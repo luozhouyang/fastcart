@@ -235,8 +235,8 @@ impl PromotionListQuery {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct PromotionRuleRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PromotionRuleRequest {
     attribute: PromotionRuleAttribute,
     operator: Option<PromotionRuleOperator>,
     value: String,
@@ -252,8 +252,8 @@ impl From<PromotionRuleRequest> for PromotionRuleInput {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CreatePromotionRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreatePromotionRequest {
     code: Option<String>,
     title: String,
     promotion_type: PromotionType,
@@ -283,8 +283,8 @@ impl CreatePromotionRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdatePromotionRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdatePromotionRequest {
     #[serde(default, deserialize_with = "nullable")]
     code: Option<Option<String>>,
     title: Option<String>,
@@ -335,8 +335,8 @@ impl CouponListQuery {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateCouponRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateCouponRequest {
     code: String,
     promotion_id: String,
     usage_limit: Option<i64>,
@@ -358,8 +358,8 @@ impl CreateCouponRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateCouponRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateCouponRequest {
     code: Option<String>,
     promotion_id: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
@@ -384,13 +384,14 @@ impl UpdateCouponRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ValidateCouponRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ValidateCouponRequest {
     code: String,
 }
 
-#[derive(Debug, Serialize)]
-struct CouponValidationResponse {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = CouponValidation)]
+pub struct CouponValidationResponse {
     valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     coupon: Option<Coupon>,

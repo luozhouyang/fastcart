@@ -321,8 +321,8 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateTaxCategoryRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateTaxCategoryRequest {
     name: String,
     code: String,
     description: Option<String>,
@@ -338,8 +338,8 @@ impl CreateTaxCategoryRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateTaxCategoryRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateTaxCategoryRequest {
     name: Option<String>,
     code: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
@@ -356,8 +356,8 @@ impl UpdateTaxCategoryRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateTaxRegionRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateTaxRegionRequest {
     name: String,
     country_code: String,
     province_code: Option<String>,
@@ -375,8 +375,8 @@ impl CreateTaxRegionRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateTaxRegionRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateTaxRegionRequest {
     name: Option<String>,
     country_code: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
@@ -405,8 +405,8 @@ struct ListRatesQuery {
     region_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateTaxRateRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateTaxRateRequest {
     region_id: String,
     category_id: Option<String>,
     name: String,
@@ -430,8 +430,8 @@ impl CreateTaxRateRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateTaxRateRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateTaxRateRequest {
     #[serde(default, deserialize_with = "nullable")]
     category_id: Option<Option<String>>,
     name: Option<String>,
@@ -456,14 +456,14 @@ impl UpdateTaxRateRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct TaxCalculateLineRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct TaxCalculateLineRequest {
     amount_minor: i64,
     category_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct TaxCalculateRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct TaxCalculateRequest {
     country: String,
     province: Option<String>,
     category_id: Option<String>,
@@ -472,8 +472,8 @@ struct TaxCalculateRequest {
     lines: Vec<TaxCalculateLineRequest>,
 }
 
-#[derive(Debug, Serialize)]
-struct TaxCalculationResponse {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TaxCalculationResponse {
     lines: Vec<TaxLine>,
     totals: TaxBreakdown,
 }

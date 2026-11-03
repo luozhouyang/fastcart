@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Pagination metadata in the public contract.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PageInfo {
     /// Page size.
     pub limit: i64,
@@ -49,7 +49,8 @@ impl<T> PageResponse<T> {
 }
 
 /// A platform user.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = User)]
 pub struct UserDto {
     /// User identifier.
     pub id: String,
@@ -79,7 +80,8 @@ impl From<&User> for UserDto {
 }
 
 /// A registered store.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Store)]
 pub struct StoreDto {
     /// Store identifier.
     pub id: String,
@@ -121,7 +123,8 @@ impl From<&Store> for StoreDto {
 }
 
 /// A registered hostname.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Domain)]
 pub struct DomainDto {
     /// Domain identifier.
     pub id: String,
@@ -148,7 +151,8 @@ impl From<&StoreDomain> for DomainDto {
 }
 
 /// A user's membership in a store.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Membership)]
 pub struct MembershipDto {
     /// Membership identifier.
     pub id: String,
@@ -181,7 +185,7 @@ impl From<&Membership> for MembershipDto {
 }
 
 /// Login request body.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
     /// Account email.
     pub email: String,
@@ -190,7 +194,7 @@ pub struct LoginRequest {
 }
 
 /// Successful login response body. Tokens are delivered as cookies.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct LoginResponse {
     /// Authenticated user.
     pub user: UserDto,
@@ -201,7 +205,7 @@ pub struct LoginResponse {
 }
 
 /// Current actor description.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct MeResponse {
     /// Authenticated user.
     pub user: UserDto,
@@ -212,7 +216,7 @@ pub struct MeResponse {
 }
 
 /// First-run setup request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct SetupRequest {
     /// Email address.
     pub email: String,
@@ -225,7 +229,7 @@ pub struct SetupRequest {
 }
 
 /// Store creation request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateStoreRequest {
     /// Display name.
     pub name: String,
@@ -242,7 +246,7 @@ pub struct CreateStoreRequest {
 }
 
 /// Partial store update request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateStoreRequest {
     /// Display name.
     pub name: Option<String>,
@@ -255,7 +259,7 @@ pub struct UpdateStoreRequest {
 }
 
 /// Store deletion request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct DeleteStoreRequest {
     /// Whether to write a consistent backup before deletion.
     #[serde(default)]
@@ -266,7 +270,7 @@ pub struct DeleteStoreRequest {
 }
 
 /// Domain registration request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct DomainRequest {
     /// Hostname to register.
     pub hostname: String,
@@ -276,14 +280,14 @@ pub struct DomainRequest {
 }
 
 /// Primary domain selection request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct PrimaryDomainRequest {
     /// Existing hostname to promote.
     pub hostname: String,
 }
 
 /// Membership upsert request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct MembershipRequest {
     /// User to add.
     pub user_id: String,
@@ -292,7 +296,7 @@ pub struct MembershipRequest {
 }
 
 /// User creation request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateUserRequest {
     /// Email address.
     pub email: String,
@@ -317,7 +321,8 @@ pub struct PermissionCheckResponse {
 }
 
 /// A store role definition.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Role)]
 pub struct RoleDto {
     /// Role name.
     pub name: String,
@@ -326,7 +331,7 @@ pub struct RoleDto {
 }
 
 /// Result of a provisioning run.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProvisioningResponse {
     /// Provisioned store.
     pub store: StoreDto,
@@ -337,7 +342,7 @@ pub struct ProvisioningResponse {
 }
 
 /// API token creation request.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateApiTokenRequest {
     /// Human-readable name.
     pub name: String,
@@ -351,7 +356,8 @@ pub struct CreateApiTokenRequest {
 }
 
 /// API token metadata. The secret is never included.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = ApiToken)]
 pub struct ApiTokenDto {
     /// Token identifier.
     pub id: String,
@@ -393,7 +399,8 @@ impl From<&fastcart_platform::ApiToken> for ApiTokenDto {
 }
 
 /// Response for a newly created API token. The plaintext token is shown once.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = CreatedApiToken)]
 pub struct CreatedApiTokenResponse {
     /// One-time plaintext token.
     pub token: String,

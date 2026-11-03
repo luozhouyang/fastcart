@@ -80,8 +80,8 @@ struct PageListQuery {
 }
 
 /// Navigation item reorder body.
-#[derive(Clone, Debug, Deserialize)]
-struct NavigationItemReorderRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct NavigationItemReorderRequest {
     item_ids: Vec<String>,
 }
 

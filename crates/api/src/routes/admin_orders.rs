@@ -115,13 +115,13 @@ struct OrderListQuery {
     email: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct CancelOrderRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CancelOrderRequest {
     reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct FulfillOrderRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct FulfillOrderRequest {
     #[serde(default)]
     provider_id: Option<String>,
     #[serde(default)]
@@ -135,14 +135,14 @@ struct FulfillOrderRequest {
     partial: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct FulfillmentItemRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct FulfillmentItemRequest {
     order_item_id: LineItemId,
     quantity: i64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct RefundOrderRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct RefundOrderRequest {
     payment_id: PaymentId,
     amount: i64,
     currency: String,

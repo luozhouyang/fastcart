@@ -63,22 +63,25 @@ pub fn router() -> Router<Arc<AppContext>> {
 // Requests and responses
 // -------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Deserialize)]
-struct CreateLocationRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = CreateInventoryLocationRequest)]
+pub struct CreateLocationRequest {
     name: String,
     address: Option<Metadata>,
     metadata: Option<Metadata>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct UpdateLocationRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = UpdateInventoryLocationRequest)]
+pub struct UpdateLocationRequest {
     name: Option<String>,
     address: Option<Metadata>,
     metadata: Option<Metadata>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct CreateItemRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = CreateInventoryItemRequest)]
+pub struct CreateItemRequest {
     sku: Option<String>,
     variant_id: Option<VariantId>,
     metadata: Option<Metadata>,
@@ -90,8 +93,9 @@ struct LevelsQuery {
     location_id: Option<InventoryLocationId>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct AdjustmentRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = InventoryAdjustmentRequest)]
+pub struct AdjustmentRequest {
     inventory_item_id: InventoryItemId,
     location_id: InventoryLocationId,
     quantity_delta: i64,
@@ -99,8 +103,9 @@ struct AdjustmentRequest {
     reference: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct TransferRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = InventoryTransferRequest)]
+pub struct TransferRequest {
     inventory_item_id: InventoryItemId,
     from_location_id: InventoryLocationId,
     to_location_id: InventoryLocationId,
@@ -108,28 +113,28 @@ struct TransferRequest {
     reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct ReservationLineRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct ReservationLineRequest {
     variant_id: VariantId,
     quantity: i64,
     line_item_id: Option<LineItemId>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct ReservationRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct ReservationRequest {
     lines: Vec<ReservationLineRequest>,
     checkout_id: CheckoutId,
     ttl_seconds: i64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct ReleaseReservationsRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct ReleaseReservationsRequest {
     #[serde(default)]
     reservation_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct CommitReservationsRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CommitReservationsRequest {
     checkout_id: CheckoutId,
     order_id: OrderId,
 }
@@ -140,24 +145,25 @@ struct MovementsQuery {
     limit: Option<usize>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct AvailabilityResponse {
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = InventoryAvailability)]
+pub struct AvailabilityResponse {
     variant_id: VariantId,
     available: i64,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct ReleasedResponse {
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ReleasedResponse {
     released: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct CommittedResponse {
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct CommittedResponse {
     committed: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct TransferResponse {
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TransferResponse {
     from: InventoryLevel,
     to: InventoryLevel,
 }

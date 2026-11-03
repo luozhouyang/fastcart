@@ -60,12 +60,13 @@ struct CustomerListQuery {
     query: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct UpdateCustomerRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateCustomerRequest {
     email: Option<String>,
     first_name: Option<String>,
     last_name: Option<String>,
     phone: Option<String>,
+    #[schema(value_type = Option<String>)]
     status: Option<CustomerStatus>,
     metadata: Option<Metadata>,
 }
@@ -88,14 +89,14 @@ struct AddressRequest {
     metadata: Metadata,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct CreateGroupRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateGroupRequest {
     name: String,
     metadata: Option<Metadata>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct GroupCustomerRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct GroupCustomerRequest {
     customer_id: CustomerId,
 }
 

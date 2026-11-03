@@ -22,7 +22,7 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/shipping/options", get(shipping_options))
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct VariantAvailability {
     /// Variant identifier.
     pub variant_id: String,

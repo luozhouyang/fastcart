@@ -463,8 +463,8 @@ fn parse_country(value: Option<String>) -> ApiResult<Option<CountryCode>> {
         .map_err(|error| ApiError::new(AppError::from(error)))
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateShippingProfileRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateShippingProfileRequest {
     name: String,
     profile_type: Option<String>,
     metadata: Option<Metadata>,
@@ -480,8 +480,8 @@ impl CreateShippingProfileRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateShippingProfileRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateShippingProfileRequest {
     name: Option<String>,
     profile_type: Option<String>,
     metadata: Option<Metadata>,
@@ -502,8 +502,8 @@ struct ListOptionsQuery {
     profile_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateShippingOptionRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateShippingOptionRequest {
     profile_id: String,
     name: String,
     amount_minor: i64,
@@ -531,8 +531,8 @@ impl CreateShippingOptionRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateShippingOptionRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateShippingOptionRequest {
     name: Option<String>,
     amount_minor: Option<i64>,
     currency: Option<String>,
@@ -560,8 +560,8 @@ impl UpdateShippingOptionRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateFulfillmentSetRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateFulfillmentSetRequest {
     name: String,
     #[serde(rename = "type")]
     set_type: Option<String>,
@@ -578,8 +578,8 @@ impl CreateFulfillmentSetRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateFulfillmentSetRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateFulfillmentSetRequest {
     name: Option<String>,
     #[serde(rename = "type")]
     set_type: Option<String>,
@@ -596,8 +596,8 @@ impl UpdateFulfillmentSetRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateShippingRateRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateShippingRateRequest {
     country_code: Option<String>,
     province_code: Option<String>,
     amount_minor: i64,
@@ -622,8 +622,8 @@ impl CreateShippingRateRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdateShippingRateRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateShippingRateRequest {
     #[serde(default, deserialize_with = "nullable")]
     country_code: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
@@ -656,8 +656,9 @@ impl UpdateShippingRateRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct AddLocationRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = AddShippingLocationRequest)]
+pub struct AddLocationRequest {
     location_id: String,
 }
 

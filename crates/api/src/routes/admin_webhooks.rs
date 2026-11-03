@@ -36,16 +36,16 @@ pub fn router() -> Router<Arc<crate::state::AppContext>> {
         .route("/webhook-deliveries/{id}/replay", post(replay_delivery))
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-struct CreateWebhookRequest {
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct CreateWebhookRequest {
     url: String,
     events: Vec<String>,
     secret: Option<String>,
     metadata: Option<Metadata>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-struct UpdateWebhookRequest {
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct UpdateWebhookRequest {
     url: Option<String>,
     events: Option<Vec<String>>,
     is_active: Option<bool>,
@@ -56,8 +56,8 @@ struct DeliveriesQuery {
     limit: Option<i64>,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
-struct WebhookEndpointDto {
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct WebhookEndpointDto {
     id: String,
     url: String,
     events: Vec<String>,
@@ -67,15 +67,17 @@ struct WebhookEndpointDto {
     updated_at: i64,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
-struct CreatedWebhookDto {
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+#[schema(as = CreatedWebhookEndpoint)]
+pub struct CreatedWebhookDto {
     #[serde(flatten)]
     endpoint: WebhookEndpointDto,
     secret: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
-struct RotatedSecretDto {
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+#[schema(as = RotatedSecret)]
+pub struct RotatedSecretDto {
     secret: String,
 }
 

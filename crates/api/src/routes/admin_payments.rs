@@ -62,8 +62,9 @@ struct ListPaymentsQuery {
 }
 
 /// Body for creating a refund.
-#[derive(Clone, Debug, serde::Deserialize)]
-struct CreateRefundRequest {
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
+#[schema(as = CreatePaymentRefundRequest)]
+pub struct CreateRefundRequest {
     /// Refund amount in minor units.
     amount: i64,
     /// Human-readable refund reason.
@@ -73,8 +74,8 @@ struct CreateRefundRequest {
 }
 
 /// Body for failing a payment session.
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-struct FailSessionRequest {
+#[derive(Clone, Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct FailSessionRequest {
     /// Failure reason stored on the session and attempt.
     reason: Option<String>,
 }
@@ -126,8 +127,9 @@ struct PaymentAttemptDto {
 }
 
 /// HTTP representation of a refund.
-#[derive(Clone, Debug, serde::Serialize)]
-struct RefundDto {
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+#[schema(as = PaymentRefund)]
+pub struct RefundDto {
     id: String,
     payment_id: Option<String>,
     order_id: Option<String>,

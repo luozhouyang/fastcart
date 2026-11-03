@@ -158,8 +158,8 @@ struct SearchQuery {
 }
 
 /// A product option to create alongside a product.
-#[derive(Clone, Debug, Deserialize)]
-struct CreateOptionRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateOptionRequest {
     title: String,
     #[serde(default)]
     values: Vec<String>,
@@ -181,8 +181,8 @@ impl From<CreateOptionRequest> for CreateOptionInput {
 }
 
 /// A variant to create alongside a product.
-#[derive(Clone, Debug, Deserialize)]
-struct CreateVariantRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateVariantRequest {
     title: String,
     #[serde(default)]
     sku: Option<String>,
@@ -205,6 +205,7 @@ struct CreateVariantRequest {
     #[serde(default)]
     option_value_ids: Vec<String>,
     #[serde(default)]
+    #[schema(value_type = Vec<Object>)]
     option_values: Vec<VariantOptionInput>,
 }
 
@@ -228,8 +229,8 @@ impl From<CreateVariantRequest> for CreateVariantInput {
 }
 
 /// Product creation body.
-#[derive(Clone, Debug, Deserialize)]
-struct CreateProductRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateProductRequest {
     title: String,
     #[serde(default)]
     handle: Option<String>,
@@ -281,8 +282,8 @@ impl From<CreateProductRequest> for CreateProductInput {
 }
 
 /// Category creation body.
-#[derive(Clone, Debug, Deserialize)]
-struct CreateCategoryRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateCategoryRequest {
     title: String,
     #[serde(default)]
     handle: Option<String>,
@@ -316,8 +317,8 @@ impl From<CreateCategoryRequest> for CreateCategoryInput {
 }
 
 /// Collection creation body.
-#[derive(Clone, Debug, Deserialize)]
-struct CreateCollectionRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateCollectionRequest {
     title: String,
     #[serde(default)]
     handle: Option<String>,
@@ -345,8 +346,8 @@ impl From<CreateCollectionRequest> for CreateCollectionInput {
 }
 
 /// Image creation body.
-#[derive(Clone, Debug, Deserialize)]
-struct CreateImageRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateImageRequest {
     url: String,
     #[serde(default)]
     alt: Option<String>,
@@ -371,51 +372,52 @@ impl From<CreateImageRequest> for CreateImageInput {
 }
 
 /// Image reorder body.
-#[derive(Clone, Debug, Deserialize)]
-struct ImageReorderRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct ImageReorderRequest {
     image_ids: Vec<String>,
 }
 
 /// Products to add to a collection.
-#[derive(Clone, Debug, Deserialize)]
-struct CollectionProductsRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CollectionProductsRequest {
     product_ids: Vec<String>,
 }
 
 /// Tag creation body.
-#[derive(Clone, Debug, Deserialize)]
-struct TagRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct TagRequest {
     value: String,
 }
 
 /// Body linking an existing tag to a product.
-#[derive(Clone, Debug, Deserialize)]
-struct ProductTagRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct ProductTagRequest {
     tag_id: String,
 }
 
 /// Body replacing the sales channels a product is published to.
-#[derive(Clone, Debug, Default, Deserialize)]
-struct ProductSalesChannelsRequest {
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
+#[schema(as = SetProductSalesChannelsRequest)]
+pub struct ProductSalesChannelsRequest {
     #[serde(default)]
     sales_channel_ids: Vec<String>,
 }
 
 /// Batch settings update body.
-#[derive(Clone, Debug, Deserialize)]
-struct SettingsRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct SettingsRequest {
     values: BTreeMap<String, String>,
 }
 
 /// Single setting update body.
-#[derive(Clone, Debug, Deserialize)]
-struct SettingRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct SettingRequest {
     value: String,
 }
 
 /// Sales-channel creation body.
-#[derive(Clone, Debug, Deserialize)]
-struct CreateSalesChannelRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateSalesChannelRequest {
     name: String,
     #[serde(default)]
     description: Option<String>,

@@ -89,7 +89,7 @@ pub struct CalculatedPrice {
 }
 
 /// A product enriched with an optional calculated price.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct StoreProduct {
     /// The catalog product, flattened into the response object.
     #[serde(flatten)]

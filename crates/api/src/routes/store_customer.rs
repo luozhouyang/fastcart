@@ -70,8 +70,9 @@ pub fn router() -> Router<Arc<AppContext>> {
 }
 
 /// Registration request body.
-#[derive(Clone, Debug, Deserialize)]
-struct RegisterRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = RegisterCustomerRequest)]
+pub struct RegisterRequest {
     /// Account email.
     email: String,
     /// Plaintext password.
@@ -85,8 +86,8 @@ struct RegisterRequest {
 }
 
 /// Customer login request body.
-#[derive(Clone, Debug, Deserialize)]
-struct CustomerLoginRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CustomerLoginRequest {
     /// Account email.
     email: String,
     /// Plaintext password.
@@ -94,9 +95,9 @@ struct CustomerLoginRequest {
 }
 
 /// Profile update request body. Omitted fields are left unchanged.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(default)]
-struct UpdateProfileRequest {
+pub struct UpdateProfileRequest {
     /// Replacement given name.
     first_name: Option<String>,
     /// Replacement family name.
@@ -137,8 +138,8 @@ struct AddressRequest {
 }
 
 /// Password change request body.
-#[derive(Clone, Debug, Deserialize)]
-struct ChangePasswordRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct ChangePasswordRequest {
     /// Current password.
     current_password: String,
     /// Replacement password.
@@ -146,22 +147,24 @@ struct ChangePasswordRequest {
 }
 
 /// Email-only request body used by the verification and reset request routes.
-#[derive(Clone, Debug, Deserialize)]
-struct EmailRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct EmailRequest {
     /// Account email address.
     email: String,
 }
 
 /// Single-token request body.
-#[derive(Clone, Debug, Deserialize)]
-struct TokenRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = EmailVerificationConfirmRequest)]
+pub struct TokenRequest {
     /// Plaintext single-use token.
     token: String,
 }
 
 /// password-reset confirmation body.
-#[derive(Clone, Debug, Deserialize)]
-struct ResetPasswordRequest {
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = PasswordResetConfirmRequest)]
+pub struct ResetPasswordRequest {
     /// Plaintext single-use token.
     token: String,
     /// Replacement password.
@@ -169,15 +172,15 @@ struct ResetPasswordRequest {
 }
 
 /// Generic acknowledgement that never reveals account existence or state.
-#[derive(Clone, Debug, Serialize)]
-struct AcceptedResponse {
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AcceptedResponse {
     /// The request was accepted for processing.
     accepted: bool,
 }
 
 /// Confirmation result for an email-verification token.
-#[derive(Clone, Debug, Serialize)]
-struct EmailVerifiedResponse {
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct EmailVerifiedResponse {
     /// The customer's email is now verified.
     email_verified: bool,
 }

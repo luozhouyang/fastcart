@@ -242,8 +242,8 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-#[derive(Debug, Deserialize)]
-struct PriceListRuleRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PriceListRuleRequest {
     attribute: String,
     operator: Option<String>,
     value: String,
@@ -259,8 +259,8 @@ impl From<PriceListRuleRequest> for PriceListRuleInput {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CreatePriceListRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreatePriceListRequest {
     title: String,
     description: Option<String>,
     price_type: Option<PriceListType>,
@@ -287,8 +287,8 @@ impl CreatePriceListRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdatePriceListRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdatePriceListRequest {
     title: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
     description: Option<Option<String>>,
@@ -341,8 +341,8 @@ impl ListPricesQuery {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct PriceRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PriceRequest {
     price_list_id: Option<String>,
     variant_id: String,
     currency_code: String,
@@ -372,8 +372,8 @@ impl PriceRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdatePriceRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdatePriceRequest {
     #[serde(default, deserialize_with = "nullable")]
     price_list_id: Option<Option<String>>,
     variant_id: Option<String>,
@@ -416,8 +416,8 @@ impl UpdatePriceRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct BulkPricesRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkPricesRequest {
     prices: Vec<PriceRequest>,
 }
 
@@ -451,8 +451,8 @@ impl CalculatePriceQuery {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CalculatePricesRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CalculatePricesRequest {
     variant_ids: Vec<String>,
     currency: String,
     quantity: Option<i64>,

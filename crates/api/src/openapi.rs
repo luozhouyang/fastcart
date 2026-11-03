@@ -162,6 +162,124 @@ use crate::state::AppContext;
     fastcart_module_promotion::PromotionStatus,
     fastcart_module_promotion::PromotionType,
     fastcart_module_promotion::PromotionUsage,
+    crate::dto::ApiTokenDto,
+    crate::dto::CreateApiTokenRequest,
+    crate::dto::CreateStoreRequest,
+    crate::dto::CreateUserRequest,
+    crate::dto::CreatedApiTokenResponse,
+    crate::dto::DeleteStoreRequest,
+    crate::dto::DomainDto,
+    crate::dto::DomainRequest,
+    crate::dto::LoginRequest,
+    crate::dto::LoginResponse,
+    crate::dto::MeResponse,
+    crate::dto::MembershipDto,
+    crate::dto::MembershipRequest,
+    crate::dto::PageInfo,
+    crate::dto::PrimaryDomainRequest,
+    crate::dto::ProvisioningResponse,
+    crate::dto::RoleDto,
+    crate::dto::SetupRequest,
+    crate::dto::StoreDto,
+    crate::dto::UpdateStoreRequest,
+    crate::dto::UserDto,
+    crate::routes::admin_catalog::CollectionProductsRequest,
+    crate::routes::admin_catalog::CreateCategoryRequest,
+    crate::routes::admin_catalog::CreateCollectionRequest,
+    crate::routes::admin_catalog::CreateImageRequest,
+    crate::routes::admin_catalog::CreateOptionRequest,
+    crate::routes::admin_catalog::CreateProductRequest,
+    crate::routes::admin_catalog::CreateSalesChannelRequest,
+    crate::routes::admin_catalog::CreateVariantRequest,
+    crate::routes::admin_catalog::ImageReorderRequest,
+    crate::routes::admin_catalog::ProductSalesChannelsRequest,
+    crate::routes::admin_catalog::ProductTagRequest,
+    crate::routes::admin_catalog::SettingRequest,
+    crate::routes::admin_catalog::SettingsRequest,
+    crate::routes::admin_catalog::TagRequest,
+    crate::routes::admin_content::NavigationItemReorderRequest,
+    crate::routes::admin_customers::CreateGroupRequest,
+    crate::routes::admin_customers::GroupCustomerRequest,
+    crate::routes::admin_customers::UpdateCustomerRequest,
+    crate::routes::admin_inventory::AdjustmentRequest,
+    crate::routes::admin_inventory::AvailabilityResponse,
+    crate::routes::admin_inventory::CommitReservationsRequest,
+    crate::routes::admin_inventory::CommittedResponse,
+    crate::routes::admin_inventory::CreateItemRequest,
+    crate::routes::admin_inventory::CreateLocationRequest,
+    crate::routes::admin_inventory::ReleaseReservationsRequest,
+    crate::routes::admin_inventory::ReleasedResponse,
+    crate::routes::admin_inventory::ReservationLineRequest,
+    crate::routes::admin_inventory::ReservationRequest,
+    crate::routes::admin_inventory::TransferRequest,
+    crate::routes::admin_inventory::TransferResponse,
+    crate::routes::admin_inventory::UpdateLocationRequest,
+    crate::routes::admin_orders::CancelOrderRequest,
+    crate::routes::admin_orders::FulfillOrderRequest,
+    crate::routes::admin_orders::FulfillmentItemRequest,
+    crate::routes::admin_orders::RefundOrderRequest,
+    crate::routes::admin_payments::CreateRefundRequest,
+    crate::routes::admin_payments::FailSessionRequest,
+    crate::routes::admin_payments::RefundDto,
+    crate::routes::admin_pricing::BulkPricesRequest,
+    crate::routes::admin_pricing::CalculatePricesRequest,
+    crate::routes::admin_pricing::CreatePriceListRequest,
+    crate::routes::admin_pricing::PriceListRuleRequest,
+    crate::routes::admin_pricing::PriceRequest,
+    crate::routes::admin_pricing::UpdatePriceListRequest,
+    crate::routes::admin_pricing::UpdatePriceRequest,
+    crate::routes::admin_promotions::CouponValidationResponse,
+    crate::routes::admin_promotions::CreateCouponRequest,
+    crate::routes::admin_promotions::CreatePromotionRequest,
+    crate::routes::admin_promotions::PromotionRuleRequest,
+    crate::routes::admin_promotions::UpdateCouponRequest,
+    crate::routes::admin_promotions::UpdatePromotionRequest,
+    crate::routes::admin_promotions::ValidateCouponRequest,
+    crate::routes::admin_shipping::AddLocationRequest,
+    crate::routes::admin_shipping::CreateFulfillmentSetRequest,
+    crate::routes::admin_shipping::CreateShippingOptionRequest,
+    crate::routes::admin_shipping::CreateShippingProfileRequest,
+    crate::routes::admin_shipping::CreateShippingRateRequest,
+    crate::routes::admin_shipping::UpdateFulfillmentSetRequest,
+    crate::routes::admin_shipping::UpdateShippingOptionRequest,
+    crate::routes::admin_shipping::UpdateShippingProfileRequest,
+    crate::routes::admin_shipping::UpdateShippingRateRequest,
+    crate::routes::admin_tax::CreateTaxCategoryRequest,
+    crate::routes::admin_tax::CreateTaxRateRequest,
+    crate::routes::admin_tax::CreateTaxRegionRequest,
+    crate::routes::admin_tax::TaxCalculateLineRequest,
+    crate::routes::admin_tax::TaxCalculateRequest,
+    crate::routes::admin_tax::TaxCalculationResponse,
+    crate::routes::admin_tax::UpdateTaxCategoryRequest,
+    crate::routes::admin_tax::UpdateTaxRateRequest,
+    crate::routes::admin_tax::UpdateTaxRegionRequest,
+    crate::routes::admin_webhooks::CreateWebhookRequest,
+    crate::routes::admin_webhooks::CreatedWebhookDto,
+    crate::routes::admin_webhooks::RotatedSecretDto,
+    crate::routes::admin_webhooks::UpdateWebhookRequest,
+    crate::routes::admin_webhooks::WebhookEndpointDto,
+    crate::routes::store_cart::AddItemRequest,
+    crate::routes::store_cart::CartAddressType,
+    crate::routes::store_cart::CompleteCheckoutRequest,
+    crate::routes::store_cart::CompleteCheckoutResponse,
+    crate::routes::store_cart::CreateCartRequest,
+    crate::routes::store_cart::CreateCheckoutRequestDto,
+    crate::routes::store_cart::DiscountRequest,
+    crate::routes::store_cart::SetAddressRequest,
+    crate::routes::store_cart::SetEmailRequest,
+    crate::routes::store_cart::SetShippingMethodRequest,
+    crate::routes::store_cart::UpdateItemRequest,
+    crate::routes::store_catalog::StoreProduct,
+    crate::routes::store_customer::AcceptedResponse,
+    crate::routes::store_customer::ChangePasswordRequest,
+    crate::routes::store_customer::CustomerLoginRequest,
+    crate::routes::store_customer::EmailRequest,
+    crate::routes::store_customer::EmailVerifiedResponse,
+    crate::routes::store_customer::RegisterRequest,
+    crate::routes::store_customer::ResetPasswordRequest,
+    crate::routes::store_customer::TokenRequest,
+    crate::routes::store_customer::UpdateProfileRequest,
+    crate::routes::store_inventory::VariantAvailability,
 )))]
 struct GeneratedSchemas;
 
@@ -3186,13 +3304,6 @@ fn schemas() -> Value {
         ], &["error"]),
 
 
-        "PageInfo": object(&[
-            ("limit", integer()),
-            ("offset", integer()),
-            ("total", integer()),
-        ], &["limit", "offset", "total"]),
-
-
         "PageMeta": object(&[
             ("limit", integer()),
             ("offset", integer()),
@@ -3214,99 +3325,7 @@ fn schemas() -> Value {
         ], &["currency_code", "subtotal", "grand_total"]),
 
 
-
         // Identity and platform resources.
-        "User": object(&[
-            ("id", string()),
-            ("email", string()),
-            ("first_name", optional_string()),
-            ("last_name", optional_string()),
-            ("status", string_enum(&["active", "disabled"])),
-            ("email_verified_at", nullable(integer())),
-        ], &["id", "email", "status"]),
-
-
-        "Store": object(&[
-            ("id", string()),
-            ("name", string()),
-            ("slug", string()),
-            ("status", string()),
-            ("primary_domain", optional_string()),
-            ("locale", string()),
-            ("currency_code", string()),
-            ("timezone", string()),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "name", "slug", "status"]),
-
-
-        "Domain": object(&[
-            ("id", string()),
-            ("store_id", string()),
-            ("hostname", string()),
-            ("is_primary", boolean()),
-            ("verified_at", nullable(integer())),
-        ], &["id", "store_id", "hostname", "is_primary"]),
-
-
-        "Membership": object(&[
-            ("id", string()),
-            ("user_id", string()),
-            ("store_id", string()),
-            ("status", string()),
-            ("roles", array_of(string())),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "user_id", "store_id", "roles"]),
-
-
-        "Role": object(&[
-            ("name", string()),
-            ("description", string()),
-        ], &["name", "description"]),
-
-
-        "ApiToken": object(&[
-            ("id", string()),
-            ("user_id", string()),
-            ("store_id", optional_string()),
-            ("name", string()),
-            ("prefix", string()),
-            ("scopes", array_of(string())),
-            ("expires_at", nullable(integer())),
-            ("revoked_at", nullable(integer())),
-            ("last_used_at", nullable(integer())),
-            ("created_at", integer()),
-        ], &["id", "user_id", "name", "prefix", "scopes"]),
-
-
-        "CreatedApiToken": object(&[
-            ("token", string()),
-            ("record", schema_ref("ApiToken")),
-        ], &["token", "record"]),
-
-
-        "ProvisioningResponse": object(&[
-            ("store", schema_ref("Store")),
-            ("steps", array_of(string())),
-            ("already_active", boolean()),
-        ], &["store", "steps", "already_active"]),
-
-
-        "LoginResponse": object(&[
-            ("user", schema_ref("User")),
-            ("csrf_token", string()),
-            ("expires_at", integer()),
-        ], &["user", "csrf_token", "expires_at"]),
-
-
-        "MeResponse": object(&[
-            ("user", schema_ref("User")),
-            ("store_id", optional_string()),
-            ("permissions", array_of(string())),
-        ], &["user", "permissions"]),
-
-
         "Variant": object(&[
             ("id", string()),
             ("product_id", string()),
@@ -3364,12 +3383,6 @@ fn schemas() -> Value {
         ], &["id", "email", "status"]),
 
 
-        "AcceptedResponse": object(&[("accepted", boolean())], &["accepted"]),
-
-
-        "EmailVerifiedResponse": object(&[("email_verified", boolean())], &["email_verified"]),
-
-
         "CustomerGroup": object(&[
             ("id", string()),
             ("name", string()),
@@ -3386,21 +3399,6 @@ fn schemas() -> Value {
         ], &["customer", "csrf_token", "expires_at"]),
 
 
-        "CompleteCheckoutResponse": object(&[
-            ("checkout", schema_ref("Checkout")),
-            ("order", schema_ref("Order")),
-            ("payment", schema_ref("Payment")),
-        ], &["checkout", "order", "payment"]),
-
-
-        "VariantAvailability": object(&[
-            ("variant_id", string()),
-            ("available", integer()),
-            ("manage_inventory", boolean()),
-            ("allow_backorder", boolean()),
-        ], &["variant_id", "available"]),
-
-
         "SettingsMap": map_of(string()),
 
 
@@ -3413,65 +3411,6 @@ fn schemas() -> Value {
         "ReindexResponse": object(&[
             ("indexed", boolean()),
         ], &["indexed"]),
-
-
-        "InventoryAvailability": object(&[
-            ("variant_id", string()),
-            ("available", integer()),
-        ], &["variant_id", "available"]),
-
-
-        "TransferResponse": object(&[
-            ("from", schema_ref("InventoryLevel")),
-            ("to", schema_ref("InventoryLevel")),
-        ], &["from", "to"]),
-
-
-        "ReleasedResponse": object(&[("released", integer())], &["released"]),
-
-
-        "CommittedResponse": object(&[("committed", integer())], &["committed"]),
-
-
-        "PaymentRefund": object(&[
-            ("id", string()),
-            ("payment_id", optional_string()),
-            ("order_id", optional_string()),
-            ("amount", integer()),
-            ("currency_code", string()),
-            ("status", string()),
-            ("provider_refund_id", optional_string()),
-            ("reason", optional_string()),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "amount", "currency_code", "status"]),
-
-
-        "CouponValidation": object(&[
-            ("valid", boolean()),
-            ("coupon", nullable(schema_ref("Coupon"))),
-        ], &["valid"]),
-
-
-        "TaxCalculationResponse": object(&[
-            ("lines", array_of(schema_ref("TaxLine"))),
-            ("totals", schema_ref("TaxBreakdown")),
-        ], &["lines", "totals"]),
-
-
-        "CreatedWebhookEndpoint": object(&[
-            ("id", string()),
-            ("url", string()),
-            ("events", array_of(string())),
-            ("is_active", boolean()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-            ("secret", string()),
-        ], &["id", "url", "events", "secret"]),
-
-
-        "RotatedSecret": object(&[("secret", string())], &["secret"]),
 
 
         "WebhookSignature": object(&[
@@ -3498,7 +3437,6 @@ fn schemas() -> Value {
             ("payload", json!({"type": "object", "additionalProperties": true})),
             ("signature", schema_ref("WebhookSignature")),
         ], &["provider", "provider_event_id", "event_type", "payload"]),
-
 
 
         // Themes and operations.
@@ -3563,99 +3501,8 @@ fn schemas() -> Value {
         ], &["status"]),
 
 
-
         // Request bodies: authentication and platform.
-        "LoginRequest": object(&[
-            ("email", string()),
-            ("password", string()),
-        ], &["email", "password"]),
-
-
-        "SetupRequest": object(&[
-            ("email", string()),
-            ("password", string()),
-            ("first_name", optional_string()),
-            ("last_name", optional_string()),
-        ], &["email", "password"]),
-
-
-        "CreateUserRequest": object(&[
-            ("email", string()),
-            ("password", string()),
-            ("first_name", optional_string()),
-            ("last_name", optional_string()),
-            ("store_id", optional_string()),
-            ("roles", array_of(string())),
-        ], &["email", "password"]),
-
-
-        "CreateApiTokenRequest": object(&[
-            ("name", string()),
-            ("store_id", optional_string()),
-            ("scopes", array_of(string())),
-            ("ttl_seconds", nullable(integer())),
-        ], &["name"]),
-
-
-        "CreateStoreRequest": object(&[
-            ("name", string()),
-            ("slug", string()),
-            ("primary_domain", string()),
-            ("locale", optional_string()),
-            ("currency_code", optional_string()),
-            ("timezone", optional_string()),
-        ], &["name", "slug", "primary_domain"]),
-
-
-        "UpdateStoreRequest": object(&[
-            ("name", optional_string()),
-            ("locale", optional_string()),
-            ("currency_code", optional_string()),
-            ("timezone", optional_string()),
-        ], &[]),
-
-
-        "DeleteStoreRequest": object(&[
-            ("backup", boolean()),
-            ("purge_data", boolean()),
-        ], &[]),
-
-
-        "DomainRequest": object(&[
-            ("hostname", string()),
-            ("is_primary", boolean()),
-        ], &["hostname"]),
-
-
-        "PrimaryDomainRequest": object(&[("hostname", string())], &["hostname"]),
-
-
-        "MembershipRequest": object(&[
-            ("user_id", string()),
-            ("roles", array_of(string())),
-        ], &["user_id", "roles"]),
-
-
-
         // Request bodies: catalog and settings.
-        "CreateProductRequest": object(&[
-            ("title", string()),
-            ("handle", optional_string()),
-            ("subtitle", optional_string()),
-            ("description", optional_string()),
-            ("thumbnail", optional_string()),
-            ("weight", nullable(number())),
-            ("dimensions", nullable(schema_ref("Dimensions"))),
-            ("metadata", schema_ref("Metadata")),
-            ("variants", array_of(json!({"type": "object", "additionalProperties": true}))),
-            ("options", array_of(json!({"type": "object", "additionalProperties": true}))),
-            ("category_ids", array_of(string())),
-            ("collection_ids", array_of(string())),
-            ("tag_values", array_of(string())),
-            ("images", array_of(string())),
-        ], &["title"]),
-
-
         "UpdateProductRequest": object(&[
             ("title", optional_string()),
             ("handle", optional_string()),
@@ -3667,40 +3514,6 @@ fn schemas() -> Value {
             ("dimensions", nullable(schema_ref("Dimensions"))),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
-
-
-        "SetProductSalesChannelsRequest": object(&[
-            ("sales_channel_ids", array_of(string())),
-        ], &[]),
-
-
-        "StoreProduct": json!({
-            "allOf": [
-                schema_ref("Product"),
-                {
-                    "type": "object",
-                    "properties": {
-                        "calculated_price": nullable(schema_ref("CalculatedPrice")),
-                    },
-                },
-            ],
-        }),
-
-
-        "CreateVariantRequest": object(&[
-            ("title", string()),
-            ("sku", optional_string()),
-            ("barcode", optional_string()),
-            ("status", optional_string()),
-            ("weight", nullable(number())),
-            ("dimensions", nullable(schema_ref("Dimensions"))),
-            ("manage_inventory", nullable(boolean())),
-            ("allow_backorder", nullable(boolean())),
-            ("tax_category_id", optional_string()),
-            ("metadata", schema_ref("Metadata")),
-            ("option_value_ids", array_of(string())),
-            ("option_values", array_of(json!({"type": "object", "additionalProperties": true}))),
-        ], &["title"]),
 
 
         "UpdateVariantRequest": object(&[
@@ -3717,30 +3530,6 @@ fn schemas() -> Value {
         ], &[]),
 
 
-        "CreateImageRequest": object(&[
-            ("url", string()),
-            ("alt", optional_string()),
-            ("variant_id", optional_string()),
-            ("rank", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-        ], &["url"]),
-
-
-        "ImageReorderRequest": object(&[("image_ids", array_of(string()))], &["image_ids"]),
-
-
-        "CreateCategoryRequest": object(&[
-            ("title", string()),
-            ("handle", optional_string()),
-            ("parent_id", optional_string()),
-            ("description", optional_string()),
-            ("is_active", nullable(boolean())),
-            ("is_internal", nullable(boolean())),
-            ("rank", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-        ], &["title"]),
-
-
         "UpdateCategoryRequest": object(&[
             ("title", optional_string()),
             ("handle", optional_string()),
@@ -3753,16 +3542,6 @@ fn schemas() -> Value {
         ], &[]),
 
 
-        "CreateCollectionRequest": object(&[
-            ("title", string()),
-            ("handle", optional_string()),
-            ("description", optional_string()),
-            ("is_published", nullable(boolean())),
-            ("rank", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-        ], &["title"]),
-
-
         "UpdateCollectionRequest": object(&[
             ("title", optional_string()),
             ("handle", optional_string()),
@@ -3773,35 +3552,12 @@ fn schemas() -> Value {
         ], &[]),
 
 
-        "CollectionProductsRequest": object(&[("product_ids", array_of(string()))], &["product_ids"]),
-
-
-        "TagRequest": object(&[("value", string())], &["value"]),
-
-
-        "ProductTagRequest": object(&[("tag_id", string())], &["tag_id"]),
-
-
-        "SettingsRequest": object(&[("values", map_of(string()))], &["values"]),
-
-
-        "SettingRequest": object(&[("value", string())], &["value"]),
-
-
-        "CreateSalesChannelRequest": object(&[
-            ("name", string()),
-            ("description", optional_string()),
-            ("metadata", schema_ref("Metadata")),
-        ], &["name"]),
-
-
         "UpdateSalesChannelRequest": object(&[
             ("name", optional_string()),
             ("description", optional_string()),
             ("is_enabled", nullable(boolean())),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
-
 
 
         // Request bodies: content.
@@ -3848,9 +3604,6 @@ fn schemas() -> Value {
         ], &["title"]),
 
 
-        "NavigationItemReorderRequest": object(&[("item_ids", array_of(string()))], &["item_ids"]),
-
-
         "CreateRedirectRequest": object(&[
             ("from_path", string()),
             ("to_path", string()),
@@ -3859,18 +3612,7 @@ fn schemas() -> Value {
         ], &["from_path", "to_path"]),
 
 
-
         // Request bodies: customers.
-        "UpdateCustomerRequest": object(&[
-            ("email", optional_string()),
-            ("first_name", optional_string()),
-            ("last_name", optional_string()),
-            ("phone", optional_string()),
-            ("status", optional_string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
         "AddressRequest": object(&[
             ("is_default_shipping", nullable(boolean())),
             ("is_default_billing", nullable(boolean())),
@@ -3888,499 +3630,15 @@ fn schemas() -> Value {
         ], &[]),
 
 
-        "CreateGroupRequest": object(&[
-            ("name", string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["name"]),
-
-
-        "GroupCustomerRequest": object(&[("customer_id", string())], &["customer_id"]),
-
-
-
         // Request bodies: inventory.
-        "CreateInventoryLocationRequest": object(&[
-            ("name", string()),
-            ("address", nullable(schema_ref("Metadata"))),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["name"]),
-
-
-        "UpdateInventoryLocationRequest": object(&[
-            ("name", optional_string()),
-            ("address", nullable(schema_ref("Metadata"))),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "CreateInventoryItemRequest": object(&[
-            ("sku", optional_string()),
-            ("variant_id", optional_string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "InventoryAdjustmentRequest": object(&[
-            ("inventory_item_id", string()),
-            ("location_id", string()),
-            ("quantity_delta", integer()),
-            ("reason", string()),
-            ("reference", optional_string()),
-        ], &["inventory_item_id", "location_id", "quantity_delta", "reason"]),
-
-
-        "InventoryTransferRequest": object(&[
-            ("inventory_item_id", string()),
-            ("from_location_id", string()),
-            ("to_location_id", string()),
-            ("quantity", integer()),
-            ("reason", optional_string()),
-        ], &["inventory_item_id", "from_location_id", "to_location_id", "quantity"]),
-
-
-        "ReservationRequest": object(&[
-            ("lines", array_of(json!({"type": "object", "additionalProperties": true}))),
-            ("checkout_id", string()),
-            ("ttl_seconds", integer()),
-        ], &["lines", "checkout_id", "ttl_seconds"]),
-
-
-        "ReleaseReservationsRequest": object(&[
-            ("reservation_ids", array_of(string())),
-        ], &[]),
-
-
-        "CommitReservationsRequest": object(&[
-            ("checkout_id", string()),
-            ("order_id", string()),
-        ], &["checkout_id", "order_id"]),
-
-
-
         // Request bodies: orders and payments.
-        "CancelOrderRequest": object(&[("reason", optional_string())], &[]),
-
-
-        "FulfillOrderRequest": object(&[
-            ("provider_id", optional_string()),
-            ("provider_data", nullable(schema_ref("Metadata"))),
-            ("items", array_of(schema_ref("FulfillmentItemRequest"))),
-            ("tracking_numbers", array_of(string())),
-            ("shipped_at", nullable(integer())),
-            ("partial", boolean()),
-        ], &[]),
-
-
-        "FulfillmentItemRequest": object(&[
-            ("order_item_id", string()),
-            ("quantity", integer()),
-        ], &["order_item_id", "quantity"]),
-
-
-        "RefundOrderRequest": object(&[
-            ("payment_id", string()),
-            ("amount", integer()),
-            ("currency", string()),
-            ("reason", optional_string()),
-        ], &["payment_id", "amount", "currency"]),
-
-
-        "CreatePaymentRefundRequest": object(&[
-            ("amount", integer()),
-            ("reason", optional_string()),
-            ("idempotency_key", optional_string()),
-        ], &["amount"]),
-
-
-        "FailSessionRequest": object(&[("reason", optional_string())], &[]),
-
-
-
         // Request bodies: pricing and promotions.
-        "CreatePriceListRequest": object(&[
-            ("title", string()),
-            ("description", optional_string()),
-            ("price_type", optional_string()),
-            ("status", optional_string()),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-            ("rules", array_of(json!({"type": "object", "additionalProperties": true}))),
-        ], &["title"]),
-
-
-        "UpdatePriceListRequest": object(&[
-            ("title", optional_string()),
-            ("description", optional_string()),
-            ("price_type", optional_string()),
-            ("status", optional_string()),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-            ("rules", array_of(json!({"type": "object", "additionalProperties": true}))),
-        ], &[]),
-
-
-        "PriceRequest": object(&[
-            ("price_list_id", optional_string()),
-            ("variant_id", string()),
-            ("currency_code", string()),
-            ("amount", integer()),
-            ("min_quantity", nullable(integer())),
-            ("max_quantity", nullable(integer())),
-            ("customer_group_id", optional_string()),
-            ("sales_channel_id", optional_string()),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["variant_id", "currency_code", "amount"]),
-
-
-        "UpdatePriceRequest": object(&[
-            ("price_list_id", nullable(string())),
-            ("variant_id", optional_string()),
-            ("currency_code", optional_string()),
-            ("amount", nullable(integer())),
-            ("min_quantity", nullable(integer())),
-            ("max_quantity", nullable(integer())),
-            ("customer_group_id", nullable(string())),
-            ("sales_channel_id", nullable(string())),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "BulkPricesRequest": object(&[
-            ("prices", array_of(schema_ref("PriceRequest"))),
-        ], &["prices"]),
-
-
-        "CalculatePricesRequest": object(&[
-            ("variant_ids", array_of(string())),
-            ("currency", string()),
-            ("quantity", nullable(integer())),
-            ("customer_group_id", optional_string()),
-            ("sales_channel_id", optional_string()),
-        ], &["variant_ids", "currency"]),
-
-
-        "CreatePromotionRequest": object(&[
-            ("code", optional_string()),
-            ("title", string()),
-            ("promotion_type", string()),
-            ("value", integer()),
-            ("status", optional_string()),
-            ("is_automatic", nullable(boolean())),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("usage_limit", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-            ("rules", array_of(json!({"type": "object", "additionalProperties": true}))),
-        ], &["title", "promotion_type", "value"]),
-
-
-        "UpdatePromotionRequest": object(&[
-            ("code", nullable(string())),
-            ("title", optional_string()),
-            ("promotion_type", optional_string()),
-            ("value", nullable(integer())),
-            ("status", optional_string()),
-            ("is_automatic", nullable(boolean())),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("usage_limit", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-            ("rules", array_of(json!({"type": "object", "additionalProperties": true}))),
-        ], &[]),
-
-
-        "CreateCouponRequest": object(&[
-            ("code", string()),
-            ("promotion_id", string()),
-            ("usage_limit", nullable(integer())),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["code", "promotion_id"]),
-
-
-        "UpdateCouponRequest": object(&[
-            ("code", optional_string()),
-            ("promotion_id", optional_string()),
-            ("usage_limit", nullable(integer())),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "ValidateCouponRequest": object(&[("code", string())], &["code"]),
-
-
-
         // Request bodies: shipping and tax.
-        "CreateShippingProfileRequest": object(&[
-            ("name", string()),
-            ("profile_type", optional_string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["name"]),
-
-
-        "UpdateShippingProfileRequest": object(&[
-            ("name", optional_string()),
-            ("profile_type", optional_string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "CreateShippingOptionRequest": object(&[
-            ("profile_id", string()),
-            ("name", string()),
-            ("amount_minor", integer()),
-            ("currency", string()),
-            ("provider_id", optional_string()),
-            ("provider_data", nullable(schema_ref("Metadata"))),
-            ("fulfillment_set_id", optional_string()),
-            ("is_enabled", nullable(boolean())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["profile_id", "name", "amount_minor", "currency"]),
-
-
-        "UpdateShippingOptionRequest": object(&[
-            ("name", optional_string()),
-            ("amount_minor", nullable(integer())),
-            ("currency", optional_string()),
-            ("provider_id", optional_string()),
-            ("provider_data", nullable(schema_ref("Metadata"))),
-            ("fulfillment_set_id", nullable(string())),
-            ("is_enabled", nullable(boolean())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "CreateFulfillmentSetRequest": object(&[
-            ("name", string()),
-            ("type", optional_string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["name"]),
-
-
-        "UpdateFulfillmentSetRequest": object(&[
-            ("name", optional_string()),
-            ("type", optional_string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "CreateShippingRateRequest": object(&[
-            ("country_code", optional_string()),
-            ("province_code", optional_string()),
-            ("amount_minor", integer()),
-            ("currency", string()),
-            ("min_subtotal", nullable(integer())),
-            ("max_subtotal", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["amount_minor", "currency"]),
-
-
-        "UpdateShippingRateRequest": object(&[
-            ("country_code", nullable(string())),
-            ("province_code", nullable(string())),
-            ("amount_minor", nullable(integer())),
-            ("currency", optional_string()),
-            ("min_subtotal", nullable(integer())),
-            ("max_subtotal", nullable(integer())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "AddShippingLocationRequest": object(&[("location_id", string())], &["location_id"]),
-
-
-        "CreateTaxCategoryRequest": object(&[
-            ("name", string()),
-            ("code", string()),
-            ("description", optional_string()),
-        ], &["name", "code"]),
-
-
-        "UpdateTaxCategoryRequest": object(&[
-            ("name", optional_string()),
-            ("code", optional_string()),
-            ("description", nullable(string())),
-        ], &[]),
-
-
-        "CreateTaxRegionRequest": object(&[
-            ("name", string()),
-            ("country_code", string()),
-            ("province_code", optional_string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["name", "country_code"]),
-
-
-        "UpdateTaxRegionRequest": object(&[
-            ("name", optional_string()),
-            ("country_code", optional_string()),
-            ("province_code", nullable(string())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "CreateTaxRateRequest": object(&[
-            ("region_id", string()),
-            ("category_id", optional_string()),
-            ("name", string()),
-            ("rate_bps", integer()),
-            ("is_inclusive", nullable(boolean())),
-            ("is_default", nullable(boolean())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["region_id", "name", "rate_bps"]),
-
-
-        "UpdateTaxRateRequest": object(&[
-            ("category_id", nullable(string())),
-            ("name", optional_string()),
-            ("rate_bps", nullable(integer())),
-            ("is_inclusive", nullable(boolean())),
-            ("is_default", nullable(boolean())),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &[]),
-
-
-        "TaxCalculateRequest": object(&[
-            ("country", string()),
-            ("province", optional_string()),
-            ("category_id", optional_string()),
-            ("amount_minor", nullable(integer())),
-            ("lines", array_of(json!({"type": "object", "additionalProperties": true}))),
-        ], &["country"]),
-
-
-
         // Request bodies: webhooks.
-        "CreateWebhookRequest": object(&[
-            ("url", string()),
-            ("events", array_of(string())),
-            ("secret", optional_string()),
-            ("metadata", nullable(schema_ref("Metadata"))),
-        ], &["url", "events"]),
-
-
-        "UpdateWebhookRequest": object(&[
-            ("url", optional_string()),
-            ("events", array_of(string())),
-            ("is_active", nullable(boolean())),
-        ], &[]),
-
-
-
         // Request bodies: carts, checkouts and storefront customers.
-        "CreateCartRequest": object(&[
-            ("currency_code", string()),
-            ("email", optional_string()),
-            ("sales_channel_id", optional_string()),
-            ("expires_in_seconds", nullable(integer())),
-        ], &["currency_code"]),
-
-
-        "AddItemRequest": object(&[
-            ("variant_id", string()),
-            ("quantity", integer()),
-            ("country_code", optional_string()),
-            ("province_code", optional_string()),
-        ], &["variant_id", "quantity"]),
-
-
-        "UpdateItemRequest": object(&[("quantity", integer())], &["quantity"]),
-
-
-        "SetEmailRequest": object(&[("email", string())], &["email"]),
-
-
-        "SetCartAddressRequest": object(&[
-            ("type", string_enum(&["shipping", "billing"])),
-            ("first_name", optional_string()),
-            ("last_name", optional_string()),
-            ("company", optional_string()),
-            ("address_1", optional_string()),
-            ("address_2", optional_string()),
-            ("city", optional_string()),
-            ("province", optional_string()),
-            ("postal_code", optional_string()),
-            ("country_code", optional_string()),
-            ("phone", optional_string()),
-        ], &["type"]),
-
-
-        "SetShippingMethodRequest": object(&[
-            ("shipping_option_id", string()),
-            ("country_code", optional_string()),
-            ("province_code", optional_string()),
-        ], &["shipping_option_id"]),
-
-
-        "DiscountRequest": object(&[("code", string())], &["code"]),
-
-
-        "CreateCheckoutRequest": object(&[
-            ("cart_id", string()),
-            ("email", optional_string()),
-            ("payment_provider", optional_string()),
-            ("idempotency_key", optional_string()),
-            ("expires_in_seconds", nullable(integer())),
-            ("country_code", optional_string()),
-            ("province_code", optional_string()),
-        ], &["cart_id"]),
-
-
-        "CompleteCheckoutRequest": object(&[
-            ("country_code", optional_string()),
-            ("province_code", optional_string()),
-        ], &[]),
-
-
-        "RegisterCustomerRequest": object(&[
-            ("email", string()),
-            ("password", string()),
-            ("first_name", optional_string()),
-            ("last_name", optional_string()),
-        ], &["email", "password"]),
-
-
-        "CustomerLoginRequest": object(&[
-            ("email", string()),
-            ("password", string()),
-        ], &["email", "password"]),
-
-
-        "UpdateProfileRequest": object(&[
-            ("first_name", optional_string()),
-            ("last_name", optional_string()),
-            ("phone", optional_string()),
-        ], &[]),
-
-
-        "ChangePasswordRequest": object(&[
-            ("current_password", string()),
-            ("new_password", string()),
-        ], &["current_password", "new_password"]),
-
-
-        "EmailRequest": object(&[("email", string())], &["email"]),
-
-
-        "EmailVerificationConfirmRequest": object(&[("token", string())], &["token"]),
-
-
         "PasswordResetRequest": object(&[("email", string())], &["email"]),
 
 
-        "PasswordResetConfirmRequest": object(&[
-            ("token", string()),
-            ("password", string()),
-        ], &["token", "password"]),
     }
     for (name, schema) in generated_schemas() {
         schemas.insert(name, schema);

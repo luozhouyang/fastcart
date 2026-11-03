@@ -55,7 +55,7 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/checkouts/{checkout_id}/history", get(checkout_history))
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct CreateCartRequest {
     /// Cart currency.
     pub currency_code: String,
@@ -67,7 +67,7 @@ pub struct CreateCartRequest {
     pub expires_in_seconds: Option<i64>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct AddItemRequest {
     /// Variant to add.
     pub variant_id: String,
@@ -79,22 +79,34 @@ pub struct AddItemRequest {
     pub province_code: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct UpdateItemRequest {
     /// New quantity; zero removes the line.
     pub quantity: i64,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct SetEmailRequest {
     /// Contact email.
     pub email: String,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+/// Address type accepted by the cart address endpoint.
+#[derive(utoipa::ToSchema)]
+#[schema(rename_all = "snake_case")]
+pub enum CartAddressType {
+    /// Shipping address.
+    Shipping,
+    /// Billing address.
+    Billing,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
+#[schema(as = SetCartAddressRequest)]
 pub struct SetAddressRequest {
     /// `shipping` or `billing`.
     #[serde(rename = "type")]
+    #[schema(value_type = CartAddressType)]
     pub address_type: String,
     /// Given name.
     pub first_name: Option<String>,
@@ -118,7 +130,7 @@ pub struct SetAddressRequest {
     pub phone: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct SetShippingMethodRequest {
     /// Shipping option identifier.
     pub shipping_option_id: String,
@@ -128,13 +140,14 @@ pub struct SetShippingMethodRequest {
     pub province_code: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct DiscountRequest {
     /// Coupon code.
     pub code: String,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
+#[schema(as = CreateCheckoutRequest)]
 pub struct CreateCheckoutRequestDto {
     /// Cart being checked out.
     pub cart_id: String,
@@ -157,7 +170,7 @@ fn default_payment_provider() -> String {
     "manual".to_owned()
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct CompleteCheckoutRequest {
     /// Destination country override.
     pub country_code: Option<String>,
@@ -165,7 +178,7 @@ pub struct CompleteCheckoutRequest {
     pub province_code: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct CompleteCheckoutResponse {
     /// Final checkout.
     pub checkout: CheckoutSession,
