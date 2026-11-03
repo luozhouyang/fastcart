@@ -506,6 +506,7 @@ dependencies = [
  "fastcart-module-shipping",
  "fastcart-module-store",
  "fastcart-module-tax",
+ "fastcart-module-webhook",
  "fastcart-platform",
  "fastcart-workflows",
  "http-body-util",
@@ -800,6 +801,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastcart-module-webhook"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "fastcart-infrastructure",
+ "fastcart-kernel",
+ "hex",
+ "hmac",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "fastcart-platform"
 version = "0.1.0"
 dependencies = [
@@ -931,6 +950,7 @@ dependencies = [
  "fastcart-module-promotion",
  "fastcart-module-shipping",
  "fastcart-module-tax",
+ "fastcart-module-webhook",
  "fastcart-platform",
  "serde",
  "serde_json",

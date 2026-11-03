@@ -502,3 +502,124 @@ async fn api_tokens_authorize_store_scoped_requests() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn admins_manage_webhook_endpoints_without_leaking_secrets() {
+    let fixture = fixture().await;
+    let (_, _, cookies) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/auth/setup",
+        Some(serde_json::json!({
+            "email": "owner@example.com",
+            "password": "hunter2hunter2"
+        })),
+        &[],
+    )
+    .await;
+    let session = cookie_value(&cookies, "fc_admin_session").unwrap();
+    let csrf = cookie_value(&cookies, "fc_csrf").unwrap();
+    let auth = format!("fc_admin_session={session}; fc_csrf={csrf}");
+
+    let (status, store, _) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(serde_json::json!({
+            "name": "Demo",
+            "slug": "demo",
+            "primary_domain": "demo.example.com"
+        })),
+        &[("cookie", auth.as_str()), ("x-csrf-token", csrf.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{store}");
+    let store_id = store["id"].as_str().unwrap().to_owned();
+    let headers = [
+        ("cookie", auth.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+        ("x-store-id", store_id.as_str()),
+    ];
+
+    let (status, created, _) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/webhooks",
+        Some(serde_json::json!({
+            "url": "https://example.com/hooks",
+            "events": ["order.placed", "order.placed"]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert!(created["secret"].as_str().unwrap().starts_with("whsec_"));
+    assert_eq!(created["events"], serde_json::json!(["order.placed"]));
+    let endpoint_id = created["id"].as_str().unwrap().to_owned();
+
+    let (status, listed, _) = json_request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/webhooks",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert!(listed[0].get("secret").is_none());
+
+    let (status, updated, _) = json_request(
+        &fixture.app,
+        "PATCH",
+        &format!("/api/v1/admin/webhooks/{endpoint_id}"),
+        Some(serde_json::json!({"events": ["*"], "is_active": false})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["events"], serde_json::json!(["*"]));
+    assert_eq!(updated["is_active"], false);
+
+    let (status, rotated, _) = json_request(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/admin/webhooks/{endpoint_id}/rotate-secret"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rotated}");
+    assert_ne!(rotated["secret"], created["secret"]);
+
+    let (status, deliveries, _) = json_request(
+        &fixture.app,
+        "GET",
+        &format!("/api/v1/admin/webhooks/{endpoint_id}/deliveries"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(deliveries.as_array().unwrap().is_empty());
+
+    let (status, _, _) = json_request(
+        &fixture.app,
+        "DELETE",
+        &format!("/api/v1/admin/webhooks/{endpoint_id}"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body, _) = json_request(
+        &fixture.app,
+        "GET",
+        &format!("/api/v1/admin/webhooks/{endpoint_id}"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}

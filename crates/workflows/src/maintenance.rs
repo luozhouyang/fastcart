@@ -9,6 +9,7 @@ use fastcart_module_cart::CartService;
 use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::CheckoutService;
 use fastcart_module_inventory::InventoryService;
+use fastcart_module_webhook::WebhookService;
 use fastcart_platform::{PlatformStore, StoreStatus};
 
 /// Counts produced by one maintenance sweep.
@@ -24,6 +25,10 @@ pub struct MaintenanceReport {
     pub outbox_dispatched: u64,
     /// Background jobs processed.
     pub jobs_processed: u64,
+    /// Webhook deliveries accepted by their endpoints.
+    pub webhooks_delivered: u64,
+    /// Webhook deliveries that exhausted their retry budget.
+    pub webhooks_failed: u64,
     /// Store-level failures encountered.
     pub failures: u64,
 }
@@ -135,9 +140,14 @@ pub async fn run_maintenance(
             }
             match fetch_pending_outbox(database.pool(), 100).await {
                 Ok(records) => {
+                    let webhooks = WebhookService::new(database.clone());
                     for record in records {
                         if let Some(event) = record.to_envelope(Some(store.id.clone())) {
-                            let _ = events.publish(event);
+                            let _ = events.publish(event.clone());
+                            if let Err(error) = webhooks.fan_out(&event).await {
+                                tracing::warn!(store_id = %store.id, event_id = %event.id, error = %error, "webhook fan-out failed");
+                                report.failures += 1;
+                            }
                         }
                         if let Err(error) = mark_outbox_processed(database.pool(), &record.id).await
                         {
@@ -153,6 +163,27 @@ pub async fn run_maintenance(
                 }
                 Err(error) => {
                     tracing::warn!(store_id = %store.id, error = %error, "outbox read failed");
+                    report.failures += 1;
+                }
+            }
+            match WebhookService::new(database.clone())
+                .deliver_due(now, 10)
+                .await
+            {
+                Ok(delivery) => {
+                    report.webhooks_delivered += delivery.delivered;
+                    report.webhooks_failed += delivery.failed;
+                    if delivery.retried > 0 || delivery.failed > 0 {
+                        tracing::warn!(
+                            store_id = %store.id,
+                            retried = delivery.retried,
+                            failed = delivery.failed,
+                            "webhook delivery sweep reported failures"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "webhook delivery sweep failed");
                     report.failures += 1;
                 }
             }

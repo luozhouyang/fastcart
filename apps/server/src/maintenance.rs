@@ -24,6 +24,8 @@ pub async fn maintenance_loop(context: Arc<AppContext>) {
                 checkouts_expired = report.checkouts_expired,
                 outbox_dispatched = report.outbox_dispatched,
                 jobs_processed = report.jobs_processed,
+                webhooks_delivered = report.webhooks_delivered,
+                webhooks_failed = report.webhooks_failed,
                 failures = report.failures,
                 "maintenance sweep completed"
             );

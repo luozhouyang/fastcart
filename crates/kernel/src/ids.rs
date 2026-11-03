@@ -135,6 +135,11 @@ define_id!(ApiTokenId, "token", "Identifier of an API token.");
 define_id!(JobId, "job", "Identifier of a background job.");
 define_id!(EventId, "evt", "Identifier of a domain event.");
 define_id!(WebhookId, "whook", "Identifier of a webhook endpoint.");
+define_id!(
+    WebhookDeliveryId,
+    "whdel",
+    "Identifier of a webhook delivery attempt."
+);
 
 #[cfg(test)]
 mod tests {
