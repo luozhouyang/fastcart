@@ -18,7 +18,7 @@ use fastcart_http::{
     ApiError, ApiJson, ApiResult, CUSTOMER_CSRF_COOKIE, CUSTOMER_SESSION_COOKIE, CustomerActor,
     PaginationQuery, csrf_cookie, parse_cookies, session_cookie, session_cookie_clear,
 };
-use fastcart_kernel::{AppError, OrderId, now_timestamp};
+use fastcart_kernel::{AppError, OrderId, normalize_email, now_timestamp};
 use fastcart_module_customer::{
     Address, AddressInput, CreatedCustomerSession, Customer, CustomerGroup, CustomerService,
     RegisterCustomerInput, UpdateCustomerInput,
@@ -164,9 +164,15 @@ async fn login(
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CustomerLoginRequest>,
 ) -> ApiResult<Response> {
+    let email = normalize_email(&request.email);
+    let key = format!("customer-login:{email}");
+    if !context.login_limiter.check(&key) {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
     let session = CustomerService::new(db)
-        .login(&request.email, &request.password)
+        .login(&email, &request.password)
         .await?;
+    context.login_limiter.reset(&key);
     session_response(&context, session)
 }
 
@@ -341,6 +347,7 @@ fn session_response(context: &AppContext, session: CreatedCustomerSession) -> Ap
         csrf_cookie(
             CUSTOMER_CSRF_COOKIE,
             &session.csrf_token,
+            max_age,
             context.config.cookie_secure,
         ),
     )?;

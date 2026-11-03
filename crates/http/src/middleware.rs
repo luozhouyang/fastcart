@@ -8,6 +8,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use fastcart_kernel::{ActorContext, AuthenticationMethod, CurrencyCode, StoreContext, StoreId};
 use fastcart_platform::{AuthService, StoreResolver};
+use subtle::ConstantTimeEq;
 
 use crate::cookies::parse_cookies;
 use crate::error::{ApiError, REQUEST_ID};
@@ -91,7 +92,7 @@ pub async fn admin_auth_middleware(
             .get(CSRF_HEADER)
             .and_then(|value| value.to_str().ok())
             .ok_or(ApiError::new(fastcart_kernel::AppError::Forbidden))?;
-        if csrf_cookie != csrf_header {
+        if !bool::from(csrf_cookie.as_bytes().ct_eq(csrf_header.as_bytes())) {
             return Err(ApiError::new(fastcart_kernel::AppError::Forbidden));
         }
     }
@@ -112,9 +113,23 @@ pub async fn admin_auth_middleware(
     }
 
     let actor = if token.starts_with("fc_") {
+        if requested_store.is_none() {
+            return Err(ApiError::new(fastcart_kernel::AppError::Forbidden));
+        }
         let token = state.auth.authenticate_api_token(&token).await?;
-        if let (Some(requested), Some(token_store)) = (&requested_store, &token.store_id) {
+        let Some(token_store) = token.store_id.as_ref() else {
+            return Err(ApiError::new(fastcart_kernel::AppError::Forbidden));
+        };
+        if let Some(requested) = &requested_store {
             if requested != token_store {
+                return Err(ApiError::new(fastcart_kernel::AppError::Forbidden));
+            }
+            if !state
+                .auth
+                .platform()
+                .is_member(&token.user_id, requested)
+                .await?
+            {
                 return Err(ApiError::new(fastcart_kernel::AppError::Forbidden));
             }
         }
@@ -335,6 +350,55 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["permissions"][0], "customers.read");
+    }
+
+    #[tokio::test]
+    async fn api_tokens_are_rejected_without_a_store_scope() {
+        let platform = PlatformStore::in_memory().await.unwrap();
+        let auth = AuthService::new(platform.clone());
+        let user = auth
+            .register(CreateUserInput::new("owner@example.com"), "hunter2hunter2")
+            .await
+            .unwrap();
+        let store = platform
+            .create_store(CreateStoreInput::new("Demo", "demo", "demo.example.com"))
+            .await
+            .unwrap();
+        platform
+            .upsert_membership(&user.id, &store.id, &["owner"])
+            .await
+            .unwrap();
+        let token = auth
+            .create_api_token(
+                &user.id,
+                Some(&store.id),
+                "automation",
+                &["products.read".into()],
+                None,
+            )
+            .await
+            .unwrap();
+        let app =
+            Router::new()
+                .route("/me", get(actor_handler))
+                .layer(middleware::from_fn_with_state(
+                    AdminAuthState {
+                        auth,
+                        require_store: false,
+                    },
+                    admin_auth_middleware,
+                ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/me")
+                    .header("authorization", format!("Bearer {}", token.token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 //! SQLite-backed webhook registry and delivery worker.
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use fastcart_infrastructure::{StoreDatabase, database_error};
@@ -7,6 +8,7 @@ use fastcart_kernel::{
     AppError, DomainEventEnvelope, Metadata, Timestamp, WebhookDeliveryId, WebhookId,
     now_timestamp, validate_metadata,
 };
+use futures::StreamExt;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use reqwest::Url;
@@ -32,6 +34,7 @@ pub struct WebhookService {
     db: StoreDatabase,
     client: reqwest::Client,
     max_attempts: u32,
+    allow_private_networks: bool,
 }
 
 impl WebhookService {
@@ -40,9 +43,22 @@ impl WebhookService {
     pub fn new(db: StoreDatabase) -> Self {
         Self {
             db,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(DELIVERY_TIMEOUT)
+                .build()
+                .expect("the webhook HTTP client configuration is valid"),
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            allow_private_networks: false,
         }
+    }
+
+    /// Allows loopback and private destinations. Only for tests and local
+    /// development; production deployments must leave this disabled.
+    #[must_use]
+    pub fn with_private_networks_allowed(mut self, allowed: bool) -> Self {
+        self.allow_private_networks = allowed;
+        self
     }
 
     /// Overrides the HTTP client used for deliveries.
@@ -64,7 +80,7 @@ impl WebhookService {
         &self,
         input: CreateWebhookEndpointInput,
     ) -> Result<CreatedWebhookEndpoint, AppError> {
-        let url = validate_url(&input.url)?;
+        let url = validate_url(&input.url, self.allow_private_networks)?;
         let events = normalize_events(input.events)?;
         let secret = match input.secret {
             Some(secret) => {
@@ -124,7 +140,7 @@ impl WebhookService {
     ) -> Result<WebhookEndpoint, AppError> {
         let current = self.fetch_endpoint_row(id).await?;
         let url = match input.url {
-            Some(url) => validate_url(&url)?,
+            Some(url) => validate_url(&url, self.allow_private_networks)?,
             None => current.url.clone(),
         };
         let events = match input.events {
@@ -391,6 +407,9 @@ impl WebhookService {
         endpoint: &EndpointRow,
         now: Timestamp,
     ) -> Result<SendOutcome, AppError> {
+        if !self.allow_private_networks {
+            ensure_public_resolution(&endpoint.url).await?;
+        }
         let timestamp = now_timestamp();
         let signature = sign(&endpoint.secret, timestamp, &row.payload)?;
         let response = self
@@ -410,10 +429,14 @@ impl WebhookService {
             Ok(response) => {
                 let status = i64::from(response.status().as_u16());
                 let successful = response.status().is_success();
-                let body = response.text().await.unwrap_or_default();
-                (successful, Some(status), Some(truncate(body)))
+                let body = read_response_body(response).await;
+                (successful, Some(status), Some(body))
             }
-            Err(error) => (false, None, Some(truncate(error.to_string()))),
+            Err(error) => (
+                false,
+                None,
+                Some(truncate_bytes(error.to_string().as_bytes())),
+            ),
         };
 
         let outcome = if delivered {
@@ -560,7 +583,7 @@ impl DeliveryRow {
     }
 }
 
-fn validate_url(raw: &str) -> Result<String, AppError> {
+fn validate_url(raw: &str, allow_private: bool) -> Result<String, AppError> {
     let url = raw.trim();
     if url.is_empty() {
         return Err(AppError::validation("webhook url is required"));
@@ -585,13 +608,21 @@ fn validate_url(raw: &str) -> Result<String, AppError> {
             "webhook url must use the http or https scheme",
         ));
     }
-    if parsed.host_str().is_none_or(str::is_empty) {
+    let Some(host) = parsed.host_str().filter(|host| !host.is_empty()) else {
         return Err(AppError::validation("webhook url must include a host"));
-    }
+    };
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(AppError::validation(
             "webhook url must not include credentials",
         ));
+    }
+    if !allow_private {
+        if parsed.scheme() != "https" {
+            return Err(AppError::validation(
+                "webhook url must use https (private destinations are disabled)",
+            ));
+        }
+        validate_public_host(host)?;
     }
     Ok(url.to_owned())
 }
@@ -660,11 +691,114 @@ fn sign(secret: &str, timestamp: Timestamp, payload: &str) -> Result<String, App
     Ok(format!("v1={}", hex::encode(mac.finalize().into_bytes())))
 }
 
-fn truncate(body: String) -> String {
-    if body.len() <= MAX_RESPONSE_BODY_BYTES {
-        return body;
+fn truncate_bytes(body: &[u8]) -> String {
+    let end = body.len().min(MAX_RESPONSE_BODY_BYTES);
+    let end = (0..=end)
+        .rev()
+        .find(|index| {
+            body.get(*index)
+                .is_none_or(|byte| *byte & 0b1100_0000 != 0b1000_0000)
+        })
+        .unwrap_or(0);
+    String::from_utf8_lossy(&body[..end]).into_owned()
+}
+
+async fn read_response_body(response: reqwest::Response) -> String {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::with_capacity(MAX_RESPONSE_BODY_BYTES.min(16 * 1024));
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            break;
+        };
+        let remaining = MAX_RESPONSE_BODY_BYTES.saturating_sub(body.len());
+        if remaining == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if body.len() >= MAX_RESPONSE_BODY_BYTES {
+            break;
+        }
     }
-    body.chars().take(MAX_RESPONSE_BODY_BYTES).collect()
+    truncate_bytes(&body)
+}
+
+fn is_forbidden_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+                || octets[0] == 0
+                || octets[0] >= 224
+        }
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| is_forbidden_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
+fn validate_public_host(host: &str) -> Result<(), AppError> {
+    let normalized = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || normalized.ends_with(".local")
+        || normalized.ends_with(".internal")
+        || normalized.ends_with(".home")
+        || normalized.ends_with(".lan")
+    {
+        return Err(AppError::validation(
+            "webhook url must not target a local host",
+        ));
+    }
+    if let Ok(ip) = normalized.parse::<IpAddr>() {
+        if is_forbidden_ip(ip) {
+            return Err(AppError::validation(
+                "webhook url must not target a private or local address",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_public_resolution(raw: &str) -> Result<(), AppError> {
+    let parsed = Url::parse(raw)
+        .map_err(|error| AppError::validation(format!("invalid webhook url: {error}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::validation("webhook url must include a host"))?;
+    validate_public_host(host)?;
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let target = host.trim_matches(['[', ']']).to_owned();
+    let addresses = tokio::net::lookup_host((target.as_str(), port))
+        .await
+        .map_err(|error| {
+            AppError::validation(format!("webhook host cannot be resolved: {error}"))
+        })?;
+    let mut resolved = false;
+    for address in addresses {
+        resolved = true;
+        if is_forbidden_ip(address.ip()) {
+            return Err(AppError::validation(
+                "webhook host resolves to a private or local address",
+            ));
+        }
+    }
+    if !resolved {
+        return Err(AppError::validation("webhook host has no addresses"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -733,6 +867,7 @@ mod tests {
                 .await
                 .expect("in-memory store database"),
         )
+        .with_private_networks_allowed(true)
     }
 
     async fn endpoint(service: &WebhookService, url: &str, events: Vec<&str>) -> String {
@@ -794,6 +929,27 @@ mod tests {
                 .unwrap_err()
                 .is_not_found()
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_private_and_plaintext_destinations_by_default() {
+        let service = WebhookService::new(StoreDatabase::in_memory(StoreId::new()).await.unwrap());
+        for url in [
+            "http://example.com/hook",
+            "https://127.0.0.1/hook",
+            "https://localhost/hook",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/hook",
+        ] {
+            service
+                .create_endpoint(CreateWebhookEndpointInput {
+                    url: url.to_owned(),
+                    events: vec!["order.placed".to_owned()],
+                    ..Default::default()
+                })
+                .await
+                .expect_err("private or plaintext URL was accepted");
+        }
     }
 
     #[tokio::test]

@@ -433,21 +433,23 @@ async fn create_user(
                     "roles are required when creating a user for a store",
                 ));
             }
-            Some(store_id)
+            store_id
         }
-        None => None,
+        None => {
+            return Err(ApiError::validation(
+                "store_id is required when creating a user",
+            ));
+        }
     };
     let mut input = CreateUserInput::new(&request.email);
     input.first_name = request.first_name;
     input.last_name = request.last_name;
     let user = context.auth.register(input, &request.password).await?;
-    if let Some(store_id) = store_id {
-        let roles: Vec<&str> = request.roles.iter().map(String::as_str).collect();
-        context
-            .platform
-            .upsert_membership(&user.id, &store_id, &roles)
-            .await?;
-    }
+    let roles: Vec<&str> = request.roles.iter().map(String::as_str).collect();
+    context
+        .platform
+        .upsert_membership(&user.id, &store_id, &roles)
+        .await?;
     Ok((StatusCode::CREATED, Json(UserDto::from(&user))))
 }
 

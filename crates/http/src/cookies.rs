@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use axum::http::HeaderMap;
+use cookie::{Cookie, SameSite};
 
 /// Parses the `Cookie` header into a name/value map. The first value wins.
 #[must_use]
@@ -13,12 +14,12 @@ pub fn parse_cookies(headers: &HeaderMap) -> HashMap<String, String> {
             continue;
         };
         for pair in value.split(';') {
-            let Some((name, value)) = pair.split_once('=') else {
+            let Ok(cookie) = Cookie::parse(pair.trim()) else {
                 continue;
             };
             cookies
-                .entry(name.trim().to_owned())
-                .or_insert_with(|| value.trim().to_owned());
+                .entry(cookie.name().to_owned())
+                .or_insert_with(|| cookie.value().to_owned());
         }
     }
     cookies
@@ -29,34 +30,47 @@ pub fn parse_cookies(headers: &HeaderMap) -> HashMap<String, String> {
 /// `max_age_seconds` of zero creates a session cookie.
 #[must_use]
 pub fn session_cookie(name: &str, value: &str, max_age_seconds: i64, secure: bool) -> String {
-    let mut cookie = format!(
-        "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-        max_age_seconds.max(0)
-    );
-    if secure {
-        cookie.push_str("; Secure");
+    let mut builder = Cookie::build((name, value))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax);
+    if max_age_seconds > 0 {
+        builder = builder.max_age(cookie::time::Duration::seconds(max_age_seconds));
     }
-    cookie
+    if secure {
+        builder = builder.secure(true);
+    }
+    builder.build().to_string()
 }
 
 /// Builds a JavaScript-readable CSRF cookie for double-submit protection.
 #[must_use]
-pub fn csrf_cookie(name: &str, value: &str, secure: bool) -> String {
-    let mut cookie = format!("{name}={value}; Path=/; SameSite=Lax");
-    if secure {
-        cookie.push_str("; Secure");
+pub fn csrf_cookie(name: &str, value: &str, max_age_seconds: i64, secure: bool) -> String {
+    let mut builder = Cookie::build((name, value))
+        .path("/")
+        .http_only(false)
+        .same_site(SameSite::Lax);
+    if max_age_seconds > 0 {
+        builder = builder.max_age(cookie::time::Duration::seconds(max_age_seconds));
     }
-    cookie
+    if secure {
+        builder = builder.secure(true);
+    }
+    builder.build().to_string()
 }
 
 /// Builds a cookie that clears the named value.
 #[must_use]
 pub fn session_cookie_clear(name: &str, secure: bool) -> String {
-    let mut cookie = format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+    let mut builder = Cookie::build((name, ""))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(cookie::time::Duration::ZERO);
     if secure {
-        cookie.push_str("; Secure");
+        builder = builder.secure(true);
     }
-    cookie
+    builder.build().to_string()
 }
 
 #[cfg(test)]
@@ -86,6 +100,8 @@ mod tests {
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("Max-Age=3600"));
         assert!(session_cookie_clear("session", true).contains("Max-Age=0"));
-        assert!(!csrf_cookie("csrf", "x", false).contains("HttpOnly"));
+        assert!(!session_cookie("session", "abc", 0, false).contains("Max-Age"));
+        assert!(!csrf_cookie("csrf", "x", 3600, false).contains("HttpOnly"));
+        assert!(csrf_cookie("csrf", "x", 3600, false).contains("Max-Age=3600"));
     }
 }

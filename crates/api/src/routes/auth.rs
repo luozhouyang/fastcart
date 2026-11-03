@@ -39,6 +39,7 @@ pub async fn setup(
     State(context): State<Arc<AppContext>>,
     ApiJson(request): ApiJson<SetupRequest>,
 ) -> ApiResult<Response> {
+    let _guard = context.bootstrap_lock.lock().await;
     if context.platform.count_users().await? > 0 {
         return Err(ApiError::new(AppError::Conflict(
             "platform is already initialized".to_owned(),
@@ -117,6 +118,7 @@ fn session_response(context: &AppContext, session: CreatedSession) -> ApiResult<
         csrf_cookie(
             ADMIN_CSRF_COOKIE,
             &session.csrf_token,
+            max_age,
             context.config.cookie_secure,
         ),
     )?;

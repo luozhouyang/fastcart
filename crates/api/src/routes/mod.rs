@@ -248,7 +248,7 @@ pub async fn customer_auth_middleware(
                     .get(CSRF_HEADER)
                     .and_then(|value| value.to_str().ok())
                     .ok_or_else(|| ApiError::new(AppError::Forbidden))?;
-                if csrf_cookie != csrf_header {
+                if !bool::from(csrf_cookie.as_bytes().ct_eq(csrf_header.as_bytes())) {
                     return Err(ApiError::new(AppError::Forbidden));
                 }
             }

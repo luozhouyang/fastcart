@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Mutex;
+
 use fastcart_email::EmailService;
 use fastcart_http::{Metrics, RateLimiter};
 use fastcart_infrastructure::{EventBus, StoreCache, StoreDatabaseManager};
@@ -73,6 +75,8 @@ pub struct AppContext {
     pub cache: StoreCache,
     /// Login attempt limiter.
     pub login_limiter: RateLimiter,
+    /// Serializes first-user bootstrap so concurrent setup calls cannot both win.
+    pub bootstrap_lock: Arc<Mutex<()>>,
     /// Registered payment providers shared by all stores.
     pub payment_providers: ProviderRegistry,
     /// HTTP request metrics.
@@ -119,6 +123,7 @@ impl AppContext {
             events: EventBus::new(1024),
             cache,
             login_limiter: RateLimiter::new(10, Duration::from_secs(5 * 60)),
+            bootstrap_lock: Arc::new(Mutex::new(())),
             payment_providers,
             metrics: Arc::new(Metrics::new()),
             storefront_runtime: None,
@@ -130,6 +135,13 @@ impl AppContext {
     #[must_use]
     pub fn with_storefront_runtime(mut self, runtime: Option<Arc<dyn StorefrontRuntime>>) -> Self {
         self.storefront_runtime = runtime;
+        self
+    }
+
+    /// Replaces the email service with one configured for this deployment.
+    #[must_use]
+    pub fn with_email(mut self, email: EmailService) -> Self {
+        self.email = email;
         self
     }
 }

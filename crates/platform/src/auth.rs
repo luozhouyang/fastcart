@@ -356,10 +356,17 @@ impl AuthService {
                 "token name must be between 1 and 120 characters".to_owned(),
             ));
         }
-        if let Some(store_id) = store_id {
-            if !self.platform.is_member(user_id, store_id).await? {
-                return Err(PlatformError::Forbidden);
-            }
+        let Some(store_id) = store_id else {
+            return Err(PlatformError::InvalidInput(
+                "API tokens must be scoped to a store".to_owned(),
+            ));
+        };
+        if !self.platform.is_member(user_id, store_id).await? {
+            return Err(PlatformError::Forbidden);
+        }
+        let allowed = self.platform.permissions_for(user_id, store_id).await?;
+        if !scopes.iter().all(|scope| allowed.contains(scope)) {
+            return Err(PlatformError::Forbidden);
         }
         let ttl = ttl_seconds.unwrap_or(MAX_API_TOKEN_TTL_SECONDS);
         if ttl <= 0 || ttl > MAX_API_TOKEN_TTL_SECONDS {
@@ -381,7 +388,7 @@ impl AuthService {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
-        .bind(store_id.map(StoreId::as_str))
+        .bind(store_id.as_str())
         .bind(user_id.as_str())
         .bind(name.trim())
         .bind(&prefix)
@@ -396,7 +403,7 @@ impl AuthService {
             record: ApiToken {
                 id,
                 user_id: user_id.clone(),
-                store_id: store_id.cloned(),
+                store_id: Some(store_id.clone()),
                 name: name.trim().to_owned(),
                 prefix,
                 scopes: scopes.to_vec(),
@@ -414,8 +421,10 @@ impl AuthService {
             return Err(PlatformError::Unauthorized);
         }
         let row = sqlx::query(
-            "SELECT id, user_id, store_id, scopes, expires_at, revoked_at
-             FROM api_tokens WHERE token_hash = ?",
+            "SELECT t.id, t.user_id, t.store_id, t.scopes, t.expires_at, t.revoked_at
+             FROM api_tokens t
+             JOIN users u ON u.id = t.user_id
+             WHERE t.token_hash = ? AND u.status = 'active'",
         )
         .bind(hash_token(token))
         .fetch_optional(self.platform.pool())
@@ -434,10 +443,11 @@ impl AuthService {
         let store_id: Option<String> = row.try_get("store_id")?;
         let user_id = UserId::from_string(row.try_get::<String, _>("user_id")?);
         let store_id = store_id.map(StoreId::from_string);
-        if let Some(store_id) = store_id.as_ref() {
-            if !self.platform.is_member(&user_id, store_id).await? {
-                return Err(PlatformError::Forbidden);
-            }
+        let Some(store_id_ref) = store_id.as_ref() else {
+            return Err(PlatformError::Forbidden);
+        };
+        if !self.platform.is_member(&user_id, store_id_ref).await? {
+            return Err(PlatformError::Forbidden);
         }
         let scopes: Vec<String> =
             serde_json::from_str(row.try_get::<String, _>("scopes")?.as_str()).unwrap_or_default();
@@ -676,11 +686,20 @@ mod tests {
             .register(CreateUserInput::new("owner@example.com"), "hunter2hunter2")
             .await
             .unwrap();
+        let store = auth
+            .platform()
+            .create_store(CreateStoreInput::new("Demo", "demo", "demo.example.com"))
+            .await
+            .unwrap();
+        auth.platform()
+            .upsert_membership(&user.id, &store.id, &["owner"])
+            .await
+            .unwrap();
 
         let created = auth
             .create_api_token(
                 &user.id,
-                None,
+                Some(&store.id),
                 "automation",
                 &["products.read".into()],
                 None,
@@ -700,6 +719,7 @@ mod tests {
 
         let authenticated = auth.authenticate_api_token(&created.token).await.unwrap();
         assert_eq!(authenticated.user_id, user.id);
+        assert_eq!(authenticated.store_id, Some(store.id.clone()));
         assert_eq!(authenticated.scopes, vec!["products.read"]);
 
         auth.revoke_api_token(&user.id, &created.record.id)
@@ -711,6 +731,74 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert!(listed[0].revoked_at.is_some());
         assert!(!format!("{:?}", listed[0]).contains(&created.token));
+    }
+
+    #[tokio::test]
+    async fn api_tokens_require_a_store_and_cannot_escalate_scopes() {
+        let auth = service().await;
+        let user = auth
+            .register(CreateUserInput::new("owner@example.com"), "hunter2hunter2")
+            .await
+            .unwrap();
+        assert!(
+            auth.create_api_token(&user.id, None, "global", &["products.read".into()], None)
+                .await
+                .is_err()
+        );
+        let store = auth
+            .platform()
+            .create_store(CreateStoreInput::new("Demo", "demo", "demo.example.com"))
+            .await
+            .unwrap();
+        auth.platform()
+            .upsert_membership(&user.id, &store.id, &["support-agent"])
+            .await
+            .unwrap();
+        assert!(
+            auth.create_api_token(
+                &user.id,
+                Some(&store.id),
+                "escalated",
+                &["products.write".into()],
+                None,
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn api_tokens_stop_working_when_the_user_is_disabled() {
+        let auth = service().await;
+        let user = auth
+            .register(CreateUserInput::new("owner@example.com"), "hunter2hunter2")
+            .await
+            .unwrap();
+        let store = auth
+            .platform()
+            .create_store(CreateStoreInput::new("Demo", "demo", "demo.example.com"))
+            .await
+            .unwrap();
+        auth.platform()
+            .upsert_membership(&user.id, &store.id, &["owner"])
+            .await
+            .unwrap();
+        let created = auth
+            .create_api_token(
+                &user.id,
+                Some(&store.id),
+                "automation",
+                &["products.read".into()],
+                None,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET status = 'disabled' WHERE id = ?")
+            .bind(user.id.as_str())
+            .execute(auth.platform().pool())
+            .await
+            .unwrap();
+        assert!(auth.authenticate_api_token(&created.token).await.is_err());
     }
 
     #[tokio::test]

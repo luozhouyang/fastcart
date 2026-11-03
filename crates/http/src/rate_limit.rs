@@ -1,65 +1,82 @@
-//! Small in-process fixed-window rate limiter for authentication endpoints.
+//! Bounded in-process rate limiting backed by `governor` and `moka`.
+//!
+//! Keys are kept in a bounded, idle-expiring cache so attacker-controlled
+//! identifiers cannot grow process memory without limit.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::fmt;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::time::Duration;
 
-/// A fixed-window limiter keyed by client or account identifier.
-#[derive(Clone, Debug)]
+use governor::clock::DefaultClock;
+use governor::state::{InMemoryState, NotKeyed};
+use governor::{Quota, RateLimiter as GovernorLimiter};
+use moka::sync::Cache;
+
+type DirectLimiter = GovernorLimiter<NotKeyed, InMemoryState, DefaultClock>;
+
+/// A keyed limiter allowing `limit` events per `window`.
+#[derive(Clone)]
 pub struct RateLimiter {
-    inner: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    entries: Cache<String, Arc<DirectLimiter>>,
+    quota: Quota,
     limit: usize,
     window: Duration,
+}
+
+impl fmt::Debug for RateLimiter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RateLimiter")
+            .field("limit", &self.limit)
+            .field("window", &self.window)
+            .field("entries", &self.entries.entry_count())
+            .finish()
+    }
 }
 
 impl RateLimiter {
     /// Creates a limiter allowing `limit` events per `window`.
     #[must_use]
     pub fn new(limit: usize, window: Duration) -> Self {
+        let limit = limit.max(1);
+        let limit_u32 = u32::try_from(limit).unwrap_or(u32::MAX);
+        let burst = NonZeroU32::new(limit_u32).expect("limit is non-zero");
+        let period = window
+            .checked_div(limit_u32)
+            .filter(|period| !period.is_zero())
+            .unwrap_or(Duration::from_secs(1));
+        let quota = Quota::with_period(period)
+            .expect("period is non-zero")
+            .allow_burst(burst);
+        let entries = Cache::builder()
+            .max_capacity(100_000)
+            .time_to_idle(window.saturating_mul(2))
+            .build();
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-            limit: limit.max(1),
+            entries,
+            quota,
+            limit,
             window,
         }
     }
 
     /// Records an attempt and returns true when it is allowed.
     pub fn check(&self, key: &str) -> bool {
-        let now = Instant::now();
-        let mut entries = match self.inner.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let window = self.window;
-        entries.retain(|_, attempts| {
-            while attempts
-                .front()
-                .is_some_and(|attempt| now.duration_since(*attempt) > window)
-            {
-                attempts.pop_front();
-            }
-            !attempts.is_empty()
+        let limiter = self.entries.get_with(key.to_owned(), || {
+            Arc::new(GovernorLimiter::direct(self.quota))
         });
-        let attempts = entries.entry(key.to_owned()).or_default();
-        if attempts.len() >= self.limit {
-            return false;
-        }
-        attempts.push_back(now);
-        true
+        limiter.check().is_ok()
     }
 
     /// Removes all recorded attempts.
     pub fn clear(&self) {
-        if let Ok(mut entries) = self.inner.lock() {
-            entries.clear();
-        }
+        self.entries.invalidate_all();
     }
 
     /// Removes attempts for one key.
     pub fn reset(&self, key: &str) {
-        if let Ok(mut entries) = self.inner.lock() {
-            entries.remove(key);
-        }
+        self.entries.invalidate(key);
     }
 
     /// Maximum number of attempts per window.
@@ -91,5 +108,14 @@ mod tests {
         assert!(!limiter.check("ip"));
         limiter.reset("ip");
         assert!(limiter.check("ip"));
+    }
+
+    #[test]
+    fn keys_are_bounded() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+        for index in 0..1_000 {
+            assert!(limiter.check(&format!("key-{index}")));
+        }
+        assert!(limiter.entries.entry_count() <= 100_000);
     }
 }
