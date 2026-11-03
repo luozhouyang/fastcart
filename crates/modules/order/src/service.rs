@@ -299,6 +299,15 @@ impl OrderService {
         Self { db }
     }
 
+    /// Returns the store database backing this service.
+    ///
+    /// Used by sibling application modules (post-purchase flows) that extend
+    /// the order service without duplicating persistence plumbing.
+    #[must_use]
+    pub(crate) fn database(&self) -> &StoreDatabase {
+        &self.db
+    }
+
     /// Places an order from a validated snapshot.
     ///
     /// The order, its items, adjustments and initial history row are written in

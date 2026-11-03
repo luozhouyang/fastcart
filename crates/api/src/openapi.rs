@@ -96,14 +96,45 @@ use crate::state::AppContext;
     fastcart_module_order::FulfillmentStatus,
     fastcart_module_order::Order,
     fastcart_module_order::OrderAdjustment,
+    fastcart_module_order::OrderClaim,
+    fastcart_module_order::OrderClaimItem,
+    fastcart_module_order::OrderEdit,
+    fastcart_module_order::OrderEditAction,
+    fastcart_module_order::OrderEditItem,
+    fastcart_module_order::OrderEditItemStatus,
+    fastcart_module_order::OrderEditStatus,
+    fastcart_module_order::OrderExchange,
+    fastcart_module_order::OrderExchangeItem,
     fastcart_module_order::OrderFulfillment,
     fastcart_module_order::OrderItem,
     fastcart_module_order::OrderItemAdjustment,
     fastcart_module_order::OrderRefund,
+    fastcart_module_order::OrderReturn,
+    fastcart_module_order::OrderReturnItem,
     fastcart_module_order::OrderStatus,
     fastcart_module_order::OrderStatusHistory,
+    fastcart_module_order::ClaimItemStatus,
+    fastcart_module_order::ClaimItemType,
+    fastcart_module_order::ClaimStatus,
+    fastcart_module_order::ExchangeItemDirection,
+    fastcart_module_order::ExchangeItemStatus,
+    fastcart_module_order::ExchangeStatus,
     fastcart_module_order::PaymentStatus,
     fastcart_module_order::RefundStatus,
+    fastcart_module_order::ReturnItemStatus,
+    fastcart_module_order::ReturnStatus,
+    crate::dto::CancelAfterSaleRequest,
+    crate::dto::ClaimItemRequest,
+    crate::dto::CreateClaimRequest,
+    crate::dto::CreateExchangeRequest,
+    crate::dto::CreateOrderEditRequest,
+    crate::dto::CreateReturnRequest,
+    crate::dto::ExchangeItemRequest,
+    crate::dto::OrderEditItemRequest,
+    crate::dto::ReceiveReturnItemRequest,
+    crate::dto::ReceiveReturnRequest,
+    crate::dto::ReturnItemRequest,
+    crate::dto::WriteOffReturnRequest,
     fastcart_module_payment::Payment,
     fastcart_module_payment::PaymentAttempt,
     fastcart_module_payment::PaymentSession,
@@ -1427,6 +1458,160 @@ fn admin_order_routes() -> Vec<Route> {
             Auth::Admin,
             Some("RefundOrderRequest"),
             ok(Schema::Ref("Order")),
+        ),
+        get(
+            "/api/v1/admin/orders/{id}/returns",
+            "List order returns",
+            Auth::Admin,
+            &[],
+            ok(Schema::Array("OrderReturn")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/returns",
+            "Create an order return",
+            Auth::Admin,
+            Some("CreateReturnRequest"),
+            created(Schema::Ref("OrderReturn")),
+        ),
+        get(
+            "/api/v1/admin/orders/{id}/returns/{return_id}",
+            "Get an order return",
+            Auth::Admin,
+            &[],
+            ok(Schema::Ref("OrderReturn")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/returns/{return_id}/request",
+            "Request an order return",
+            Auth::Admin,
+            None,
+            ok(Schema::Ref("OrderReturn")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/returns/{return_id}/receive",
+            "Receive an order return",
+            Auth::Admin,
+            Some("ReceiveReturnRequest"),
+            ok(Schema::Ref("OrderReturn")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/returns/{return_id}/write-off",
+            "Write off an order return",
+            Auth::Admin,
+            Some("WriteOffReturnRequest"),
+            ok(Schema::Ref("OrderReturn")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/returns/{return_id}/cancel",
+            "Cancel an order return",
+            Auth::Admin,
+            Some("CancelAfterSaleRequest"),
+            ok(Schema::Ref("OrderReturn")),
+        ),
+        get(
+            "/api/v1/admin/orders/{id}/claims",
+            "List order claims",
+            Auth::Admin,
+            &[],
+            ok(Schema::Array("OrderClaim")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/claims",
+            "Create an order claim",
+            Auth::Admin,
+            Some("CreateClaimRequest"),
+            created(Schema::Ref("OrderClaim")),
+        ),
+        get(
+            "/api/v1/admin/orders/{id}/claims/{claim_id}",
+            "Get an order claim",
+            Auth::Admin,
+            &[],
+            ok(Schema::Ref("OrderClaim")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/claims/{claim_id}/accept",
+            "Accept an order claim",
+            Auth::Admin,
+            None,
+            ok(Schema::Ref("OrderClaim")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/claims/{claim_id}/cancel",
+            "Cancel an order claim",
+            Auth::Admin,
+            Some("CancelAfterSaleRequest"),
+            ok(Schema::Ref("OrderClaim")),
+        ),
+        get(
+            "/api/v1/admin/orders/{id}/exchanges",
+            "List order exchanges",
+            Auth::Admin,
+            &[],
+            ok(Schema::Array("OrderExchange")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/exchanges",
+            "Create an order exchange",
+            Auth::Admin,
+            Some("CreateExchangeRequest"),
+            created(Schema::Ref("OrderExchange")),
+        ),
+        get(
+            "/api/v1/admin/orders/{id}/exchanges/{exchange_id}",
+            "Get an order exchange",
+            Auth::Admin,
+            &[],
+            ok(Schema::Ref("OrderExchange")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/exchanges/{exchange_id}/accept",
+            "Accept an order exchange",
+            Auth::Admin,
+            None,
+            ok(Schema::Ref("OrderExchange")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/exchanges/{exchange_id}/cancel",
+            "Cancel an order exchange",
+            Auth::Admin,
+            Some("CancelAfterSaleRequest"),
+            ok(Schema::Ref("OrderExchange")),
+        ),
+        get(
+            "/api/v1/admin/orders/{id}/edits",
+            "List order edits",
+            Auth::Admin,
+            &[],
+            ok(Schema::Array("OrderEdit")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/edits",
+            "Create an order edit",
+            Auth::Admin,
+            Some("CreateOrderEditRequest"),
+            created(Schema::Ref("OrderEdit")),
+        ),
+        get(
+            "/api/v1/admin/orders/{id}/edits/{edit_id}",
+            "Get an order edit",
+            Auth::Admin,
+            &[],
+            ok(Schema::Ref("OrderEdit")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/edits/{edit_id}/confirm",
+            "Confirm an order edit",
+            Auth::Admin,
+            None,
+            ok(Schema::Ref("OrderEdit")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/edits/{edit_id}/cancel",
+            "Cancel an order edit",
+            Auth::Admin,
+            Some("CancelAfterSaleRequest"),
+            ok(Schema::Ref("OrderEdit")),
         ),
     ]
 }
@@ -4193,12 +4378,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 139);
+        assert_eq!(count("/api/v1/admin"), 157);
         assert_eq!(count("/api/v1/store"), 38);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/internal/storefront"), 38);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 240);
+        assert_eq!(paths.len(), 258);
 
         for key in [
             "/api/v1/platform/stores",
@@ -4306,7 +4491,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 339);
+        assert_eq!(operation_count, 361);
     }
 
     #[test]

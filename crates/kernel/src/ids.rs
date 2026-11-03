@@ -101,6 +101,10 @@ define_id!(CheckoutId, "chk", "Identifier of a checkout session.");
 define_id!(OrderId, "order", "Identifier of an order.");
 define_id!(FulfillmentId, "ful", "Identifier of a fulfillment.");
 define_id!(RefundId, "refund", "Identifier of a refund.");
+define_id!(ReturnId, "ret", "Identifier of an order return.");
+define_id!(ClaimId, "claim", "Identifier of an order claim.");
+define_id!(ExchangeId, "exch", "Identifier of an order exchange.");
+define_id!(OrderEditId, "oedit", "Identifier of an order edit.");
 define_id!(PaymentId, "pay", "Identifier of a payment.");
 define_id!(
     PaymentSessionId,
