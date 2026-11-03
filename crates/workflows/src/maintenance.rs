@@ -142,12 +142,29 @@ pub async fn run_maintenance(
                 Ok(records) => {
                     let webhooks = WebhookService::new(database.clone());
                     for record in records {
+                        let mut fan_out_failed = false;
                         if let Some(event) = record.to_envelope(Some(store.id.clone())) {
-                            let _ = events.publish(event.clone());
+                            // Fan out before publishing so a database failure
+                            // keeps the outbox row retryable.
                             if let Err(error) = webhooks.fan_out(&event).await {
                                 tracing::warn!(store_id = %store.id, event_id = %event.id, error = %error, "webhook fan-out failed");
                                 report.failures += 1;
+                                fan_out_failed = true;
+                            } else {
+                                let _ = events.publish(event);
                             }
+                        }
+                        if fan_out_failed {
+                            if let Err(error) = mark_outbox_failed(
+                                database.pool(),
+                                &record.id,
+                                "webhook fan-out failed",
+                            )
+                            .await
+                            {
+                                tracing::warn!(store_id = %store.id, error = %error, "outbox failure recording failed");
+                            }
+                            continue;
                         }
                         if let Err(error) = mark_outbox_processed(database.pool(), &record.id).await
                         {
