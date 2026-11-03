@@ -396,3 +396,109 @@ async fn storefront_requests_resolve_the_host_trustworthily() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+#[tokio::test]
+async fn api_tokens_authorize_store_scoped_requests() {
+    let fixture = fixture().await;
+    let (_, _, cookies) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/auth/setup",
+        Some(serde_json::json!({
+            "email": "owner@example.com",
+            "password": "hunter2hunter2"
+        })),
+        &[],
+    )
+    .await;
+    let session = cookie_value(&cookies, "fc_admin_session").unwrap();
+    let csrf = cookie_value(&cookies, "fc_csrf").unwrap();
+    let admin_auth = format!("fc_admin_session={session}; fc_csrf={csrf}");
+    let headers = [
+        ("cookie", admin_auth.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+    ];
+
+    let (status, store, _) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(serde_json::json!({
+            "name": "Demo",
+            "slug": "demo",
+            "primary_domain": "demo.example.com"
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{store}");
+    let store_id = store["id"].as_str().unwrap().to_owned();
+
+    let (status, created, _) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/api-tokens",
+        Some(serde_json::json!({
+            "name": "automation",
+            "store_id": store_id,
+            "scopes": ["products.read"]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let token = created["token"].as_str().unwrap().to_owned();
+    let token_id = created["record"]["id"].as_str().unwrap().to_owned();
+    assert!(token.starts_with("fc_"));
+    assert!(created["record"].get("token").is_none());
+
+    let (status, body, _) = json_request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/catalog/products",
+        None,
+        &[
+            ("authorization", &format!("Bearer {token}")),
+            ("x-store-id", &store_id),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The token cannot select a different store.
+    let (status, _, _) = json_request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/catalog/products",
+        None,
+        &[
+            ("authorization", &format!("Bearer {token}")),
+            ("x-store-id", "store_other"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _, _) = json_request(
+        &fixture.app,
+        "DELETE",
+        &format!("/api/v1/platform/api-tokens/{token_id}"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, _) = json_request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/catalog/products",
+        None,
+        &[
+            ("authorization", &format!("Bearer {token}")),
+            ("x-store-id", &store_id),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

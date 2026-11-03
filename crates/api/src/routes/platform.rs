@@ -15,9 +15,10 @@ use fastcart_platform::{CreateStoreInput, CreateUserInput, NewAudit, UpdateStore
 use super::auth::{login, logout, me, setup};
 use super::{authorize_store, require_owner};
 use crate::dto::{
-    CreateStoreRequest, CreateUserRequest, DeleteStoreRequest, DomainDto, DomainRequest,
-    MembershipDto, MembershipRequest, PageResponse, PrimaryDomainRequest, ProvisioningResponse,
-    RoleDto, StoreDto, UpdateStoreRequest, UserDto,
+    ApiTokenDto, CreateApiTokenRequest, CreateStoreRequest, CreateUserRequest,
+    CreatedApiTokenResponse, DeleteStoreRequest, DomainDto, DomainRequest, MembershipDto,
+    MembershipRequest, PageResponse, PrimaryDomainRequest, ProvisioningResponse, RoleDto, StoreDto,
+    UpdateStoreRequest, UserDto,
 };
 use crate::state::AppContext;
 
@@ -32,6 +33,8 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         .route("/auth/me", get(me))
         .route("/roles", get(list_roles))
         .route("/users", post(create_user))
+        .route("/api-tokens", get(list_api_tokens).post(create_api_token))
+        .route("/api-tokens/{token_id}", delete(revoke_api_token))
         .route("/stores", get(list_stores).post(create_store))
         .route("/stores/{store_id}", get(get_store).patch(update_store))
         .route("/stores/{store_id}/activate", post(activate_store))
@@ -475,4 +478,56 @@ async fn audit(
     if let Err(error) = context.platform.record_audit(entry).await {
         tracing::warn!(error = %error, "failed to write audit log");
     }
+}
+
+async fn create_api_token(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    ApiJson(request): ApiJson<CreateApiTokenRequest>,
+) -> ApiResult<(StatusCode, Json<CreatedApiTokenResponse>)> {
+    let user_id = actor.require_user().map_err(ApiError::new)?.clone();
+    let store_id = request
+        .store_id
+        .as_deref()
+        .map(parse_store_id)
+        .transpose()?;
+    if let Some(store_id) = store_id.as_ref() {
+        authorize_store(&context.platform, &actor, store_id, Some("users.write")).await?;
+    }
+    let created = context
+        .auth
+        .create_api_token(
+            &user_id,
+            store_id.as_ref(),
+            &request.name,
+            &request.scopes,
+            request.ttl_seconds,
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatedApiTokenResponse {
+            token: created.token,
+            record: ApiTokenDto::from(&created.record),
+        }),
+    ))
+}
+
+async fn list_api_tokens(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+) -> ApiResult<Json<Vec<ApiTokenDto>>> {
+    let user_id = actor.require_user().map_err(ApiError::new)?;
+    let tokens = context.auth.list_api_tokens(user_id).await?;
+    Ok(Json(tokens.iter().map(ApiTokenDto::from).collect()))
+}
+
+async fn revoke_api_token(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    Path(token_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let user_id = actor.require_user().map_err(ApiError::new)?;
+    context.auth.revoke_api_token(user_id, &token_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

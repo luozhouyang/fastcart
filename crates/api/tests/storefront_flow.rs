@@ -250,6 +250,28 @@ async fn storefront_cart_checkout_and_order_flow() {
     .await;
     assert_eq!(status, StatusCode::OK, "{product_response}");
 
+    let (status, availability) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/store/products/hoodie/availability",
+        None,
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{availability}");
+    assert_eq!(availability[0]["available"], 5);
+
+    let (status, shipping_options) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/store/shipping/options?country_code=US&subtotal=3000",
+        None,
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shipping_options}");
+    assert_eq!(shipping_options.as_array().unwrap().len(), 1);
+
     // Anonymous cart.
     let (status, cart) = request(
         &fixture.app,

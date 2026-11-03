@@ -18,7 +18,7 @@ use fastcart_http::{
     ApiError, ApiJson, ApiResult, CUSTOMER_CSRF_COOKIE, CUSTOMER_SESSION_COOKIE, CustomerActor,
     PaginationQuery, csrf_cookie, parse_cookies, session_cookie, session_cookie_clear,
 };
-use fastcart_kernel::{AppError, now_timestamp};
+use fastcart_kernel::{AppError, OrderId, now_timestamp};
 use fastcart_module_customer::{
     Address, AddressInput, CreatedCustomerSession, Customer, CustomerGroup, CustomerService,
     RegisterCustomerInput, UpdateCustomerInput,
@@ -46,6 +46,7 @@ pub fn router() -> Router<Arc<AppContext>> {
             axum::routing::patch(update_address).delete(remove_address),
         )
         .route("/customers/me/orders", get(list_orders))
+        .route("/customers/me/orders/{order_id}", get(get_own_order))
         .route("/customers/me/groups", get(list_groups))
         .route("/customers/me/password", post(change_password))
 }
@@ -415,6 +416,21 @@ fn address_input(request: AddressRequest, existing: Option<&Address>) -> Address
             .or_else(|| existing.and_then(|address| address.phone.clone())),
         metadata: existing.map_or_else(Default::default, |address| address.metadata.clone()),
     }
+}
+
+async fn get_own_order(
+    CustomerActor(actor): CustomerActor,
+    StoreDb(db): StoreDb,
+    Path(order_id): Path<String>,
+) -> ApiResult<Json<Order>> {
+    let customer_id = actor.require_customer().map_err(ApiError::new)?;
+    let order = OrderService::new(db)
+        .get(&OrderId::from_string(order_id))
+        .await?;
+    if order.customer_id.as_ref() != Some(customer_id) {
+        return Err(ApiError::new(AppError::not_found("order", &order.id)));
+    }
+    Ok(Json(order))
 }
 
 #[cfg(test)]

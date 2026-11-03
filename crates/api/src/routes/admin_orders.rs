@@ -14,6 +14,7 @@ use fastcart_module_order::{
     FulfillmentInput, Order, OrderFilter, OrderRefund, OrderService, OrderStatus,
     OrderStatusHistory, PaymentStatus, RefundInput,
 };
+use fastcart_module_payment::PaymentService;
 use serde::Deserialize;
 
 use super::StoreDb;
@@ -238,7 +239,7 @@ async fn order_history(
 // -------------------------------------------------------------------------
 
 async fn create_refund(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -248,9 +249,15 @@ async fn create_refund(
         .require_permission("orders.write")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
+    let payment_id = request.payment_id.clone();
+    let amount = request.amount;
+    let reason = request.reason.clone();
+    let payments = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
+    payments.get_payment(payment_id.as_str()).await?;
     let order = OrderService::new(db)
         .add_refund(&id, map_refund_input(request))
         .await?;
+    payments.refund(payment_id.as_str(), amount, reason).await?;
     Ok(Json(order))
 }
 

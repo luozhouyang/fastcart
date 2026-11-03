@@ -331,3 +331,68 @@ pub struct ProvisioningResponse {
     /// Whether the store was already active.
     pub already_active: bool,
 }
+
+/// API token creation request.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateApiTokenRequest {
+    /// Human-readable name.
+    pub name: String,
+    /// Optional store scope.
+    pub store_id: Option<String>,
+    /// Granted permission scopes.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Lifetime in seconds; defaults to the maximum.
+    pub ttl_seconds: Option<i64>,
+}
+
+/// API token metadata. The secret is never included.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiTokenDto {
+    /// Token identifier.
+    pub id: String,
+    /// Owning user.
+    pub user_id: String,
+    /// Optional store scope.
+    pub store_id: Option<String>,
+    /// Human-readable name.
+    pub name: String,
+    /// Display prefix.
+    pub prefix: String,
+    /// Granted scopes.
+    pub scopes: Vec<String>,
+    /// Expiry timestamp.
+    pub expires_at: Option<i64>,
+    /// Revocation timestamp.
+    pub revoked_at: Option<i64>,
+    /// Last-use timestamp.
+    pub last_used_at: Option<i64>,
+    /// Creation timestamp.
+    pub created_at: i64,
+}
+
+impl From<&fastcart_platform::ApiToken> for ApiTokenDto {
+    fn from(token: &fastcart_platform::ApiToken) -> Self {
+        Self {
+            id: token.id.clone(),
+            user_id: token.user_id.to_string(),
+            store_id: token.store_id.as_ref().map(ToString::to_string),
+            name: token.name.clone(),
+            prefix: token.prefix.clone(),
+            scopes: token.scopes.clone(),
+            expires_at: token.expires_at,
+            revoked_at: token.revoked_at,
+            last_used_at: token.last_used_at,
+            created_at: token.created_at,
+        }
+    }
+}
+
+/// Response for a newly created API token. The plaintext token is shown once.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreatedApiTokenResponse {
+    /// One-time plaintext token.
+    pub token: String,
+    /// Persisted metadata.
+    pub record: ApiTokenDto,
+}
