@@ -17,6 +17,13 @@ use crate::{ADMIN_CSRF_COOKIE, ADMIN_SESSION_COOKIE, CSRF_HEADER, STORE_ID_HEADE
 #[derive(Clone, Debug)]
 pub struct RequestId(pub String);
 
+/// The raw authentication token presented by the client.
+///
+/// Handlers use this only for logout and token rotation; authorization uses the
+/// resolved [`fastcart_kernel::ActorContext`].
+#[derive(Clone, Debug)]
+pub struct SessionToken(pub String);
+
 /// Adds `x-request-id` to requests and responses and scopes error rendering.
 pub async fn request_id_middleware(mut request: Request, next: Next) -> Response {
     let id = request
@@ -136,6 +143,7 @@ pub async fn admin_auth_middleware(
     };
 
     request.extensions_mut().insert(actor);
+    request.extensions_mut().insert(SessionToken(token));
     Ok(next.run(request).await)
 }
 

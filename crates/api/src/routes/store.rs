@@ -10,7 +10,7 @@ use axum::Router;
 use axum::middleware;
 use fastcart_http::StoreResolutionState;
 
-use super::{StoreDbState, not_implemented, store_database_middleware};
+use super::{StoreDbState, customer_auth_middleware, not_implemented, store_database_middleware};
 use crate::state::AppContext;
 
 /// Builds the public storefront router.
@@ -28,7 +28,12 @@ pub fn internal_router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
 
 fn scoped(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
     Router::new()
+        .merge(super::store_cart::router())
+        .merge(super::store_catalog::router())
+        .merge(super::store_customer::router())
+        .merge(super::store_content::router())
         .fallback(not_implemented)
+        .layer(middleware::from_fn(customer_auth_middleware))
         .layer(middleware::from_fn_with_state(
             StoreDbState {
                 databases: context.databases.clone(),

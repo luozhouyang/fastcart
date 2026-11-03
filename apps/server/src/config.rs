@@ -23,6 +23,8 @@ pub struct Config {
     pub storefront: StorefrontConfig,
     /// Background job settings.
     pub jobs: JobsConfig,
+    /// Payment provider settings.
+    pub payments: PaymentsConfig,
 }
 
 /// HTTP listener settings.
@@ -150,6 +152,14 @@ impl Default for StorefrontConfig {
     }
 }
 
+/// Payment provider settings.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PaymentsConfig {
+    /// Shared secret used to verify manual/sandbox webhook signatures.
+    pub webhook_secret: Option<String>,
+}
+
 /// Background job settings.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -206,6 +216,9 @@ impl Config {
         }
         if let Ok(value) = env::var("FASTCART_LOG_LEVEL") {
             self.server.log_level = value;
+        }
+        if let Ok(value) = env::var("FASTCART_PAYMENT_WEBHOOK_SECRET") {
+            self.payments.webhook_secret = Some(value);
         }
         Ok(())
     }

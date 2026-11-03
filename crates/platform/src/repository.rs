@@ -36,4 +36,10 @@ impl PlatformStore {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    /// Runs a lightweight connectivity check.
+    pub async fn ping(&self) -> PlatformResult<()> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
 }

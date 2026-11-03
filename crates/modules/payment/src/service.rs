@@ -225,6 +225,28 @@ impl PaymentService {
     }
 
     /// Marks a session failed and records a failed attempt.
+    /// Associates a captured payment with the order it paid.
+    ///
+    /// The payment is captured before the order is created (so an order is
+    /// never recorded without a successful capture), then linked here.
+    pub async fn assign_order(
+        &self,
+        payment_id: &str,
+        order_id: &OrderId,
+    ) -> Result<Payment, AppError> {
+        let result = sqlx::query("UPDATE payments SET order_id = ?, updated_at = ? WHERE id = ?")
+            .bind(order_id.as_str())
+            .bind(now_timestamp())
+            .bind(payment_id)
+            .execute(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("payment", payment_id));
+        }
+        self.get_payment(payment_id).await
+    }
+
     pub async fn fail_session(
         &self,
         session_id: &str,

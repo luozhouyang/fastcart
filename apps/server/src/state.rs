@@ -55,6 +55,11 @@ impl AppState {
             allowed_origins: config.server.cors_origins.clone(),
             max_body_bytes: 2 * 1024 * 1024,
             backup_dir: config.database.backup_dir.clone(),
+            manual_payment_secret: config
+                .payments
+                .webhook_secret
+                .clone()
+                .filter(|secret| !secret.is_empty()),
         };
         let context = Arc::new(AppContext::new(
             api_config,

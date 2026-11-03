@@ -89,6 +89,20 @@ impl PaginationQuery {
     }
 }
 
+impl<S> FromRequestParts<S> for PaginationQuery
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Query(value) = Query::<Self>::from_request_parts(parts, state)
+            .await
+            .map_err(|rejection| ApiError::validation(rejection.body_text()))?;
+        Ok(value)
+    }
+}
+
 /// JSON body extractor that renders rejection errors in the platform envelope.
 #[derive(Clone, Debug)]
 pub struct ApiJson<T>(pub T);

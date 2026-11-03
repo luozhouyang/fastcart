@@ -157,6 +157,20 @@ impl PricingService {
     }
 
     /// Loads one price list with its rules.
+    /// Deletes a price list and its rules. Prices referencing the list are
+    /// deleted by the foreign-key cascade.
+    pub async fn delete_price_list(&self, id: &str) -> Result<(), AppError> {
+        let result = sqlx::query("DELETE FROM price_lists WHERE id = ?")
+            .bind(id)
+            .execute(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("price list", id));
+        }
+        Ok(())
+    }
+
     pub async fn get_price_list(&self, id: &str) -> Result<PriceList, AppError> {
         let row = sqlx::query_as::<_, PriceListRow>(&format!(
             "SELECT {PRICE_LIST_COLUMNS} FROM price_lists WHERE id = ?"

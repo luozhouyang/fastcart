@@ -375,8 +375,7 @@ async fn storefront_requests_resolve_the_host_trustworthily() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    // The commerce routes are not mounted yet, but store resolution must pass
-    // so the fallback reports 501 rather than 404.
+    // Store resolution must pass before the commerce route runs.
     let (status, body, _) = json_request(
         &fixture.app,
         "GET",
@@ -385,7 +384,7 @@ async fn storefront_requests_resolve_the_host_trustworthily() {
         &[("host", "demo.example.com")],
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
 
     let (status, body, _) = json_request(
         &fixture.app,

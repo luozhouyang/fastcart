@@ -419,6 +419,47 @@ impl OrderService {
         Ok(fastcart_kernel::PageResult::new(data, count, pagination))
     }
 
+    /// Updates the payment status of an order.
+    ///
+    /// Used by checkout workflows after a provider capture or refund. Order
+    /// status and payment status remain independent dimensions.
+    pub async fn set_payment_status(
+        &self,
+        id: &OrderId,
+        status: PaymentStatus,
+    ) -> Result<Order, AppError> {
+        let order = self.load_order(id).await?;
+        if order.payment_status == status {
+            return Ok(order);
+        }
+        let allowed = match order.payment_status {
+            PaymentStatus::Awaiting | PaymentStatus::Authorized => {
+                matches!(status, PaymentStatus::Captured | PaymentStatus::Failed)
+            }
+            PaymentStatus::Captured => matches!(
+                status,
+                PaymentStatus::PartiallyRefunded | PaymentStatus::Refunded
+            ),
+            PaymentStatus::PartiallyRefunded => matches!(status, PaymentStatus::Refunded),
+            PaymentStatus::Refunded | PaymentStatus::Failed => false,
+        };
+        if !allowed {
+            return Err(AppError::conflict(format!(
+                "cannot transition payment status from {} to {}",
+                order.payment_status.as_str(),
+                status.as_str()
+            )));
+        }
+        sqlx::query("UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?")
+            .bind(status.as_str())
+            .bind(now_timestamp())
+            .bind(id.as_str())
+            .execute(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        self.get(id).await
+    }
+
     /// Moves a pending order to `confirmed`.
     pub async fn confirm(&self, id: &OrderId) -> Result<Order, AppError> {
         let order = self.load_order(id).await?;

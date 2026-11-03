@@ -28,11 +28,14 @@ pub async fn run(config: Config) -> Result<()> {
         "fastcart server listening"
     );
 
+    let maintenance = tokio::spawn(crate::maintenance::maintenance_loop(state.context.clone()));
+
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server failed")?;
 
+    maintenance.abort();
     state.databases.close_all().await;
     tracing::info!("fastcart server stopped");
     Ok(())

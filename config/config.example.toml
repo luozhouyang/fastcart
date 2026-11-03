@@ -33,3 +33,7 @@ request_timeout_ms = 10000
 [jobs]
 enabled = true
 worker_count = 2
+
+[payments]
+# Shared secret for manual/sandbox webhook signatures (x-manual-signature).
+# webhook_secret = ""

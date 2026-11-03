@@ -20,7 +20,10 @@ pub mod store_db_manager;
 
 pub use cache::StoreCache;
 pub use database::{DatabaseHealth, DatabaseOptions, connect_memory, connect_sqlite};
-pub use event_bus::{EventBus, OutboxRecord, append_outbox_event};
+pub use event_bus::{
+    EventBus, OutboxRecord, append_outbox_event, fetch_pending_outbox, mark_outbox_failed,
+    mark_outbox_processed,
+};
 pub use jobs::{JobQueue, JobRecord, NewJob};
 pub use storage::{LocalStorage, Storage};
 pub use store_db_manager::{BackupManifest, StoreDatabase, StoreDatabaseManager};

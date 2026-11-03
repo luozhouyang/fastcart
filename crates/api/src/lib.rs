@@ -36,7 +36,7 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
         .nest("/api/v1/platform", routes::platform::router(&context))
         .nest("/api/v1/admin", routes::admin::router(&context))
         .nest("/api/v1/store", routes::store::router(&context))
-        .nest("/api/v1/webhooks", routes::webhooks::router())
+        .nest("/api/v1/webhooks", routes::webhooks::router(&context))
         .nest(
             "/internal/storefront",
             routes::store::internal_router(&context),

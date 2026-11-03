@@ -321,6 +321,13 @@ impl PlatformStore {
         Ok(())
     }
 
+    /// Returns the number of platform users.
+    pub async fn count_users(&self) -> PlatformResult<i64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(self.pool())
+            .await?)
+    }
+
     /// Lists users with pagination.
     pub async fn list_users(&self, pagination: Pagination) -> PlatformResult<PageResult<User>> {
         let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")

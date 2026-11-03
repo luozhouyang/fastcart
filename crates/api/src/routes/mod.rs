@@ -1,10 +1,24 @@
 //! Shared route helpers and store-database middleware.
 
 pub mod admin;
+pub mod admin_catalog;
+pub mod admin_content;
+pub mod admin_customers;
+pub mod admin_inventory;
+pub mod admin_orders;
+pub mod admin_payments;
+pub mod admin_pricing;
+pub mod admin_promotions;
+pub mod admin_shipping;
+pub mod admin_tax;
 pub mod auth;
 pub mod health;
 pub mod platform;
 pub mod store;
+pub mod store_cart;
+pub mod store_catalog;
+pub mod store_content;
+pub mod store_customer;
 pub mod webhooks;
 
 use std::collections::BTreeSet;
@@ -14,9 +28,13 @@ use axum::Json;
 use axum::extract::{Extension, OriginalUri, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use fastcart_http::{ApiError, ApiResult};
+use fastcart_http::{
+    ApiError, ApiResult, CSRF_HEADER, CUSTOMER_CSRF_COOKIE, CUSTOMER_SESSION_COOKIE, parse_cookies,
+};
 use fastcart_infrastructure::{StoreDatabase, StoreDatabaseManager};
 use fastcart_kernel::{ActorContext, AppError, StoreContext, StoreId};
+use fastcart_module_cart::Cart;
+use fastcart_module_customer::CustomerService;
 use fastcart_platform::{MembershipStatus, PlatformStore};
 
 use crate::state::AppContext;
@@ -147,4 +165,71 @@ pub async fn not_implemented(OriginalUri(uri): OriginalUri) -> ApiError {
 pub async fn not_implemented_json(OriginalUri(uri): OriginalUri) -> Json<serde_json::Value> {
     let _ = uri;
     Json(serde_json::json!({"error": {"code": "NOT_IMPLEMENTED"}}))
+}
+
+/// Authenticates a storefront customer from the session cookie.
+///
+/// Requests without a cookie continue anonymously. A presented but invalid
+/// session is rejected with 401 so clients can clear stale cookies. Unsafe
+/// cookie-authenticated requests require the double-submit CSRF token.
+pub async fn customer_auth_middleware(
+    Extension(database): Extension<StoreDatabase>,
+    Extension(store): Extension<StoreContext>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let cookies = parse_cookies(request.headers());
+    let actor = match cookies.get(CUSTOMER_SESSION_COOKIE) {
+        Some(token) => {
+            if !matches!(
+                *request.method(),
+                axum::http::Method::GET
+                    | axum::http::Method::HEAD
+                    | axum::http::Method::OPTIONS
+                    | axum::http::Method::TRACE
+            ) {
+                let csrf_cookie = cookies
+                    .get(CUSTOMER_CSRF_COOKIE)
+                    .ok_or_else(|| ApiError::new(AppError::Forbidden))?;
+                let csrf_header = request
+                    .headers()
+                    .get(CSRF_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| ApiError::new(AppError::Forbidden))?;
+                if csrf_cookie != csrf_header {
+                    return Err(ApiError::new(AppError::Forbidden));
+                }
+            }
+            let service = CustomerService::new(database);
+            let session = service
+                .authenticate_session(token)
+                .await
+                .map_err(ApiError::new)?;
+            ActorContext::customer(session.customer.id, store.store_id)
+        }
+        None => ActorContext {
+            store_id: Some(store.store_id),
+            ..ActorContext::anonymous()
+        },
+    };
+    request.extensions_mut().insert(actor);
+    Ok(next.run(request).await)
+}
+
+/// Ensures the actor may access a cart.
+///
+/// Anonymous carts are addressed by their unguessable identifier; carts that
+/// belong to a customer require that customer's session. Cart identifiers are
+/// never treated as authorization by themselves for customer carts.
+pub fn ensure_cart_access(cart: &Cart, actor: &ActorContext) -> ApiResult<()> {
+    match cart.customer_id.as_ref() {
+        Some(customer_id) => {
+            if actor.customer_id.as_ref() == Some(customer_id) {
+                Ok(())
+            } else {
+                Err(ApiError::new(AppError::Forbidden))
+            }
+        }
+        None => Ok(()),
+    }
 }

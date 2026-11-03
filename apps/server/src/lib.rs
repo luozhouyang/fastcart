@@ -2,6 +2,7 @@
 
 pub mod bootstrap;
 pub mod config;
+pub mod maintenance;
 pub mod shutdown;
 pub mod state;
 

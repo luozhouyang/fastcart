@@ -1,0 +1,358 @@
+//! End-to-end cart, promotion, tax, inventory, payment and order flow.
+
+use std::sync::Arc;
+
+use fastcart_infrastructure::StoreDatabase;
+use fastcart_kernel::{CountryCode, CurrencyCode, Metadata, StoreId, VariantId};
+use fastcart_module_cart::{CartStatus, CreateCartInput};
+use fastcart_module_catalog::{CatalogService, CreateProductInput, CreateVariantInput};
+use fastcart_module_inventory::{CreateInventoryItemInput, CreateLocationInput, InventoryService};
+use fastcart_module_payment::{
+    ManualProvider, PaymentService, PaymentStatus as PaymentState, ProviderRegistry,
+};
+use fastcart_module_pricing::{CreatePriceInput, PricingService};
+use fastcart_module_promotion::{CreatePromotionInput, PromotionService, PromotionType};
+use fastcart_module_shipping::{
+    CreateShippingOptionInput, CreateShippingProfileInput, ShippingService,
+};
+use fastcart_module_tax::{
+    CreateTaxCategoryInput, CreateTaxRateInput, CreateTaxRegionInput, TaxService,
+};
+use fastcart_workflows::{CartContext, CartWorkflow, CheckoutWorkflow, CreateCheckoutRequest};
+
+fn usd() -> CurrencyCode {
+    CurrencyCode::new("USD").unwrap()
+}
+
+#[tokio::test]
+async fn complete_checkout_flow_is_consistent_and_idempotent() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let currency = usd();
+
+    // Catalog.
+    let catalog = CatalogService::new(db.clone());
+    let product = catalog
+        .create_product(CreateProductInput {
+            title: "Classic T-Shirt".to_owned(),
+            variants: vec![CreateVariantInput {
+                title: "Medium".to_owned(),
+                sku: Some("TSHIRT-M".to_owned()),
+                manage_inventory: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog.publish_product(&product.id).await.unwrap();
+    let variant_id = product.variants[0].id.clone();
+
+    // Pricing.
+    let pricing = PricingService::new(db.clone());
+    pricing
+        .create_price(CreatePriceInput::new(&variant_id, currency.clone(), 2_000))
+        .await
+        .unwrap();
+
+    // Inventory with 10 units.
+    let inventory = InventoryService::new(db.clone());
+    let location = inventory
+        .create_location(CreateLocationInput {
+            name: "Main warehouse".to_owned(),
+            address: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let item = inventory
+        .create_item(CreateInventoryItemInput {
+            sku: Some("TSHIRT-M".to_owned()),
+            variant_id: Some(VariantId::from_string(variant_id.clone())),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    inventory
+        .adjust_stock(&item.id, &location.id, 10, "restock", None)
+        .await
+        .unwrap();
+
+    // 10% automatic promotion.
+    let promotions = PromotionService::new(db.clone());
+    promotions
+        .create_promotion(
+            CreatePromotionInput::new("Ten percent", PromotionType::Percentage, 1_000)
+                .active()
+                .automatic(),
+        )
+        .await
+        .unwrap();
+
+    // 10% tax for US.
+    let tax = TaxService::new(db.clone());
+    let _category = tax
+        .create_category(CreateTaxCategoryInput {
+            name: "Standard".to_owned(),
+            code: "standard".to_owned(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let region = tax
+        .create_region(CreateTaxRegionInput {
+            name: "United States".to_owned(),
+            country_code: CountryCode::new("US").unwrap(),
+            province_code: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    tax.create_rate(CreateTaxRateInput {
+        tax_region_id: region.id.clone(),
+        tax_category_id: None,
+        name: "US sales tax".to_owned(),
+        rate_bps: 1_000,
+        is_inclusive: false,
+        is_default: true,
+        metadata: None,
+    })
+    .await
+    .unwrap();
+
+    // Flat shipping rate.
+    let shipping = ShippingService::new(db.clone());
+    let profile = shipping
+        .create_profile(CreateShippingProfileInput {
+            name: "Default".to_owned(),
+            profile_type: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let option = shipping
+        .create_option(CreateShippingOptionInput {
+            profile_id: profile.id.clone(),
+            name: "Standard shipping".to_owned(),
+            amount_minor: 500,
+            currency: currency.clone(),
+            is_enabled: Some(true),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    // Cart: 2 x 2000 = 4000, 10% off = 400, shipping 500, tax 410.
+    let context = CartContext::new(CountryCode::new("US").unwrap());
+    let carts = CartWorkflow::new(db.clone());
+    let cart = carts
+        .create_cart(CreateCartInput {
+            currency_code: currency.to_string(),
+            customer_id: None,
+            email: Some("buyer@example.com".to_owned()),
+            sales_channel_id: None,
+            metadata: Metadata::empty(),
+            expires_in_seconds: None,
+        })
+        .await
+        .unwrap();
+    let cart = carts
+        .add_item(
+            &cart.id,
+            &VariantId::from_string(variant_id.clone()),
+            2,
+            &context,
+        )
+        .await
+        .unwrap();
+    let cart = carts
+        .set_shipping_method(&cart.id, &option.id, &context)
+        .await
+        .unwrap();
+
+    assert_eq!(cart.totals.item_subtotal, 4_000);
+    assert_eq!(cart.totals.discount_total, 400);
+    assert_eq!(cart.totals.shipping_total, 500);
+    assert_eq!(cart.totals.tax_total, 410);
+    assert_eq!(cart.totals.total, 4_510);
+    assert_eq!(cart.totals.currency_code, currency);
+
+    // Checkout reserves stock and creates a payment session.
+    let providers = ProviderRegistry::new();
+    providers
+        .register(Arc::new(ManualProvider::sandbox()))
+        .unwrap();
+    let payments = PaymentService::with_registry(db.clone(), providers);
+    let checkout_workflow = CheckoutWorkflow::new(db.clone(), payments);
+    let checkout = checkout_workflow
+        .create(CreateCheckoutRequest::new(
+            cart.id.clone(),
+            "manual",
+            context.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        checkout.status.as_str(),
+        fastcart_module_checkout::CheckoutStatus::PaymentPending.as_str()
+    );
+    assert_eq!(
+        inventory
+            .variant_availability(&VariantId::from_string(variant_id.clone()))
+            .await
+            .unwrap(),
+        8
+    );
+
+    let completed = checkout_workflow
+        .complete(&checkout.id, &context)
+        .await
+        .unwrap();
+    assert_eq!(completed.order.total, 4_510);
+    assert_eq!(completed.order.subtotal, 4_000);
+    assert_eq!(completed.order.discount_total, 400);
+    assert_eq!(completed.order.tax_total, 360);
+    assert_eq!(
+        completed.order.status,
+        fastcart_module_order::OrderStatus::Confirmed
+    );
+    assert_eq!(
+        completed.order.payment_status,
+        fastcart_module_order::PaymentStatus::Captured
+    );
+    assert_eq!(completed.payment.status, PaymentState::Captured);
+    assert_eq!(
+        completed.checkout.status.as_str(),
+        fastcart_module_checkout::CheckoutStatus::OrderPlaced.as_str()
+    );
+    assert_eq!(completed.order.items.len(), 1);
+    assert_eq!(completed.order.items[0].product_title, "Classic T-Shirt");
+    assert_eq!(completed.order.items[0].quantity, 2);
+
+    // Stock is committed, not merely reserved.
+    assert_eq!(
+        inventory
+            .variant_availability(&VariantId::from_string(variant_id))
+            .await
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        carts.get_cart(&cart.id).await.unwrap().status,
+        CartStatus::Completed
+    );
+
+    // Replaying completion returns the same order and payment.
+    let replay = checkout_workflow
+        .complete(&checkout.id, &context)
+        .await
+        .unwrap();
+    assert_eq!(replay.order.id, completed.order.id);
+    assert_eq!(replay.payment.id, completed.payment.id);
+}
+
+#[tokio::test]
+async fn checkout_requires_stock_availability() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let currency = usd();
+    let catalog = CatalogService::new(db.clone());
+    let product = catalog
+        .create_product(CreateProductInput {
+            title: "Limited".to_owned(),
+            variants: vec![CreateVariantInput {
+                title: "One".to_owned(),
+                manage_inventory: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let variant_id = product.variants[0].id.clone();
+    PricingService::new(db.clone())
+        .create_price(CreatePriceInput::new(&variant_id, currency.clone(), 1_000))
+        .await
+        .unwrap();
+    let inventory = InventoryService::new(db.clone());
+    let location = inventory
+        .create_location(CreateLocationInput {
+            name: "Main".to_owned(),
+            address: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let item = inventory
+        .create_item(CreateInventoryItemInput {
+            sku: None,
+            variant_id: Some(VariantId::from_string(variant_id.clone())),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    inventory
+        .adjust_stock(&item.id, &location.id, 1, "restock", None)
+        .await
+        .unwrap();
+
+    let context = CartContext::new(CountryCode::new("US").unwrap());
+    let carts = CartWorkflow::new(db.clone());
+    let cart = carts
+        .create_cart(CreateCartInput {
+            currency_code: currency.to_string(),
+            customer_id: None,
+            email: Some("buyer@example.com".to_owned()),
+            sales_channel_id: None,
+            metadata: Metadata::empty(),
+            expires_in_seconds: None,
+        })
+        .await
+        .unwrap();
+    carts
+        .add_item(&cart.id, &VariantId::from_string(variant_id), 2, &context)
+        .await
+        .unwrap();
+
+    let shipping = ShippingService::new(db.clone());
+    let profile = shipping
+        .create_profile(CreateShippingProfileInput {
+            name: "Default".to_owned(),
+            profile_type: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let option = shipping
+        .create_option(CreateShippingOptionInput {
+            profile_id: profile.id.clone(),
+            name: "Standard".to_owned(),
+            amount_minor: 0,
+            currency: currency.clone(),
+            is_enabled: Some(true),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    carts
+        .set_shipping_method(&cart.id, &option.id, &context)
+        .await
+        .unwrap();
+
+    let providers = ProviderRegistry::new();
+    providers
+        .register(Arc::new(ManualProvider::sandbox()))
+        .unwrap();
+    let payments = PaymentService::with_registry(db.clone(), providers);
+    let workflow = CheckoutWorkflow::new(db, payments);
+    let error = workflow
+        .create(CreateCheckoutRequest::new(
+            cart.id.clone(),
+            "manual",
+            context,
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("insufficient stock"),
+        "unexpected error: {error}"
+    );
+}

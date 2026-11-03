@@ -24,6 +24,7 @@ tracing-subscriber.workspace = true
 fastcart-api.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-platform.workspace = true
+fastcart-workflows.workspace = true
 
 [lints]
 workspace = true

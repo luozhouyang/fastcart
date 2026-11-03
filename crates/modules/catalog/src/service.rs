@@ -814,6 +814,25 @@ impl CatalogService {
     }
 
     /// Loads a non-deleted collection.
+    /// Soft-deletes a collection so historical references remain valid.
+    pub async fn delete_collection(&self, id: &str) -> Result<(), AppError> {
+        let now = fastcart_kernel::now_timestamp();
+        let result = sqlx::query(
+            "UPDATE collections SET deleted_at = ?, updated_at = ? \
+             WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(id)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("collection", id));
+        }
+        Ok(())
+    }
+
     pub async fn get_collection(&self, id: &str) -> Result<Collection, AppError> {
         let row = sqlx::query("SELECT * FROM collections WHERE id = ? AND deleted_at IS NULL")
             .bind(id)
