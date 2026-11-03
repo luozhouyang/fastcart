@@ -1,5 +1,20 @@
 //! The `payment` commerce module.
 //!
-//! Domain rules, application services and SQLite repositories for this module
-//! live here. The crate is self-contained: cross-module orchestration belongs in
-//! `fastcart-workflows`.
+//! Provider-independent payment sessions, captures, refunds and idempotent
+//! webhook processing persist in the per-store SQLite database. Cross-module
+//! orchestration belongs in `fastcart-workflows`.
+
+pub mod domain;
+pub mod provider;
+pub mod service;
+
+pub use domain::{
+    CreatePaymentSessionInput, ListPaymentsFilter, Payment, PaymentAttempt, PaymentSession,
+    PaymentStatus, PaymentWebhookRecord, Refund, RefundStatus, WebhookStatus,
+};
+pub use provider::{
+    CaptureRequest, CaptureResult, CreateProviderSession, MANUAL_SIGNATURE_HEADER, ManualProvider,
+    PaymentError, PaymentProvider, ProviderRegistry, ProviderSession, RefundRequest, RefundResult,
+    VerifiedWebhook,
+};
+pub use service::PaymentService;

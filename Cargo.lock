@@ -484,11 +484,18 @@ name = "fastcart-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "fastcart-http",
+ "fastcart-infrastructure",
+ "fastcart-kernel",
+ "fastcart-platform",
+ "http-body-util",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
+ "tracing",
 ]
 
 [[package]]
@@ -854,6 +861,8 @@ dependencies = [
  "anyhow",
  "axum",
  "fastcart-api",
+ "fastcart-infrastructure",
+ "fastcart-platform",
  "serde",
  "tokio",
  "toml",
@@ -2400,6 +2409,7 @@ dependencies = [
  "http-body-util",
  "percent-encoding",
  "pin-project-lite",
+ "tokio",
  "tower-layer",
  "tower-service",
  "tracing",

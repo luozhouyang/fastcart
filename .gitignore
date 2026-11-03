@@ -16,6 +16,7 @@ packages/*/dist/
 
 # Runtime data
 /data/*
+/crates/*/data/
 !/data/.gitkeep
 !/data/stores/
 !/data/stores/.gitkeep

@@ -9,11 +9,19 @@ rust-version.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tower.workspace = true
 tower-http.workspace = true
+tracing.workspace = true
+fastcart-http.workspace = true
+fastcart-infrastructure.workspace = true
+fastcart-kernel.workspace = true
+fastcart-platform.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
-tower = { version = "0.5", features = ["util"] }
+http-body-util.workspace = true
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

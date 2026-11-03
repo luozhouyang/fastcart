@@ -1,127 +1,88 @@
 //! Axum presentation layer.
 //!
-//! Phase 0 exposes health endpoints and reserves the API namespaces defined by
-//! the architecture. Route handlers stay thin: they translate HTTP into
-//! application service calls and must not contain business rules.
+//! Route handlers stay thin: they translate HTTP into application service calls
+//! and never contain business rules. Namespaces:
+//!
+//! - `/api/v1/platform` — installation and store management
+//! - `/api/v1/admin` — store-scoped administration
+//! - `/api/v1/store` — public storefront operations
+//! - `/api/v1/webhooks` — provider callbacks
+//! - `/internal/storefront` — trusted SSR-to-commerce boundary
+//!
+//! Middleware order (outermost first): request id → tracing → body limit →
+//! CORS. Route-specific authentication and store resolution are layered per
+//! namespace.
 
-use axum::extract::{OriginalUri, State};
-use axum::http::StatusCode;
-use axum::routing::get;
-use axum::{Json, Router};
-use serde::Serialize;
+pub mod dto;
+pub mod routes;
+pub mod state;
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
+use tokio::time::Duration;
+use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-/// Shared state for the HTTP router.
-#[derive(Clone, Debug)]
-pub struct ApiState {
-    /// Service name reported by health endpoints.
-    pub service_name: &'static str,
-    /// Service version reported by health endpoints.
-    pub version: &'static str,
-}
-
-impl Default for ApiState {
-    fn default() -> Self {
-        Self {
-            service_name: "fastcart",
-            version: env!("CARGO_PKG_VERSION"),
-        }
-    }
-}
-
-/// Health response payload.
-#[derive(Debug, Serialize)]
-pub struct HealthResponse {
-    status: &'static str,
-    service: &'static str,
-    version: &'static str,
-}
+pub use state::{ApiConfig, AppContext};
 
 /// Builds the application router.
-pub fn build_router(state: ApiState) -> Router {
-    let reserved = Router::<ApiState>::new().fallback(not_implemented);
+pub fn build_router(context: Arc<AppContext>) -> Router {
+    let router = Router::new()
+        .merge(routes::health::router())
+        .nest("/api/v1/platform", routes::platform::router(&context))
+        .nest("/api/v1/admin", routes::admin::router(&context))
+        .nest("/api/v1/store", routes::store::router(&context))
+        .nest("/api/v1/webhooks", routes::webhooks::router())
+        .nest(
+            "/internal/storefront",
+            routes::store::internal_router(&context),
+        )
+        .with_state(context.clone());
 
-    Router::new()
-        .route("/health", get(health))
-        .route("/health/live", get(liveness))
-        .route("/health/ready", get(readiness))
-        .nest("/api/v1/platform", reserved.clone())
-        .nest("/api/v1/admin", reserved.clone())
-        .nest("/api/v1/store", reserved.clone())
-        .nest("/api/v1/webhooks", reserved.clone())
-        .nest("/internal/storefront", reserved)
+    router
+        .layer(cors_layer(&context.config.allowed_origins))
+        .layer(RequestBodyLimitLayer::new(context.config.max_body_bytes))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .layer(axum::middleware::from_fn(
+            fastcart_http::request_id_middleware,
+        ))
 }
 
-async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
-    Json(health_response(&state))
-}
-
-async fn liveness(State(state): State<ApiState>) -> Json<HealthResponse> {
-    Json(health_response(&state))
-}
-
-async fn readiness(State(state): State<ApiState>) -> Json<HealthResponse> {
-    Json(health_response(&state))
-}
-
-fn health_response(state: &ApiState) -> HealthResponse {
-    HealthResponse {
-        status: "ok",
-        service: state.service_name,
-        version: state.version,
-    }
-}
-
-async fn not_implemented(OriginalUri(uri): OriginalUri) -> (StatusCode, Json<serde_json::Value>) {
-    let body = serde_json::json!({
-        "error": {
-            "code": "NOT_IMPLEMENTED",
-            "message": format!("route {} is not implemented yet", uri.path()),
-            "request_id": null
-        }
-    });
-    (StatusCode::NOT_IMPLEMENTED, Json(body))
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use tower::ServiceExt;
-
-    use super::{ApiState, build_router};
-
-    #[tokio::test]
-    async fn health_endpoint_is_ok() {
-        let app = build_router(ApiState::default());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn reserved_namespaces_are_explicit() {
-        let app = build_router(ApiState::default());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/admin/products")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+fn cors_layer(origins: &[String]) -> CorsLayer {
+    let allowed_headers = [
+        header::CONTENT_TYPE,
+        header::AUTHORIZATION,
+        header::ACCEPT,
+        HeaderName::from_static("x-store-id"),
+        HeaderName::from_static("x-csrf-token"),
+        HeaderName::from_static("x-request-id"),
+    ];
+    let layer = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers(allowed_headers)
+        .allow_credentials(true);
+    let parsed: Vec<HeaderValue> = origins
+        .iter()
+        .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+        .collect();
+    if parsed.is_empty() {
+        layer
+    } else {
+        layer.allow_origin(parsed)
     }
 }

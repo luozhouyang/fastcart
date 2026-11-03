@@ -2,12 +2,18 @@
 host = "0.0.0.0"
 port = 8080
 log_level = "info"
+# Set to true behind HTTPS. Localhost is treated as a secure context by browsers.
+cookie_secure = false
+# Exact origins allowed to call the API with credentials.
+cors_origins = ["http://localhost:5173", "http://localhost:5174"]
 
 [database]
 platform_path = "./data/platform.sqlite"
 stores_dir = "./data/stores"
 journal_mode = "wal"
 busy_timeout_ms = 5000
+max_connections = 5
+backup_dir = "./data/backups"
 
 [storage]
 provider = "local"
@@ -15,6 +21,7 @@ root = "./data/assets"
 
 [cache]
 max_capacity = 10000
+ttl_seconds = 60
 
 [storefront]
 enabled = true

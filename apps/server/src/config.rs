@@ -35,6 +35,10 @@ pub struct ServerConfig {
     pub port: u16,
     /// Default tracing filter.
     pub log_level: String,
+    /// Whether session cookies carry the Secure attribute.
+    pub cookie_secure: bool,
+    /// Exact browser origins permitted to call the API with credentials.
+    pub cors_origins: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -43,6 +47,8 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_owned(),
             port: 8080,
             log_level: "info".to_owned(),
+            cookie_secure: true,
+            cors_origins: Vec::new(),
         }
     }
 }
@@ -59,6 +65,10 @@ pub struct DatabaseConfig {
     pub journal_mode: String,
     /// SQLite busy timeout in milliseconds.
     pub busy_timeout_ms: u64,
+    /// Maximum connections per store pool.
+    pub max_connections: u32,
+    /// Directory for on-demand store backups.
+    pub backup_dir: PathBuf,
 }
 
 impl Default for DatabaseConfig {
@@ -68,6 +78,8 @@ impl Default for DatabaseConfig {
             stores_dir: PathBuf::from("./data/stores"),
             journal_mode: "wal".to_owned(),
             busy_timeout_ms: 5_000,
+            max_connections: 5,
+            backup_dir: PathBuf::from("./data/backups"),
         }
     }
 }
@@ -97,12 +109,15 @@ impl Default for StorageConfig {
 pub struct CacheConfig {
     /// Maximum number of cache entries.
     pub max_capacity: u64,
+    /// Entry time to live in seconds.
+    pub ttl_seconds: u64,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_capacity: 10_000,
+            ttl_seconds: 60,
         }
     }
 }
@@ -211,6 +226,12 @@ impl Config {
         }
         if self.database.busy_timeout_ms == 0 {
             bail!("database.busy_timeout_ms must be greater than zero");
+        }
+        if self.database.max_connections == 0 {
+            bail!("database.max_connections must be greater than zero");
+        }
+        if self.cache.ttl_seconds == 0 {
+            bail!("cache.ttl_seconds must be greater than zero");
         }
         Ok(())
     }

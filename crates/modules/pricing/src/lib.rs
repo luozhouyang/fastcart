@@ -1,5 +1,15 @@
 //! The `pricing` commerce module.
 //!
-//! Domain rules, application services and SQLite repositories for this module
-//! live here. The crate is self-contained: cross-module orchestration belongs in
+//! Owns price lists, rules, variant prices and the deterministic price
+//! selector. The crate is self-contained: cross-module orchestration belongs in
 //! `fastcart-workflows`.
+
+pub mod domain;
+pub mod service;
+
+pub use domain::{
+    CreatePriceInput, CreatePriceListInput, Price, PriceContext, PriceFilter, PriceList,
+    PriceListRule, PriceListRuleInput, PriceListStatus, PriceListType, SelectedPrice,
+    UpdatePriceInput, UpdatePriceListInput, select_price,
+};
+pub use service::PricingService;

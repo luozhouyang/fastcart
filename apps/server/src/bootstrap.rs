@@ -13,8 +13,8 @@ pub async fn run(config: Config) -> Result<()> {
     init_tracing(&config.server.log_level);
     config.validate().context("invalid configuration")?;
 
-    let state = AppState::new(config.clone());
-    let app = fastcart_api::build_router(state.api_state());
+    let state = AppState::initialize(config.clone()).await?;
+    let app = fastcart_api::build_router(state.context.clone());
     let address = config.listen_address();
 
     let listener = TcpListener::bind(&address)
@@ -31,7 +31,11 @@ pub async fn run(config: Config) -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .context("server failed")
+        .context("server failed")?;
+
+    state.databases.close_all().await;
+    tracing::info!("fastcart server stopped");
+    Ok(())
 }
 
 /// Loads configuration from the environment and starts the server.
