@@ -927,6 +927,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "utoipa",
 ]
 
 [[package]]
@@ -1035,6 +1036,7 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]
@@ -1051,6 +1053,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -1061,13 +1064,18 @@ dependencies = [
  "async-trait",
  "fastcart-infrastructure",
  "fastcart-kernel",
+ "hex",
+ "rand 0.8.8",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]
@@ -1084,6 +1092,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "utoipa",
 ]
 
 [[package]]
@@ -1119,6 +1128,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "tokio",
+ "utoipa",
 ]
 
 [[package]]

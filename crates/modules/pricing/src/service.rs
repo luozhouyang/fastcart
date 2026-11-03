@@ -6,6 +6,7 @@ use fastcart_infrastructure::{StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, CurrencyCode, PageResult, Pagination, PriceId, PriceListId, now_timestamp,
 };
+use sqlx::Row;
 use sqlx::{QueryBuilder, Sqlite};
 
 use crate::domain::{
@@ -655,9 +656,59 @@ impl PricingService {
             .fetch_all(self.db.pool())
             .await
             .map_err(database_error)?;
-        rows.into_iter()
+        let mut prices = rows
+            .into_iter()
             .map(PriceRow::into_price)
-            .collect::<Result<Vec<_>, AppError>>()
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let list_ids: Vec<String> = prices
+            .iter()
+            .filter_map(|price| price.price_list_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let rules = self.load_price_list_rule_conditions(&list_ids).await?;
+        prices.retain(|price| {
+            price
+                .price_list_id
+                .as_ref()
+                .is_none_or(|list_id| rules_match(rules.get(list_id), context))
+        });
+        Ok(prices)
+    }
+
+    async fn load_price_list_rule_conditions(
+        &self,
+        list_ids: &[String],
+    ) -> Result<HashMap<String, Vec<(String, String, String)>>, AppError> {
+        if list_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
+            "SELECT price_list_id, attribute, operator, value FROM price_list_rules \
+             WHERE price_list_id IN (",
+        );
+        let mut separated = builder.separated(", ");
+        for id in list_ids {
+            separated.push_bind(id.clone());
+        }
+        separated.push_unseparated(")");
+        let rows = builder
+            .build()
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let mut rules: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+        for row in rows {
+            let list_id: String = row.try_get("price_list_id").map_err(database_error)?;
+            let attribute: String = row.try_get("attribute").map_err(database_error)?;
+            let operator: String = row.try_get("operator").map_err(database_error)?;
+            let value: String = row.try_get("value").map_err(database_error)?;
+            rules
+                .entry(list_id)
+                .or_default()
+                .push((attribute, operator, value));
+        }
+        Ok(rules)
     }
 
     async fn ensure_price_list_exists(&self, id: &str) -> Result<(), AppError> {
@@ -878,6 +929,24 @@ impl PriceRow {
             updated_at: self.updated_at,
         })
     }
+}
+
+fn rules_match(rules: Option<&Vec<(String, String, String)>>, context: &PriceContext) -> bool {
+    rules.is_none_or(|rules| {
+        rules.iter().all(|(attribute, operator, value)| {
+            let actual = match attribute.as_str() {
+                "customer_group_id" => context.customer_group_id.as_deref(),
+                "sales_channel_id" => context.sales_channel_id.as_deref(),
+                "currency" | "currency_code" => Some(context.currency.as_str()),
+                _ => None,
+            };
+            match operator.as_str() {
+                "eq" => actual == Some(value.as_str()),
+                "ne" => actual != Some(value.as_str()),
+                _ => false,
+            }
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1285,6 +1354,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.count, 2);
+    }
+
+    #[tokio::test]
+    async fn price_list_rules_restrict_selection() {
+        let service = service().await;
+        service
+            .create_price(CreatePriceInput::new("var_1", usd(), 1000))
+            .await
+            .unwrap();
+        let list = service
+            .create_price_list(
+                CreatePriceListInput::new("VIP")
+                    .active()
+                    .with_rule(PriceListRuleInput::eq("customer_group_id", "vip")),
+            )
+            .await
+            .unwrap();
+        service
+            .create_price(CreatePriceInput::new("var_1", usd(), 800).with_price_list(&list.id))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service
+                .calculate_price("var_1", &context(1, 100))
+                .await
+                .unwrap()
+                .unwrap()
+                .amount,
+            1000
+        );
+        let mut vip = context(1, 100);
+        vip.customer_group_id = Some("vip".to_owned());
+        assert_eq!(
+            service
+                .calculate_price("var_1", &vip)
+                .await
+                .unwrap()
+                .unwrap()
+                .amount,
+            800
+        );
     }
 
     #[tokio::test]

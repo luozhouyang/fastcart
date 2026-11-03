@@ -178,10 +178,23 @@ pub struct CompleteCheckoutResponse {
 async fn create_cart(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    publishable_key: Option<Extension<super::PublishableKeyContext>>,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateCartRequest>,
 ) -> ApiResult<(StatusCode, Json<Cart>)> {
-    if let Some(channel_id) = request.sales_channel_id.as_deref() {
+    let mut sales_channel_id = request.sales_channel_id;
+    if let Some(Extension(key)) = publishable_key {
+        match sales_channel_id.as_deref() {
+            Some(channel_id) if key.sales_channel_ids.iter().any(|id| id == channel_id) => {}
+            Some(_) => {
+                return Err(ApiError::new(AppError::Forbidden));
+            }
+            None => {
+                sales_channel_id = key.sales_channel_ids.first().cloned();
+            }
+        }
+    }
+    if let Some(channel_id) = sales_channel_id.as_deref() {
         let channel = StoreService::new(db.clone())
             .get_sales_channel(channel_id)
             .await?;
@@ -191,7 +204,7 @@ async fn create_cart(
     }
     let mut input = CreateCartInput::new(request.currency_code);
     input.email = request.email;
-    input.sales_channel_id = request.sales_channel_id;
+    input.sales_channel_id = sales_channel_id;
     input.expires_in_seconds = request.expires_in_seconds;
     input.customer_id = actor.customer_id.clone();
     let cart = CartWorkflow::new(db).create_cart(input).await?;

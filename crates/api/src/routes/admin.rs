@@ -31,6 +31,7 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         ));
 
     let scoped = Router::new()
+        .merge(super::admin_campaigns::router())
         .merge(super::admin_catalog::router())
         .merge(super::admin_content::router())
         .merge(super::admin_customers::router())
@@ -39,6 +40,7 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         .merge(super::admin_payments::router())
         .merge(super::admin_pricing::router())
         .merge(super::admin_promotions::router())
+        .merge(super::admin_regions::router())
         .merge(super::admin_shipping::router())
         .merge(super::admin_tax::router())
         .merge(super::admin_theme::router())

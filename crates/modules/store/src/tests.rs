@@ -4,8 +4,9 @@ use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{Metadata, Pagination, StoreId};
 
 use crate::{
-    CreateSalesChannelInput, MAX_SETTING_KEY_LENGTH, MAX_SETTING_VALUE_BYTES, StoreService,
-    UpdateSalesChannelInput,
+    CreatePublishableApiKeyInput, CreateRegionInput, CreateSalesChannelInput,
+    MAX_SETTING_KEY_LENGTH, MAX_SETTING_VALUE_BYTES, RegionService, StoreService,
+    UpdateRegionInput, UpdateSalesChannelInput,
 };
 
 async fn service() -> StoreService {
@@ -266,4 +267,104 @@ async fn sales_channel_metadata_is_size_validated() {
         .await
         .unwrap_err();
     assert!(matches!(error, fastcart_kernel::AppError::Validation(_)));
+}
+
+async fn regions() -> RegionService {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("in-memory store database");
+    RegionService::new(db)
+}
+
+#[tokio::test]
+async fn regions_validate_currency_country_and_default_switching() {
+    let service = regions().await;
+    let first = service
+        .create_region(CreateRegionInput {
+            name: "United States".to_owned(),
+            currency_code: "USD".to_owned(),
+            countries: vec!["US".to_owned()],
+            is_default: true,
+            ..CreateRegionInput::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.countries, vec!["US".to_owned()]);
+    assert!(service.default_region().await.unwrap().is_some());
+
+    let second = service
+        .create_region(CreateRegionInput {
+            name: "Europe".to_owned(),
+            currency_code: "EUR".to_owned(),
+            countries: vec!["DE".to_owned(), "FR".to_owned()],
+            is_default: true,
+            ..CreateRegionInput::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.countries, vec!["DE".to_owned(), "FR".to_owned()]);
+    assert_eq!(
+        service.default_region().await.unwrap().unwrap().id,
+        second.id
+    );
+    assert!(
+        service
+            .create_region(CreateRegionInput {
+                name: "Broken".to_owned(),
+                currency_code: "ABC".to_owned(),
+                countries: vec!["ZZ".to_owned()],
+                ..CreateRegionInput::default()
+            })
+            .await
+            .is_err()
+    );
+    assert!(service.delete_region(&second.id).await.is_err());
+    service
+        .update_region(
+            &second.id,
+            UpdateRegionInput {
+                name: Some("Eurozone".to_owned()),
+                ..UpdateRegionInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let page = service.list_regions(Pagination::default()).await.unwrap();
+    assert_eq!(page.count, 2);
+}
+
+#[tokio::test]
+async fn publishable_keys_are_scoped_and_revocable() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("in-memory store database");
+    let store = StoreService::new(db.clone());
+    let channel = store
+        .create_sales_channel(channel_input("Web"))
+        .await
+        .unwrap();
+    let service = RegionService::new(db);
+    let created = service
+        .create_publishable_key(CreatePublishableApiKeyInput {
+            title: "Storefront".to_owned(),
+            sales_channel_ids: vec![channel.id.clone()],
+        })
+        .await
+        .unwrap();
+    assert!(created.token.starts_with("pk_"));
+    let authenticated = service
+        .authenticate_publishable_key(&created.token)
+        .await
+        .unwrap();
+    assert_eq!(authenticated.sales_channel_ids, vec![channel.id.clone()]);
+    service
+        .revoke_publishable_key(&created.key.id)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .authenticate_publishable_key(&created.token)
+            .await
+            .is_err()
+    );
 }

@@ -85,6 +85,7 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
         header::ACCEPT,
         HeaderName::from_static("x-store-id"),
         HeaderName::from_static("x-csrf-token"),
+        HeaderName::from_static("x-publishable-api-key"),
         HeaderName::from_static("x-request-id"),
     ];
     let layer = CorsLayer::new()

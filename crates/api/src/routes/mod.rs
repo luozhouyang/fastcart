@@ -1,6 +1,7 @@
 //! Shared route helpers and store-database middleware.
 
 pub mod admin;
+pub mod admin_campaigns;
 pub mod admin_catalog;
 pub mod admin_content;
 pub mod admin_customers;
@@ -9,6 +10,7 @@ pub mod admin_orders;
 pub mod admin_payments;
 pub mod admin_pricing;
 pub mod admin_promotions;
+pub mod admin_regions;
 pub mod admin_shipping;
 pub mod admin_tax;
 pub mod admin_theme;
@@ -22,6 +24,7 @@ pub mod store_catalog;
 pub mod store_content;
 pub mod store_customer;
 pub mod store_inventory;
+pub mod store_regions;
 pub mod store_theme;
 pub mod storefront;
 pub mod webhooks;
@@ -96,6 +99,43 @@ pub async fn internal_fetch_auth_middleware(
 pub struct StoreDbState {
     /// Manager providing isolated per-store pools.
     pub databases: Arc<StoreDatabaseManager>,
+}
+
+/// Validated publishable API key context for storefront requests.
+#[derive(Clone, Debug)]
+pub struct PublishableKeyContext {
+    /// Sales channels the key may access.
+    pub sales_channel_ids: Vec<String>,
+}
+
+/// Validates the optional `x-publishable-api-key` storefront header.
+pub async fn publishable_key_middleware(
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let token = request
+        .headers()
+        .get("x-publishable-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let Some(token) = token else {
+        return Ok(next.run(request).await);
+    };
+    let database = request
+        .extensions()
+        .get::<StoreDatabase>()
+        .cloned()
+        .ok_or_else(|| ApiError::new(AppError::Unauthorized))?;
+    let key = fastcart_module_store::RegionService::new(database)
+        .authenticate_publishable_key(&token)
+        .await?;
+    let mut request = request;
+    request.extensions_mut().insert(PublishableKeyContext {
+        sales_channel_ids: key.sales_channel_ids,
+    });
+    Ok(next.run(request).await)
 }
 
 /// Loads the resolved store's database and attaches it to the request.

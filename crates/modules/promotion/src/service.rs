@@ -8,11 +8,11 @@ use fastcart_kernel::{
 use sqlx::{QueryBuilder, Sqlite};
 
 use crate::domain::{
-    Coupon, CouponFilter, CreateCouponInput, CreatePromotionInput, Promotion, PromotionCart,
-    PromotionContext, PromotionFilter, PromotionResult, PromotionRule, PromotionRuleInput,
-    PromotionStatus, PromotionUsage, UpdateCouponInput, UpdatePromotionInput, calculate_promotions,
-    normalize_code, validate_promotion_fields, validate_usage_limit, validate_window,
-    window_contains,
+    Campaign, Coupon, CouponFilter, CreateCampaignInput, CreateCouponInput, CreatePromotionInput,
+    Promotion, PromotionCart, PromotionContext, PromotionFilter, PromotionResult, PromotionRule,
+    PromotionRuleInput, PromotionStatus, PromotionUsage, UpdateCampaignInput, UpdateCouponInput,
+    UpdatePromotionInput, calculate_promotions, normalize_code, validate_promotion_fields,
+    validate_usage_limit, validate_window, window_contains,
 };
 
 const PROMOTION_COLUMNS: &str = "id, code, title, type AS promotion_type, value, status, \
@@ -502,6 +502,211 @@ impl PromotionService {
         Ok(coupon)
     }
 
+    /// Creates a campaign.
+    pub async fn create_campaign(&self, input: CreateCampaignInput) -> Result<Campaign, AppError> {
+        let name = input.name.trim();
+        if name.is_empty() || name.chars().count() > 200 {
+            return Err(AppError::validation(
+                "campaign name must be between 1 and 200 characters",
+            ));
+        }
+        if input.budget_limit.is_some_and(|limit| limit <= 0) {
+            return Err(AppError::validation("campaign budget must be positive"));
+        }
+        validate_window(input.starts_at, input.ends_at, "campaign")?;
+        validate_metadata(&input.metadata)?;
+        let id = format!("camp_{}", uuid::Uuid::now_v7().simple());
+        let now = now_timestamp();
+        sqlx::query(
+            "INSERT INTO campaigns
+             (id, name, description, budget_limit, budget_used, starts_at, ends_at, metadata,
+              created_at, updated_at)
+             VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(input.description.as_deref())
+        .bind(input.budget_limit)
+        .bind(input.starts_at)
+        .bind(input.ends_at)
+        .bind(input.metadata.to_json_string())
+        .bind(now)
+        .bind(now)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        self.get_campaign(&id).await
+    }
+
+    /// Loads a campaign by identifier.
+    pub async fn get_campaign(&self, id: &str) -> Result<Campaign, AppError> {
+        let row = sqlx::query_as::<_, CampaignRow>(
+            "SELECT id, name, description, budget_limit, budget_used, starts_at, ends_at,
+                    metadata, created_at, updated_at FROM campaigns WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("campaign", id))?;
+        Ok(row.into_campaign())
+    }
+
+    /// Lists campaigns newest first.
+    pub async fn list_campaigns(
+        &self,
+        pagination: Pagination,
+    ) -> Result<PageResult<Campaign>, AppError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM campaigns")
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let rows = sqlx::query_as::<_, CampaignRow>(
+            "SELECT id, name, description, budget_limit, budget_used, starts_at, ends_at,
+                    metadata, created_at, updated_at FROM campaigns
+             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(pagination.limit)
+        .bind(pagination.offset)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(PageResult::new(
+            rows.into_iter().map(CampaignRow::into_campaign).collect(),
+            count,
+            pagination,
+        ))
+    }
+
+    /// Partially updates a campaign.
+    pub async fn update_campaign(
+        &self,
+        id: &str,
+        input: UpdateCampaignInput,
+    ) -> Result<Campaign, AppError> {
+        let existing = self.get_campaign(id).await?;
+        let name = input.name.as_deref().map_or_else(
+            || Ok(existing.name.clone()),
+            |name| {
+                let name = name.trim();
+                if name.is_empty() || name.chars().count() > 200 {
+                    Err(AppError::validation(
+                        "campaign name must be between 1 and 200 characters",
+                    ))
+                } else {
+                    Ok(name.to_owned())
+                }
+            },
+        )?;
+        let budget_limit = input.budget_limit.unwrap_or(existing.budget_limit);
+        if budget_limit.is_some_and(|limit| limit <= 0) {
+            return Err(AppError::validation("campaign budget must be positive"));
+        }
+        if budget_limit.is_some_and(|limit| limit < existing.budget_used) {
+            return Err(AppError::conflict(
+                "campaign budget cannot be below consumed usage",
+            ));
+        }
+        let starts_at = input.starts_at.unwrap_or(existing.starts_at);
+        let ends_at = input.ends_at.unwrap_or(existing.ends_at);
+        validate_window(starts_at, ends_at, "campaign")?;
+        let metadata = input.metadata.unwrap_or_else(|| existing.metadata.clone());
+        validate_metadata(&metadata)?;
+        let now = now_timestamp();
+        let updated = sqlx::query(
+            "UPDATE campaigns SET name = ?, description = ?, budget_limit = ?, starts_at = ?,
+             ends_at = ?, metadata = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&name)
+        .bind(
+            input
+                .description
+                .as_deref()
+                .or(existing.description.as_deref()),
+        )
+        .bind(budget_limit)
+        .bind(starts_at)
+        .bind(ends_at)
+        .bind(metadata.to_json_string())
+        .bind(now)
+        .bind(id)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::not_found("campaign", id));
+        }
+        self.get_campaign(id).await
+    }
+
+    /// Deletes a campaign; promotion links are removed by cascade.
+    pub async fn delete_campaign(&self, id: &str) -> Result<(), AppError> {
+        let result = sqlx::query("DELETE FROM campaigns WHERE id = ?")
+            .bind(id)
+            .execute(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("campaign", id));
+        }
+        Ok(())
+    }
+
+    /// Links a promotion to a campaign.
+    pub async fn link_promotion(
+        &self,
+        campaign_id: &str,
+        promotion_id: &str,
+    ) -> Result<(), AppError> {
+        self.get_campaign(campaign_id).await?;
+        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM promotions WHERE id = ?")
+            .bind(promotion_id)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        if exists.is_none() {
+            return Err(AppError::not_found("promotion", promotion_id));
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO campaign_promotions (campaign_id, promotion_id)
+             VALUES (?, ?)",
+        )
+        .bind(campaign_id)
+        .bind(promotion_id)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Removes a promotion from a campaign.
+    pub async fn unlink_promotion(
+        &self,
+        campaign_id: &str,
+        promotion_id: &str,
+    ) -> Result<(), AppError> {
+        sqlx::query("DELETE FROM campaign_promotions WHERE campaign_id = ? AND promotion_id = ?")
+            .bind(campaign_id)
+            .bind(promotion_id)
+            .execute(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Lists promotions attached to a campaign.
+    pub async fn list_campaign_promotions(
+        &self,
+        campaign_id: &str,
+    ) -> Result<Vec<String>, AppError> {
+        self.get_campaign(campaign_id).await?;
+        sqlx::query_scalar("SELECT promotion_id FROM campaign_promotions WHERE campaign_id = ?")
+            .bind(campaign_id)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)
+    }
+
     /// Records one usage and increments promotion and coupon counters.
     pub async fn record_usage(
         &self,
@@ -599,6 +804,33 @@ impl PromotionService {
         .map_err(database_error)?;
         if updated.rows_affected() == 0 {
             return Err(AppError::conflict("promotion usage limit reached"));
+        }
+
+        let campaigns: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT c.id, c.budget_limit, c.budget_used FROM campaigns c
+             JOIN campaign_promotions cp ON cp.campaign_id = c.id
+             WHERE cp.promotion_id = ?",
+        )
+        .bind(promotion_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(database_error)?;
+        for (campaign_id, budget_limit, budget_used) in campaigns {
+            if budget_limit.is_some_and(|limit| budget_used >= limit) {
+                return Err(AppError::conflict("campaign budget exhausted"));
+            }
+            let updated = sqlx::query(
+                "UPDATE campaigns SET budget_used = budget_used + 1, updated_at = ?
+                 WHERE id = ? AND (budget_limit IS NULL OR budget_used < budget_limit)",
+            )
+            .bind(now)
+            .bind(&campaign_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::conflict("campaign budget exhausted"));
+            }
         }
         transaction.commit().await.map_err(database_error)?;
 
@@ -801,6 +1033,37 @@ async fn insert_promotion_rules(
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct CampaignRow {
+    id: String,
+    name: String,
+    description: Option<String>,
+    budget_limit: Option<i64>,
+    budget_used: i64,
+    starts_at: Option<i64>,
+    ends_at: Option<i64>,
+    metadata: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl CampaignRow {
+    fn into_campaign(self) -> Campaign {
+        Campaign {
+            id: self.id,
+            name: self.name,
+            description: self.description,
+            budget_limit: self.budget_limit,
+            budget_used: self.budget_used,
+            starts_at: self.starts_at,
+            ends_at: self.ends_at,
+            metadata: fastcart_kernel::Metadata::from_json_str(&self.metadata),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
 struct PromotionUsageRow {
     id: String,
     promotion_id: String,
@@ -924,10 +1187,10 @@ mod tests {
 
     use super::PromotionService;
     use crate::domain::{
-        CreateCouponInput, CreatePromotionInput, Promotion, PromotionCart, PromotionContext,
-        PromotionFilter, PromotionLine, PromotionRule, PromotionRuleAttribute, PromotionRuleInput,
-        PromotionRuleOperator, PromotionStatus, PromotionType, UpdatePromotionInput,
-        calculate_promotions,
+        CreateCampaignInput, CreateCouponInput, CreatePromotionInput, Promotion, PromotionCart,
+        PromotionContext, PromotionFilter, PromotionLine, PromotionRule, PromotionRuleAttribute,
+        PromotionRuleInput, PromotionRuleOperator, PromotionStatus, PromotionType,
+        UpdatePromotionInput, calculate_promotions,
     };
 
     async fn service() -> PromotionService {
@@ -1694,5 +1957,47 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].promotion_id, "promo_active");
+    }
+
+    #[tokio::test]
+    async fn campaign_budgets_are_consumed_atomically() {
+        let service = service().await;
+        let promotion = service
+            .create_promotion(
+                CreatePromotionInput::new("Budgeted", PromotionType::FixedAmount, 100).active(),
+            )
+            .await
+            .unwrap();
+        let campaign = service
+            .create_campaign(CreateCampaignInput {
+                name: "Launch".to_owned(),
+                budget_limit: Some(1),
+                ..CreateCampaignInput::default()
+            })
+            .await
+            .unwrap();
+        service
+            .link_promotion(&campaign.id, &promotion.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .list_campaign_promotions(&campaign.id)
+                .await
+                .unwrap(),
+            vec![promotion.id.clone()]
+        );
+
+        service
+            .record_usage(&promotion.id, None, None, Some("order_1"))
+            .await
+            .unwrap();
+        let exhausted = service
+            .record_usage(&promotion.id, None, None, Some("order_2"))
+            .await
+            .unwrap_err();
+        assert!(matches!(exhausted, AppError::Conflict(_)));
+        let stored = service.get_campaign(&campaign.id).await.unwrap();
+        assert_eq!(stored.budget_used, 1);
     }
 }

@@ -1051,3 +1051,62 @@ pub(crate) fn validate_promotion_fields(
     }
     validate_metadata(metadata)
 }
+
+/// A campaign grouping promotions under a shared budget.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Campaign {
+    /// Campaign identifier.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Maximum number of promotion usages, or unlimited.
+    pub budget_limit: Option<i64>,
+    /// Usages already consumed.
+    pub budget_used: i64,
+    /// Start of the validity window.
+    pub starts_at: Option<i64>,
+    /// End of the validity window.
+    pub ends_at: Option<i64>,
+    /// Extension metadata.
+    pub metadata: Metadata,
+    /// Creation timestamp.
+    pub created_at: i64,
+    /// Last update timestamp.
+    pub updated_at: i64,
+}
+
+/// Input for creating a campaign.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreateCampaignInput {
+    /// Display name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Maximum usages.
+    pub budget_limit: Option<i64>,
+    /// Start timestamp.
+    pub starts_at: Option<i64>,
+    /// End timestamp.
+    pub ends_at: Option<i64>,
+    /// Extension metadata.
+    pub metadata: Metadata,
+}
+
+/// Input for partially updating a campaign.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UpdateCampaignInput {
+    /// New name.
+    pub name: Option<String>,
+    /// New description.
+    pub description: Option<String>,
+    /// New budget limit; `Some(None)` makes it unlimited.
+    pub budget_limit: Option<Option<i64>>,
+    /// New start.
+    pub starts_at: Option<Option<i64>>,
+    /// New end.
+    pub ends_at: Option<Option<i64>>,
+    /// Replacement metadata.
+    pub metadata: Option<Metadata>,
+}

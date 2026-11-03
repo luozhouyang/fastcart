@@ -8,10 +8,10 @@ pub mod domain;
 pub mod service;
 
 pub use domain::{
-    Coupon, CouponFilter, CreateCouponInput, CreatePromotionInput, Promotion, PromotionApplication,
-    PromotionCart, PromotionContext, PromotionFilter, PromotionLine, PromotionResult,
-    PromotionRule, PromotionRuleAttribute, PromotionRuleInput, PromotionRuleOperator,
-    PromotionStatus, PromotionType, PromotionUsage, UpdateCouponInput, UpdatePromotionInput,
-    apply_promotion, calculate_promotions,
+    Campaign, Coupon, CouponFilter, CreateCampaignInput, CreateCouponInput, CreatePromotionInput,
+    Promotion, PromotionApplication, PromotionCart, PromotionContext, PromotionFilter,
+    PromotionLine, PromotionResult, PromotionRule, PromotionRuleAttribute, PromotionRuleInput,
+    PromotionRuleOperator, PromotionStatus, PromotionType, PromotionUsage, UpdateCampaignInput,
+    UpdateCouponInput, UpdatePromotionInput, apply_promotion, calculate_promotions,
 };
 pub use service::PromotionService;

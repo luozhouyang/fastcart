@@ -8,7 +8,7 @@ use fastcart_kernel::Metadata;
 use serde::{Deserialize, Serialize};
 
 /// A channel through which a store exposes products.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SalesChannel {
     /// Channel identifier.
     pub id: String,
