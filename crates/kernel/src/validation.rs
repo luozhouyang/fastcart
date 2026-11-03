@@ -31,24 +31,10 @@ pub fn validate_handle(value: &str, field: &str) -> Result<(), AppError> {
     }
 }
 
-/// Converts arbitrary text into a valid handle.
+/// Converts arbitrary text into a valid handle using Unicode transliteration.
 #[must_use]
 pub fn slugify(value: &str) -> String {
-    let mut slug = String::with_capacity(value.len());
-    let mut last_was_separator = true;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-            last_was_separator = false;
-        } else if !last_was_separator {
-            slug.push('-');
-            last_was_separator = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    slug
+    slug::slugify(value)
 }
 
 /// Returns true when the value looks like an email address.
@@ -60,41 +46,10 @@ pub fn is_valid_email(value: &str) -> bool {
     if value.len() > 320 || value.trim() != value {
         return false;
     }
-    let Some((local, domain)) = value.split_once('@') else {
+    let Ok(address) = value.parse::<email_address::EmailAddress>() else {
         return false;
     };
-    if local.is_empty() || local.len() > 64 || domain.contains('@') {
-        return false;
-    }
-    if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
-        return false;
-    }
-    value.chars().all(|character| {
-        character.is_ascii_alphanumeric()
-            || matches!(
-                character,
-                '!' | '#'
-                    | '$'
-                    | '%'
-                    | '&'
-                    | '\''
-                    | '*'
-                    | '+'
-                    | '-'
-                    | '/'
-                    | '='
-                    | '?'
-                    | '^'
-                    | '_'
-                    | '`'
-                    | '{'
-                    | '|'
-                    | '}'
-                    | '~'
-                    | '.'
-                    | '@'
-            )
-    })
+    address.domain().contains('.')
 }
 
 /// Validates an email address.
@@ -175,12 +130,16 @@ mod tests {
     fn slugify_produces_valid_handles() {
         assert_eq!(slugify("  Summer Sale 2026! "), "summer-sale-2026");
         assert_eq!(slugify("---"), "");
+        assert_eq!(slugify("Größe"), "grosse");
+        assert!(!slugify("夏季促销").is_empty());
     }
 
     #[test]
     fn emails_are_checked_structurally() {
         assert!(is_valid_email("owner@example.com"));
         assert!(!is_valid_email("owner@example"));
+        assert!(!is_valid_email("owner@example..com"));
+        assert!(!is_valid_email("owner@-example.com"));
         assert!(!is_valid_email("owner example.com"));
         assert!(!is_valid_email(" owner@example.com"));
         assert_eq!(normalize_email(" Owner@Example.COM "), "owner@example.com");

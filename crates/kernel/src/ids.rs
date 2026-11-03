@@ -8,9 +8,19 @@ macro_rules! define_id {
     ($name:ident, $prefix:literal, $doc:literal) => {
         #[doc = $doc]
         #[derive(
-            Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+            Clone,
+            Debug,
+            PartialEq,
+            Eq,
+            Hash,
+            PartialOrd,
+            Ord,
+            serde::Serialize,
+            serde::Deserialize,
+            utoipa::ToSchema,
         )]
         #[serde(transparent)]
+        #[schema(value_type = String)]
         pub struct $name(String);
 
         impl $name {

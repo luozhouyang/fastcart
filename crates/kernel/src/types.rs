@@ -22,15 +22,16 @@ pub fn now_timestamp() -> Timestamp {
 }
 
 /// A validated two-letter ISO 3166-1 country code.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, utoipa::ToSchema)]
 #[serde(transparent)]
+#[schema(value_type = String)]
 pub struct CountryCode(String);
 
 impl CountryCode {
     /// Creates a validated uppercase country code.
     pub fn new(code: impl Into<String>) -> Result<Self, KernelError> {
         let code = code.into().trim().to_ascii_uppercase();
-        if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        if rust_iso3166::from_alpha2(&code).is_none() {
             return Err(KernelError::Validation(format!(
                 "invalid country code: {code}"
             )));
@@ -62,42 +63,19 @@ impl<'de> Deserialize<'de> for CountryCode {
 }
 
 /// A locale identifier such as `en-US` or `fr_FR`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, utoipa::ToSchema)]
 #[serde(transparent)]
+#[schema(value_type = String)]
 pub struct Locale(String);
 
 impl Locale {
     /// Creates a validated locale identifier.
     pub fn new(value: impl Into<String>) -> Result<Self, KernelError> {
         let raw = value.into().trim().replace('_', "-");
-        let normalized = raw
-            .split('-')
-            .enumerate()
-            .map(|(index, part)| {
-                if index == 0 {
-                    part.to_ascii_lowercase()
-                } else if part.len() == 2 {
-                    part.to_ascii_uppercase()
-                } else {
-                    part.to_ascii_lowercase()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("-");
-        let valid = normalized.len() >= 2
-            && normalized.len() <= 35
-            && normalized
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '-')
-            && normalized
-                .split('-')
-                .all(|part| !part.is_empty() && part.len() <= 8);
-        if !valid {
-            return Err(KernelError::Validation(format!(
-                "invalid locale: {normalized}"
-            )));
-        }
-        Ok(Self(normalized))
+        let locale: unic_langid::LanguageIdentifier = raw
+            .parse()
+            .map_err(|_| KernelError::Validation(format!("invalid locale: {raw}")))?;
+        Ok(Self(locale.to_string()))
     }
 
     /// Returns the locale as a string slice.
@@ -124,8 +102,9 @@ impl<'de> Deserialize<'de> for Locale {
 }
 
 /// Free-form extension metadata attached to catalog and commerce records.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(transparent)]
+#[schema(value_type = Object)]
 pub struct Metadata(BTreeMap<String, Value>);
 
 impl Metadata {
@@ -145,6 +124,11 @@ impl Metadata {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.0.get(key)
+    }
+
+    /// Removes a metadata entry.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        self.0.remove(key)
     }
 
     /// Returns true when no entries are present.
@@ -172,7 +156,7 @@ impl Metadata {
 }
 
 /// Offset/limit pagination input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Pagination {
     /// Maximum number of records to return.
     pub limit: i64,
@@ -213,7 +197,7 @@ impl Pagination {
 }
 
 /// A page of results with pagination metadata.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PageResult<T> {
     /// Records in this page.
     pub data: Vec<T>,
@@ -305,6 +289,7 @@ mod tests {
     fn country_codes_are_validated() {
         assert_eq!(CountryCode::new("us").unwrap().as_str(), "US");
         assert!(CountryCode::new("USA").is_err());
+        assert!(CountryCode::new("ZZ").is_err());
     }
 
     #[test]

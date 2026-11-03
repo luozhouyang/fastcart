@@ -8,15 +8,16 @@ use serde::Deserialize;
 use crate::error::KernelError;
 
 /// A three-letter ISO-style currency code.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, utoipa::ToSchema)]
 #[serde(transparent)]
+#[schema(value_type = String)]
 pub struct CurrencyCode(String);
 
 impl CurrencyCode {
     /// Creates a validated uppercase currency code.
     pub fn new(code: impl Into<String>) -> Result<Self, KernelError> {
         let code = code.into().trim().to_ascii_uppercase();
-        if code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        if iso_currency::Currency::from_code(&code).is_none() {
             return Err(KernelError::InvalidCurrency(code));
         }
         Ok(Self(code))
@@ -33,12 +34,10 @@ impl CurrencyCode {
     /// Most currencies use two digits, but the platform must not assume that.
     #[must_use]
     pub fn minor_unit_digits(&self) -> u32 {
-        match self.0.as_str() {
-            "BIF" | "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW" | "PYG" | "RWF"
-            | "UGX" | "VND" | "VUV" | "XAF" | "XOF" | "XPF" => 0,
-            "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
-            _ => 2,
-        }
+        iso_currency::Currency::from_code(&self.0)
+            .and_then(iso_currency::Currency::exponent)
+            .map(u32::from)
+            .unwrap_or(2)
     }
 }
 
@@ -81,7 +80,7 @@ pub enum Rounding {
 }
 
 /// An amount in minor currency units with its currency.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Money {
     amount_minor: i64,
     currency: CurrencyCode,
@@ -128,9 +127,12 @@ impl Money {
     }
 
     /// Returns the amount with the opposite sign.
-    #[must_use]
-    pub fn negated(&self) -> Self {
-        Self::new(-self.amount_minor, self.currency.clone())
+    pub fn negated(&self) -> Result<Self, KernelError> {
+        let amount_minor = self
+            .amount_minor
+            .checked_neg()
+            .ok_or_else(|| KernelError::Validation("money overflow".to_owned()))?;
+        Ok(Self::new(amount_minor, self.currency.clone()))
     }
 
     /// Adds two monetary values of the same currency.
@@ -242,7 +244,12 @@ impl std::fmt::Display for Money {
         let minor = (self.amount_minor % divisor).abs();
         write!(
             formatter,
-            "{}.{:0width$} {}",
+            "{}{}.{:0width$} {}",
+            if self.amount_minor < 0 && major == 0 {
+                "-"
+            } else {
+                ""
+            },
             major,
             minor,
             self.currency,
@@ -264,6 +271,7 @@ mod tests {
         assert!(CurrencyCode::new("usd").is_ok());
         assert!(CurrencyCode::new("US").is_err());
         assert!(CurrencyCode::new("US1").is_err());
+        assert!(CurrencyCode::new("ABC").is_err());
     }
 
     #[test]
@@ -271,6 +279,12 @@ mod tests {
         assert_eq!(CurrencyCode::new("JPY").unwrap().minor_unit_digits(), 0);
         assert_eq!(CurrencyCode::new("KWD").unwrap().minor_unit_digits(), 3);
         assert_eq!(usd().minor_unit_digits(), 2);
+    }
+
+    #[test]
+    fn negation_rejects_the_minimum_amount() {
+        assert!(Money::new(i64::MIN, usd()).negated().is_err());
+        assert_eq!(Money::new(5, usd()).negated().unwrap().amount_minor(), -5);
     }
 
     #[test]
@@ -312,6 +326,8 @@ mod tests {
     #[test]
     fn money_formats_with_currency_minor_units() {
         assert_eq!(Money::new(1234, usd()).to_string(), "12.34 USD");
+        assert_eq!(Money::new(-5, usd()).to_string(), "-0.05 USD");
+        assert_eq!(Money::new(-1234, usd()).to_string(), "-12.34 USD");
         assert_eq!(
             Money::new(1234, CurrencyCode::new("JPY").unwrap()).to_string(),
             "1234 JPY"
