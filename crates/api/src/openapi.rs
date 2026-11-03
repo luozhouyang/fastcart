@@ -46,6 +46,8 @@ use crate::state::AppContext;
     crate::routes::admin_campaigns::CreateCampaignRequest,
     crate::routes::admin_campaigns::LinkPromotionRequest,
     crate::routes::admin_campaigns::UpdateCampaignRequest,
+    crate::routes::admin_workflows::WorkflowExecutionDto,
+    crate::routes::admin_workflows::WorkflowStepDto,
     crate::routes::admin_regions::CreatePublishableKeyRequest,
     crate::routes::admin_regions::CreateRegionRequest,
     crate::routes::admin_regions::CreatedPublishableKeyDto,
@@ -672,6 +674,7 @@ fn admin_routes() -> Vec<Route> {
     routes.extend(admin_tax_routes());
     routes.extend(admin_theme_routes());
     routes.extend(admin_webhook_routes());
+    routes.extend(admin_workflow_routes());
     routes
 }
 
@@ -2370,6 +2373,25 @@ fn admin_theme_routes() -> Vec<Route> {
             Auth::Admin,
             None,
             ok(Schema::Ref("Theme")),
+        ),
+    ]
+}
+
+fn admin_workflow_routes() -> Vec<Route> {
+    vec![
+        get(
+            "/api/v1/admin/workflows-executions",
+            "List workflow executions",
+            Auth::Admin,
+            PAGED,
+            ok(Schema::Page("WorkflowExecutionDto")),
+        ),
+        get(
+            "/api/v1/admin/workflows-executions/{id}",
+            "Get a workflow execution",
+            Auth::Admin,
+            &[],
+            ok(Schema::Ref("WorkflowExecutionDto")),
         ),
     ]
 }
@@ -4480,12 +4502,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 158);
+        assert_eq!(count("/api/v1/admin"), 160);
         assert_eq!(count("/api/v1/store"), 42);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/internal/storefront"), 42);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 267);
+        assert_eq!(paths.len(), 269);
 
         for key in [
             "/api/v1/platform/stores",
@@ -4593,7 +4615,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 370);
+        assert_eq!(operation_count, 372);
     }
 
     #[test]

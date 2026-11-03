@@ -6,9 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 fastcart-email.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-kernel.workspace = true

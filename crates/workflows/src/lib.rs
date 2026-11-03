@@ -5,8 +5,13 @@
 
 pub mod cart;
 pub mod checkout;
+pub mod engine;
 pub mod maintenance;
 
 pub use cart::{CartContext, CartWorkflow};
 pub use checkout::{CheckoutWorkflow, CompleteCheckoutResult, CreateCheckoutRequest};
+pub use engine::{
+    EngineConfig, StepContext, StepError, WorkflowDefinition, WorkflowEngine, WorkflowExecution,
+    WorkflowExecutionDetail, WorkflowExecutionFilter, WorkflowStep, WorkflowStepRecord, status,
+};
 pub use maintenance::{MaintenanceReport, run_maintenance, run_maintenance_with_options};

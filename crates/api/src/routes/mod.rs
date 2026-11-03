@@ -15,6 +15,7 @@ pub mod admin_shipping;
 pub mod admin_tax;
 pub mod admin_theme;
 pub mod admin_webhooks;
+pub mod admin_workflows;
 pub mod auth;
 pub mod health;
 pub mod platform;

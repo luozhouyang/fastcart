@@ -1256,6 +1256,7 @@ dependencies = [
 name = "fastcart-workflows"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "fastcart-email",
  "fastcart-infrastructure",
@@ -1275,9 +1276,11 @@ dependencies = [
  "fastcart-platform",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
