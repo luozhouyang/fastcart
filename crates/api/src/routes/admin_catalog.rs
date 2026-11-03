@@ -47,6 +47,10 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/catalog/products/{id}/archive", post(archive_product))
         .route("/catalog/products/{id}/variants", post(create_variant))
         .route(
+            "/products/{id}/sales-channels",
+            post(set_product_sales_channels),
+        )
+        .route(
             "/catalog/variants/{id}",
             get(get_variant)
                 .patch(update_variant)
@@ -390,6 +394,13 @@ struct ProductTagRequest {
     tag_id: String,
 }
 
+/// Body replacing the sales channels a product is published to.
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ProductSalesChannelsRequest {
+    #[serde(default)]
+    sales_channel_ids: Vec<String>,
+}
+
 /// Batch settings update body.
 #[derive(Clone, Debug, Deserialize)]
 struct SettingsRequest {
@@ -482,6 +493,7 @@ async fn list_products(
         collection_id: query.collection_id,
         tag_value: query.tag,
         query: query.query,
+        sales_channel_ids: None,
         include_deleted: query.include_deleted,
     };
     let page = CatalogService::new(db)
@@ -583,6 +595,33 @@ async fn archive_product(
         "product",
         product_id.as_str(),
         serde_json::Value::Null,
+    )
+    .await;
+    Ok(Json(product))
+}
+
+/// Replaces the sales channels a product is published to.
+async fn set_product_sales_channels(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<ProductSalesChannelsRequest>,
+) -> ApiResult<Json<Product>> {
+    authorize(&actor, "products.write")?;
+    let product_id = ProductId::from_string(id);
+    let service = CatalogService::new(db);
+    service
+        .set_product_sales_channels(product_id.as_str(), &request.sales_channel_ids)
+        .await?;
+    let product = service.get_product(product_id.as_str()).await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "product.sales_channels_updated",
+        "product",
+        product_id.as_str(),
+        serde_json::json!({"sales_channel_ids": request.sales_channel_ids}),
     )
     .await;
     Ok(Json(product))

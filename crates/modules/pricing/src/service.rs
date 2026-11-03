@@ -4,22 +4,24 @@ use std::collections::HashMap;
 
 use fastcart_infrastructure::{StoreDatabase, database_error};
 use fastcart_kernel::{
-    AppError, CurrencyCode, PageResult, Pagination, PriceId, PriceListId, now_timestamp,
+    AppError, CurrencyCode, PageResult, Pagination, PriceId, PriceListId, PriceSetId, now_timestamp,
 };
 use sqlx::Row;
 use sqlx::{QueryBuilder, Sqlite};
 
 use crate::domain::{
     CreatePriceInput, CreatePriceListInput, Price, PriceContext, PriceFilter, PriceList,
-    PriceListRule, PriceListRuleInput, SelectedPrice, UpdatePriceInput, UpdatePriceListInput,
-    normalize_rule_input, select_price, validate_price_fields, validate_price_list_fields,
+    PriceListRule, PriceListRuleInput, PriceListType, PriceSet, SelectedPrice, UpdatePriceInput,
+    UpdatePriceListInput, normalize_rule_input, select_price, validate_price_fields,
+    validate_price_list_fields,
 };
 
 const PRICE_LIST_COLUMNS: &str = "id, title, description, type AS price_type, status, starts_at, \
      ends_at, metadata, created_at, updated_at";
-const PRICE_COLUMNS: &str = "id, price_list_id, variant_id, currency_code, amount, min_quantity, \
-     max_quantity, customer_group_id, sales_channel_id, starts_at, ends_at, metadata, created_at, \
-     updated_at";
+const PRICE_COLUMNS: &str = "id, price_list_id, \
+     (SELECT type FROM price_lists WHERE id = prices.price_list_id) AS price_list_type, \
+     variant_id, currency_code, amount, min_quantity, max_quantity, customer_group_id, \
+     sales_channel_id, starts_at, ends_at, metadata, created_at, updated_at";
 const PRICE_LIST_RULE_COLUMNS: &str = "id, price_list_id, attribute, operator, value, created_at";
 
 /// Application service for price lists, prices and deterministic selection.
@@ -215,6 +217,39 @@ impl PricingService {
         Ok(PageResult::new(price_lists, count, pagination))
     }
 
+    // ---------------------------------------------------------------------
+    // Price sets
+    // ---------------------------------------------------------------------
+
+    /// Returns the price set linked to a variant, creating it when absent.
+    pub async fn get_or_create_price_set_for_variant(
+        &self,
+        variant_id: &str,
+    ) -> Result<PriceSet, AppError> {
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let price_set = ensure_price_set_tx(&mut transaction, variant_id).await?;
+        transaction.commit().await.map_err(database_error)?;
+        Ok(price_set)
+    }
+
+    /// Returns the price set linked to a variant, when one exists.
+    pub async fn get_price_set_for_variant(
+        &self,
+        variant_id: &str,
+    ) -> Result<Option<PriceSet>, AppError> {
+        let row = sqlx::query_as::<_, PriceSetRow>(
+            "SELECT ps.id, ps.title, ps.metadata, ps.created_at, ps.updated_at
+             FROM price_sets ps
+             JOIN product_variant_price_set link ON link.price_set_id = ps.id
+             WHERE link.variant_id = ?",
+        )
+        .bind(variant_id)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        row.map(PriceSetRow::into_price_set).transpose()
+    }
+
     /// Creates a price.
     pub async fn create_price(&self, input: CreatePriceInput) -> Result<Price, AppError> {
         validate_price_fields(
@@ -226,9 +261,10 @@ impl PricingService {
             input.ends_at,
             &input.metadata,
         )?;
-        if let Some(price_list_id) = input.price_list_id.as_deref() {
-            self.ensure_price_list_exists(price_list_id).await?;
-        }
+        let price_list_type = match input.price_list_id.as_deref() {
+            Some(price_list_id) => Some(self.ensure_price_list_exists(price_list_id).await?),
+            None => None,
+        };
         if self
             .find_price_id_by_scope(
                 &input.variant_id,
@@ -248,15 +284,18 @@ impl PricingService {
 
         let id = PriceId::new().to_string();
         let now = now_timestamp();
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let price_set = ensure_price_set_tx(&mut transaction, &input.variant_id).await?;
         sqlx::query(
             "INSERT INTO prices
-             (id, price_list_id, variant_id, currency_code, amount, min_quantity, max_quantity,
-              customer_group_id, sales_channel_id, starts_at, ends_at, metadata, created_at,
-              updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, price_list_id, price_set_id, variant_id, currency_code, amount, min_quantity,
+              max_quantity, customer_group_id, sales_channel_id, starts_at, ends_at, metadata,
+              created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&input.price_list_id)
+        .bind(&price_set.id)
         .bind(&input.variant_id)
         .bind(input.currency_code.as_str())
         .bind(input.amount)
@@ -269,13 +308,15 @@ impl PricingService {
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
+        transaction.commit().await.map_err(database_error)?;
 
         Ok(Price {
             id,
             price_list_id: input.price_list_id,
+            price_list_type,
             variant_id: input.variant_id,
             currency_code: input.currency_code,
             amount: input.amount,
@@ -288,6 +329,7 @@ impl PricingService {
             metadata: input.metadata,
             created_at: now,
             updated_at: now,
+            price_list_rule_count: 0,
         })
     }
 
@@ -318,9 +360,10 @@ impl PricingService {
             ends_at,
             &metadata,
         )?;
-        if let Some(price_list_id) = price_list_id.as_deref() {
-            self.ensure_price_list_exists(price_list_id).await?;
-        }
+        let price_list_type = match price_list_id.as_deref() {
+            Some(price_list_id) => Some(self.ensure_price_list_exists(price_list_id).await?),
+            None => None,
+        };
         if let Some(found_id) = self
             .find_price_id_by_scope(
                 &variant_id,
@@ -340,14 +383,17 @@ impl PricingService {
         }
 
         let now = now_timestamp();
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let price_set = ensure_price_set_tx(&mut transaction, &variant_id).await?;
         sqlx::query(
             "UPDATE prices
-             SET price_list_id = ?, variant_id = ?, currency_code = ?, amount = ?,
-                 min_quantity = ?, max_quantity = ?, customer_group_id = ?, sales_channel_id = ?,
-                 starts_at = ?, ends_at = ?, metadata = ?, updated_at = ?
+             SET price_list_id = ?, price_set_id = ?, variant_id = ?, currency_code = ?,
+                 amount = ?, min_quantity = ?, max_quantity = ?, customer_group_id = ?,
+                 sales_channel_id = ?, starts_at = ?, ends_at = ?, metadata = ?, updated_at = ?
              WHERE id = ?",
         )
         .bind(&price_list_id)
+        .bind(&price_set.id)
         .bind(&variant_id)
         .bind(currency_code.as_str())
         .bind(amount)
@@ -360,13 +406,15 @@ impl PricingService {
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(id)
-        .execute(self.db.pool())
+        .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
+        transaction.commit().await.map_err(database_error)?;
 
         Ok(Price {
             id: id.to_owned(),
             price_list_id,
+            price_list_type,
             variant_id,
             currency_code,
             amount,
@@ -379,6 +427,7 @@ impl PricingService {
             metadata,
             created_at: existing.created_at,
             updated_at: now,
+            price_list_rule_count: existing.price_list_rule_count,
         })
     }
 
@@ -511,10 +560,11 @@ impl PricingService {
             .map_err(database_error)?;
 
             let id = if let Some(existing_id) = existing_id {
+                let price_set = ensure_price_set_tx(&mut transaction, &input.variant_id).await?;
                 sqlx::query(
                     "UPDATE prices
                      SET max_quantity = ?, starts_at = ?, ends_at = ?, metadata = ?,
-                         amount = ?, updated_at = ?
+                         amount = ?, price_set_id = ?, updated_at = ?
                      WHERE id = ?",
                 )
                 .bind(input.max_quantity)
@@ -522,6 +572,7 @@ impl PricingService {
                 .bind(input.ends_at)
                 .bind(input.metadata.to_json_string())
                 .bind(input.amount)
+                .bind(&price_set.id)
                 .bind(now)
                 .bind(&existing_id)
                 .execute(&mut *transaction)
@@ -530,15 +581,17 @@ impl PricingService {
                 existing_id
             } else {
                 let id = PriceId::new().to_string();
+                let price_set = ensure_price_set_tx(&mut transaction, &input.variant_id).await?;
                 sqlx::query(
                     "INSERT INTO prices
-                     (id, price_list_id, variant_id, currency_code, amount, min_quantity,
-                      max_quantity, customer_group_id, sales_channel_id, starts_at, ends_at,
-                      metadata, created_at, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, price_list_id, price_set_id, variant_id, currency_code, amount,
+                      min_quantity, max_quantity, customer_group_id, sales_channel_id, starts_at,
+                      ends_at, metadata, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&id)
                 .bind(&input.price_list_id)
+                .bind(&price_set.id)
                 .bind(&input.variant_id)
                 .bind(input.currency_code.as_str())
                 .bind(input.amount)
@@ -611,9 +664,10 @@ impl PricingService {
         }
 
         let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
-            "SELECT p.id, p.price_list_id, p.variant_id, p.currency_code, p.amount,
-                    p.min_quantity, p.max_quantity, p.customer_group_id, p.sales_channel_id,
-                    p.starts_at, p.ends_at, p.metadata, p.created_at, p.updated_at
+            "SELECT p.id, p.price_list_id, pl.type AS price_list_type, p.variant_id,
+                    p.currency_code, p.amount, p.min_quantity, p.max_quantity,
+                    p.customer_group_id, p.sales_channel_id, p.starts_at, p.ends_at, p.metadata,
+                    p.created_at, p.updated_at
              FROM prices p
              LEFT JOIN price_lists pl ON pl.id = p.price_list_id
              WHERE p.currency_code = ",
@@ -673,6 +727,15 @@ impl PricingService {
                 .as_ref()
                 .is_none_or(|list_id| rules_match(rules.get(list_id), context))
         });
+        for price in &mut prices {
+            price.price_list_rule_count = price
+                .price_list_id
+                .as_deref()
+                .and_then(|list_id| rules.get(list_id))
+                .map_or(0, |list_rules| {
+                    i64::try_from(list_rules.len()).unwrap_or(i64::MAX)
+                });
+        }
         Ok(prices)
     }
 
@@ -711,16 +774,17 @@ impl PricingService {
         Ok(rules)
     }
 
-    async fn ensure_price_list_exists(&self, id: &str) -> Result<(), AppError> {
-        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM price_lists WHERE id = ?")
-            .bind(id)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(database_error)?;
-        if exists.is_none() {
-            return Err(AppError::not_found("price list", id));
+    async fn ensure_price_list_exists(&self, id: &str) -> Result<PriceListType, AppError> {
+        let price_type: Option<String> =
+            sqlx::query_scalar("SELECT type FROM price_lists WHERE id = ?")
+                .bind(id)
+                .fetch_optional(self.db.pool())
+                .await
+                .map_err(database_error)?;
+        match price_type {
+            Some(price_type) => price_type.parse(),
+            None => Err(AppError::not_found("price list", id)),
         }
-        Ok(())
     }
 
     async fn find_price_id_by_scope(
@@ -892,10 +956,79 @@ impl PriceListRuleRow {
     }
 }
 
+async fn ensure_price_set_tx(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    variant_id: &str,
+) -> Result<PriceSet, AppError> {
+    if let Some(row) = sqlx::query_as::<_, PriceSetRow>(
+        "SELECT ps.id, ps.title, ps.metadata, ps.created_at, ps.updated_at
+         FROM price_sets ps
+         JOIN product_variant_price_set link ON link.price_set_id = ps.id
+         WHERE link.variant_id = ?",
+    )
+    .bind(variant_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(database_error)?
+    {
+        return row.into_price_set();
+    }
+
+    let id = PriceSetId::new().to_string();
+    let title = format!("Prices for {variant_id}");
+    let now = now_timestamp();
+    sqlx::query(
+        "INSERT INTO price_sets (id, title, metadata, created_at, updated_at)
+         VALUES (?, ?, '{}', ?, ?)",
+    )
+    .bind(&id)
+    .bind(&title)
+    .bind(now)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    sqlx::query("INSERT INTO product_variant_price_set (variant_id, price_set_id) VALUES (?, ?)")
+        .bind(variant_id)
+        .bind(&id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    Ok(PriceSet {
+        id,
+        title: Some(title),
+        metadata: fastcart_kernel::Metadata::empty(),
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PriceSetRow {
+    id: String,
+    title: Option<String>,
+    metadata: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl PriceSetRow {
+    fn into_price_set(self) -> Result<PriceSet, AppError> {
+        Ok(PriceSet {
+            id: self.id,
+            title: self.title,
+            metadata: fastcart_kernel::Metadata::from_json_str(&self.metadata),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct PriceRow {
     id: String,
     price_list_id: Option<String>,
+    price_list_type: Option<String>,
     variant_id: String,
     currency_code: String,
     amount: i64,
@@ -915,6 +1048,10 @@ impl PriceRow {
         Ok(Price {
             id: self.id,
             price_list_id: self.price_list_id,
+            price_list_type: self
+                .price_list_type
+                .map(|price_type| price_type.parse())
+                .transpose()?,
             variant_id: self.variant_id,
             currency_code: CurrencyCode::new(self.currency_code)?,
             amount: self.amount,
@@ -927,6 +1064,7 @@ impl PriceRow {
             metadata: fastcart_kernel::Metadata::from_json_str(&self.metadata),
             created_at: self.created_at,
             updated_at: self.updated_at,
+            price_list_rule_count: 0,
         })
     }
 }
@@ -988,6 +1126,7 @@ mod tests {
         Price {
             id: id.to_owned(),
             price_list_id: None,
+            price_list_type: None,
             variant_id: "var_1".to_owned(),
             currency_code: usd(),
             amount,
@@ -1000,7 +1139,22 @@ mod tests {
             metadata: Metadata::empty(),
             created_at: 0,
             updated_at: 0,
+            price_list_rule_count: 0,
         }
+    }
+
+    fn sale_price(id: &str, list_id: &str, amount: i64) -> Price {
+        let mut price = sample_price(id, amount);
+        price.price_list_id = Some(list_id.to_owned());
+        price.price_list_type = Some(PriceListType::Sale);
+        price
+    }
+
+    fn override_price(id: &str, list_id: &str, amount: i64) -> Price {
+        let mut price = sample_price(id, amount);
+        price.price_list_id = Some(list_id.to_owned());
+        price.price_list_type = Some(PriceListType::Override);
+        price
     }
 
     #[test]
@@ -1100,29 +1254,93 @@ mod tests {
     }
 
     #[test]
-    fn selector_prefers_price_list_over_base() {
+    fn selector_applies_sale_only_when_it_is_a_discount() {
         let base = sample_price("price_base", 1000);
-        let mut listed = sample_price("price_listed", 1100);
-        listed.price_list_id = Some("plist_1".to_owned());
-
-        let selected = select_price(&[base, listed], &context(1, 100)).unwrap();
-        assert_eq!(selected.price_id, "price_listed");
+        let cheaper = sale_price("price_sale", "plist_1", 900);
+        let selected = select_price(&[base.clone(), cheaper], &context(1, 100)).unwrap();
+        assert_eq!(selected.price_id, "price_sale");
         assert_eq!(selected.price_list_id.as_deref(), Some("plist_1"));
+        assert_eq!(selected.price_list_type, Some(PriceListType::Sale));
+        assert_eq!(selected.original_amount, Some(1000));
+
+        let expensive = sale_price("price_sale", "plist_1", 1100);
+        let selected = select_price(&[base, expensive], &context(1, 100)).unwrap();
+        assert_eq!(selected.price_id, "price_base");
+        assert_eq!(selected.price_list_type, None);
+        assert_eq!(selected.original_amount, None);
+    }
+
+    #[test]
+    fn selector_uses_sale_when_no_base_price_exists() {
+        let only_sale = sale_price("price_sale", "plist_1", 900);
+        let selected = select_price(&[only_sale], &context(1, 100)).unwrap();
+        assert_eq!(selected.price_id, "price_sale");
+        assert_eq!(selected.original_amount, None);
+    }
+
+    #[test]
+    fn selector_override_replaces_base_and_sale() {
+        let base = sample_price("price_base", 1000);
+        let sale = sale_price("price_sale", "plist_sale", 700);
+        let over = override_price("price_override", "plist_override", 1200);
+
+        let selected = select_price(&[base, sale, over], &context(1, 100)).unwrap();
+        assert_eq!(selected.price_id, "price_override");
+        assert_eq!(selected.price_list_type, Some(PriceListType::Override));
+        assert_eq!(selected.original_amount, Some(1000));
+    }
+
+    #[test]
+    fn selector_ranks_multiple_matching_lists_deterministically() {
+        let base = sample_price("price_base", 1000);
+
+        // More matching rules beat a cheaper but less specific list.
+        let mut generic = sale_price("price_generic", "plist_generic", 800);
+        generic.price_list_rule_count = 0;
+        let mut specific = sale_price("price_specific", "plist_specific", 950);
+        specific.price_list_rule_count = 1;
+        assert_eq!(
+            select_price(
+                &[base.clone(), generic.clone(), specific.clone()],
+                &context(1, 100)
+            )
+            .unwrap()
+            .price_id,
+            "price_specific"
+        );
+
+        // With equal specificity the lowest amount wins.
+        let mut cheaper = generic.clone();
+        cheaper.price_list_rule_count = 1;
+        cheaper.amount = 700;
+        assert_eq!(
+            select_price(&[base.clone(), specific, cheaper], &context(1, 100))
+                .unwrap()
+                .price_id,
+            "price_generic"
+        );
+
+        // With equal specificity and amount the newest wins.
+        let mut newest = generic;
+        newest.price_list_rule_count = 1;
+        newest.amount = 700;
+        newest.starts_at = Some(50);
+        let older = {
+            let mut older = newest.clone();
+            older.id = "price_older".to_owned();
+            older.starts_at = Some(10);
+            older
+        };
+        assert_eq!(
+            select_price(&[base, older, newest], &context(1, 100))
+                .unwrap()
+                .price_id,
+            "price_generic"
+        );
     }
 
     #[test]
     fn selector_tie_breaks_are_deterministic() {
-        let mut newest = sample_price("price_newest", 1200);
-        newest.starts_at = Some(50);
-        let mut older = sample_price("price_older", 1000);
-        older.starts_at = Some(10);
-        assert_eq!(
-            select_price(&[older.clone(), newest.clone()], &context(1, 100))
-                .unwrap()
-                .price_id,
-            "price_newest"
-        );
-
         let cheap = sample_price("price_cheap", 1000);
         let expensive = sample_price("price_expensive", 1100);
         assert_eq!(
@@ -1513,5 +1731,122 @@ mod tests {
         assert_eq!(batch["var_1"].as_ref().unwrap().amount, 1000);
         assert_eq!(batch["var_2"].as_ref().unwrap().amount, 2000);
         assert!(batch["var_missing"].is_none());
+    }
+
+    #[tokio::test]
+    async fn price_sets_are_created_once_per_variant_and_linked_to_prices() {
+        let service = service().await;
+        let base = service
+            .create_price(CreatePriceInput::new("var_1", usd(), 1000))
+            .await
+            .unwrap();
+        let price_set = service
+            .get_price_set_for_variant("var_1")
+            .await
+            .unwrap()
+            .expect("price set");
+        assert_eq!(price_set.title.as_deref(), Some("Prices for var_1"));
+
+        let stored_set_id: String =
+            sqlx::query_scalar("SELECT price_set_id FROM prices WHERE id = ?")
+                .bind(&base.id)
+                .fetch_one(service.db.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored_set_id, price_set.id);
+
+        let list = service
+            .create_price_list(CreatePriceListInput::new("Sale").active())
+            .await
+            .unwrap();
+        service
+            .create_price(CreatePriceInput::new("var_1", usd(), 900).with_price_list(&list.id))
+            .await
+            .unwrap();
+        let same_set = service
+            .get_or_create_price_set_for_variant("var_1")
+            .await
+            .unwrap();
+        assert_eq!(same_set.id, price_set.id);
+
+        let other_set = service
+            .get_or_create_price_set_for_variant("var_2")
+            .await
+            .unwrap();
+        assert_ne!(other_set.id, price_set.id);
+        assert!(
+            service
+                .get_price_set_for_variant("var_missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn calculation_treats_sales_as_discounts_and_overrides_as_replacements() {
+        let service = service().await;
+        service
+            .create_price(CreatePriceInput::new("var_1", usd(), 1000))
+            .await
+            .unwrap();
+
+        let sale = service
+            .create_price_list(CreatePriceListInput::new("Summer sale").active())
+            .await
+            .unwrap();
+        service
+            .create_price(CreatePriceInput::new("var_1", usd(), 800).with_price_list(&sale.id))
+            .await
+            .unwrap();
+        let selected = service
+            .calculate_price("var_1", &context(1, 100))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.amount, 800);
+        assert_eq!(selected.price_list_type, Some(PriceListType::Sale));
+        assert_eq!(selected.original_amount, Some(1000));
+
+        let overpriced = service
+            .create_price_list(CreatePriceListInput::new("Bad sale").active())
+            .await
+            .unwrap();
+        service
+            .create_price(
+                CreatePriceInput::new("var_1", usd(), 1200).with_price_list(&overpriced.id),
+            )
+            .await
+            .unwrap();
+        let selected = service
+            .calculate_price("var_1", &context(1, 100))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.amount, 800);
+        assert_eq!(selected.price_list_id.as_deref(), Some(sale.id.as_str()));
+
+        let override_list = service
+            .create_price_list({
+                let mut input = CreatePriceListInput::new("Absolute").active();
+                input.price_type = PriceListType::Override;
+                input
+            })
+            .await
+            .unwrap();
+        service
+            .create_price(
+                CreatePriceInput::new("var_1", usd(), 1500).with_price_list(&override_list.id),
+            )
+            .await
+            .unwrap();
+        let selected = service
+            .calculate_price("var_1", &context(1, 100))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.amount, 1500);
+        assert_eq!(selected.price_list_type, Some(PriceListType::Override));
+        assert_eq!(selected.original_amount, Some(1000));
     }
 }

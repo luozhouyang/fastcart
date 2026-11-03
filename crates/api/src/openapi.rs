@@ -146,7 +146,9 @@ use crate::state::AppContext;
     fastcart_module_pricing::PriceListRule,
     fastcart_module_pricing::PriceListStatus,
     fastcart_module_pricing::PriceListType,
+    fastcart_module_pricing::PriceSet,
     fastcart_module_pricing::SelectedPrice,
+    crate::routes::store_catalog::CalculatedPrice,
     fastcart_module_promotion::Campaign,
     fastcart_module_promotion::Coupon,
     fastcart_module_promotion::Promotion,
@@ -731,6 +733,13 @@ fn admin_catalog_routes() -> Vec<Route> {
             Auth::Admin,
             Some("CreateVariantRequest"),
             created(Schema::Ref("Variant")),
+        ),
+        post(
+            "/api/v1/admin/products/{id}/sales-channels",
+            "Replace the sales channels a product is published to",
+            Auth::Admin,
+            Some("SetProductSalesChannelsRequest"),
+            ok(Schema::Ref("Product")),
         ),
         get(
             "/api/v1/admin/catalog/variants/{id}",
@@ -2554,15 +2563,24 @@ fn store_routes() -> Vec<Route> {
                 "collection_id",
                 "tag",
                 "query",
+                "currency_code",
+                "region_id",
+                "customer_group_id",
+                "quantity",
             ],
-            ok(Schema::Page("Product")),
+            ok(Schema::Page("StoreProduct")),
         ),
         get(
             "/api/v1/store/products/{handle}",
             "Get a published product by handle",
             Auth::Public,
-            &[],
-            ok(Schema::Ref("Product")),
+            &[
+                "currency_code",
+                "region_id",
+                "customer_group_id",
+                "quantity",
+            ],
+            ok(Schema::Ref("StoreProduct")),
         ),
         get(
             "/api/v1/store/categories",
@@ -3587,6 +3605,24 @@ fn schemas() -> Value {
         ], &[]),
 
 
+        "SetProductSalesChannelsRequest": object(&[
+            ("sales_channel_ids", array_of(string())),
+        ], &[]),
+
+
+        "StoreProduct": json!({
+            "allOf": [
+                schema_ref("Product"),
+                {
+                    "type": "object",
+                    "properties": {
+                        "calculated_price": nullable(schema_ref("CalculatedPrice")),
+                    },
+                },
+            ],
+        }),
+
+
         "CreateVariantRequest": object(&[
             ("title", string()),
             ("sku", optional_string()),
@@ -4378,12 +4414,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 157);
+        assert_eq!(count("/api/v1/admin"), 158);
         assert_eq!(count("/api/v1/store"), 38);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/internal/storefront"), 38);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 258);
+        assert_eq!(paths.len(), 259);
 
         for key in [
             "/api/v1/platform/stores",
@@ -4491,7 +4527,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 361);
+        assert_eq!(operation_count, 362);
     }
 
     #[test]

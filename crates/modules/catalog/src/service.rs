@@ -413,6 +413,113 @@ impl CatalogService {
         Ok(product)
     }
 
+    /// Loads an active, non-deleted product by handle when it is published to
+    /// at least one of the supplied sales channels.
+    ///
+    /// An empty channel list applies no channel filter.
+    pub async fn get_published_by_handle_in_channels(
+        &self,
+        handle: &str,
+        sales_channel_ids: &[String],
+    ) -> Result<Product, AppError> {
+        if sales_channel_ids.is_empty() {
+            return self.get_published_by_handle(handle).await;
+        }
+        let placeholders = sql_markers(sales_channel_ids.len());
+        let sql = format!(
+            "SELECT {PRODUCT_COLUMNS} FROM products p \
+             WHERE p.handle = ? AND p.deleted_at IS NULL AND p.status = 'active' \
+             AND EXISTS (SELECT 1 FROM product_sales_channels sc \
+                         WHERE sc.product_id = p.id AND sc.sales_channel_id IN ({placeholders}))"
+        );
+        let mut query = sqlx::query(&sql).bind(handle);
+        for channel_id in sales_channel_ids {
+            query = query.bind(channel_id);
+        }
+        let row = query
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("published product handle", handle))?;
+        let mut product = product_from_row(&row)?;
+        self.hydrate_products(std::slice::from_mut(&mut product))
+            .await?;
+        Ok(product)
+    }
+
+    // ---------------------------------------------------------------------
+    // Sales channels
+    // ---------------------------------------------------------------------
+
+    /// Replaces the sales channels a product is published to.
+    ///
+    /// Every channel must exist before any link is changed, and the replace is
+    /// performed in a single transaction.
+    pub async fn set_product_sales_channels(
+        &self,
+        product_id: &str,
+        channel_ids: &[String],
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE id = ? AND deleted_at IS NULL")
+                .bind(product_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        if exists == 0 {
+            return Err(AppError::not_found("product", product_id));
+        }
+
+        let mut seen = HashSet::new();
+        for channel_id in channel_ids {
+            if !seen.insert(channel_id) {
+                continue;
+            }
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sales_channels WHERE id = ?")
+                .bind(channel_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database_error)?;
+            if count == 0 {
+                return Err(AppError::not_found("sales channel", channel_id));
+            }
+        }
+
+        sqlx::query("DELETE FROM product_sales_channels WHERE product_id = ?")
+            .bind(product_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        for channel_id in seen {
+            sqlx::query(
+                "INSERT INTO product_sales_channels (product_id, sales_channel_id) VALUES (?, ?)",
+            )
+            .bind(product_id)
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Lists the sales channels a product is published to.
+    pub async fn list_product_sales_channel_ids(
+        &self,
+        product_id: &str,
+    ) -> Result<Vec<String>, AppError> {
+        sqlx::query_scalar(
+            "SELECT sales_channel_id FROM product_sales_channels \
+             WHERE product_id = ? ORDER BY sales_channel_id ASC",
+        )
+        .bind(product_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)
+    }
+
     async fn set_product_status(
         &self,
         id: &str,
@@ -1318,7 +1425,12 @@ impl CatalogService {
         query: &str,
         pagination: Pagination,
     ) -> Result<PageResult<Product>, AppError> {
-        self.search_products_inner(query, pagination, true).await
+        let filter = ProductFilter {
+            status: Some(ProductStatus::Active),
+            ..ProductFilter::default()
+        };
+        self.search_products_with_filter(query, filter, pagination)
+            .await
     }
 
     /// Searches all non-deleted products for administration using FTS5.
@@ -1327,7 +1439,61 @@ impl CatalogService {
         query: &str,
         pagination: Pagination,
     ) -> Result<PageResult<Product>, AppError> {
-        self.search_products_inner(query, pagination, false).await
+        self.search_products_with_filter(query, ProductFilter::default(), pagination)
+            .await
+    }
+
+    /// Searches products using FTS5 plus the supplied catalog filters.
+    ///
+    /// This is the storefront entry point when sales-channel scoping (or any
+    /// other structural filter) must be combined with full-text search.
+    pub async fn search_products_with_filter(
+        &self,
+        query: &str,
+        filter: ProductFilter,
+        pagination: Pagination,
+    ) -> Result<PageResult<Product>, AppError> {
+        let pagination = checked_pagination(pagination)?;
+        let Some(match_expression) = fts_query(query) else {
+            return Ok(PageResult::new(Vec::new(), 0, pagination));
+        };
+        let (where_clause, binds) = product_filter_clause(&filter);
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM product_search \
+             JOIN products p ON p.id = product_search.product_id \
+             WHERE product_search MATCH ? AND {where_clause}"
+        );
+        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql).bind(&match_expression);
+        for bind in &binds {
+            count_query = count_query.bind(bind);
+        }
+        let count = count_query
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let list_sql = format!(
+            "SELECT {PRODUCT_COLUMNS} FROM product_search \
+             JOIN products p ON p.id = product_search.product_id \
+             WHERE product_search MATCH ? AND {where_clause} \
+             ORDER BY p.created_at ASC, p.id ASC LIMIT ? OFFSET ?"
+        );
+        let mut list_query = sqlx::query(&list_sql).bind(&match_expression);
+        for bind in &binds {
+            list_query = list_query.bind(bind);
+        }
+        let rows = list_query
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let mut products = Vec::with_capacity(rows.len());
+        for row in &rows {
+            products.push(product_from_row(row)?);
+        }
+        self.hydrate_products(&mut products).await?;
+        Ok(PageResult::new(products, count, pagination))
     }
 
     /// Rebuilds the FTS index from the product and variant tables.
@@ -1351,53 +1517,6 @@ impl CatalogService {
         .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
         Ok(result.rows_affected())
-    }
-
-    async fn search_products_inner(
-        &self,
-        query: &str,
-        pagination: Pagination,
-        storefront_only: bool,
-    ) -> Result<PageResult<Product>, AppError> {
-        let pagination = checked_pagination(pagination)?;
-        let Some(match_expression) = fts_query(query) else {
-            return Ok(PageResult::new(Vec::new(), 0, pagination));
-        };
-        let status_clause = if storefront_only {
-            "AND p.status = 'active'"
-        } else {
-            ""
-        };
-        let count_sql = format!(
-            "SELECT COUNT(*) FROM product_search \
-             JOIN products p ON p.id = product_search.product_id \
-             WHERE product_search MATCH ? AND p.deleted_at IS NULL {status_clause}"
-        );
-        let count: i64 = sqlx::query_scalar(&count_sql)
-            .bind(&match_expression)
-            .fetch_one(self.db.pool())
-            .await
-            .map_err(database_error)?;
-
-        let list_sql = format!(
-            "SELECT {PRODUCT_COLUMNS} FROM product_search \
-             JOIN products p ON p.id = product_search.product_id \
-             WHERE product_search MATCH ? AND p.deleted_at IS NULL {status_clause} \
-             ORDER BY p.created_at ASC, p.id ASC LIMIT ? OFFSET ?"
-        );
-        let rows = sqlx::query(&list_sql)
-            .bind(&match_expression)
-            .bind(pagination.limit)
-            .bind(pagination.offset)
-            .fetch_all(self.db.pool())
-            .await
-            .map_err(database_error)?;
-        let mut products = Vec::with_capacity(rows.len());
-        for row in &rows {
-            products.push(product_from_row(row)?);
-        }
-        self.hydrate_products(&mut products).await?;
-        Ok(PageResult::new(products, count, pagination))
     }
 
     // ---------------------------------------------------------------------
@@ -1607,6 +1726,28 @@ impl CatalogService {
                 .push(tag_from_row(&row)?);
         }
 
+        let mut sales_channels: HashMap<String, Vec<String>> = HashMap::new();
+        let sql = format!(
+            "SELECT product_id, sales_channel_id FROM product_sales_channels \
+             WHERE product_id IN ({placeholders}) ORDER BY sales_channel_id ASC"
+        );
+        let mut query = sqlx::query(&sql);
+        for id in &ids {
+            query = query.bind(id);
+        }
+        for row in query
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?
+        {
+            let product_id: String = column(&row, "product_id")?;
+            let sales_channel_id: String = column(&row, "sales_channel_id")?;
+            sales_channels
+                .entry(product_id)
+                .or_default()
+                .push(sales_channel_id);
+        }
+
         for product in products.iter_mut() {
             product.variants = variants.remove(&product.id).unwrap_or_default();
             product.options = options.remove(&product.id).unwrap_or_default();
@@ -1614,6 +1755,7 @@ impl CatalogService {
             product.categories = categories.remove(&product.id).unwrap_or_default();
             product.collections = collections.remove(&product.id).unwrap_or_default();
             product.tags = tags.remove(&product.id).unwrap_or_default();
+            product.sales_channel_ids = sales_channels.remove(&product.id).unwrap_or_default();
         }
         Ok(())
     }
@@ -2396,6 +2538,7 @@ fn product_from_row(row: &SqliteRow) -> Result<Product, AppError> {
         categories: Vec::new(),
         collections: Vec::new(),
         tags: Vec::new(),
+        sales_channel_ids: Vec::new(),
     })
 }
 
@@ -2609,6 +2752,18 @@ fn product_filter_clause(filter: &ProductFilter) -> (String, Vec<String>) {
                 .to_owned(),
         );
         binds.push(tag_value.clone());
+    }
+    if let Some(channel_ids) = filter
+        .sales_channel_ids
+        .as_ref()
+        .filter(|channel_ids| !channel_ids.is_empty())
+    {
+        let markers = sql_markers(channel_ids.len());
+        conditions.push(format!(
+            "EXISTS (SELECT 1 FROM product_sales_channels sc \
+             WHERE sc.product_id = p.id AND sc.sales_channel_id IN ({markers}))"
+        ));
+        binds.extend(channel_ids.iter().cloned());
     }
     if let Some(query) = filter.query.as_ref() {
         let query = query.trim();

@@ -1,21 +1,26 @@
 //! Public storefront catalog routes.
 //!
 //! Every handler operates on the store resolved from the trusted `Host`; the
-//! client cannot select a store. Only published products are exposed.
+//! client cannot select a store. Only published products are exposed and, when
+//! a publishable API key is supplied, only products linked to one of the key's
+//! sales channels are visible.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::Path;
+use axum::extract::{Extension, Path};
 use axum::routing::get;
 use fastcart_http::{ApiQuery, ApiResult, PaginationQuery};
+use fastcart_infrastructure::StoreDatabase;
+use fastcart_kernel::{AppError, CurrencyCode, now_timestamp};
 use fastcart_module_catalog::{CatalogService, Product, ProductFilter, ProductStatus};
-use fastcart_module_store::StoreService;
-use serde::Deserialize;
+use fastcart_module_pricing::{PriceContext, PriceListType, PricingService};
+use fastcart_module_store::{RegionService, StoreService};
+use serde::{Deserialize, Serialize};
 
-use super::StoreDb;
+use super::{PublishableKeyContext, StoreDb};
 use crate::dto::PageResponse;
 use crate::state::AppContext;
 
@@ -45,6 +50,14 @@ struct ProductQuery {
     tag: Option<String>,
     /// Case-insensitive text matched against product data.
     query: Option<String>,
+    /// Currency used for calculated prices; takes precedence over `region_id`.
+    currency_code: Option<String>,
+    /// Region whose currency is used for calculated prices.
+    region_id: Option<String>,
+    /// Customer group used when selecting prices.
+    customer_group_id: Option<String>,
+    /// Quantity used when selecting quantity-tiered prices.
+    quantity: Option<i64>,
 }
 
 /// Query parameters accepted by storefront search.
@@ -58,26 +71,71 @@ struct SearchQuery {
     offset: Option<i64>,
 }
 
+/// A computed price for a storefront product.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CalculatedPrice {
+    /// Amount in minor currency units.
+    pub amount: i64,
+    /// Currency of the calculated price.
+    pub currency_code: String,
+    /// Winning price list, or `None` for a base price.
+    pub price_list_id: Option<String>,
+    /// Type of the winning price list, or `None` for a base price.
+    pub price_list_type: Option<PriceListType>,
+    /// Base amount the calculated price was compared against, when any.
+    pub original_amount: Option<i64>,
+    /// Evaluation timestamp in Unix seconds.
+    pub calculated_at: i64,
+}
+
+/// A product enriched with an optional calculated price.
+#[derive(Clone, Debug, Serialize)]
+pub struct StoreProduct {
+    /// The catalog product, flattened into the response object.
+    #[serde(flatten)]
+    pub product: Product,
+    /// Calculated price, present only when a currency was supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calculated_price: Option<CalculatedPrice>,
+}
+
 async fn list_products(
     StoreDb(db): StoreDb,
+    publishable_key: Option<Extension<PublishableKeyContext>>,
     ApiQuery(query): ApiQuery<ProductQuery>,
-) -> ApiResult<Json<PageResponse<Product>>> {
+) -> ApiResult<Json<PageResponse<StoreProduct>>> {
     let pagination = PaginationQuery {
         limit: query.limit,
         offset: query.offset,
     }
     .pagination()?;
-    let page = CatalogService::new(db)
-        .list_products(storefront_product_filter(query), pagination)
+    let channel_ids = key_sales_channel_ids(&publishable_key);
+    let page = CatalogService::new(db.clone())
+        .list_products(storefront_product_filter(&query, channel_ids), pagination)
         .await?;
+    let calculated = calculate_product_prices(&db, &page.data, &query).await?;
+    let page = page.map(|product| StoreProduct {
+        calculated_price: calculated.get(&product.id).cloned(),
+        product,
+    });
     Ok(Json(PageResponse::from_page(page)))
 }
 
-async fn get_product(StoreDb(db): StoreDb, Path(handle): Path<String>) -> ApiResult<Json<Product>> {
-    let product = CatalogService::new(db)
-        .get_published_by_handle(&handle)
+async fn get_product(
+    StoreDb(db): StoreDb,
+    publishable_key: Option<Extension<PublishableKeyContext>>,
+    Path(handle): Path<String>,
+    ApiQuery(query): ApiQuery<ProductQuery>,
+) -> ApiResult<Json<StoreProduct>> {
+    let channel_ids = key_sales_channel_ids(&publishable_key);
+    let product = CatalogService::new(db.clone())
+        .get_published_by_handle_in_channels(&handle, channel_ids)
         .await?;
-    Ok(Json(product))
+    let calculated = calculate_product_prices(&db, std::slice::from_ref(&product), &query).await?;
+    Ok(Json(StoreProduct {
+        calculated_price: calculated.get(&product.id).cloned(),
+        product,
+    }))
 }
 
 async fn list_categories(
@@ -104,6 +162,7 @@ async fn list_collections(
 
 async fn search(
     StoreDb(db): StoreDb,
+    publishable_key: Option<Extension<PublishableKeyContext>>,
     ApiQuery(query): ApiQuery<SearchQuery>,
 ) -> ApiResult<Json<PageResponse<Product>>> {
     let pagination = PaginationQuery {
@@ -111,8 +170,15 @@ async fn search(
         offset: query.offset,
     }
     .pagination()?;
+    let channel_ids = key_sales_channel_ids(&publishable_key);
+    let filter = ProductFilter {
+        status: Some(ProductStatus::Active),
+        sales_channel_ids: (!channel_ids.is_empty()).then(|| channel_ids.to_vec()),
+        include_deleted: false,
+        ..ProductFilter::default()
+    };
     let page = CatalogService::new(db)
-        .search_products(query.q.as_deref().unwrap_or_default(), pagination)
+        .search_products_with_filter(query.q.as_deref().unwrap_or_default(), filter, pagination)
         .await?;
     Ok(Json(PageResponse::from_page(page)))
 }
@@ -126,17 +192,96 @@ async fn public_settings(StoreDb(db): StoreDb) -> ApiResult<Json<BTreeMap<String
     Ok(Json(public))
 }
 
+/// Returns the sales channels attached to an optional publishable key.
+fn key_sales_channel_ids(publishable_key: &Option<Extension<PublishableKeyContext>>) -> &[String] {
+    publishable_key.as_ref().map_or(&[], |Extension(context)| {
+        context.sales_channel_ids.as_slice()
+    })
+}
+
 /// Maps storefront filters onto the catalog filter, always restricting the
-/// result to published products.
-fn storefront_product_filter(query: ProductQuery) -> ProductFilter {
+/// result to published products and, when present, the key's sales channels.
+fn storefront_product_filter(query: &ProductQuery, channel_ids: &[String]) -> ProductFilter {
     ProductFilter {
         status: Some(ProductStatus::Active),
-        category_id: query.category_id,
-        collection_id: query.collection_id,
-        tag_value: query.tag,
-        query: query.query,
+        category_id: query.category_id.clone(),
+        collection_id: query.collection_id.clone(),
+        tag_value: query.tag.clone(),
+        query: query.query.clone(),
+        sales_channel_ids: (!channel_ids.is_empty()).then(|| channel_ids.to_vec()),
         include_deleted: false,
     }
+}
+
+/// Resolves the currency requested by `currency_code` or `region_id`.
+async fn resolve_currency(
+    db: &StoreDatabase,
+    query: &ProductQuery,
+) -> ApiResult<Option<CurrencyCode>> {
+    if let Some(currency_code) = query.currency_code.as_deref() {
+        return Ok(Some(
+            CurrencyCode::new(currency_code).map_err(AppError::from)?,
+        ));
+    }
+    let Some(region_id) = query.region_id.as_deref() else {
+        return Ok(None);
+    };
+    let region = RegionService::new(db.clone()).get_region(region_id).await?;
+    Ok(Some(
+        CurrencyCode::new(&region.currency_code).map_err(AppError::from)?,
+    ))
+}
+
+/// Calculates the lowest selected price for each product, keyed by product id.
+async fn calculate_product_prices(
+    db: &StoreDatabase,
+    products: &[Product],
+    query: &ProductQuery,
+) -> ApiResult<HashMap<String, CalculatedPrice>> {
+    let Some(currency) = resolve_currency(db, query).await? else {
+        return Ok(HashMap::new());
+    };
+    let variant_ids: Vec<String> = products
+        .iter()
+        .flat_map(|product| product.variants.iter().map(|variant| variant.id.clone()))
+        .collect();
+    if variant_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let context = PriceContext {
+        currency,
+        quantity: query.quantity.unwrap_or(1),
+        customer_group_id: query.customer_group_id.clone(),
+        sales_channel_id: None,
+        at: now_timestamp(),
+    };
+    let selected = PricingService::new(db.clone())
+        .calculate_prices(&variant_ids, &context)
+        .await?;
+
+    let mut calculated = HashMap::new();
+    for product in products {
+        let best = product
+            .variants
+            .iter()
+            .filter_map(|variant| selected.get(&variant.id).and_then(Option::as_ref))
+            .min_by_key(|price| price.amount);
+        if let Some(price) = best {
+            calculated.insert(
+                product.id.clone(),
+                CalculatedPrice {
+                    amount: price.amount,
+                    currency_code: price.currency.as_str().to_owned(),
+                    price_list_id: price.price_list_id.clone(),
+                    price_list_type: price.price_list_type,
+                    original_amount: price.original_amount,
+                    calculated_at: context.at,
+                },
+            );
+        }
+    }
+    Ok(calculated)
 }
 
 /// Returns true when a setting key may be exposed to storefronts.
@@ -164,18 +309,34 @@ mod tests {
 
     #[test]
     fn storefront_filters_are_published_only() {
-        let filter = storefront_product_filter(ProductQuery {
-            category_id: Some("cat_1".to_owned()),
-            collection_id: Some("col_1".to_owned()),
-            tag: Some("sale".to_owned()),
-            query: Some("shirt".to_owned()),
-            ..ProductQuery::default()
-        });
+        let filter = storefront_product_filter(
+            &ProductQuery {
+                category_id: Some("cat_1".to_owned()),
+                collection_id: Some("col_1".to_owned()),
+                tag: Some("sale".to_owned()),
+                query: Some("shirt".to_owned()),
+                ..ProductQuery::default()
+            },
+            &[],
+        );
         assert_eq!(filter.status, Some(ProductStatus::Active));
         assert_eq!(filter.category_id.as_deref(), Some("cat_1"));
         assert_eq!(filter.collection_id.as_deref(), Some("col_1"));
         assert_eq!(filter.tag_value.as_deref(), Some("sale"));
         assert_eq!(filter.query.as_deref(), Some("shirt"));
+        assert_eq!(filter.sales_channel_ids, None);
         assert!(!filter.include_deleted);
+    }
+
+    #[test]
+    fn storefront_filters_forward_sales_channels() {
+        let filter = storefront_product_filter(
+            &ProductQuery::default(),
+            &["sc_web".to_owned(), "sc_pos".to_owned()],
+        );
+        assert_eq!(
+            filter.sales_channel_ids,
+            Some(vec!["sc_web".to_owned(), "sc_pos".to_owned()])
+        );
     }
 }

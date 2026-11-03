@@ -91,6 +91,7 @@ define_id!(CollectionId, "coll", "Identifier of a collection.");
 define_id!(TagId, "tag", "Identifier of a tag.");
 define_id!(PriceId, "price", "Identifier of a price.");
 define_id!(PriceListId, "plist", "Identifier of a price list.");
+define_id!(PriceSetId, "pset", "Identifier of a price set.");
 define_id!(CartId, "cart", "Identifier of a cart.");
 define_id!(
     LineItemId,

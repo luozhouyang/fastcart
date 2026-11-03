@@ -230,6 +230,21 @@ pub struct UpdatePriceListInput {
     pub rules: Option<Vec<PriceListRuleInput>>,
 }
 
+/// A container for every base, sale and override price of one variant.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PriceSet {
+    /// Price set identifier.
+    pub id: String,
+    /// Human-readable title.
+    pub title: Option<String>,
+    /// Extension metadata.
+    pub metadata: Metadata,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: i64,
+}
+
 /// A price for one variant in one currency.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Price {
@@ -237,6 +252,11 @@ pub struct Price {
     pub id: String,
     /// Optional owning price list. `None` denotes a base price.
     pub price_list_id: Option<String>,
+    /// Type of the owning price list, or `None` for a base price.
+    ///
+    /// Resolved when the price is loaded so selection can distinguish sale
+    /// discounts from absolute overrides without a second query.
+    pub price_list_type: Option<PriceListType>,
     /// Variant the price applies to.
     pub variant_id: String,
     /// ISO-style currency code.
@@ -261,6 +281,12 @@ pub struct Price {
     pub created_at: i64,
     /// Last update timestamp in Unix seconds.
     pub updated_at: i64,
+    /// Number of matching rules attached to the owning price list.
+    ///
+    /// Internal ranking input only: it never leaves the service boundary.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub price_list_rule_count: i64,
 }
 
 /// Input for creating a price.
@@ -414,6 +440,10 @@ pub struct SelectedPrice {
     pub currency: CurrencyCode,
     /// Winning price list, or `None` for a base price.
     pub price_list_id: Option<String>,
+    /// Type of the winning price list, or `None` for a base price.
+    pub price_list_type: Option<PriceListType>,
+    /// Best base amount the winning price was compared against, when any.
+    pub original_amount: Option<i64>,
 }
 
 impl SelectedPrice {
@@ -424,7 +454,7 @@ impl SelectedPrice {
     }
 }
 
-/// Selects the most specific eligible price.
+/// Selects the best eligible price.
 ///
 /// Candidates are filtered first:
 ///
@@ -436,31 +466,100 @@ impl SelectedPrice {
 /// 4. a customer-group-scoped price only matches the same group, and a
 ///    sales-channel-scoped price only matches the same channel.
 ///
-/// Remaining candidates are ranked by specificity:
+/// Eligible candidates are grouped by the type of their price list and the
+/// following precedence applies:
 ///
-/// 1. price-list prices beat base prices;
+/// 1. an override list replaces the base price and wins outright;
+/// 2. otherwise a sale list only wins when its amount is strictly lower than
+///    the best base price, so a sale can never increase the payable amount;
+/// 3. when no base price exists, the best sale price is used because there is
+///    nothing to discount against;
+/// 4. without a sale candidate the best base price wins.
+///
+/// Candidates of the same class are ranked deterministically:
+///
+/// 1. more matching price-list rules (more specific targeting) win;
 /// 2. customer-group-scoped prices beat unscoped prices;
 /// 3. sales-channel-scoped prices beat unscoped prices;
-/// 4. a higher `min_quantity` beats a lower one;
-/// 5. the newest `starts_at` wins (a missing start is the oldest);
-/// 6. the lowest amount wins;
+/// 4. a higher `min_quantity` tier wins;
+/// 5. the lowest amount wins;
+/// 6. the newest `starts_at` wins (a missing start is the oldest);
 /// 7. the lexicographically smallest identifier wins as a final tie-break.
 #[must_use]
 pub fn select_price(candidates: &[Price], context: &PriceContext) -> Option<SelectedPrice> {
-    candidates
+    let eligible: Vec<&Price> = candidates
         .iter()
         .filter(|price| price.currency_code == context.currency)
         .filter(|price| quantity_matches(price, context.quantity))
         .filter(|price| window_contains(context.at, price.starts_at, price.ends_at))
         .filter(|price| scope_matches(&price.customer_group_id, &context.customer_group_id))
         .filter(|price| scope_matches(&price.sales_channel_id, &context.sales_channel_id))
+        .collect();
+    if eligible.is_empty() {
+        return None;
+    }
+
+    let mut overrides = Vec::new();
+    let mut sales = Vec::new();
+    let mut bases = Vec::new();
+    for price in eligible {
+        match price_kind(price) {
+            PriceKind::Override => overrides.push(price),
+            PriceKind::Sale => sales.push(price),
+            PriceKind::Base => bases.push(price),
+        }
+    }
+
+    let best_override = best_candidate(&overrides);
+    let best_sale = best_candidate(&sales);
+    let best_base = best_candidate(&bases);
+
+    let (winner, original_amount) = match (best_override, best_base, best_sale) {
+        (Some(over), base, _) => (over, base.map(|price| price.amount)),
+        (None, Some(base), Some(sale)) => {
+            if sale.amount < base.amount {
+                (sale, Some(base.amount))
+            } else {
+                (base, None)
+            }
+        }
+        (None, Some(base), None) => (base, None),
+        (None, None, Some(sale)) => (sale, None),
+        (None, None, None) => return None,
+    };
+
+    Some(SelectedPrice {
+        price_id: winner.id.clone(),
+        amount: winner.amount,
+        currency: winner.currency_code.clone(),
+        price_list_id: winner.price_list_id.clone(),
+        price_list_type: winner.price_list_type,
+        original_amount,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PriceKind {
+    Base,
+    Sale,
+    Override,
+}
+
+fn price_kind(price: &Price) -> PriceKind {
+    match (&price.price_list_id, price.price_list_type) {
+        (None, _) => PriceKind::Base,
+        (Some(_), Some(PriceListType::Override)) => PriceKind::Override,
+        // A list price without a resolved type is treated as a sale for
+        // backwards compatibility with candidates built by older callers.
+        (Some(_), _) => PriceKind::Sale,
+    }
+}
+
+fn best_candidate<'a>(candidates: &[&'a Price]) -> Option<&'a Price> {
+    candidates
+        .iter()
+        .copied()
         .min_by(|left, right| compare_candidates(left, right))
-        .map(|price| SelectedPrice {
-            price_id: price.id.clone(),
-            amount: price.amount,
-            currency: price.currency_code.clone(),
-            price_list_id: price.price_list_id.clone(),
-        })
 }
 
 fn quantity_matches(price: &Price, quantity: i64) -> bool {
@@ -477,9 +576,8 @@ fn window_contains(at: i64, starts_at: Option<i64>, ends_at: Option<i64>) -> boo
 
 fn compare_candidates(left: &Price, right: &Price) -> Ordering {
     right
-        .price_list_id
-        .is_some()
-        .cmp(&left.price_list_id.is_some())
+        .price_list_rule_count
+        .cmp(&left.price_list_rule_count)
         .then_with(|| {
             right
                 .customer_group_id
@@ -493,13 +591,13 @@ fn compare_candidates(left: &Price, right: &Price) -> Ordering {
                 .cmp(&left.sales_channel_id.is_some())
         })
         .then_with(|| right.min_quantity.cmp(&left.min_quantity))
+        .then_with(|| left.amount.cmp(&right.amount))
         .then_with(|| {
             right
                 .starts_at
                 .unwrap_or(i64::MIN)
                 .cmp(&left.starts_at.unwrap_or(i64::MIN))
         })
-        .then_with(|| left.amount.cmp(&right.amount))
         .then_with(|| left.id.cmp(&right.id))
 }
 

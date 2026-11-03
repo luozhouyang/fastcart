@@ -18,9 +18,9 @@ pub use ids::{
     CustomerSessionId, EventId, ExchangeId, FulfillmentId, ImageId, InventoryItemId,
     InventoryLocationId, JobId, LineItemId, NavigationId, OptionId, OptionValueId, OrderEditId,
     OrderId, PageId, PaymentAttemptId, PaymentId, PaymentSessionId, PriceId, PriceListId,
-    ProductId, PromotionId, RefundId, ReservationId, ReturnId, SessionId, ShippingOptionId,
-    ShippingProfileId, StoreId, TagId, TaxCategoryId, TaxRateId, TaxRegionId, ThemeActivationId,
-    ThemeId, UserId, VariantId, WebhookDeliveryId, WebhookId,
+    PriceSetId, ProductId, PromotionId, RefundId, ReservationId, ReturnId, SessionId,
+    ShippingOptionId, ShippingProfileId, StoreId, TagId, TaxCategoryId, TaxRateId, TaxRegionId,
+    ThemeActivationId, ThemeId, UserId, VariantId, WebhookDeliveryId, WebhookId,
 };
 pub use money::{CurrencyCode, Money, Rounding};
 pub use types::{

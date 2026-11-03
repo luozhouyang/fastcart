@@ -9,7 +9,7 @@ pub mod service;
 
 pub use domain::{
     CreatePriceInput, CreatePriceListInput, Price, PriceContext, PriceFilter, PriceList,
-    PriceListRule, PriceListRuleInput, PriceListStatus, PriceListType, SelectedPrice,
+    PriceListRule, PriceListRuleInput, PriceListStatus, PriceListType, PriceSet, SelectedPrice,
     UpdatePriceInput, UpdatePriceListInput, select_price,
 };
 pub use service::PricingService;

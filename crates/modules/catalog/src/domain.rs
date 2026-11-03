@@ -99,6 +99,8 @@ pub struct Product {
     pub collections: Vec<Collection>,
     /// Linked tags.
     pub tags: Vec<Tag>,
+    /// Sales channels the product is published to. Empty when unlinked.
+    pub sales_channel_ids: Vec<String>,
 }
 
 /// A concrete purchasable variant of a product.
@@ -510,6 +512,9 @@ pub struct ProductFilter {
     pub tag_value: Option<String>,
     /// Case-insensitive text matched against title, description, handle and SKU.
     pub query: Option<String>,
+    /// Restrict to products linked to at least one of these sales channels.
+    /// `None` or an empty list applies no channel filter.
+    pub sales_channel_ids: Option<Vec<String>>,
     /// Include soft-deleted products.
     pub include_deleted: bool,
 }
