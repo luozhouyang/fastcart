@@ -6,7 +6,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use fastcart_api::{ApiConfig, AppContext, build_router};
-use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
+use fastcart_email::{SEND_EMAIL_JOB_TYPE, SendEmailJob};
+use fastcart_infrastructure::{DatabaseOptions, JobQueue, StoreCache, StoreDatabaseManager};
+use fastcart_kernel::StoreId;
 use fastcart_platform::PlatformStore;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -15,6 +17,9 @@ struct Fixture {
     app: Router,
     admin_auth: String,
     csrf: String,
+    databases: Arc<StoreDatabaseManager>,
+    store_id: StoreId,
+    _dir: tempfile::TempDir,
 }
 
 async fn fixture() -> Fixture {
@@ -32,7 +37,7 @@ async fn fixture() -> Fixture {
     let context = Arc::new(AppContext::new(
         config,
         platform,
-        databases,
+        databases.clone(),
         StoreCache::default_capacity(),
     ));
     let app = build_router(context);
@@ -53,7 +58,7 @@ async fn fixture() -> Fixture {
     let session = cookie_value(&cookies, "fc_admin_session").unwrap();
     let csrf = cookie_value(&cookies, "fc_csrf").unwrap();
     let auth = format!("fc_admin_session={session}; fc_csrf={csrf}");
-    let (status, _, _) = send(
+    let (status, store, _) = send(
         &app,
         "POST",
         "/api/v1/platform/stores",
@@ -66,13 +71,15 @@ async fn fixture() -> Fixture {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
+    let store_id = StoreId::from_string(store["id"].as_str().unwrap());
 
-    // Keep the temp directory alive for the process lifetime.
-    std::mem::forget(dir);
     Fixture {
         app,
         admin_auth: auth,
         csrf,
+        databases,
+        store_id,
+        _dir: dir,
     }
 }
 
@@ -134,6 +141,228 @@ fn cookie_value(cookies: &[String], name: &str) -> Option<String> {
         let (cookie_name, rest) = cookie.split_once('=')?;
         (cookie_name.trim() == name).then(|| rest.split(';').next().unwrap_or("").to_owned())
     })
+}
+
+async fn claim_email_job(fixture: &Fixture) -> SendEmailJob {
+    let database = fixture.databases.database(&fixture.store_id).await.unwrap();
+    let queue = JobQueue::new(database.pool().clone());
+    let jobs = queue.claim("test-worker", 10).await.unwrap();
+    let record = jobs
+        .into_iter()
+        .find(|job| job.job_type == SEND_EMAIL_JOB_TYPE)
+        .expect("an enqueued email job");
+    serde_json::from_str(&record.payload).expect("a valid email job payload")
+}
+
+fn token_from_body(body: &str) -> String {
+    body.rsplit_once(':')
+        .map(|(_, token)| token.trim().to_owned())
+        .expect("an email body ending in a token")
+}
+
+#[tokio::test]
+async fn customers_verify_email_and_reset_password_over_http() {
+    let fixture = fixture().await;
+
+    let (status, body, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers",
+        Some(serde_json::json!({
+            "email": "buyer@example.com",
+            "password": "password123"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Existing accounts receive the generic acknowledgement.
+    let (status, accepted, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/email-verification/request",
+        Some(serde_json::json!({"email": "BUYER@Example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    assert_eq!(accepted, serde_json::json!({"accepted": true}));
+
+    // Unknown accounts receive the exact same response and no email.
+    let (status, unknown, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/email-verification/request",
+        Some(serde_json::json!({"email": "nobody@example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{unknown}");
+    assert_eq!(unknown, accepted);
+
+    let job = claim_email_job(&fixture).await;
+    assert_eq!(job.to, "buyer@example.com");
+    let verification_token = token_from_body(job.text.as_deref().unwrap());
+
+    let (status, verified, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/email-verification/confirm",
+        Some(serde_json::json!({"token": verification_token})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{verified}");
+    assert_eq!(verified["email_verified"], true);
+
+    // A token can only be consumed once.
+    let (status, _, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/email-verification/confirm",
+        Some(serde_json::json!({"token": verification_token})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Already verified accounts still get the generic response and no email.
+    let (status, already_verified, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/email-verification/request",
+        Some(serde_json::json!({"email": "buyer@example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(already_verified, accepted);
+    let database = fixture.databases.database(&fixture.store_id).await.unwrap();
+    let queue = JobQueue::new(database.pool().clone());
+    assert!(queue.claim("test-worker-2", 10).await.unwrap().is_empty());
+
+    // Reset requests are generic as well.
+    let (status, reset_accepted, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/password-reset/request",
+        Some(serde_json::json!({"email": "BUYER@example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{reset_accepted}");
+    assert_eq!(reset_accepted, accepted);
+
+    let job = claim_email_job(&fixture).await;
+    assert_eq!(job.to, "buyer@example.com");
+    let reset_token = token_from_body(job.text.as_deref().unwrap());
+
+    let (status, _, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/password-reset/confirm",
+        Some(serde_json::json!({
+            "token": reset_token,
+            "password": "new-password123"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The old password no longer works and the new one does.
+    let (status, _, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/login",
+        Some(serde_json::json!({
+            "email": "buyer@example.com",
+            "password": "password123"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, logged_in, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/login",
+        Some(serde_json::json!({
+            "email": "buyer@example.com",
+            "password": "new-password123"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{logged_in}");
+    assert_eq!(logged_in["customer"]["email"], "buyer@example.com");
+
+    // Reset tokens are single use as well.
+    let (status, _, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/password-reset/confirm",
+        Some(serde_json::json!({
+            "token": reset_token,
+            "password": "another-password123"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Unknown emails never produce a reset email.
+    let (status, unknown_reset, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/password-reset/request",
+        Some(serde_json::json!({"email": "nobody@example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(unknown_reset, accepted);
+    assert!(queue.claim("test-worker-3", 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn auth_email_requests_are_rate_limited_per_email() {
+    let fixture = fixture().await;
+
+    for _ in 0..5 {
+        let (status, body, _) = send(
+            &fixture.app,
+            "POST",
+            "/api/v1/store/customers/email-verification/request",
+            Some(serde_json::json!({"email": "nobody@example.com"})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    }
+
+    let (status, body, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/email-verification/request",
+        Some(serde_json::json!({"email": "nobody@example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+
+    // The reset flow uses its own key for the same address.
+    let (status, body, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/customers/password-reset/request",
+        Some(serde_json::json!({"email": "nobody@example.com"})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
 }
 
 #[tokio::test]

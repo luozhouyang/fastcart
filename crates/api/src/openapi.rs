@@ -310,6 +310,13 @@ const fn created(schema: Schema) -> Success {
     }
 }
 
+const fn accepted(schema: Schema) -> Success {
+    Success {
+        status: 202,
+        schema,
+    }
+}
+
 const fn no_content() -> Success {
     Success {
         status: 204,
@@ -2714,6 +2721,34 @@ fn store_routes() -> Vec<Route> {
             Some("ChangePasswordRequest"),
             no_content(),
         ),
+        post(
+            "/api/v1/store/customers/email-verification/request",
+            "Request a customer email-verification token",
+            Auth::Public,
+            Some("EmailRequest"),
+            accepted(Schema::Ref("AcceptedResponse")),
+        ),
+        post(
+            "/api/v1/store/customers/email-verification/confirm",
+            "Confirm a customer email-verification token",
+            Auth::Public,
+            Some("EmailVerificationConfirmRequest"),
+            ok(Schema::Ref("EmailVerifiedResponse")),
+        ),
+        post(
+            "/api/v1/store/customers/password-reset/request",
+            "Request a customer password-reset token",
+            Auth::Public,
+            Some("PasswordResetRequest"),
+            accepted(Schema::Ref("AcceptedResponse")),
+        ),
+        post(
+            "/api/v1/store/customers/password-reset/confirm",
+            "Confirm a customer password-reset token",
+            Auth::Public,
+            Some("PasswordResetConfirmRequest"),
+            no_content(),
+        ),
         get(
             "/api/v1/store/products/{handle}/availability",
             "Get variant availability for a product",
@@ -3300,10 +3335,17 @@ fn schemas() -> Value {
             ("last_name", optional_string()),
             ("phone", optional_string()),
             ("status", string_enum(&["active", "disabled"])),
+            ("email_verified_at", nullable(integer())),
             ("metadata", schema_ref("Metadata")),
             ("created_at", integer()),
             ("updated_at", integer()),
         ], &["id", "email", "status"]),
+
+
+        "AcceptedResponse": object(&[("accepted", boolean())], &["accepted"]),
+
+
+        "EmailVerifiedResponse": object(&[("email_verified", boolean())], &["email_verified"]),
 
 
         "CustomerGroup": object(&[
@@ -4302,6 +4344,21 @@ fn schemas() -> Value {
             ("current_password", string()),
             ("new_password", string()),
         ], &["current_password", "new_password"]),
+
+
+        "EmailRequest": object(&[("email", string())], &["email"]),
+
+
+        "EmailVerificationConfirmRequest": object(&[("token", string())], &["token"]),
+
+
+        "PasswordResetRequest": object(&[("email", string())], &["email"]),
+
+
+        "PasswordResetConfirmRequest": object(&[
+            ("token", string()),
+            ("password", string()),
+        ], &["token", "password"]),
     }
     for (name, schema) in generated_schemas() {
         schemas.insert(name, schema);
@@ -4424,11 +4481,11 @@ mod tests {
 
         assert_eq!(count("/api/v1/platform"), 20);
         assert_eq!(count("/api/v1/admin"), 158);
-        assert_eq!(count("/api/v1/store"), 38);
+        assert_eq!(count("/api/v1/store"), 42);
         assert_eq!(count("/api/v1/webhooks"), 1);
-        assert_eq!(count("/internal/storefront"), 38);
+        assert_eq!(count("/internal/storefront"), 42);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 259);
+        assert_eq!(paths.len(), 267);
 
         for key in [
             "/api/v1/platform/stores",
@@ -4536,7 +4593,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 362);
+        assert_eq!(operation_count, 370);
     }
 
     #[test]

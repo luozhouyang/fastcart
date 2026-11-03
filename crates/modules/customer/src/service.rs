@@ -19,13 +19,14 @@ use sqlx::{FromRow, Sqlite, Transaction};
 
 use crate::domain::{
     Address, AddressInput, AuthenticatedCustomerSession, CUSTOMER_SESSION_TTL_SECONDS,
-    CreateCustomerInput, CreatedCustomerSession, Customer, CustomerGroup, CustomerSession,
-    CustomerStatus, LoginInput, MAX_NAME_LENGTH, MAX_PHONE_LENGTH, MIN_PASSWORD_LENGTH,
-    RegisterCustomerInput, UpdateCustomerInput,
+    CreateCustomerInput, CreatedCustomerAuthToken, CreatedCustomerSession, Customer,
+    CustomerAuthTokenType, CustomerGroup, CustomerSession, CustomerStatus,
+    EMAIL_VERIFICATION_TTL_SECONDS, LoginInput, MAX_NAME_LENGTH, MAX_PHONE_LENGTH,
+    MIN_PASSWORD_LENGTH, PASSWORD_RESET_TTL_SECONDS, RegisterCustomerInput, UpdateCustomerInput,
 };
 
 const CUSTOMER_COLUMNS: &str = "id, email, first_name, last_name, phone, has_account, status, \
-     metadata, created_at, updated_at, deleted_at";
+     email_verified_at, metadata, created_at, updated_at, deleted_at";
 
 const ADDRESS_COLUMNS: &str = "id, customer_id, is_default_shipping, is_default_billing, \
      first_name, last_name, company, address_1, address_2, city, province, postal_code, \
@@ -760,7 +761,8 @@ impl CustomerService {
         let email = normalize_email(email);
         let row = sqlx::query_as::<_, CredentialCustomerRow>(
             "SELECT c.id, c.email, c.first_name, c.last_name, c.phone, c.has_account,
-                    c.status, c.metadata, c.created_at, c.updated_at, cc.password_hash
+                    c.status, c.email_verified_at, c.metadata, c.created_at, c.updated_at,
+                    cc.password_hash
              FROM customers c
              JOIN customer_credentials cc ON cc.customer_id = c.id
              WHERE cc.email = ? AND c.deleted_at IS NULL",
@@ -804,7 +806,7 @@ impl CustomerService {
         let row = sqlx::query_as::<_, SessionCustomerRow>(
             "SELECT s.id AS session_id, s.expires_at,
                     c.id, c.email, c.first_name, c.last_name, c.phone, c.has_account,
-                    c.status, c.metadata, c.created_at, c.updated_at
+                    c.status, c.email_verified_at, c.metadata, c.created_at, c.updated_at
              FROM customer_sessions s
              JOIN customers c ON c.id = s.customer_id
              WHERE s.token_hash = ? AND s.revoked_at IS NULL AND c.deleted_at IS NULL",
@@ -915,6 +917,254 @@ impl CustomerService {
         Ok(())
     }
 
+    /// Creates an email-verification token, invalidating any earlier unused
+    /// verification token for the same customer.
+    ///
+    /// The plaintext token is returned exactly once and must be delivered by
+    /// email; only its SHA-256 digest is persisted.
+    pub async fn request_email_verification(
+        &self,
+        customer_id: &CustomerId,
+    ) -> Result<CreatedCustomerAuthToken, AppError> {
+        let customer = self.get_customer(customer_id).await?;
+        if customer.email_verified_at.is_some() {
+            return Err(AppError::conflict("email is already verified"));
+        }
+
+        self.issue_auth_token(
+            customer_id,
+            CustomerAuthTokenType::EmailVerification,
+            EMAIL_VERIFICATION_TTL_SECONDS,
+        )
+        .await
+    }
+
+    /// Consumes an email-verification token and marks the email as verified.
+    ///
+    /// Expired, already used and wrong-type tokens are rejected. The token is
+    /// consumed with a conditional update so concurrent confirmations cannot
+    /// both succeed.
+    pub async fn verify_email(&self, token: &str) -> Result<Customer, AppError> {
+        if token.is_empty() {
+            return Err(invalid_auth_token());
+        }
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
+        let row = sqlx::query_as::<_, AuthTokenRow>(
+            "SELECT id, customer_id, token_type, expires_at, used_at
+             FROM customer_auth_tokens WHERE token_hash = ?",
+        )
+        .bind(hash_token(token))
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(invalid_auth_token)?;
+
+        if row.token_type != CustomerAuthTokenType::EmailVerification.as_str()
+            || row.used_at.is_some()
+            || row.expires_at <= now
+        {
+            return Err(invalid_auth_token());
+        }
+
+        let consumed = sqlx::query(
+            "UPDATE customer_auth_tokens SET used_at = ?
+             WHERE id = ? AND used_at IS NULL AND expires_at > ?",
+        )
+        .bind(now)
+        .bind(&row.id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if consumed.rows_affected() != 1 {
+            return Err(invalid_auth_token());
+        }
+
+        let updated = sqlx::query(
+            "UPDATE customers SET email_verified_at = ?, updated_at = ?
+             WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(&row.customer_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(invalid_auth_token());
+        }
+        tx.commit().await.map_err(database_error)?;
+
+        self.get_customer(&CustomerId::from_string(row.customer_id))
+            .await
+    }
+
+    /// Creates a password-reset token for an existing account.
+    ///
+    /// Unknown emails and guest profiles return `None` without creating a
+    /// token, so callers can keep their response generic. Any earlier unused
+    /// reset token for the account is invalidated.
+    pub async fn request_password_reset(
+        &self,
+        email: &str,
+    ) -> Result<Option<CreatedCustomerAuthToken>, AppError> {
+        let email = normalize_email(email);
+        if validate_email(&email, "email").is_err() {
+            return Ok(None);
+        }
+        let Some(customer) = self.get_customer_by_email(&email).await? else {
+            return Ok(None);
+        };
+        let credential: Option<String> =
+            sqlx::query_scalar("SELECT id FROM customer_credentials WHERE customer_id = ?")
+                .bind(customer.id.as_str())
+                .fetch_optional(self.db.pool())
+                .await
+                .map_err(database_error)?;
+        if credential.is_none() {
+            return Ok(None);
+        }
+
+        self.issue_auth_token(
+            &customer.id,
+            CustomerAuthTokenType::PasswordReset,
+            PASSWORD_RESET_TTL_SECONDS,
+        )
+        .await
+        .map(Some)
+    }
+
+    /// Consumes a password-reset token, replaces the credential and
+    /// revokes all active sessions in one transaction.
+    ///
+    /// The new password uses the same policy as registration.
+    pub async fn reset_password(
+        &self,
+        token: &str,
+        new_password: &str,
+    ) -> Result<Customer, AppError> {
+        validate_new_password(new_password)?;
+        if token.is_empty() {
+            return Err(invalid_auth_token());
+        }
+
+        let now = now_timestamp();
+        let row = sqlx::query_as::<_, AuthTokenRow>(
+            "SELECT id, customer_id, token_type, expires_at, used_at
+             FROM customer_auth_tokens WHERE token_hash = ?",
+        )
+        .bind(hash_token(token))
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?
+        .ok_or_else(invalid_auth_token)?;
+        if row.token_type != CustomerAuthTokenType::PasswordReset.as_str()
+            || row.used_at.is_some()
+            || row.expires_at <= now
+        {
+            return Err(invalid_auth_token());
+        }
+
+        let password_hash = hash_password(new_password)?;
+        let mut tx = self.db.begin().await?;
+
+        let consumed = sqlx::query(
+            "UPDATE customer_auth_tokens SET used_at = ?
+             WHERE id = ? AND used_at IS NULL AND expires_at > ?",
+        )
+        .bind(now)
+        .bind(&row.id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if consumed.rows_affected() != 1 {
+            return Err(invalid_auth_token());
+        }
+
+        let customer =
+            sqlx::query("UPDATE customers SET updated_at = ? WHERE id = ? AND deleted_at IS NULL")
+                .bind(now)
+                .bind(&row.customer_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        if customer.rows_affected() != 1 {
+            return Err(invalid_auth_token());
+        }
+
+        let credential = sqlx::query(
+            "UPDATE customer_credentials SET password_hash = ?, updated_at = ?
+             WHERE customer_id = ?",
+        )
+        .bind(&password_hash)
+        .bind(now)
+        .bind(&row.customer_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if credential.rows_affected() != 1 {
+            return Err(invalid_auth_token());
+        }
+
+        sqlx::query(
+            "UPDATE customer_sessions SET revoked_at = ?
+             WHERE customer_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(&row.customer_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+
+        self.get_customer(&CustomerId::from_string(row.customer_id))
+            .await
+    }
+
+    /// Inserts a single-use authentication token and invalidates older unused
+    /// tokens of the same type for the customer.
+    async fn issue_auth_token(
+        &self,
+        customer_id: &CustomerId,
+        token_type: CustomerAuthTokenType,
+        ttl_seconds: i64,
+    ) -> Result<CreatedCustomerAuthToken, AppError> {
+        let token = random_hex(32);
+        let now = now_timestamp();
+        let expires_at = now.saturating_add(ttl_seconds);
+
+        let mut tx = self.db.begin().await?;
+        sqlx::query(
+            "UPDATE customer_auth_tokens SET used_at = ?
+             WHERE customer_id = ? AND token_type = ? AND used_at IS NULL",
+        )
+        .bind(now)
+        .bind(customer_id.as_str())
+        .bind(token_type.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        sqlx::query(
+            "INSERT INTO customer_auth_tokens
+             (id, customer_id, token_hash, token_type, expires_at, used_at, created_at)
+             VALUES (?, ?, ?, ?, ?, NULL, ?)",
+        )
+        .bind(format!("cat_{}", random_hex(16)))
+        .bind(customer_id.as_str())
+        .bind(hash_token(&token))
+        .bind(token_type.as_str())
+        .bind(expires_at)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+
+        Ok(CreatedCustomerAuthToken { token, expires_at })
+    }
+
     /// Returns the persisted sessions of a customer, excluding token digests.
     pub async fn list_sessions(
         &self,
@@ -1014,6 +1264,7 @@ struct CustomerRow {
     phone: Option<String>,
     has_account: i64,
     status: String,
+    email_verified_at: Option<i64>,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -1030,6 +1281,7 @@ impl CustomerRow {
             phone: self.phone,
             has_account: self.has_account != 0,
             status: CustomerStatus::from_db(&self.status),
+            email_verified_at: self.email_verified_at,
             metadata: Metadata::from_json_str(&self.metadata),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -1054,6 +1306,7 @@ struct CredentialCustomerRow {
     phone: Option<String>,
     has_account: i64,
     status: String,
+    email_verified_at: Option<i64>,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -1070,6 +1323,7 @@ impl CredentialCustomerRow {
             phone: self.phone,
             has_account: self.has_account != 0,
             status: CustomerStatus::from_db(&self.status),
+            email_verified_at: self.email_verified_at,
             metadata: Metadata::from_json_str(&self.metadata),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -1089,6 +1343,7 @@ struct SessionCustomerRow {
     phone: Option<String>,
     has_account: i64,
     status: String,
+    email_verified_at: Option<i64>,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -1104,6 +1359,7 @@ impl SessionCustomerRow {
             phone: self.phone,
             has_account: self.has_account != 0,
             status: CustomerStatus::from_db(&self.status),
+            email_verified_at: self.email_verified_at,
             metadata: Metadata::from_json_str(&self.metadata),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -1201,6 +1457,15 @@ impl CustomerSessionRow {
             created_at: self.created_at,
         }
     }
+}
+
+#[derive(Debug, FromRow)]
+struct AuthTokenRow {
+    id: String,
+    customer_id: String,
+    token_type: String,
+    expires_at: i64,
+    used_at: Option<i64>,
 }
 
 // -------------------------------------------------------------------------
@@ -1362,6 +1627,11 @@ fn random_hex(bytes: usize) -> String {
 /// SHA-256 digest used for session token lookup.
 fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Generic error for missing, expired, used or wrong-type auth tokens.
+fn invalid_auth_token() -> AppError {
+    AppError::validation("invalid or expired token")
 }
 
 fn conflict_or_database(error: sqlx::Error, message: &'static str) -> AppError {
@@ -1975,5 +2245,338 @@ mod tests {
 
         let sessions = service.list_sessions(&customer.id).await.unwrap();
         assert!(sessions.iter().all(|session| session.revoked_at.is_some()));
+    }
+
+    #[test]
+    fn auth_token_type_round_trips() {
+        assert_eq!(
+            CustomerAuthTokenType::parse("email_verification"),
+            Some(CustomerAuthTokenType::EmailVerification)
+        );
+        assert_eq!(
+            CustomerAuthTokenType::parse("password_reset"),
+            Some(CustomerAuthTokenType::PasswordReset)
+        );
+        assert_eq!(CustomerAuthTokenType::parse("other"), None);
+        assert_eq!(
+            CustomerAuthTokenType::EmailVerification.as_str(),
+            "email_verification"
+        );
+        assert_eq!(
+            CustomerAuthTokenType::PasswordReset.as_str(),
+            "password_reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn email_verification_token_is_hashed_and_single_use() {
+        let (service, db) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+        assert!(customer.email_verified_at.is_none());
+
+        let created = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap();
+        assert_eq!(created.token.len(), 64);
+        assert!(created.expires_at > now_timestamp());
+        let debug = format!("{created:?}");
+        assert!(!debug.contains(&created.token));
+
+        let (stored_hash, token_type, used_at): (String, String, Option<i64>) = sqlx::query_as(
+            "SELECT token_hash, token_type, used_at FROM customer_auth_tokens
+             WHERE customer_id = ?",
+        )
+        .bind(customer.id.as_str())
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(stored_hash, hash_token(&created.token));
+        assert_ne!(stored_hash, created.token);
+        assert_eq!(token_type, "email_verification");
+        assert!(used_at.is_none());
+
+        let verified = service.verify_email(&created.token).await.unwrap();
+        assert!(verified.email_verified_at.is_some());
+
+        let reused = service.verify_email(&created.token).await.unwrap_err();
+        assert!(matches!(reused, AppError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn verification_token_is_consumed_once_under_concurrency() {
+        let (service, _) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+        let created = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(
+            service.verify_email(&created.token),
+            service.verify_email(&created.token)
+        );
+        assert!(
+            first.is_ok() ^ second.is_ok(),
+            "exactly one confirmation must succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_rejects_expired_tokens() {
+        let (service, db) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+        let created = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE customer_auth_tokens SET expires_at = 0 WHERE customer_id = ?")
+            .bind(customer.id.as_str())
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let error = service.verify_email(&created.token).await.unwrap_err();
+        assert!(matches!(error, AppError::Validation(_)));
+        let current = service.get_customer(&customer.id).await.unwrap();
+        assert!(current.email_verified_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn already_verified_customers_cannot_request_again() {
+        let (service, _) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+        let created = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap();
+        service.verify_email(&created.token).await.unwrap();
+
+        let error = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn requesting_verification_invalidates_previous_tokens() {
+        let (service, _) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+        let first = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap();
+        let second = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap();
+
+        assert!(service.verify_email(&first.token).await.is_err());
+        assert!(service.verify_email(&second.token).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn auth_tokens_reject_wrong_type() {
+        let (service, _) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+
+        let verification = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap();
+        let error = service
+            .reset_password(&verification.token, "new-reset-password-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Validation(_)));
+
+        let reset = service
+            .request_password_reset("owner@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        let error = service.verify_email(&reset.token).await.unwrap_err();
+        assert!(matches!(error, AppError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn reset_password_changes_login_and_revokes_sessions() {
+        let (service, _) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+        let session = service
+            .login("owner@example.com", "reset-password-1")
+            .await
+            .unwrap();
+
+        let reset = service
+            .request_password_reset("OWNER@Example.com")
+            .await
+            .unwrap()
+            .expect("existing account receives a reset token");
+        assert_eq!(reset.token.len(), 64);
+        assert!(reset.expires_at > now_timestamp());
+
+        let updated = service
+            .reset_password(&reset.token, "new-reset-password-1")
+            .await
+            .unwrap();
+        assert_eq!(updated.id, customer.id);
+        assert!(service.authenticate_session(&session.token).await.is_err());
+        assert!(
+            service
+                .login("owner@example.com", "reset-password-1")
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .login("owner@example.com", "new-reset-password-1")
+                .await
+                .is_ok()
+        );
+        assert!(
+            service
+                .reset_password(&reset.token, "another-reset-password-1")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_password_rejects_short_passwords_without_consuming_the_token() {
+        let (service, _) = service().await;
+        service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+        let reset = service
+            .request_password_reset("owner@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let error = service
+            .reset_password(&reset.token, "short")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Validation(_)));
+        assert!(
+            service
+                .reset_password(&reset.token, "another-reset-password-1")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn requesting_reset_invalidates_previous_tokens() {
+        let (service, _) = service().await;
+        service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "reset-password-1",
+            ))
+            .await
+            .unwrap();
+        let first = service
+            .request_password_reset("owner@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        let second = service
+            .request_password_reset("owner@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            service
+                .reset_password(&first.token, "new-reset-password-1")
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .reset_password(&second.token, "new-reset-password-1")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_request_for_unknown_or_guest_email_returns_none() {
+        let (service, _) = service().await;
+        assert!(
+            service
+                .request_password_reset("missing@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            service
+                .request_password_reset("  MISSING@Example.com ")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        service
+            .create_customer(CreateCustomerInput::new("guest@example.com"))
+            .await
+            .unwrap();
+        assert!(
+            service
+                .request_password_reset("guest@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -13,8 +13,9 @@ pub mod service;
 
 pub use domain::{
     Address, AddressInput, AuthenticatedCustomerSession, CUSTOMER_SESSION_TTL_SECONDS,
-    CreateCustomerInput, CreatedCustomerSession, Customer, CustomerGroup, CustomerSession,
-    CustomerStatus, LoginInput, MAX_NAME_LENGTH, MAX_PHONE_LENGTH, MIN_PASSWORD_LENGTH,
-    RegisterCustomerInput, UpdateCustomerInput,
+    CreateCustomerInput, CreatedCustomerAuthToken, CreatedCustomerSession, Customer,
+    CustomerAuthTokenType, CustomerGroup, CustomerSession, CustomerStatus,
+    EMAIL_VERIFICATION_TTL_SECONDS, LoginInput, MAX_NAME_LENGTH, MAX_PHONE_LENGTH,
+    MIN_PASSWORD_LENGTH, PASSWORD_RESET_TTL_SECONDS, RegisterCustomerInput, UpdateCustomerInput,
 };
 pub use service::CustomerService;

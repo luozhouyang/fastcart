@@ -1039,6 +1039,7 @@ export interface Customer {
   phone: string | null;
   has_account: boolean;
   status: CustomerStatus;
+  email_verified_at: Timestamp | null;
   metadata: Metadata;
   created_at: Timestamp;
   updated_at: Timestamp;

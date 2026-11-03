@@ -75,6 +75,8 @@ pub struct AppContext {
     pub cache: StoreCache,
     /// Login attempt limiter.
     pub login_limiter: RateLimiter,
+    /// Customer email-verification and password-reset request limiter.
+    pub customer_email_limiter: RateLimiter,
     /// Serializes first-user bootstrap so concurrent setup calls cannot both win.
     pub bootstrap_lock: Arc<Mutex<()>>,
     /// Registered payment providers shared by all stores.
@@ -125,6 +127,7 @@ impl AppContext {
             events: EventBus::new(1024),
             cache,
             login_limiter: RateLimiter::new(10, Duration::from_secs(5 * 60)),
+            customer_email_limiter: RateLimiter::new(5, Duration::from_secs(15 * 60)),
             bootstrap_lock: Arc::new(Mutex::new(())),
             payment_providers,
             shipping_providers:

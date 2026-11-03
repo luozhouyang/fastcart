@@ -14,10 +14,12 @@ use axum::http::StatusCode;
 use axum::http::header::{HeaderValue, SET_COOKIE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use fastcart_email::EmailMessage;
 use fastcart_http::{
     ApiError, ApiJson, ApiResult, CUSTOMER_CSRF_COOKIE, CUSTOMER_SESSION_COOKIE, CustomerActor,
     PaginationQuery, csrf_cookie, parse_cookies, session_cookie, session_cookie_clear,
 };
+use fastcart_infrastructure::{JobQueue, StoreDatabase};
 use fastcart_kernel::{AppError, OrderId, normalize_email, now_timestamp};
 use fastcart_module_customer::{
     Address, AddressInput, CreatedCustomerSession, Customer, CustomerGroup, CustomerService,
@@ -49,6 +51,22 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/customers/me/orders/{order_id}", get(get_own_order))
         .route("/customers/me/groups", get(list_groups))
         .route("/customers/me/password", post(change_password))
+        .route(
+            "/customers/email-verification/request",
+            post(request_email_verification),
+        )
+        .route(
+            "/customers/email-verification/confirm",
+            post(confirm_email_verification),
+        )
+        .route(
+            "/customers/password-reset/request",
+            post(request_password_reset),
+        )
+        .route(
+            "/customers/password-reset/confirm",
+            post(confirm_password_reset),
+        )
 }
 
 /// Registration request body.
@@ -125,6 +143,43 @@ struct ChangePasswordRequest {
     current_password: String,
     /// Replacement password.
     new_password: String,
+}
+
+/// Email-only request body used by the verification and reset request routes.
+#[derive(Clone, Debug, Deserialize)]
+struct EmailRequest {
+    /// Account email address.
+    email: String,
+}
+
+/// Single-token request body.
+#[derive(Clone, Debug, Deserialize)]
+struct TokenRequest {
+    /// Plaintext single-use token.
+    token: String,
+}
+
+/// password-reset confirmation body.
+#[derive(Clone, Debug, Deserialize)]
+struct ResetPasswordRequest {
+    /// Plaintext single-use token.
+    token: String,
+    /// Replacement password.
+    password: String,
+}
+
+/// Generic acknowledgement that never reveals account existence or state.
+#[derive(Clone, Debug, Serialize)]
+struct AcceptedResponse {
+    /// The request was accepted for processing.
+    accepted: bool,
+}
+
+/// Confirmation result for an email-verification token.
+#[derive(Clone, Debug, Serialize)]
+struct EmailVerifiedResponse {
+    /// The customer's email is now verified.
+    email_verified: bool,
 }
 
 /// Session response body. Tokens are delivered as cookies.
@@ -322,6 +377,126 @@ async fn change_password(
     let mut response = StatusCode::NO_CONTENT.into_response();
     clear_session_cookies(&context, &mut response)?;
     Ok(response)
+}
+
+/// Requests an email-verification token.
+///
+/// The response is always the same 202 acknowledgement, whether or not the
+/// account exists or is already verified. Email delivery failures are logged
+/// and never change the response.
+async fn request_email_verification(
+    State(context): State<Arc<AppContext>>,
+    StoreDb(db): StoreDb,
+    ApiJson(request): ApiJson<EmailRequest>,
+) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
+    let email = normalize_email(&request.email);
+    let key = format!("email-verification:{email}");
+    if !context.customer_email_limiter.check(&key) {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
+
+    let service = CustomerService::new(db.clone());
+    if let Some(customer) = service.get_customer_by_email(&email).await? {
+        match service.request_email_verification(&customer.id).await {
+            Ok(created) => {
+                enqueue_auth_email(
+                    &context,
+                    &db,
+                    &customer.email,
+                    "Verify your email address",
+                    format!(
+                        "Use this token to verify your email address: {}",
+                        created.token
+                    ),
+                )
+                .await;
+            }
+            // Already verified and recently deleted accounts stay silent.
+            Err(AppError::Conflict(_) | AppError::NotFound(_)) => {}
+            Err(error) => return Err(ApiError::new(error)),
+        }
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AcceptedResponse { accepted: true }),
+    ))
+}
+
+/// Confirms an email-verification token.
+async fn confirm_email_verification(
+    StoreDb(db): StoreDb,
+    ApiJson(request): ApiJson<TokenRequest>,
+) -> ApiResult<Json<EmailVerifiedResponse>> {
+    CustomerService::new(db)
+        .verify_email(&request.token)
+        .await?;
+    Ok(Json(EmailVerifiedResponse {
+        email_verified: true,
+    }))
+}
+
+/// Requests a password-reset token.
+///
+/// Unknown and guest emails do not create tokens. The response is always the
+/// same 202 acknowledgement and email failures are only logged.
+async fn request_password_reset(
+    State(context): State<Arc<AppContext>>,
+    StoreDb(db): StoreDb,
+    ApiJson(request): ApiJson<EmailRequest>,
+) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
+    let email = normalize_email(&request.email);
+    let key = format!("password-reset:{email}");
+    if !context.customer_email_limiter.check(&key) {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
+
+    let service = CustomerService::new(db.clone());
+    if let Some(created) = service.request_password_reset(&email).await? {
+        enqueue_auth_email(
+            &context,
+            &db,
+            &email,
+            "Reset your password",
+            format!("Use this token to reset your password: {}", created.token),
+        )
+        .await;
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AcceptedResponse { accepted: true }),
+    ))
+}
+
+/// Confirms a password-reset token and revokes every session.
+async fn confirm_password_reset(
+    StoreDb(db): StoreDb,
+    ApiJson(request): ApiJson<ResetPasswordRequest>,
+) -> ApiResult<StatusCode> {
+    CustomerService::new(db)
+        .reset_password(&request.token, &request.password)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Enqueues an authentication email, logging failures without failing the
+/// caller. Plaintext tokens are never logged.
+async fn enqueue_auth_email(
+    context: &AppContext,
+    db: &StoreDatabase,
+    recipient: &str,
+    subject: &str,
+    body: String,
+) {
+    let message = EmailMessage::new(recipient, subject).with_text(body);
+    let queue = JobQueue::new(db.pool().clone());
+    if let Err(error) = context.email.enqueue(&queue, message, Some(10)).await {
+        tracing::warn!(
+            error = %error,
+            "failed to enqueue customer authentication email"
+        );
+    }
 }
 
 /// Builds the login response, setting the session and CSRF cookies.

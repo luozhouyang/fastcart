@@ -18,6 +18,10 @@ pub const MAX_PHONE_LENGTH: usize = 40;
 pub const MIN_PASSWORD_LENGTH: usize = 8;
 /// Customer session lifetime in seconds (30 days).
 pub const CUSTOMER_SESSION_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
+/// Email-verification token lifetime in seconds (24 hours).
+pub const EMAIL_VERIFICATION_TTL_SECONDS: i64 = 24 * 60 * 60;
+/// password-reset token lifetime in seconds (1 hour).
+pub const PASSWORD_RESET_TTL_SECONDS: i64 = 60 * 60;
 
 /// Lifecycle status of a customer account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +70,8 @@ pub struct Customer {
     pub has_account: bool,
     /// Lifecycle status.
     pub status: CustomerStatus,
+    /// Email verification timestamp (Unix seconds), absent until verified.
+    pub email_verified_at: Option<Timestamp>,
     /// Free-form extension metadata.
     pub metadata: Metadata,
     /// Creation timestamp (Unix seconds).
@@ -186,6 +192,59 @@ pub struct AuthenticatedCustomerSession {
     pub customer: Customer,
     /// Identifier of the session that authenticated the request.
     pub session_id: CustomerSessionId,
+}
+
+/// Purpose of a single-use customer authentication token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomerAuthTokenType {
+    /// Confirms ownership of a customer email address.
+    EmailVerification,
+    /// Authorizes a password reset.
+    PasswordReset,
+}
+
+impl CustomerAuthTokenType {
+    /// Returns the database representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EmailVerification => "email_verification",
+            Self::PasswordReset => "password_reset",
+        }
+    }
+
+    /// Decodes a stored token type.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "email_verification" => Some(Self::EmailVerification),
+            "password_reset" => Some(Self::PasswordReset),
+            _ => None,
+        }
+    }
+}
+
+/// A newly created single-use authentication token.
+///
+/// The plaintext token is returned exactly once so it can be delivered by
+/// email; only its SHA-256 digest is persisted. `Debug` redacts the value.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CreatedCustomerAuthToken {
+    /// Plaintext token delivered to the customer once.
+    pub token: String,
+    /// Expiry timestamp (Unix seconds).
+    pub expires_at: Timestamp,
+}
+
+impl fmt::Debug for CreatedCustomerAuthToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreatedCustomerAuthToken")
+            .field("token", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Input for creating a guest or administrative customer profile.
