@@ -14,6 +14,9 @@ anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 fastcart-server.workspace = true
+fastcart-platform.workspace = true
+fastcart-infrastructure.workspace = true
+fastcart-kernel.workspace = true
 
 [lints]
 workspace = true

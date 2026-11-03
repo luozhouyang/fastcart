@@ -1,10 +1,12 @@
 //! Periodic maintenance over active store databases.
 
 use fastcart_infrastructure::{
-    EventBus, StoreDatabaseManager, fetch_pending_outbox, mark_outbox_failed, mark_outbox_processed,
+    EventBus, JobQueue, StoreDatabaseManager, fetch_pending_outbox, mark_outbox_failed,
+    mark_outbox_processed,
 };
 use fastcart_kernel::{Pagination, now_timestamp};
 use fastcart_module_cart::CartService;
+use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::CheckoutService;
 use fastcart_module_inventory::InventoryService;
 use fastcart_platform::{PlatformStore, StoreStatus};
@@ -20,6 +22,8 @@ pub struct MaintenanceReport {
     pub checkouts_expired: u64,
     /// Outbox events dispatched.
     pub outbox_dispatched: u64,
+    /// Background jobs processed.
+    pub jobs_processed: u64,
     /// Store-level failures encountered.
     pub failures: u64,
 }
@@ -82,6 +86,50 @@ pub async fn run_maintenance(
                 Ok(count) => report.checkouts_expired += count,
                 Err(error) => {
                     tracing::warn!(store_id = %store.id, error = %error, "checkout expiry failed");
+                    report.failures += 1;
+                }
+            }
+            let queue = JobQueue::new(database.pool().clone());
+            match queue.claim("maintenance", 25).await {
+                Ok(jobs) => {
+                    for job in jobs {
+                        let outcome = match job.job_type.as_str() {
+                            "expire_cart" => CartService::new(database.clone())
+                                .expire_due(now)
+                                .await
+                                .map(|_| ()),
+                            "expire_reservation" => InventoryService::new(database.clone())
+                                .expire_due(now)
+                                .await
+                                .map(|_| ()),
+                            "reindex_search" => CatalogService::new(database.clone())
+                                .reindex_search()
+                                .await
+                                .map(|_| ()),
+                            "dispatch_outbox" => Ok(()),
+                            other => Err(fastcart_kernel::AppError::validation(format!(
+                                "no handler for job type {other}"
+                            ))),
+                        };
+                        match outcome {
+                            Ok(()) => {
+                                if let Err(error) = queue.complete(&job.id).await {
+                                    tracing::warn!(store_id = %store.id, error = %error, "job completion failed");
+                                    report.failures += 1;
+                                } else {
+                                    report.jobs_processed += 1;
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(store_id = %store.id, job_type = %job.job_type, error = %error, "job failed");
+                                let _ = queue.fail(&job.id, &error.to_string()).await;
+                                report.failures += 1;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "job claim failed");
                     report.failures += 1;
                 }
             }

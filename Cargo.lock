@@ -518,6 +518,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "fastcart-infrastructure",
+ "fastcart-kernel",
+ "fastcart-platform",
  "fastcart-server",
  "tokio",
 ]

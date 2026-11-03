@@ -2,172 +2,155 @@
 
 A lightweight, self-hosted, multi-store commerce platform built with Rust and React.
 
-Fastcart aims to deliver the developer experience of modern headless commerce platforms while keeping deployment simple: a single Rust modular monolith, one SQLite database per store, a React admin application, and a TanStack Start storefront served through an embedded JavaScript runtime.
+Fastcart aims to deliver the developer experience of modern headless commerce platforms while keeping deployment simple: a single Rust modular monolith, one SQLite database per store, a React admin application, and an embedded storefront runtime.
 
-> **Status: Phase 0 — project scaffold.**
-> The workspace, configuration loading, health API, and frontend shells are in place. Commerce modules, persistence, and the SSR runtime bridge are under active development and not yet production-ready.
+> **Status: backend implementation complete; UI and SSR runtime are still being built.**
+> The platform, commerce modules, workflows and HTTP APIs are implemented and
+> covered by unit and integration tests. The React admin/storefront applications
+> are shells, and the V8/Node storefront runtime bridge is not wired yet.
 
 ## Why Fastcart
 
-- **Simple to deploy.** Single-node, single-binary first. No mandatory Redis, PostgreSQL, or message broker.
-- **Multi-store by design.** Every store owns an isolated SQLite database; store context is resolved per request.
-- **Rust performance.** Async Rust with Axum and Tokio, integer-based money types, and explicit module boundaries.
-- **Modern storefront.** TanStack Start and React 19 with SSR and streaming, rendered inside the Rust process.
-- **Extensible core.** Provider interfaces, capability-scoped plugins, and an event/outbox foundation.
-- **AI-ready.** A controlled tool registry that calls application services — never storage directly — with auditable tasks.
+- **Simple to deploy.** Single-node, single-binary first. No mandatory Redis, PostgreSQL or message broker.
+- **Multi-store by design.** Every store owns an isolated SQLite database; store context is resolved per request from trusted platform metadata.
+- **Rust performance.** Async Rust with Axum and Tokio, integer money, explicit module boundaries.
+- **Medusa-style modules.** Catalog, pricing, inventory, customer, cart, promotion, checkout, order, payment, shipping, tax and content are independent crates; workflows compose them.
+- **Extensible core.** Provider interfaces, capability-scoped plugin manifests, a transactional outbox, a persistent job queue, and an auditable AI tool registry.
 
-## Architecture
+## Implemented backend
 
-```text
-fastcart-server
-│
-├── Axum HTTP server
-│
-├── Commerce core
-│
-├── Store registry / per-store SQLite databases
-│
-├── Storefront runtime manager
-│   ├── Embedded V8 runtime (deno_core)
-│   ├── Node.js sidecar (fallback)
-│   └── Worker pool + request queue
-│
-├── Embedded TanStack Start bundle
-│
-└── Static assets
-```
+### Platform
 
-The backend is a modular monolith. Domain crates stay independent of HTTP and SQLx so that presentation, persistence, and runtime adapters can evolve separately.
+- Store registry, lifecycle (`provisioning` / `active` / `suspended` / `deleting` / `deleted`) and idempotent provisioning.
+- Domain registry with normalization, primary-domain rules and duplicate detection.
+- Platform users, Argon2id credentials, server-side admin sessions, CSRF-protected cookie auth and hashed API tokens.
+- Roles and permissions: `products.*`, `orders.*`, `customers.*`, `inventory.*`, `promotions.*`, `settings.*`, `themes.*`, `users.*`, `payments.*`.
+- Audit log, per-store SQLite pools, migrations, consistent `VACUUM INTO` backups, integrity checks and restore.
+
+### Commerce modules
+
+| Module    | Capabilities                                                                                   |
+| --------- | ---------------------------------------------------------------------------------------------- |
+| store     | Store settings and sales channels                                                              |
+| catalog   | Products, variants, options, media, categories, collections, tags, FTS5 search, publication      |
+| pricing   | Price lists, scoped prices and deterministic price selection                                    |
+| promotion | Percentage/fixed/free-shipping promotions, coupons, rules, usage limits, proportional allocation |
+| inventory | Locations, levels, atomic reservations, release/commit, expiry and movement history             |
+| shipping  | Profiles, options and region/weight-aware flat rate selection                                   |
+| tax       | Categories, regions, rates and inclusive/exclusive tax calculation                              |
+| customer  | Profiles, addresses, groups, Argon2id credentials and store-scoped sessions                     |
+| cart      | Snapshot line items and server-derived totals                                                   |
+| checkout  | Persisted state machine with transition history                                                 |
+| order     | Immutable commercial snapshots, idempotent placement, fulfillment and refunds                   |
+| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events     |
+| content   | Pages, versions, navigation trees and redirects                                                 |
+
+### Cross-cutting
+
+- Transactional outbox with retry/backoff and in-process event bus.
+- SQLite-backed persistent job queue with atomic claiming and lease expiry.
+- Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; simple job handlers.
+- Store-scoped Moka cache with generation-based invalidation.
+- Local object storage with path-traversal protection.
+- Plugin manifest registry with capability checks and dependency resolution.
+- AI provider/model/tool registries with an auditable agent-task state machine.
 
 ## Repository layout
 
-| Path                        | Purpose                                                                                                        |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `apps/server`               | Axum HTTP server, bootstrap, configuration, graceful shutdown                                                  |
-| `apps/admin`                | React 19 + TanStack Router admin shell                                                                         |
-| `apps/storefront`           | TanStack Start storefront application                                                                          |
-| `crates/kernel`             | Identifiers, money, request/store context, shared errors                                                       |
-| `crates/platform`           | Store registry, domains, lifecycle, users                                                                      |
-| `crates/commerce`           | Catalog, pricing, inventory, carts, checkout, orders (in progress)                                             |
-| `crates/infrastructure`     | SQLite, migrations, storage, and job implementations                                                           |
-| `crates/api`                | HTTP presentation layer and route namespaces                                                                   |
-| `crates/storefront`         | Theme manifests, page schemas, rendering contracts                                                             |
-| `crates/storefront-runtime` | Runtime API, V8 runtime, Node sidecar, pool, and bridge                                                        |
-| `crates/plugin`             | Plugin manifests and declared capabilities                                                                     |
-| `crates/ai`                 | Tool definitions and agent task contracts                                                                      |
-| `crates/cli`                | `fastcart` administrative CLI                                                                                  |
-| `packages/*`                | TypeScript SDKs and shared UI (`api-client`, `admin-sdk`, `storefront-sdk`, `theme-sdk`, `shared-types`, `ui`) |
-| `themes/default`            | Default theme manifest, settings schema, and assets                                                            |
-| `plugins/examples`          | Example plugin workspace                                                                                       |
-| `migrations`                | Platform and per-store SQL migrations                                                                          |
-| `config`                    | Example server configuration                                                                                   |
-| `scripts`                   | Development, build, and verification helpers                                                                   |
-
-## Technology stack
-
-| Layer      | Technology                                                        |
-| ---------- | ----------------------------------------------------------------- |
-| Backend    | Rust 2024 edition, Axum, Tokio, SQLx, SQLite (WAL)                |
-| Admin      | React 19, TanStack Router, Tailwind CSS 4, Vite                   |
-| Storefront | TanStack Start, React 19, Vite                                    |
-| JS runtime | deno_core + V8 (embedded), Node.js sidecar fallback               |
-| Tooling    | Cargo workspace, pnpm workspace, ESLint, Prettier, GitHub Actions |
-
-## Prerequisites
-
-- Rust `1.97.1` (pinned by `rust-toolchain.toml`)
-- Node.js `>= 22`
-- pnpm `10.33.0` (pinned by `package.json`)
+| Path                       | Purpose                                                          |
+| -------------------------- | ---------------------------------------------------------------- |
+| `apps/server`              | Axum server bootstrap, configuration, graceful shutdown           |
+| `apps/admin`               | React admin shell                                                |
+| `apps/storefront`          | TanStack Start storefront shell                                  |
+| `crates/kernel`            | IDs, money, contexts, validation, errors                         |
+| `crates/platform`          | Platform DB, stores, domains, auth, RBAC, provisioning           |
+| `crates/infrastructure`    | SQLite pools, migrations, cache, outbox, jobs, storage           |
+| `crates/http`              | Error envelope, extractors, auth/store middleware, rate limiting |
+| `crates/modules/*`         | The independent commerce modules listed above                    |
+| `crates/workflows`         | Cart pricing, checkout and maintenance workflows                 |
+| `crates/api`               | Versioned HTTP surface and DTOs                                  |
+| `crates/plugin`, `crates/ai` | Extension foundations                                          |
+| `migrations/platform`      | Platform schema                                                  |
+| `migrations/store`         | Per-store schema (catalog, pricing, inventory, orders, …)        |
 
 ## Getting started
 
 ```bash
-# Install JavaScript dependencies
-pnpm install
-
-# Create config/config.toml and the runtime data directories
-cargo run -p fastcart-cli -- init
-
-# Start the Rust server (defaults to 0.0.0.0:8080)
-./scripts/dev-server.sh
-
-# In separate terminals, start the frontends
-pnpm dev:admin
-pnpm dev:storefront
+cargo build --workspace
+cargo run -p fastcart-cli -- init --dir .
+cargo run -p fastcart-cli -- user create --email owner@example.com --password 'change-me-please'
+cargo run -p fastcart-cli -- store create \
+  --name "Demo Store" --slug demo --domain shop.example.com \
+  --owner-email owner@example.com
+cargo run -p fastcart-cli -- serve
 ```
 
-Verify the server:
+Alternatively, start the server first and bootstrap through `POST /api/v1/platform/auth/setup`; it only succeeds while no users exist.
 
-```bash
-curl http://localhost:8080/health
+### Configuration
+
+`config/config.toml` is optional; every field has a default. Environment overrides:
+
+- `FASTCART_CONFIG` — configuration path
+- `FASTCART_SERVER_HOST`, `FASTCART_SERVER_PORT`, `FASTCART_LOG_LEVEL`
+- `FASTCART_PAYMENT_WEBHOOK_SECRET` — enables sandbox webhook verification
+
+Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
+
+## HTTP API
+
+All endpoints are under `/api/v1` unless noted.
+
+| Namespace              | Purpose                                         |
+| ---------------------- | ----------------------------------------------- |
+| `/platform/*`          | Installation, auth, stores, domains, memberships |
+| `/admin/*`             | Store-scoped administration                     |
+| `/store/*`             | Public storefront and customer operations       |
+| `/webhooks/payments/*` | Provider callbacks                              |
+| `/internal/storefront` | Trusted SSR-to-commerce boundary                |
+| `/health`, `/health/ready` | Liveness and readiness                      |
+
+Key flows:
+
+```text
+POST /api/v1/platform/auth/setup
+POST /api/v1/platform/stores
+GET  /api/v1/admin/catalog/products          # x-store-id + admin session
+POST /api/v1/store/carts
+POST /api/v1/store/carts/{id}/items
+POST /api/v1/store/carts/{id}/shipping-method
+POST /api/v1/store/checkouts
+POST /api/v1/store/checkouts/{id}/complete
 ```
 
-The default storefront dev server listens on `http://localhost:3000`.
+### Security model
 
-### CLI
+- The store is resolved from the request `Host` header against the platform registry; clients cannot select a store with a header or query parameter on storefront routes.
+- Admin requests authenticate by HttpOnly session cookie or bearer API token and select a store with `x-store-id`; the store must be one the user belongs to.
+- Cookie-authenticated mutations require the double-submit CSRF token in `x-csrf-token`.
+- All money is integer minor units. Prices, discounts, tax and shipping are computed server-side; client-submitted totals are never trusted.
+- Credentials and API/session tokens are hashed (Argon2id for passwords, SHA-256 for tokens) and never returned after creation.
 
-```bash
-cargo run -p fastcart-cli -- init      # create directories and an initial config
-cargo run -p fastcart-cli -- doctor    # validate configuration and print details
-cargo run -p fastcart-cli -- serve     # start the HTTP server
-```
-
-## Configuration
-
-Configuration is loaded from `config/config.toml`, created from `config/config.example.toml`. Environment variables can override selected values after the file is loaded:
+## Testing and quality gates
 
 ```bash
-FASTCART_SERVER_HOST=0.0.0.0
-FASTCART_SERVER_PORT=8080
-FASTCART_LOG_LEVEL=info
-```
-
-Key settings include the platform database path, the per-store database directory, the storage root, cache capacity, storefront runtime selection, and job worker counts. See `config/config.example.toml` for the full layout.
-
-## Development
-
-```bash
-# Run the full verification suite (format, lint, tests, frontend builds)
-./scripts/check.sh
-
-# Or run individual commands
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-pnpm lint
-pnpm build
-pnpm typecheck
-pnpm test
+pnpm install
+pnpm lint && pnpm typecheck && pnpm build
 ```
 
-CI runs the Rust and web jobs on every push and pull request.
-
-## API surface
-
-Phase 0 exposes health endpoints and reserves the API namespaces defined by the architecture:
-
-- `GET /health`
-- `GET /health/live`
-- `GET /health/ready`
-- Reserved: `/api/v1/platform`, `/api/v1/admin`, `/api/v1/store`, `/api/v1/webhooks`, `/internal/storefront`
-
-Reserved routes return `501 Not Implemented` with a structured error body until their phase lands.
+The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order) and customer session/CSRF flows.
 
 ## Roadmap
 
-- [x] Workspace scaffold, configuration, health API, frontend shells
-- [ ] Platform store registry and store lifecycle
-- [ ] Commerce core: catalog, pricing, inventory, cart, checkout, orders
-- [ ] SQLite persistence, migrations, outbox, background jobs
-- [ ] Storefront runtime bridge, theming, and page rendering
-- [ ] Admin product and order management
-- [ ] Plugin system with capability enforcement
-- [ ] AI tool registry and auditable agent tasks
-
-## Contributing
-
-Contributions are welcome. Please keep changes scoped to a single concern, run `./scripts/check.sh` before opening a pull request, and follow the existing crate and package boundaries.
+- React admin and storefront feature UIs.
+- V8/Node storefront SSR runtime bridge and theme page rendering.
+- OpenAPI generation and generated TypeScript SDKs.
+- Additional payment/shipping/tax providers and webhook delivery registration.
+- PostgreSQL adapter for high-traffic stores.
 
 ## License
 
-[MIT](LICENSE)
+MIT
