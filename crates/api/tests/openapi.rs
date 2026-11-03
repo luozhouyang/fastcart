@@ -8,7 +8,7 @@
 async fn document_is_openapi_31() {
     let document = fastcart_api::openapi::document();
     assert_eq!(document["openapi"], "3.1.0");
-    assert_eq!(document["servers"][0]["url"], "/api/v1");
+    assert_eq!(document["servers"][0]["url"], "/");
     assert!(
         document["paths"]
             .as_object()

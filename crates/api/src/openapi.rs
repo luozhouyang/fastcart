@@ -47,7 +47,7 @@ pub fn document() -> Value {
                 storefront namespace is additionally gated by the \
                 x-fastcart-internal-secret header.",
         },
-        "servers": [{"url": "/api/v1"}],
+        "servers": [{"url": "/"}],
         "tags": tags(),
         "paths": paths,
         "components": {
@@ -4049,7 +4049,7 @@ mod tests {
         assert_eq!(document["info"]["title"], "Fastcart Commerce API");
         assert!(document["info"]["version"].is_string());
         assert!(document["info"]["description"].is_string());
-        assert_eq!(document["servers"][0]["url"], "/api/v1");
+        assert_eq!(document["servers"][0]["url"], "/");
 
         let tags: BTreeSet<&str> = document["tags"]
             .as_array()
