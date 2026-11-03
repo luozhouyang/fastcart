@@ -52,7 +52,7 @@ Rules:
   validation, not-found and conflict failures (`AppError::validation`,
   `AppError::not_found`, `AppError::conflict`).
 - Validate input with `fastcart_kernel::{validate_handle, validate_email,
-  validate_quantity, slugify, ...}`.
+validate_quantity, slugify, ...}`.
 - Metadata is `fastcart_kernel::Metadata`; persist with `to_json_string()` and
   read with `Metadata::from_json_str()`.
 - Timestamps are Unix seconds from `fastcart_kernel::now_timestamp()`.

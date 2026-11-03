@@ -15,7 +15,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - **Simple to deploy.** Single-node, single-binary first. No mandatory Redis, PostgreSQL or message broker.
 - **Multi-store by design.** Every store owns an isolated SQLite database; store context is resolved per request from trusted platform metadata.
 - **Rust performance.** Async Rust with Axum and Tokio, integer money, explicit module boundaries.
-- **Medusa-style modules.** Catalog, pricing, inventory, customer, cart, promotion, checkout, order, payment, shipping, tax and content are independent crates; workflows compose them.
+- **Medusa-style modules.** Catalog, pricing, inventory, customer, cart, promotion, checkout, order, payment, shipping, tax, content and webhooks are independent crates; workflows compose them.
 - **Extensible core.** Provider interfaces, capability-scoped plugin manifests, a transactional outbox, a persistent job queue, and an auditable AI tool registry.
 
 ## Implemented backend
@@ -30,49 +30,52 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 
 ### Commerce modules
 
-| Module    | Capabilities                                                                                   |
-| --------- | ---------------------------------------------------------------------------------------------- |
-| store     | Store settings and sales channels                                                              |
+| Module    | Capabilities                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------ |
+| store     | Store settings and sales channels                                                                |
 | catalog   | Products, variants, options, media, categories, collections, tags, FTS5 search, publication      |
-| pricing   | Price lists, scoped prices and deterministic price selection                                    |
+| pricing   | Price lists, scoped prices and deterministic price selection                                     |
 | promotion | Percentage/fixed/free-shipping promotions, coupons, rules, usage limits, proportional allocation |
-| inventory | Locations, levels, atomic reservations, release/commit, expiry and movement history             |
-| shipping  | Profiles, options and region/weight-aware flat rate selection                                   |
-| tax       | Categories, regions, rates and inclusive/exclusive tax calculation                              |
-| customer  | Profiles, addresses, groups, Argon2id credentials and store-scoped sessions                     |
-| cart      | Snapshot line items and server-derived totals                                                   |
-| checkout  | Persisted state machine with transition history                                                 |
-| order     | Immutable commercial snapshots, idempotent placement, fulfillment and refunds                   |
-| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events     |
-| content   | Pages, versions, navigation trees and redirects                                                 |
+| inventory | Locations, levels, atomic reservations, release/commit, expiry and movement history              |
+| shipping  | Profiles, options and region/weight-aware flat rate selection                                    |
+| tax       | Categories, regions, rates and inclusive/exclusive tax calculation                               |
+| customer  | Profiles, addresses, groups, Argon2id credentials and store-scoped sessions                      |
+| cart      | Snapshot line items and server-derived totals                                                    |
+| checkout  | Persisted state machine with transition history                                                  |
+| order     | Immutable commercial snapshots, idempotent placement, fulfillment and refunds                    |
+| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events      |
+| content   | Pages, versions, navigation trees and redirects                                                  |
+| webhook   | Endpoint subscriptions, HMAC-signed deliveries, retries, replay and delivery history             |
 
 ### Cross-cutting
 
 - Transactional outbox with retry/backoff and in-process event bus.
 - SQLite-backed persistent job queue with atomic claiming and lease expiry.
-- Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; simple job handlers.
+- Signed webhook delivery from outbox events with idempotent fan-out, retry/backoff, crash recovery and replay.
+- Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; simple job handlers.
 - Store-scoped Moka cache with generation-based invalidation.
+- Prometheus-compatible `/metrics` with latency histograms, plus baseline security response headers.
 - Local object storage with path-traversal protection.
 - Plugin manifest registry with capability checks and dependency resolution.
 - AI provider/model/tool registries with an auditable agent-task state machine.
 
 ## Repository layout
 
-| Path                       | Purpose                                                          |
-| -------------------------- | ---------------------------------------------------------------- |
-| `apps/server`              | Axum server bootstrap, configuration, graceful shutdown           |
-| `apps/admin`               | React admin shell                                                |
-| `apps/storefront`          | TanStack Start storefront shell                                  |
-| `crates/kernel`            | IDs, money, contexts, validation, errors                         |
-| `crates/platform`          | Platform DB, stores, domains, auth, RBAC, provisioning           |
-| `crates/infrastructure`    | SQLite pools, migrations, cache, outbox, jobs, storage           |
-| `crates/http`              | Error envelope, extractors, auth/store middleware, rate limiting |
-| `crates/modules/*`         | The independent commerce modules listed above                    |
-| `crates/workflows`         | Cart pricing, checkout and maintenance workflows                 |
-| `crates/api`               | Versioned HTTP surface and DTOs                                  |
-| `crates/plugin`, `crates/ai` | Extension foundations                                          |
-| `migrations/platform`      | Platform schema                                                  |
-| `migrations/store`         | Per-store schema (catalog, pricing, inventory, orders, …)        |
+| Path                         | Purpose                                                          |
+| ---------------------------- | ---------------------------------------------------------------- |
+| `apps/server`                | Axum server bootstrap, configuration, graceful shutdown          |
+| `apps/admin`                 | React admin shell                                                |
+| `apps/storefront`            | TanStack Start storefront shell                                  |
+| `crates/kernel`              | IDs, money, contexts, validation, errors                         |
+| `crates/platform`            | Platform DB, stores, domains, auth, RBAC, provisioning           |
+| `crates/infrastructure`      | SQLite pools, migrations, cache, outbox, jobs, storage           |
+| `crates/http`                | Error envelope, extractors, auth/store middleware, rate limiting |
+| `crates/modules/*`           | The independent commerce modules listed above                    |
+| `crates/workflows`           | Cart pricing, checkout and maintenance workflows                 |
+| `crates/api`                 | Versioned HTTP surface and DTOs                                  |
+| `crates/plugin`, `crates/ai` | Extension foundations                                            |
+| `migrations/platform`        | Platform schema                                                  |
+| `migrations/store`           | Per-store schema (catalog, pricing, inventory, orders, …)        |
 
 ## Getting started
 
@@ -102,14 +105,15 @@ Local development uses `cookie_secure = false` and explicit `cors_origins` in `c
 
 All endpoints are under `/api/v1` unless noted.
 
-| Namespace              | Purpose                                         |
-| ---------------------- | ----------------------------------------------- |
-| `/platform/*`          | Installation, auth, stores, domains, memberships |
-| `/admin/*`             | Store-scoped administration                     |
-| `/store/*`             | Public storefront and customer operations       |
-| `/webhooks/payments/*` | Provider callbacks                              |
-| `/internal/storefront` | Trusted SSR-to-commerce boundary                |
-| `/health`, `/health/ready` | Liveness and readiness                      |
+| Namespace                  | Purpose                                          |
+| -------------------------- | ------------------------------------------------ |
+| `/platform/*`              | Installation, auth, stores, domains, memberships |
+| `/admin/*`                 | Store-scoped administration                      |
+| `/store/*`                 | Public storefront and customer operations        |
+| `/webhooks/payments/*`     | Provider callbacks                               |
+| `/internal/storefront`     | Trusted SSR-to-commerce boundary                 |
+| `/health`, `/health/ready` | Liveness and readiness                           |
+| `/metrics`                 | Prometheus-compatible process metrics            |
 
 Key flows:
 
@@ -142,7 +146,7 @@ pnpm install
 pnpm lint && pnpm typecheck && pnpm build
 ```
 
-The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order) and customer session/CSRF flows.
+The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries and cross-store tenant isolation.
 
 ## Roadmap
 
@@ -150,7 +154,7 @@ The suite covers module rules, repository behaviour, platform auth/RBAC, cart an
 - Wire the storefront runtime into the server and implement theme page rendering.
 - Embedded V8 runtime adapter.
 - OpenAPI generation and generated TypeScript SDKs.
-- Additional payment/shipping/tax providers and webhook delivery registration.
+- Additional payment/shipping/tax providers.
 - PostgreSQL adapter for high-traffic stores.
 
 ## License

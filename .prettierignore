@@ -7,3 +7,5 @@ Cargo.lock
 data
 docs/architecture
 apps/storefront/src/routeTree.gen.ts
+
+.claude
