@@ -25,6 +25,8 @@ pub struct Config {
     pub jobs: JobsConfig,
     /// Payment provider settings.
     pub payments: PaymentsConfig,
+    /// Transactional email settings.
+    pub email: EmailConfig,
 }
 
 /// HTTP listener settings.
@@ -169,6 +171,67 @@ pub struct PaymentsConfig {
     pub webhook_secret: Option<String>,
 }
 
+/// Transactional email settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmailConfig {
+    /// Provider: `log`, `smtp` or `resend`.
+    pub provider: String,
+    /// Default sender address.
+    pub from: String,
+    /// SMTP settings used when `provider = "smtp"`.
+    pub smtp: Option<SmtpSettings>,
+    /// Resend settings used when `provider = "resend"`.
+    pub resend: Option<ResendSettings>,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            provider: "log".to_owned(),
+            from: "no-reply@example.com".to_owned(),
+            smtp: None,
+            resend: None,
+        }
+    }
+}
+
+/// SMTP connection settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmtpSettings {
+    /// SMTP host.
+    pub host: String,
+    /// SMTP port.
+    pub port: u16,
+    /// Optional username.
+    pub username: Option<String>,
+    /// Optional password.
+    pub password: Option<String>,
+    /// `implicit`, `starttls` or `plain`.
+    pub security: String,
+}
+
+impl Default for SmtpSettings {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 587,
+            username: None,
+            password: None,
+            security: "starttls".to_owned(),
+        }
+    }
+}
+
+/// Resend API settings.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResendSettings {
+    /// Resend API key.
+    pub api_key: String,
+}
+
 /// Background job settings.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -246,6 +309,50 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_INTERNAL_FETCH_SECRET") {
             self.storefront.internal_fetch_secret = Some(value);
         }
+        if let Ok(value) = env::var("FASTCART_EMAIL_PROVIDER") {
+            self.email.provider = value;
+        }
+        if let Ok(value) = env::var("FASTCART_EMAIL_FROM") {
+            self.email.from = value;
+        }
+        if let Ok(value) = env::var("FASTCART_SMTP_HOST") {
+            self.email
+                .smtp
+                .get_or_insert_with(SmtpSettings::default)
+                .host = value;
+        }
+        if let Ok(value) = env::var("FASTCART_SMTP_PORT") {
+            self.email
+                .smtp
+                .get_or_insert_with(SmtpSettings::default)
+                .port = value
+                .parse()
+                .context("FASTCART_SMTP_PORT must be a valid port number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SMTP_USERNAME") {
+            self.email
+                .smtp
+                .get_or_insert_with(SmtpSettings::default)
+                .username = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_SMTP_PASSWORD") {
+            self.email
+                .smtp
+                .get_or_insert_with(SmtpSettings::default)
+                .password = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_SMTP_SECURITY") {
+            self.email
+                .smtp
+                .get_or_insert_with(SmtpSettings::default)
+                .security = value;
+        }
+        if let Ok(value) = env::var("FASTCART_RESEND_API_KEY") {
+            self.email
+                .resend
+                .get_or_insert_with(ResendSettings::default)
+                .api_key = value;
+        }
         Ok(())
     }
 
@@ -284,6 +391,36 @@ impl Config {
         }
         if self.cache.ttl_seconds == 0 {
             bail!("cache.ttl_seconds must be greater than zero");
+        }
+        match self.email.provider.as_str() {
+            "log" => {}
+            "smtp" => {
+                let smtp = self
+                    .email
+                    .smtp
+                    .as_ref()
+                    .context("email.smtp is required when email.provider = \"smtp\"")?;
+                if smtp.host.trim().is_empty() {
+                    bail!("email.smtp.host must not be empty");
+                }
+                if smtp.port == 0 {
+                    bail!("email.smtp.port must be greater than zero");
+                }
+                if !matches!(smtp.security.as_str(), "implicit" | "starttls" | "plain") {
+                    bail!("email.smtp.security must be implicit, starttls or plain");
+                }
+            }
+            "resend" => {
+                let resend = self
+                    .email
+                    .resend
+                    .as_ref()
+                    .context("email.resend is required when email.provider = \"resend\"")?;
+                if resend.api_key.trim().is_empty() {
+                    bail!("email.resend.api_key must not be empty");
+                }
+            }
+            other => bail!("email.provider must be log, smtp or resend (found {other})"),
         }
         Ok(())
     }

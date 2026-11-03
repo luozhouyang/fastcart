@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(receipt.provider, "memory");
         assert_eq!(provider.messages(), vec![message]);
 
-        queue.complete(&claimed[0].id).await.unwrap();
+        assert!(queue.complete(&claimed[0].id, "worker-1").await.unwrap());
         assert_eq!(
             queue
                 .count_by_status(fastcart_infrastructure::jobs::status::COMPLETED)

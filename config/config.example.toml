@@ -42,3 +42,19 @@ worker_count = 2
 [payments]
 # Shared secret for manual/sandbox webhook signatures (x-manual-signature).
 # webhook_secret = ""
+
+[email]
+# "log" keeps messages in the process log, "smtp" uses lettre, "resend" uses
+# the official Resend Rust SDK.
+provider = "log"
+from = "orders@example.com"
+
+# [email.smtp]
+# host = "smtp.example.com"
+# port = 587
+# username = "smtp-user"
+# password = "smtp-password"
+# security = "starttls" # implicit | starttls | plain
+
+# [email.resend]
+# api_key = "re_..."

@@ -192,9 +192,13 @@ impl EmailProvider for LogEmailProvider {
 
     async fn send(&self, message: EmailMessage) -> Result<EmailReceipt, EmailError> {
         // Bodies may contain personal data, so only routing fields are logged.
+        let recipient_domain = message
+            .to
+            .rsplit_once('@')
+            .map_or("unknown", |(_, domain)| domain);
         tracing::info!(
             provider = %self.id,
-            to = %message.to,
+            recipient_domain = %recipient_domain,
             subject = %message.subject,
             "accepted email for delivery"
         );

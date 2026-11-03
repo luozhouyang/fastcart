@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fastcart_api::{ApiConfig, AppContext};
+use fastcart_email::{
+    EmailService, ResendConfig, ResendEmailProvider, SmtpConfig, SmtpEmailProvider, SmtpSecurity,
+};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_platform::PlatformStore;
 use fastcart_runtime_api::StorefrontRuntime;
@@ -73,9 +76,11 @@ impl AppState {
                 .filter(|secret| !secret.is_empty()),
         };
         let storefront_runtime = build_storefront_runtime(&config.storefront)?;
+        let email = build_email_service(&config.email)?;
         let context = Arc::new(
             AppContext::new(api_config, platform, databases.clone(), cache)
-                .with_storefront_runtime(storefront_runtime.clone()),
+                .with_storefront_runtime(storefront_runtime.clone())
+                .with_email(email),
         );
         Ok(Self {
             config,
@@ -84,6 +89,63 @@ impl AppState {
             storefront_runtime,
         })
     }
+}
+
+fn build_email_service(config: &crate::config::EmailConfig) -> Result<EmailService> {
+    let service = EmailService::with_default_registry();
+    match config.provider.as_str() {
+        "log" => {}
+        "smtp" => {
+            let settings = config
+                .smtp
+                .as_ref()
+                .context("email.smtp is required when email.provider = \"smtp\"")?;
+            let security = match settings.security.as_str() {
+                "implicit" => SmtpSecurity::ImplicitTls,
+                "starttls" => SmtpSecurity::StartTls,
+                "plain" => SmtpSecurity::Plain,
+                other => anyhow::bail!("unsupported SMTP security mode: {other}"),
+            };
+            let mut smtp = SmtpConfig::new(&settings.host, settings.port, &config.from)
+                .with_security(security);
+            if let (Some(username), Some(password)) =
+                (settings.username.clone(), settings.password.clone())
+            {
+                smtp = smtp.with_credentials(username, password);
+            }
+            let provider = SmtpEmailProvider::new(smtp)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+                .context("failed to configure the SMTP email provider")?;
+            service
+                .registry()
+                .register(Arc::new(provider))
+                .context("failed to register the SMTP email provider")?;
+            service
+                .registry()
+                .set_default("smtp")
+                .context("failed to select the SMTP email provider")?;
+        }
+        "resend" => {
+            let settings = config
+                .resend
+                .as_ref()
+                .context("email.resend is required when email.provider = \"resend\"")?;
+            let provider = ResendEmailProvider::new(ResendConfig {
+                api_key: settings.api_key.clone(),
+                from: config.from.clone(),
+            });
+            service
+                .registry()
+                .register(Arc::new(provider))
+                .context("failed to register the Resend email provider")?;
+            service
+                .registry()
+                .set_default("resend")
+                .context("failed to select the Resend email provider")?;
+        }
+        other => anyhow::bail!("unsupported email provider: {other}"),
+    }
+    Ok(service)
 }
 
 fn build_storefront_runtime(

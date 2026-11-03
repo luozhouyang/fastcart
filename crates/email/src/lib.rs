@@ -7,6 +7,7 @@
 
 mod message;
 mod provider;
+mod providers;
 mod service;
 
 pub use message::{
@@ -15,5 +16,8 @@ pub use message::{
 };
 pub use provider::{
     EmailError, EmailProvider, EmailProviderRegistry, LogEmailProvider, MemoryEmailProvider,
+};
+pub use providers::{
+    ResendConfig, ResendEmailProvider, SmtpConfig, SmtpEmailProvider, SmtpSecurity,
 };
 pub use service::EmailService;
