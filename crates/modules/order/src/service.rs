@@ -13,8 +13,9 @@ use serde_json::Value;
 
 use crate::domain::{
     CreateAdjustmentInput, CreateOrderInput, FulfillmentInput, FulfillmentStatus, Order,
-    OrderAdjustment, OrderFilter, OrderFulfillment, OrderItem, OrderItemAdjustment, OrderRefund,
-    OrderStatus, OrderStatusHistory, PaymentStatus, RefundInput, RefundStatus,
+    OrderAdjustment, OrderFilter, OrderFulfillment, OrderFulfillmentItem, OrderItem,
+    OrderItemAdjustment, OrderRefund, OrderShippingMethod, OrderStatus, OrderStatusHistory,
+    PaymentStatus, RefundInput, RefundStatus,
 };
 
 /// Scope used for order-creation idempotency keys.
@@ -39,6 +40,7 @@ struct OrderRow {
     total: i64,
     shipping_address: String,
     billing_address: String,
+    shipping_methods: String,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -178,6 +180,9 @@ struct FulfillmentRow {
     id: String,
     order_id: String,
     status: String,
+    provider_id: String,
+    provider_fulfillment_id: Option<String>,
+    provider_data: String,
     tracking_numbers: String,
     shipped_at: Option<i64>,
     delivered_at: Option<i64>,
@@ -192,12 +197,40 @@ impl FulfillmentRow {
             id: FulfillmentId::from_string(self.id),
             order_id: OrderId::from_string(self.order_id),
             status: self.status,
+            provider_id: self.provider_id,
+            provider_fulfillment_id: self.provider_fulfillment_id,
+            provider_data: json_value(&self.provider_data),
             tracking_numbers: json_string_list(&self.tracking_numbers),
             shipped_at: self.shipped_at,
             delivered_at: self.delivered_at,
             metadata: Metadata::from_json_str(&self.metadata),
+            items: Vec::new(),
             created_at: self.created_at,
             updated_at: self.updated_at,
+        }
+    }
+}
+
+/// Persistence row for `order_fulfillment_items`.
+#[derive(sqlx::FromRow)]
+struct FulfillmentItemRow {
+    id: String,
+    fulfillment_id: String,
+    order_item_id: String,
+    variant_id: Option<String>,
+    quantity: i64,
+    created_at: i64,
+}
+
+impl FulfillmentItemRow {
+    fn into_domain(self) -> OrderFulfillmentItem {
+        OrderFulfillmentItem {
+            id: self.id,
+            fulfillment_id: FulfillmentId::from_string(self.fulfillment_id),
+            order_item_id: LineItemId::from_string(self.order_item_id),
+            variant_id: self.variant_id.map(VariantId::from_string),
+            quantity: self.quantity,
+            created_at: self.created_at,
         }
     }
 }
@@ -263,6 +296,7 @@ struct ResolvedOrder {
     adjustments: Vec<CreateAdjustmentInput>,
     shipping_address: Value,
     billing_address: Value,
+    shipping_methods: Vec<OrderShippingMethod>,
     subtotal: i64,
     discount_total: i64,
     shipping_total: i64,
@@ -402,7 +436,7 @@ impl OrderService {
             "SELECT id, display_number, customer_id, email, currency_code, status,
                     payment_status, fulfillment_status, refund_status, subtotal,
                     discount_total, shipping_total, tax_total, total, shipping_address,
-                    billing_address, metadata, created_at, updated_at, canceled_at
+                    billing_address, shipping_methods, metadata, created_at, updated_at, canceled_at
              FROM orders{where_clause}
              ORDER BY created_at DESC, display_number DESC
              LIMIT ? OFFSET ?"
@@ -634,33 +668,125 @@ impl OrderService {
             ));
         }
 
+        if input.partial && input.items.is_empty() {
+            return Err(AppError::validation(
+                "partial fulfillments require at least one item",
+            ));
+        }
+        let provider_data = if input.provider_data.is_null() {
+            serde_json::json!({})
+        } else {
+            input.provider_data
+        };
+        if !provider_data.is_object() {
+            return Err(AppError::validation(
+                "fulfillment provider_data must be a JSON object",
+            ));
+        }
+        let provider_id = input.provider_id.unwrap_or_else(|| "manual".to_owned());
+        validate_length(provider_id.trim(), "provider_id", 64)?;
+
         let now = now_timestamp();
         let shipped_at = input.shipped_at.unwrap_or(now);
-        let next_status = if input.partial {
+
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let fulfilled_rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT fi.order_item_id, COALESCE(SUM(fi.quantity), 0)
+             FROM order_fulfillment_items fi
+             JOIN order_fulfillments f ON f.id = fi.fulfillment_id
+             WHERE f.order_id = ?
+             GROUP BY fi.order_item_id",
+        )
+        .bind(id.as_str())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let fulfilled: HashMap<String, i64> = fulfilled_rows.into_iter().collect();
+
+        let mut remaining: Vec<(LineItemId, Option<VariantId>, i64)> = order
+            .items
+            .iter()
+            .filter(|item| item.requires_shipping)
+            .filter_map(|item| {
+                let already = fulfilled.get(item.id.as_str()).copied().unwrap_or_default();
+                let left = item.quantity.saturating_sub(already);
+                (left > 0).then(|| (item.id.clone(), item.variant_id.clone(), left))
+            })
+            .collect();
+
+        let requested: Vec<(LineItemId, Option<VariantId>, i64)> = if input.items.is_empty() {
+            remaining.clone()
+        } else {
+            let mut selected = Vec::with_capacity(input.items.len());
+            let mut seen = std::collections::HashSet::new();
+            for requested_item in &input.items {
+                if requested_item.quantity <= 0 {
+                    return Err(AppError::validation(
+                        "fulfillment item quantities must be positive",
+                    ));
+                }
+                if !seen.insert(requested_item.order_item_id.as_str().to_owned()) {
+                    return Err(AppError::validation(
+                        "fulfillment items must not repeat an order item",
+                    ));
+                }
+                let Some((line_id, variant_id, left)) = remaining
+                    .iter()
+                    .find(|(line_id, _, _)| line_id == &requested_item.order_item_id)
+                else {
+                    return Err(AppError::validation(
+                        "fulfillment item does not have a remaining shippable quantity",
+                    ));
+                };
+                if requested_item.quantity > *left {
+                    return Err(AppError::validation(format!(
+                        "cannot fulfill {} units; only {left} remain",
+                        requested_item.quantity
+                    )));
+                }
+                selected.push((line_id.clone(), variant_id.clone(), requested_item.quantity));
+            }
+            selected
+        };
+
+        if requested.is_empty() {
+            return Err(AppError::conflict(
+                "order has no remaining shippable items".to_owned(),
+            ));
+        }
+        for (line_id, _, quantity) in &requested {
+            if let Some(entry) = remaining.iter_mut().find(|(id, _, _)| id == line_id) {
+                entry.2 -= quantity;
+            }
+        }
+        let fully_fulfilled = remaining.iter().all(|(_, _, left)| *left == 0);
+        let next_status = if input.partial || !fully_fulfilled {
             FulfillmentStatus::PartiallyFulfilled
         } else {
             FulfillmentStatus::Fulfilled
         };
-        let note = if input.partial {
-            "partial fulfillment recorded"
-        } else {
+        let note = if next_status == FulfillmentStatus::Fulfilled {
             "fulfillment recorded"
-        };
-        let next_order_status = if input.partial {
-            order.status
         } else {
+            "partial fulfillment recorded"
+        };
+        let next_order_status = if next_status == FulfillmentStatus::Fulfilled {
             OrderStatus::Fulfilled
+        } else {
+            order.status
         };
 
-        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let fulfillment_id = FulfillmentId::new();
         sqlx::query(
             "INSERT INTO order_fulfillments
-                (id, order_id, status, tracking_numbers, shipped_at, delivered_at,
-                 metadata, created_at, updated_at)
-             VALUES (?, ?, 'fulfilled', ?, ?, NULL, '{}', ?, ?)",
+                (id, order_id, status, provider_id, provider_fulfillment_id, provider_data,
+                 tracking_numbers, shipped_at, delivered_at, metadata, created_at, updated_at)
+             VALUES (?, ?, 'fulfilled', ?, NULL, ?, ?, ?, NULL, '{}', ?, ?)",
         )
-        .bind(FulfillmentId::new().as_str())
+        .bind(fulfillment_id.as_str())
         .bind(id.as_str())
+        .bind(provider_id.trim())
+        .bind(json_text(&provider_data)?)
         .bind(json_text(&input.tracking_numbers)?)
         .bind(shipped_at)
         .bind(now)
@@ -668,6 +794,23 @@ impl OrderService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+
+        for (line_id, variant_id, quantity) in &requested {
+            sqlx::query(
+                "INSERT INTO order_fulfillment_items
+                    (id, fulfillment_id, order_item_id, variant_id, quantity, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(EventId::new().as_str())
+            .bind(fulfillment_id.as_str())
+            .bind(line_id.as_str())
+            .bind(variant_id.as_ref().map(VariantId::as_str))
+            .bind(quantity)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
 
         let updated = sqlx::query(
             "UPDATE orders SET fulfillment_status = ?, status = ?, updated_at = ?
@@ -700,8 +843,10 @@ impl OrderService {
             Some(self.db.store_id().clone()),
             serde_json::json!({
                 "order_id": id.as_str(),
+                "fulfillment_id": fulfillment_id.as_str(),
+                "provider_id": provider_id.trim(),
                 "fulfillment_status": next_status.as_str(),
-                "partial": input.partial,
+                "partial": next_status != FulfillmentStatus::Fulfilled,
             }),
         );
         append_outbox_event(&mut *tx, &event)
@@ -936,8 +1081,8 @@ impl OrderService {
                 id, display_number, customer_id, email, currency_code, status,
                 payment_status, fulfillment_status, refund_status, subtotal,
                 discount_total, shipping_total, tax_total, total, shipping_address,
-                billing_address, metadata, created_at, updated_at, canceled_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                billing_address, shipping_methods, metadata, created_at, updated_at, canceled_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
         )
         .bind(order_id.as_str())
         .bind(display_number)
@@ -955,6 +1100,7 @@ impl OrderService {
         .bind(order.total)
         .bind(json_text(&order.shipping_address)?)
         .bind(json_text(&order.billing_address)?)
+        .bind(json_text(&order.shipping_methods)?)
         .bind(order.metadata.to_json_string())
         .bind(now)
         .bind(now)
@@ -1108,7 +1254,7 @@ impl OrderService {
             "SELECT id, display_number, customer_id, email, currency_code, status,
                     payment_status, fulfillment_status, refund_status, subtotal,
                     discount_total, shipping_total, tax_total, total, shipping_address,
-                    billing_address, metadata, created_at, updated_at, canceled_at
+                    billing_address, shipping_methods, metadata, created_at, updated_at, canceled_at
              FROM orders WHERE id = ?",
         )
         .bind(id.as_str())
@@ -1190,8 +1336,8 @@ impl OrderService {
             .collect::<Result<Vec<_>, _>>()?;
 
         let fulfillment_rows = sqlx::query_as::<_, FulfillmentRow>(
-            "SELECT id, order_id, status, tracking_numbers, shipped_at, delivered_at,
-                    metadata, created_at, updated_at
+            "SELECT id, order_id, status, provider_id, provider_fulfillment_id, provider_data,
+                    tracking_numbers, shipped_at, delivered_at, metadata, created_at, updated_at
              FROM order_fulfillments WHERE order_id = ?
              ORDER BY created_at ASC, rowid ASC",
         )
@@ -1199,10 +1345,30 @@ impl OrderService {
         .fetch_all(self.db.pool())
         .await
         .map_err(database_error)?;
-        let fulfillments = fulfillment_rows
+        let mut fulfillments: Vec<OrderFulfillment> = fulfillment_rows
             .into_iter()
             .map(FulfillmentRow::into_domain)
             .collect();
+        let item_rows = sqlx::query_as::<_, FulfillmentItemRow>(
+            "SELECT fi.id, fi.fulfillment_id, fi.order_item_id, fi.variant_id, fi.quantity,
+                    fi.created_at
+             FROM order_fulfillment_items fi
+             JOIN order_fulfillments f ON f.id = fi.fulfillment_id
+             WHERE f.order_id = ?
+             ORDER BY fi.created_at ASC, fi.rowid ASC",
+        )
+        .bind(id.as_str())
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        for item in item_rows.into_iter().map(FulfillmentItemRow::into_domain) {
+            if let Some(fulfillment) = fulfillments
+                .iter_mut()
+                .find(|fulfillment| fulfillment.id == item.fulfillment_id)
+            {
+                fulfillment.items.push(item);
+            }
+        }
 
         let refund_rows = sqlx::query_as::<_, RefundRow>(
             "SELECT id, order_id, payment_id, amount, currency_code, status, reason,
@@ -1236,6 +1402,7 @@ impl OrderService {
             total: row.total,
             shipping_address: json_value(&row.shipping_address),
             billing_address: json_value(&row.billing_address),
+            shipping_methods: parse_shipping_methods(&row.shipping_methods)?,
             metadata: Metadata::from_json_str(&row.metadata),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -1448,6 +1615,7 @@ fn resolve_order(input: CreateOrderInput) -> Result<ResolvedOrder, AppError> {
         adjustments: input.adjustments,
         shipping_address: input.shipping_address,
         billing_address: input.billing_address,
+        shipping_methods: input.shipping_methods,
         subtotal: input.subtotal,
         discount_total: input.discount_total,
         shipping_total: input.shipping_total,
@@ -1490,6 +1658,11 @@ fn json_string_list(text: &str) -> Vec<String> {
     serde_json::from_str(text).unwrap_or_default()
 }
 
+fn parse_shipping_methods(text: &str) -> Result<Vec<OrderShippingMethod>, AppError> {
+    serde_json::from_str(text)
+        .map_err(|error| AppError::internal(format!("invalid shipping methods: {error}")))
+}
+
 #[cfg(test)]
 mod tests {
     use fastcart_infrastructure::StoreDatabase;
@@ -1514,6 +1687,7 @@ mod tests {
             product_title: "Widget".to_owned(),
             unit_price,
             quantity,
+            requires_shipping: true,
             ..CreateOrderItemInput::default()
         }
     }
@@ -1781,6 +1955,9 @@ mod tests {
             .fulfill(
                 &order.id,
                 FulfillmentInput {
+                    provider_id: None,
+                    provider_data: json!({}),
+                    items: Vec::new(),
                     tracking_numbers: vec!["TRACK-1".to_owned()],
                     shipped_at: None,
                     partial: false,
@@ -1790,6 +1967,9 @@ mod tests {
             .unwrap();
         assert_eq!(fulfilled.fulfillment_status, FulfillmentStatus::Fulfilled);
         assert_eq!(fulfilled.fulfillments.len(), 1);
+        assert_eq!(fulfilled.fulfillments[0].items.len(), 1);
+        assert_eq!(fulfilled.fulfillments[0].items[0].quantity, 2);
+        assert_eq!(fulfilled.fulfillments[0].provider_id, "manual");
         assert_eq!(
             fulfilled.fulfillments[0].tracking_numbers,
             vec!["TRACK-1".to_owned()]
@@ -1810,6 +1990,12 @@ mod tests {
             .fulfill(
                 &order.id,
                 FulfillmentInput {
+                    provider_id: None,
+                    provider_data: json!({}),
+                    items: vec![crate::domain::FulfillmentItemInput {
+                        order_item_id: order.items[0].id.clone(),
+                        quantity: 1,
+                    }],
                     tracking_numbers: vec!["TRACK-2".to_owned()],
                     shipped_at: Some(1_700_000_000),
                     partial: true,
@@ -1822,11 +2008,15 @@ mod tests {
             FulfillmentStatus::PartiallyFulfilled
         );
         assert_eq!(partial.fulfillments[0].shipped_at, Some(1_700_000_000));
+        assert_eq!(partial.fulfillments[0].items[0].quantity, 1);
 
         let full = service
             .fulfill(
                 &order.id,
                 FulfillmentInput {
+                    provider_id: None,
+                    provider_data: json!({}),
+                    items: Vec::new(),
                     tracking_numbers: vec!["TRACK-3".to_owned()],
                     shipped_at: None,
                     partial: false,

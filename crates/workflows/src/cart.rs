@@ -203,7 +203,11 @@ impl CartWorkflow {
                     amount: rate.amount_minor,
                     currency_code: rate.currency.to_string(),
                     is_tax_inclusive: false,
-                    data: serde_json::json!({"rate_id": rate.rate_id}),
+                    data: serde_json::json!({
+                        "rate_id": rate.rate_id,
+                        "provider_id": option.provider_id,
+                        "provider_data": option.provider_data,
+                    }),
                 },
             )
             .await?;

@@ -17,10 +17,10 @@ use fastcart_kernel::{
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::{
     ClaimItemInput, CreateClaimInput, CreateExchangeInput, CreateOrderEditInput, CreateReturnInput,
-    ExchangeItemInput, FulfillmentInput, Order, OrderClaim, OrderEdit, OrderEditItemInput,
-    OrderExchange, OrderFilter, OrderRefund, OrderReturn, OrderService, OrderStatus,
-    OrderStatusHistory, PaymentStatus, ReceiveReturnInput, ReceiveReturnItemInput, RefundInput,
-    ReturnItemInput, WriteOffReturnInput, WriteOffReturnItemInput,
+    ExchangeItemInput, FulfillmentInput, FulfillmentItemInput, Order, OrderClaim, OrderEdit,
+    OrderEditItemInput, OrderExchange, OrderFilter, OrderRefund, OrderReturn, OrderService,
+    OrderStatus, OrderStatusHistory, PaymentStatus, ReceiveReturnInput, ReceiveReturnItemInput,
+    RefundInput, ReturnItemInput, WriteOffReturnInput, WriteOffReturnItemInput,
 };
 use fastcart_module_payment::PaymentService;
 use serde::Deserialize;
@@ -123,10 +123,22 @@ struct CancelOrderRequest {
 #[derive(Clone, Debug, Deserialize)]
 struct FulfillOrderRequest {
     #[serde(default)]
+    provider_id: Option<String>,
+    #[serde(default)]
+    provider_data: serde_json::Value,
+    #[serde(default)]
+    items: Vec<FulfillmentItemRequest>,
+    #[serde(default)]
     tracking_numbers: Vec<String>,
     shipped_at: Option<i64>,
     #[serde(default)]
     partial: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct FulfillmentItemRequest {
+    order_item_id: LineItemId,
+    quantity: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -155,6 +167,16 @@ fn map_order_filter(query: OrderListQuery) -> OrderFilter {
 
 fn map_fulfillment_input(request: FulfillOrderRequest) -> FulfillmentInput {
     FulfillmentInput {
+        provider_id: request.provider_id,
+        provider_data: request.provider_data,
+        items: request
+            .items
+            .into_iter()
+            .map(|item| FulfillmentItemInput {
+                order_item_id: item.order_item_id,
+                quantity: item.quantity,
+            })
+            .collect(),
         tracking_numbers: request.tracking_numbers,
         shipped_at: request.shipped_at,
         partial: request.partial,
@@ -1062,11 +1084,20 @@ mod tests {
     #[test]
     fn maps_fulfillment_input() {
         let input = map_fulfillment_input(FulfillOrderRequest {
+            provider_id: Some("manual".to_owned()),
+            provider_data: serde_json::json!({"warehouse": "eu"}),
+            items: vec![FulfillmentItemRequest {
+                order_item_id: LineItemId::from_string("item_1"),
+                quantity: 2,
+            }],
             tracking_numbers: vec!["TRACK-1".to_owned()],
             shipped_at: Some(1_700_000_000),
             partial: true,
         });
 
+        assert_eq!(input.provider_id.as_deref(), Some("manual"));
+        assert_eq!(input.items.len(), 1);
+        assert_eq!(input.items[0].quantity, 2);
         assert_eq!(input.tracking_numbers, vec!["TRACK-1".to_owned()]);
         assert_eq!(input.shipped_at, Some(1_700_000_000));
         assert!(input.partial);

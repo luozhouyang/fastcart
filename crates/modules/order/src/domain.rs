@@ -195,6 +195,32 @@ impl RefundStatus {
     }
 }
 
+/// A shipping method snapshotted onto an order at placement time.
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OrderShippingMethod {
+    /// Shipping option chosen at checkout.
+    pub shipping_option_id: String,
+    /// Option name at purchase time.
+    pub name: String,
+    /// Registered fulfillment provider.
+    #[serde(default = "default_shipping_provider")]
+    pub provider_id: String,
+    /// Amount in minor units.
+    pub amount: i64,
+    /// Currency of the amount.
+    pub currency_code: String,
+    /// Price-list style rate identifier, when a destination rate matched.
+    #[serde(default)]
+    pub rate_id: Option<String>,
+    /// Provider-specific snapshot data.
+    #[serde(default)]
+    pub data: Value,
+}
+
+fn default_shipping_provider() -> String {
+    "manual".to_owned()
+}
+
 /// An order with every historical commercial snapshot attached.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Order {
@@ -230,6 +256,8 @@ pub struct Order {
     pub shipping_address: Value,
     /// Billing address snapshot.
     pub billing_address: Value,
+    /// Shipping methods selected at checkout, snapshotted for history.
+    pub shipping_methods: Vec<OrderShippingMethod>,
     /// Free-form metadata.
     pub metadata: Metadata,
     /// Creation timestamp in Unix seconds.
@@ -344,6 +372,23 @@ pub struct OrderStatusHistory {
     pub created_at: Timestamp,
 }
 
+/// A quantity of one order line included in a fulfillment.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OrderFulfillmentItem {
+    /// Fulfillment item identifier.
+    pub id: String,
+    /// Owning fulfillment.
+    pub fulfillment_id: FulfillmentId,
+    /// Order line being fulfilled.
+    pub order_item_id: LineItemId,
+    /// Variant snapshot, when known.
+    pub variant_id: Option<VariantId>,
+    /// Fulfilled quantity.
+    pub quantity: i64,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: Timestamp,
+}
+
 /// A fulfillment record for an order.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderFulfillment {
@@ -353,6 +398,12 @@ pub struct OrderFulfillment {
     pub order_id: OrderId,
     /// Fulfillment record status.
     pub status: String,
+    /// Registered fulfillment provider.
+    pub provider_id: String,
+    /// Provider-side fulfillment identifier.
+    pub provider_fulfillment_id: Option<String>,
+    /// Provider-specific response data.
+    pub provider_data: Value,
     /// Tracking numbers.
     pub tracking_numbers: Vec<String>,
     /// Shipment timestamp in Unix seconds.
@@ -361,6 +412,8 @@ pub struct OrderFulfillment {
     pub delivered_at: Option<Timestamp>,
     /// Free-form metadata.
     pub metadata: Metadata,
+    /// Fulfilled item quantities.
+    pub items: Vec<OrderFulfillmentItem>,
     /// Creation timestamp in Unix seconds.
     pub created_at: Timestamp,
     /// Last update timestamp in Unix seconds.
@@ -462,6 +515,9 @@ pub struct CreateOrderInput {
     pub shipping_address: Value,
     /// Billing address snapshot.
     pub billing_address: Value,
+    /// Shipping methods selected at checkout.
+    #[serde(default)]
+    pub shipping_methods: Vec<OrderShippingMethod>,
     /// Sum of item subtotals in minor units.
     pub subtotal: i64,
     /// Sum of item discounts in minor units.
@@ -481,12 +537,28 @@ pub struct CreateOrderInput {
 /// Input for [`crate::OrderService::fulfill`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FulfillmentInput {
+    /// Registered fulfillment provider; defaults to `manual`.
+    pub provider_id: Option<String>,
+    /// Provider-specific configuration.
+    pub provider_data: Value,
+    /// Items and quantities to fulfill. When empty, every remaining
+    /// shippable quantity is fulfilled.
+    pub items: Vec<FulfillmentItemInput>,
     /// Tracking numbers for the shipment.
     pub tracking_numbers: Vec<String>,
     /// Shipment timestamp; defaults to the current time.
     pub shipped_at: Option<Timestamp>,
     /// Marks the order as partially fulfilled instead of fully fulfilled.
     pub partial: bool,
+}
+
+/// One line and quantity to fulfill.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FulfillmentItemInput {
+    /// Order line being fulfilled.
+    pub order_item_id: LineItemId,
+    /// Quantity to fulfill.
+    pub quantity: i64,
 }
 
 /// Input for [`crate::OrderService::add_refund`].

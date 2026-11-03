@@ -3898,10 +3898,19 @@ fn schemas() -> Value {
 
 
         "FulfillOrderRequest": object(&[
+            ("provider_id", optional_string()),
+            ("provider_data", nullable(schema_ref("Metadata"))),
+            ("items", array_of(schema_ref("FulfillmentItemRequest"))),
             ("tracking_numbers", array_of(string())),
             ("shipped_at", nullable(integer())),
             ("partial", boolean()),
         ], &[]),
+
+
+        "FulfillmentItemRequest": object(&[
+            ("order_item_id", string()),
+            ("quantity", integer()),
+        ], &["order_item_id", "quantity"]),
 
 
         "RefundOrderRequest": object(&[

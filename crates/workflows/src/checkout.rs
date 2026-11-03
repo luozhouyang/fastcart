@@ -12,7 +12,7 @@ use fastcart_module_checkout::{
 use fastcart_module_inventory::{InventoryService, ReservationLine, ReservationReference};
 use fastcart_module_order::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, Order, OrderService,
-    OrderStatus, PaymentStatus as OrderPaymentStatus,
+    OrderShippingMethod, OrderStatus, PaymentStatus as OrderPaymentStatus,
 };
 use fastcart_module_payment::{
     CreatePaymentSessionInput, Payment, PaymentService, PaymentStatus as PaymentSessionStatus,
@@ -410,6 +410,28 @@ impl CheckoutWorkflow {
         };
         let shipping_total = cart.totals.shipping_total;
         let total = items_total + shipping_total + shipping_tax;
+        let shipping_methods = cart
+            .shipping_methods
+            .iter()
+            .map(|method| OrderShippingMethod {
+                shipping_option_id: method.shipping_option_id.to_string(),
+                name: method.name.clone(),
+                provider_id: method
+                    .data
+                    .get("provider_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("manual")
+                    .to_owned(),
+                amount: method.amount,
+                currency_code: method.currency.to_string(),
+                rate_id: method
+                    .data
+                    .get("rate_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                data: method.data.clone(),
+            })
+            .collect();
 
         let order = match self
             .order
@@ -425,6 +447,7 @@ impl CheckoutWorkflow {
                 adjustments,
                 shipping_address: checkout.shipping_address.clone(),
                 billing_address: checkout.billing_address.clone(),
+                shipping_methods,
                 subtotal,
                 discount_total,
                 shipping_total,
