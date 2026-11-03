@@ -15,6 +15,7 @@ tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+utoipa.workspace = true
 fastcart-http.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-email.workspace = true

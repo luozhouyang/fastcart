@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+futures.workspace = true
 hex.workspace = true
 hmac.workspace = true
 rand.workspace = true

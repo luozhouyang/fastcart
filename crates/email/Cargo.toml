@@ -14,6 +14,8 @@ tokio.workspace = true
 tracing.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-kernel.workspace = true
+lettre.workspace = true
+resend-rs.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
