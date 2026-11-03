@@ -9,12 +9,14 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiQuery, ApiResult, PaginationQuery};
-use fastcart_kernel::{CustomerId, OrderId, PaymentId};
+use fastcart_kernel::{ActorContext, AppError, CustomerId, OrderId, PaymentId};
+use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::{
     FulfillmentInput, Order, OrderFilter, OrderRefund, OrderService, OrderStatus,
     OrderStatusHistory, PaymentStatus, RefundInput,
 };
 use fastcart_module_payment::PaymentService;
+use fastcart_platform::NewAudit;
 use serde::Deserialize;
 
 use super::StoreDb;
@@ -188,7 +190,7 @@ async fn process_order(
 }
 
 async fn cancel_order(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -198,9 +200,30 @@ async fn cancel_order(
         .require_permission("orders.cancel")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
-    let order = OrderService::new(db)
-        .cancel(&id, request.reason.as_deref())
-        .await?;
+    let orders = OrderService::new(db.clone());
+    let current = orders.get(&id).await?;
+    if current.status == OrderStatus::Canceled {
+        return Ok(Json(current));
+    }
+    if !current.status.is_cancelable() {
+        return Err(ApiError::new(AppError::conflict(format!(
+            "order in state {} cannot be canceled",
+            current.status.as_str()
+        ))));
+    }
+    let reason = request.reason;
+    // Return committed stock before marking the order canceled. Restocking is
+    // idempotent, so an interrupted cancellation can be retried safely.
+    InventoryService::new(db).restock_order(&id).await?;
+    let order = orders.cancel(&id, reason.as_deref()).await?;
+    record_audit(
+        &context,
+        &actor,
+        "order.canceled",
+        order.id.as_str(),
+        serde_json::json!({"reason": reason}),
+    )
+    .await;
     Ok(Json(order))
 }
 
@@ -258,7 +281,40 @@ async fn create_refund(
         .add_refund(&id, map_refund_input(request))
         .await?;
     payments.refund(payment_id.as_str(), amount, reason).await?;
+    record_audit(
+        &context,
+        &actor,
+        "order.refunded",
+        order.id.as_str(),
+        serde_json::json!({
+            "payment_id": payment_id,
+            "amount": amount,
+            "currency_code": order.currency_code.clone(),
+        }),
+    )
+    .await;
     Ok(Json(order))
+}
+
+async fn record_audit(
+    context: &AppContext,
+    actor: &ActorContext,
+    action: &str,
+    resource_id: &str,
+    data: serde_json::Value,
+) {
+    let entry = NewAudit {
+        actor_id: actor.user_id.as_ref().map(ToString::to_string),
+        store_id: actor.store_id.as_ref().map(ToString::to_string),
+        action: action.to_owned(),
+        resource_type: Some("order".to_owned()),
+        resource_id: Some(resource_id.to_owned()),
+        data,
+        ip_address: None,
+    };
+    if let Err(error) = context.platform.record_audit(entry).await {
+        tracing::warn!(error = %error, "failed to write order audit log");
+    }
 }
 
 async fn list_refunds(

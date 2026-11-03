@@ -13,6 +13,8 @@ use tower::ServiceExt;
 
 struct Fixture {
     app: Router,
+    admin_auth: String,
+    csrf: String,
 }
 
 async fn fixture() -> Fixture {
@@ -67,7 +69,11 @@ async fn fixture() -> Fixture {
 
     // Keep the temp directory alive for the process lifetime.
     std::mem::forget(dir);
-    Fixture { app }
+    Fixture {
+        app,
+        admin_auth: auth,
+        csrf,
+    }
 }
 
 async fn send(
@@ -77,10 +83,21 @@ async fn send(
     body: Option<serde_json::Value>,
     headers: &[(&str, &str)],
 ) -> (StatusCode, serde_json::Value, Vec<String>) {
+    send_to_host(app, "shop.example.com", method, uri, body, headers).await
+}
+
+async fn send_to_host(
+    app: &Router,
+    host: &str,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, serde_json::Value, Vec<String>) {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
-        .header("host", "shop.example.com");
+        .header("host", host);
     for (name, value) in headers {
         builder = builder.header(*name, *value);
     }
@@ -253,4 +270,49 @@ async fn customers_register_login_and_manage_their_own_profile() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(cookie_value(&cookies, "fc_customer_session").is_some());
+
+    // Customer identities and sessions are scoped to one store database.
+    let admin_headers = [
+        ("cookie", fixture.admin_auth.as_str()),
+        ("x-csrf-token", fixture.csrf.as_str()),
+    ];
+    let (status, second_store, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(serde_json::json!({
+            "name": "Second",
+            "slug": "second",
+            "primary_domain": "second.example.com"
+        })),
+        &admin_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{second_store}");
+
+    let (status, _, _) = send_to_host(
+        &fixture.app,
+        "second.example.com",
+        "GET",
+        "/api/v1/store/customers/me",
+        None,
+        &[("cookie", auth.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, second_customer, _) = send_to_host(
+        &fixture.app,
+        "second.example.com",
+        "POST",
+        "/api/v1/store/customers",
+        Some(serde_json::json!({
+            "email": "buyer@example.com",
+            "password": "hunter2hunter2"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second_customer}");
+    assert_eq!(second_customer["customer"]["email"], "buyer@example.com");
 }

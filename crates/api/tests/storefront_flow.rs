@@ -365,6 +365,48 @@ async fn storefront_cart_checkout_and_order_flow() {
         4
     );
 
+    // Cancelling the order returns committed stock and is idempotent.
+    let admin_store_headers = [
+        ("cookie", admin_auth.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+        ("x-store-id", store_id.as_str()),
+    ];
+    let (status, canceled) = request(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/admin/orders/{order_id}/cancel"),
+        Some(serde_json::json!({"reason": "customer request"})),
+        &admin_store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_eq!(canceled["status"], "canceled");
+    assert_eq!(
+        inventory
+            .variant_availability(&VariantId::from_string(variant_id.clone()))
+            .await
+            .unwrap(),
+        5
+    );
+
+    let (status, replay_cancel) = request(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/admin/orders/{order_id}/cancel"),
+        Some(serde_json::json!({})),
+        &admin_store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay_cancel}");
+    assert_eq!(replay_cancel["status"], "canceled");
+    assert_eq!(
+        inventory
+            .variant_availability(&VariantId::from_string(variant_id))
+            .await
+            .unwrap(),
+        5
+    );
+
     // Unknown hosts never resolve to a store.
     let (status, _) = request(
         &fixture.app,
@@ -390,4 +432,58 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The owner also belongs to a second store, but that store's database
+    // cannot see the first store's catalog or orders.
+    let (status, second_store) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(serde_json::json!({
+            "name": "Second",
+            "slug": "second",
+            "primary_domain": "second.example.com"
+        })),
+        &admin_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{second_store}");
+    let second_store_id = second_store["id"].as_str().unwrap();
+    let second_store_headers = [
+        ("cookie", admin_auth.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+        ("x-store-id", second_store_id),
+    ];
+
+    let (status, products) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/catalog/products",
+        None,
+        &second_store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{products}");
+    assert_eq!(products["pagination"]["total"], 0);
+
+    let (status, orders) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/orders",
+        None,
+        &second_store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{orders}");
+    assert_eq!(orders["pagination"]["total"], 0);
+
+    let (status, _) = request(
+        &fixture.app,
+        "GET",
+        &format!("/api/v1/admin/orders/{order_id}"),
+        None,
+        &second_store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

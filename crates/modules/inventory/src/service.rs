@@ -1119,6 +1119,73 @@ impl InventoryService {
         Ok(u64::try_from(rows.len()).unwrap_or(u64::MAX))
     }
 
+    /// Reverses a committed order's inventory after cancellation.
+    ///
+    /// Committed reservations for the order are returned to stock, a movement
+    /// is recorded and the reservations are marked released. Calling this twice
+    /// is safe: the second call finds no committed reservations and returns
+    /// zero.
+    pub async fn restock_order(&self, order_id: &OrderId) -> Result<u64, AppError> {
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
+        let rows = sqlx::query(
+            "SELECT id, inventory_item_id, location_id, quantity \
+             FROM inventory_reservations WHERE order_id = ? AND status = 'committed'",
+        )
+        .bind(order_id.as_str())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let rows = rows
+            .iter()
+            .map(row_to_reserved)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for row in &rows {
+            let affected = sqlx::query(
+                "UPDATE inventory_levels \
+                 SET stocked_quantity = stocked_quantity + ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ?",
+            )
+            .bind(row.quantity)
+            .bind(now)
+            .bind(row.inventory_item_id.as_str())
+            .bind(row.location_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if affected.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "inventory level no longer matches the reservation",
+                ));
+            }
+            insert_movement(
+                &mut tx,
+                Movement {
+                    item_id: &row.inventory_item_id,
+                    location_id: &row.location_id,
+                    quantity_delta: row.quantity,
+                    reason: "order_canceled",
+                    reference: Some(order_id.as_str()),
+                    actor_id: None,
+                    now,
+                },
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE inventory_reservations SET status = 'released', updated_at = ? WHERE id = ?",
+            )
+            .bind(now)
+            .bind(row.id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
+
+        tx.commit().await.map_err(database_error)?;
+        Ok(u64::try_from(rows.len()).unwrap_or(u64::MAX))
+    }
+
     /// Releases reservations whose expiry is at or before `now`.
     pub async fn expire_due(&self, now: Timestamp) -> Result<u64, AppError> {
         let mut tx = self.db.begin().await?;
