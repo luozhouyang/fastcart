@@ -7,7 +7,7 @@ pub mod error;
 pub mod types;
 
 pub use error::RuntimeError;
-pub use types::{RuntimeBody, RuntimeRequest, RuntimeResponse};
+pub use types::{RuntimeBody, RuntimeRequest, RuntimeResponse, RuntimeTheme};
 
 /// Executes storefront server bundles.
 #[async_trait::async_trait]

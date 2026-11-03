@@ -17,7 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use fastcart_kernel::StoreContext;
 use fastcart_runtime_api::{
-    RuntimeBody, RuntimeError, RuntimeRequest, RuntimeResponse, StorefrontRuntime,
+    RuntimeBody, RuntimeError, RuntimeRequest, RuntimeResponse, RuntimeTheme, StorefrontRuntime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -128,6 +128,7 @@ impl StorefrontRuntime for NodeRuntime {
             url: request.url,
             headers: request.headers,
             body: request.body.as_ref().map(|body| STANDARD.encode(body)),
+            theme: request.theme,
             timeout_ms,
         };
 
@@ -197,6 +198,7 @@ struct RenderPayload {
     url: String,
     headers: Vec<(String, String)>,
     body: Option<String>,
+    theme: Option<RuntimeTheme>,
     timeout_ms: u64,
 }
 
@@ -243,7 +245,9 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use fastcart_kernel::{CurrencyCode, StoreContext, StoreId};
-    use fastcart_runtime_api::{RuntimeBody, RuntimeError, RuntimeRequest, StorefrontRuntime};
+    use fastcart_runtime_api::{
+        RuntimeBody, RuntimeError, RuntimeRequest, RuntimeTheme, StorefrontRuntime,
+    };
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
@@ -274,6 +278,14 @@ mod tests {
             url: "/products?page=2".to_owned(),
             headers: vec![("accept".to_owned(), "text/html".to_owned())],
             body: Some("hello".into()),
+            theme: Some(RuntimeTheme {
+                id: "default".to_owned(),
+                version: "1.0.0".to_owned(),
+                runtime: "node".to_owned(),
+                bundle_path: "themes/default".to_owned(),
+                entry: "dist/server.js".to_owned(),
+                settings: json!({"brand_color": "#111111"}),
+            }),
             timeout_ms,
         }
     }
@@ -292,6 +304,8 @@ mod tests {
             && payload["method"] == "POST"
             && payload["url"] == "/products?page=2"
             && payload["store"]["domain"] == "shop.example.com"
+            && payload["theme"]["id"] == "default"
+            && payload["theme"]["entry"] == "dist/server.js"
             && payload["timeout_ms"] == 500;
         Json(json!({
             "status": if encodes_hello && authenticated { 201 } else { 400 },

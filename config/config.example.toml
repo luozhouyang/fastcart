@@ -25,10 +25,15 @@ ttl_seconds = 60
 
 [storefront]
 enabled = true
-runtime = "v8"
+# "node" uses the Node.js sidecar. The embedded "v8" adapter is not built yet.
+runtime = "node"
 worker_count = 2
 queue_capacity = 128
 request_timeout_ms = 10000
+node_url = "http://127.0.0.1:8788"
+# node_secret = "shared-sidecar-secret"
+# Enables the secret-authenticated /internal/storefront HTTP surface for the sidecar.
+# internal_fetch_secret = "long-random-internal-secret"
 
 [jobs]
 enabled = true

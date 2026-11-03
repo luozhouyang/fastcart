@@ -7,13 +7,18 @@
 //! - `/api/v1/admin` — store-scoped administration
 //! - `/api/v1/store` — public storefront operations
 //! - `/api/v1/webhooks` — provider callbacks
-//! - `/internal/storefront` — trusted SSR-to-commerce boundary
+//! - `/internal/storefront` — trusted SSR-to-commerce boundary (secret-gated)
+//!
+//! Unmatched paths on a storefront host are rendered by the active theme via
+//! the configured runtime. API, health, metrics and internal namespaces are
+//! excluded from SSR rendering.
 //!
 //! Middleware order (outermost first): request id → metrics → tracing → body
 //! limit → CORS. Route-specific authentication and store resolution are layered
 //! per namespace.
 
 pub mod dto;
+pub mod openapi;
 pub mod routes;
 pub mod state;
 
@@ -31,16 +36,25 @@ pub use state::{ApiConfig, AppContext};
 
 /// Builds the application router.
 pub fn build_router(context: Arc<AppContext>) -> Router {
-    let router = Router::new()
+    let mut router = Router::new()
         .merge(routes::health::router())
         .nest("/api/v1/platform", routes::platform::router(&context))
         .nest("/api/v1/admin", routes::admin::router(&context))
         .nest("/api/v1/store", routes::store::router(&context))
         .nest("/api/v1/webhooks", routes::webhooks::router(&context))
-        .nest(
-            "/internal/storefront",
-            routes::store::internal_router(&context),
-        )
+        .route("/api/v1/openapi.json", axum::routing::get(openapi::handler));
+
+    // The internal surface is only reachable over HTTP when a secret is
+    // configured; otherwise it remains an in-process bridge target.
+    if let Some(secret) = context.config.internal_fetch_secret.clone() {
+        let internal = routes::store::internal_router(&context).layer(
+            axum::middleware::from_fn_with_state(secret, routes::internal_fetch_auth_middleware),
+        );
+        router = router.nest("/internal/storefront", internal);
+    }
+
+    let router = router
+        .fallback(routes::storefront::render)
         .with_state(context.clone());
 
     router

@@ -4,11 +4,12 @@ A lightweight, self-hosted, multi-store commerce platform built with Rust and Re
 
 Fastcart aims to deliver the developer experience of modern headless commerce platforms while keeping deployment simple: a single Rust modular monolith, one SQLite database per store, a React admin application, and an embedded storefront runtime.
 
-> **Status: backend implementation complete; UI and SSR runtime are still being built.**
-> The platform, commerce modules, workflows and HTTP APIs are implemented and
-> covered by unit and integration tests. The React admin/storefront applications
-> are shells. Storefront runtime adapters (worker pool, in-process fetch bridge
-> and Node sidecar) exist, but are not yet wired into the server.
+> **Status: backend implementation complete; UI is still a shell.**
+> The platform, commerce modules, workflows, HTTP APIs, theme registry, webhook
+> delivery, email delivery, observability, OpenAPI document and typed
+> TypeScript SDKs are implemented and covered by unit and integration tests.
+> The React admin/storefront applications are shells. Storefront SSR is wired
+> through the Node sidecar runtime; the embedded V8 adapter remains future work.
 
 ## Why Fastcart
 
@@ -46,13 +47,16 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 | payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events      |
 | content   | Pages, versions, navigation trees and redirects                                                  |
 | webhook   | Endpoint subscriptions, HMAC-signed deliveries, retries, replay and delivery history             |
+| theme     | Theme registry, JSON Schema settings, activation, rollback and public active-theme lookup        |
 
 ### Cross-cutting
 
 - Transactional outbox with retry/backoff and in-process event bus.
 - SQLite-backed persistent job queue with atomic claiming and lease expiry.
 - Signed webhook delivery from outbox events with idempotent fan-out, retry/backoff, crash recovery and replay.
-- Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; simple job handlers.
+- Provider-independent transactional email with queued `send_email` jobs, a log provider and an in-memory test provider.
+- Storefront SSR rendering through a bounded Node sidecar pool, with active theme context and trusted store resolution.
+- Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; email jobs; simple job handlers.
 - Store-scoped Moka cache with generation-based invalidation.
 - Prometheus-compatible `/metrics` with latency histograms, plus baseline security response headers.
 - Local object storage with path-traversal protection.
@@ -98,6 +102,13 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_CONFIG` — configuration path
 - `FASTCART_SERVER_HOST`, `FASTCART_SERVER_PORT`, `FASTCART_LOG_LEVEL`
 - `FASTCART_PAYMENT_WEBHOOK_SECRET` — enables sandbox webhook verification
+- `FASTCART_STOREFRONT_ENABLED`, `FASTCART_STOREFRONT_RUNTIME` — enable SSR and select `node`/`v8`
+- `FASTCART_STOREFRONT_NODE_URL`, `FASTCART_STOREFRONT_NODE_SECRET` — Node sidecar endpoint and bearer secret
+- `FASTCART_INTERNAL_FETCH_SECRET` — mounts the secret-gated `/internal/storefront` HTTP surface
+
+Storefront SSR uses the Node sidecar (`runtime = "node"`). The embedded `v8`
+provider is not built yet; starting with `runtime = "v8"` logs a warning and
+serves API routes without SSR.
 
 Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
 
@@ -114,6 +125,8 @@ All endpoints are under `/api/v1` unless noted.
 | `/internal/storefront`     | Trusted SSR-to-commerce boundary                 |
 | `/health`, `/health/ready` | Liveness and readiness                           |
 | `/metrics`                 | Prometheus-compatible process metrics            |
+| `/api/v1/openapi.json`     | OpenAPI 3.1 document                             |
+| `/*`                       | Storefront SSR fallback on store hosts           |
 
 Key flows:
 
@@ -151,10 +164,8 @@ The suite covers module rules, repository behaviour, platform auth/RBAC, cart an
 ## Roadmap
 
 - React admin and storefront feature UIs.
-- Wire the storefront runtime into the server and implement theme page rendering.
 - Embedded V8 runtime adapter.
-- OpenAPI generation and generated TypeScript SDKs.
-- Additional payment/shipping/tax providers.
+- Additional payment, shipping, tax, email and search providers.
 - PostgreSQL adapter for high-traffic stores.
 
 ## License

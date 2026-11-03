@@ -6,6 +6,23 @@ use futures::stream::BoxStream;
 
 use crate::error::RuntimeError;
 
+/// Active theme bundle context supplied to the runtime.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeTheme {
+    /// Theme manifest identifier.
+    pub id: String,
+    /// Theme version.
+    pub version: String,
+    /// Runtime expected by the theme (`v8` or `node`).
+    pub runtime: String,
+    /// Bundle-relative path of the theme bundle.
+    pub bundle_path: String,
+    /// Entry file inside the bundle.
+    pub entry: String,
+    /// Active theme settings.
+    pub settings: serde_json::Value,
+}
+
 /// One request handed to a storefront runtime.
 #[derive(Clone, Debug)]
 pub struct RuntimeRequest {
@@ -21,6 +38,8 @@ pub struct RuntimeRequest {
     pub headers: Vec<(String, String)>,
     /// Optional request body.
     pub body: Option<Bytes>,
+    /// Active theme bundle, if the request is a storefront render.
+    pub theme: Option<RuntimeTheme>,
     /// Execution timeout in milliseconds.
     pub timeout_ms: u64,
 }

@@ -209,6 +209,7 @@ mod tests {
             url: "/".to_owned(),
             headers: Vec::new(),
             body: None,
+            theme: None,
             timeout_ms,
         }
     }

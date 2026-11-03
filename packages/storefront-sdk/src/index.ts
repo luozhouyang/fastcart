@@ -1,62 +1,528 @@
-import { createApiClient, type ApiClientOptions } from "@fastcart/api-client";
-import type { Money, PageResult } from "@fastcart/shared-types";
+import {
+  createApiClient,
+  type ApiClientOptions,
+  type CallOptions,
+  type RequestOptions,
+} from "@fastcart/api-client";
+import type {
+  AddItemRequest,
+  Cart,
+  CartItem,
+  Category,
+  ChangePasswordRequest,
+  CheckoutSession,
+  CheckoutStateHistory,
+  Collection,
+  CompleteCheckoutRequest,
+  CompleteCheckoutResponse,
+  CreateCartRequest,
+  CreateCheckoutRequest,
+  Customer,
+  CustomerAddress,
+  CustomerAddressInput,
+  CustomerGroup,
+  CustomerLoginRequest,
+  CustomerSessionResponse,
+  DestinationQuery,
+  DiscountRequest,
+  Money,
+  NavigationTree,
+  Order,
+  Page,
+  PageResult,
+  PaginationQuery,
+  Product,
+  RegisterCustomerRequest,
+  ResolvedShippingOption,
+  SetAddressRequest,
+  SetEmailRequest,
+  SetShippingMethodRequest,
+  ShippingOptionsQuery,
+  StoreProductListQuery,
+  StoreSearchQuery,
+  StoreTheme,
+  UpdateItemRequest,
+  UpdateProfileRequest,
+  VariantAvailability,
+} from "@fastcart/shared-types";
 
-export interface StoreProduct {
-  id: string;
-  handle: string;
-  title: string;
-  description: string;
-  price: Money | null;
+/** Options accepted by {@link createStorefrontClient}. */
+export interface StorefrontClientOptions extends ApiClientOptions {
+  /** Customer CSRF token, or a provider called for every unsafe request. */
+  csrfToken?: string | (() => string | null);
 }
 
-export interface StoreCollection {
-  id: string;
-  handle: string;
-  title: string;
+/** Per-call configuration shared by every storefront method. */
+export interface StorefrontRequestOptions extends CallOptions {
+  /** Overrides the client-level CSRF token for this request. */
+  csrfToken?: string;
 }
 
-export interface CartLine {
-  variantId: string;
-  quantity: number;
+/** A storefront product, including an optional resolved display price. */
+export interface StoreProduct extends Product {
+  price?: Money | null;
 }
 
-export interface StoreCart {
-  id: string;
-  items: CartLine[];
-}
+/** Storefront collection shape. */
+export type StoreCollection = Collection;
 
+/** Backwards-compatible cart line shape. */
+export type CartLine = Pick<CartItem, "variant_id" | "quantity">;
+
+/** Storefront cart aggregate. */
+export type StoreCart = Cart;
+
+/** Typed storefront SDK for the public `/api/v1/store` namespace. */
 export interface StorefrontClient {
+  /** Updates the CSRF token captured from register or login. */
+  setCsrfToken(token: string | null): void;
+
   products: {
-    list(): Promise<PageResult<StoreProduct>>;
-    getByHandle(handle: string): Promise<StoreProduct>;
+    list(
+      query?: StoreProductListQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<PageResult<StoreProduct>>;
+    get(handle: string, options?: StorefrontRequestOptions): Promise<StoreProduct>;
+    getByHandle(handle: string, options?: StorefrontRequestOptions): Promise<StoreProduct>;
+    search(
+      query: StoreSearchQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<PageResult<StoreProduct>>;
+    availability(
+      handle: string,
+      options?: StorefrontRequestOptions,
+    ): Promise<VariantAvailability[]>;
   };
+
+  categories: {
+    list(
+      query?: PaginationQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<PageResult<Category>>;
+  };
+
   collections: {
-    list(): Promise<PageResult<StoreCollection>>;
+    list(
+      query?: PaginationQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<PageResult<StoreCollection>>;
   };
+
   cart: {
-    create(): Promise<StoreCart>;
-    addItem(cartId: string, item: CartLine): Promise<StoreCart>;
+    create(body: CreateCartRequest, options?: StorefrontRequestOptions): Promise<StoreCart>;
+    get(cartId: string, options?: StorefrontRequestOptions): Promise<StoreCart>;
+    addItem(
+      cartId: string,
+      body: AddItemRequest,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+    updateItem(
+      cartId: string,
+      itemId: string,
+      body: UpdateItemRequest,
+      query?: DestinationQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+    removeItem(
+      cartId: string,
+      itemId: string,
+      query?: DestinationQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+    clearItems(
+      cartId: string,
+      query?: DestinationQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+    setEmail(
+      cartId: string,
+      body: SetEmailRequest | string,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+    attachCustomer(cartId: string, options?: StorefrontRequestOptions): Promise<StoreCart>;
+    setAddress(
+      cartId: string,
+      body: SetAddressRequest,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+    setShippingMethod(
+      cartId: string,
+      body: SetShippingMethodRequest,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+    applyDiscount(
+      cartId: string,
+      body: DiscountRequest | string,
+      query?: DestinationQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+    removeDiscount(
+      cartId: string,
+      code: string,
+      query?: DestinationQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<StoreCart>;
+  };
+
+  customer: {
+    register(
+      body: RegisterCustomerRequest,
+      options?: StorefrontRequestOptions,
+    ): Promise<CustomerSessionResponse>;
+    login(
+      body: CustomerLoginRequest,
+      options?: StorefrontRequestOptions,
+    ): Promise<CustomerSessionResponse>;
+    logout(options?: StorefrontRequestOptions): Promise<void>;
+    me(options?: StorefrontRequestOptions): Promise<Customer>;
+    updateMe(body: UpdateProfileRequest, options?: StorefrontRequestOptions): Promise<Customer>;
+    changePassword(body: ChangePasswordRequest, options?: StorefrontRequestOptions): Promise<void>;
+    addresses: {
+      list(options?: StorefrontRequestOptions): Promise<CustomerAddress[]>;
+      create(
+        body: CustomerAddressInput,
+        options?: StorefrontRequestOptions,
+      ): Promise<CustomerAddress>;
+      update(
+        addressId: string,
+        body: CustomerAddressInput,
+        options?: StorefrontRequestOptions,
+      ): Promise<CustomerAddress>;
+      remove(addressId: string, options?: StorefrontRequestOptions): Promise<void>;
+    };
+    orders: {
+      list(query?: PaginationQuery, options?: StorefrontRequestOptions): Promise<PageResult<Order>>;
+      get(orderId: string, options?: StorefrontRequestOptions): Promise<Order>;
+    };
+    groups(options?: StorefrontRequestOptions): Promise<CustomerGroup[]>;
+  };
+
+  content: {
+    page(handle: string, options?: StorefrontRequestOptions): Promise<Page>;
+    navigation(handle: string, options?: StorefrontRequestOptions): Promise<NavigationTree>;
+  };
+
+  shipping: {
+    options(
+      query: ShippingOptionsQuery,
+      options?: StorefrontRequestOptions,
+    ): Promise<ResolvedShippingOption[]>;
+  };
+
+  theme: {
+    active(options?: StorefrontRequestOptions): Promise<StoreTheme>;
+  };
+
+  checkout: {
+    create(
+      body: CreateCheckoutRequest,
+      options?: StorefrontRequestOptions,
+    ): Promise<CheckoutSession>;
+    get(checkoutId: string, options?: StorefrontRequestOptions): Promise<CheckoutSession>;
+    complete(
+      checkoutId: string,
+      body?: CompleteCheckoutRequest,
+      options?: StorefrontRequestOptions,
+    ): Promise<CompleteCheckoutResponse>;
+    cancel(checkoutId: string, options?: StorefrontRequestOptions): Promise<CheckoutSession>;
+    history(
+      checkoutId: string,
+      options?: StorefrontRequestOptions,
+    ): Promise<CheckoutStateHistory[]>;
+  };
+
+  settings: {
+    public(options?: StorefrontRequestOptions): Promise<Record<string, string>>;
   };
 }
 
-export function createStorefrontClient(options: ApiClientOptions = {}): StorefrontClient {
-  const client = createApiClient(options);
+type StorefrontInit = CallOptions & {
+  method?: string;
+  query?: unknown;
+  body?: unknown;
+  csrfToken?: string;
+};
+
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Creates a typed storefront client.
+ *
+ * Cookies are sent by default (`credentials: "include"`) because customers are
+ * authenticated with store-scoped session cookies. The client captures the CSRF
+ * token returned by register/login and attaches it to unsafe requests. Pass an
+ * `AbortSignal` through any method's final options argument to cancel.
+ */
+export function createStorefrontClient(options: StorefrontClientOptions = {}): StorefrontClient {
+  let sessionCsrf = typeof options.csrfToken === "string" ? options.csrfToken : null;
+
+  function csrfTokenForRequest(override?: string): string | null {
+    if (override !== undefined) {
+      return override;
+    }
+    if (typeof options.csrfToken === "function") {
+      return options.csrfToken();
+    }
+    return sessionCsrf;
+  }
+
+  const client = createApiClient({
+    ...options,
+    credentials: options.credentials ?? "include",
+  });
+
+  function request<T>(path: string, init: StorefrontInit = {}): Promise<T> {
+    const method = (init.method ?? "GET").toUpperCase();
+    const headers = new Headers(init.headers);
+    if (UNSAFE_METHODS.has(method)) {
+      const csrf = csrfTokenForRequest(init.csrfToken);
+      if (csrf !== null && csrf.length > 0 && !headers.has("x-csrf-token")) {
+        headers.set("x-csrf-token", csrf);
+      }
+    }
+    return client.request<T>(path, { ...init, headers } as RequestOptions);
+  }
+
+  const id = (value: string): string => encodeURIComponent(value);
+
+  const captureSession = (response: CustomerSessionResponse): CustomerSessionResponse => {
+    sessionCsrf = response.csrf_token;
+    return response;
+  };
 
   return {
+    setCsrfToken: (token) => {
+      sessionCsrf = token;
+    },
+
     products: {
-      list: () => client.request<PageResult<StoreProduct>>("/api/v1/store/products"),
-      getByHandle: (handle) => client.request<StoreProduct>(`/api/v1/store/products/${handle}`),
-    },
-    collections: {
-      list: () => client.request<PageResult<StoreCollection>>("/api/v1/store/collections"),
-    },
-    cart: {
-      create: () => client.request<StoreCart>("/api/v1/store/carts", { method: "POST" }),
-      addItem: (cartId, item) =>
-        client.request<StoreCart>(`/api/v1/store/carts/${cartId}/items`, {
-          method: "POST",
-          body: item,
+      list: (query, requestOptions) =>
+        request<PageResult<StoreProduct>>("/api/v1/store/products", {
+          ...requestOptions,
+          query,
         }),
+      get: (handle, requestOptions) =>
+        request<StoreProduct>(`/api/v1/store/products/${id(handle)}`, requestOptions),
+      getByHandle: (handle, requestOptions) =>
+        request<StoreProduct>(`/api/v1/store/products/${id(handle)}`, requestOptions),
+      search: (query, requestOptions) =>
+        request<PageResult<StoreProduct>>("/api/v1/store/search", {
+          ...requestOptions,
+          query,
+        }),
+      availability: (handle, requestOptions) =>
+        request<VariantAvailability[]>(
+          `/api/v1/store/products/${id(handle)}/availability`,
+          requestOptions,
+        ),
+    },
+
+    categories: {
+      list: (query, requestOptions) =>
+        request<PageResult<Category>>("/api/v1/store/categories", {
+          ...requestOptions,
+          query,
+        }),
+    },
+
+    collections: {
+      list: (query, requestOptions) =>
+        request<PageResult<StoreCollection>>("/api/v1/store/collections", {
+          ...requestOptions,
+          query,
+        }),
+    },
+
+    cart: {
+      create: (body, requestOptions) =>
+        request<StoreCart>("/api/v1/store/carts", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      get: (cartId, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}`, requestOptions),
+      addItem: (cartId, body, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/items`, {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      updateItem: (cartId, itemId, body, query, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/items/${id(itemId)}`, {
+          ...requestOptions,
+          method: "PATCH",
+          query,
+          body,
+        }),
+      removeItem: (cartId, itemId, query, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/items/${id(itemId)}`, {
+          ...requestOptions,
+          method: "DELETE",
+          query,
+        }),
+      clearItems: (cartId, query, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/items`, {
+          ...requestOptions,
+          method: "DELETE",
+          query,
+        }),
+      setEmail: (cartId, body, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/email`, {
+          ...requestOptions,
+          method: "POST",
+          body: typeof body === "string" ? { email: body } : body,
+        }),
+      attachCustomer: (cartId, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/customer`, {
+          ...requestOptions,
+          method: "POST",
+        }),
+      setAddress: (cartId, body, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/addresses`, {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      setShippingMethod: (cartId, body, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/shipping-method`, {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      applyDiscount: (cartId, body, query, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/discounts`, {
+          ...requestOptions,
+          method: "POST",
+          query,
+          body: typeof body === "string" ? { code: body } : body,
+        }),
+      removeDiscount: (cartId, code, query, requestOptions) =>
+        request<StoreCart>(`/api/v1/store/carts/${id(cartId)}/discounts/${id(code)}`, {
+          ...requestOptions,
+          method: "DELETE",
+          query,
+        }),
+    },
+
+    customer: {
+      register: async (body, requestOptions) =>
+        captureSession(
+          await request<CustomerSessionResponse>("/api/v1/store/customers", {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        ),
+      login: async (body, requestOptions) =>
+        captureSession(
+          await request<CustomerSessionResponse>("/api/v1/store/customers/login", {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        ),
+      logout: (requestOptions) =>
+        request<void>("/api/v1/store/customers/logout", {
+          ...requestOptions,
+          method: "POST",
+        }),
+      me: (requestOptions) => request<Customer>("/api/v1/store/customers/me", requestOptions),
+      updateMe: (body, requestOptions) =>
+        request<Customer>("/api/v1/store/customers/me", {
+          ...requestOptions,
+          method: "PATCH",
+          body,
+        }),
+      changePassword: (body, requestOptions) =>
+        request<void>("/api/v1/store/customers/me/password", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      addresses: {
+        list: (requestOptions) =>
+          request<CustomerAddress[]>("/api/v1/store/customers/me/addresses", requestOptions),
+        create: (body, requestOptions) =>
+          request<CustomerAddress>("/api/v1/store/customers/me/addresses", {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        update: (addressId, body, requestOptions) =>
+          request<CustomerAddress>(`/api/v1/store/customers/me/addresses/${id(addressId)}`, {
+            ...requestOptions,
+            method: "PATCH",
+            body,
+          }),
+        remove: (addressId, requestOptions) =>
+          request<void>(`/api/v1/store/customers/me/addresses/${id(addressId)}`, {
+            ...requestOptions,
+            method: "DELETE",
+          }),
+      },
+      orders: {
+        list: (query, requestOptions) =>
+          request<PageResult<Order>>("/api/v1/store/customers/me/orders", {
+            ...requestOptions,
+            query,
+          }),
+        get: (orderId, requestOptions) =>
+          request<Order>(`/api/v1/store/customers/me/orders/${id(orderId)}`, requestOptions),
+      },
+      groups: (requestOptions) =>
+        request<CustomerGroup[]>("/api/v1/store/customers/me/groups", requestOptions),
+    },
+
+    content: {
+      page: (handle, requestOptions) =>
+        request<Page>(`/api/v1/store/pages/${id(handle)}`, requestOptions),
+      navigation: (handle, requestOptions) =>
+        request<NavigationTree>(`/api/v1/store/navigation/${id(handle)}`, requestOptions),
+    },
+
+    shipping: {
+      options: (query, requestOptions) =>
+        request<ResolvedShippingOption[]>("/api/v1/store/shipping/options", {
+          ...requestOptions,
+          query,
+        }),
+    },
+
+    theme: {
+      active: (requestOptions) => request<StoreTheme>("/api/v1/store/theme", requestOptions),
+    },
+
+    checkout: {
+      create: (body, requestOptions) =>
+        request<CheckoutSession>("/api/v1/store/checkouts", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      get: (checkoutId, requestOptions) =>
+        request<CheckoutSession>(`/api/v1/store/checkouts/${id(checkoutId)}`, requestOptions),
+      complete: (checkoutId, body, requestOptions) =>
+        request<CompleteCheckoutResponse>(`/api/v1/store/checkouts/${id(checkoutId)}/complete`, {
+          ...requestOptions,
+          method: "POST",
+          body: body ?? {},
+        }),
+      cancel: (checkoutId, requestOptions) =>
+        request<CheckoutSession>(`/api/v1/store/checkouts/${id(checkoutId)}/cancel`, {
+          ...requestOptions,
+          method: "POST",
+        }),
+      history: (checkoutId, requestOptions) =>
+        request<CheckoutStateHistory[]>(
+          `/api/v1/store/checkouts/${id(checkoutId)}/history`,
+          requestOptions,
+        ),
+    },
+
+    settings: {
+      public: (requestOptions) =>
+        request<Record<string, string>>("/api/v1/store/settings/public", requestOptions),
     },
   };
 }
