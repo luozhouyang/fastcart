@@ -10,16 +10,98 @@
 //! [`JsonObject`]: #/components/schemas/JsonObject
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::Router;
 use serde_json::{Map, Value, json};
 
 use crate::state::AppContext;
 
+/// OpenAPI components generated directly from Rust response types.
+///
+/// Paths remain registered by the Axum routers; utoipa owns every schema in
+/// this document so field names, nullability and enums cannot drift from the
+/// types that are actually serialized.
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(
+    fastcart_kernel::CurrencyCode,
+    fastcart_kernel::CountryCode,
+    fastcart_kernel::Locale,
+    fastcart_kernel::Metadata,
+    fastcart_kernel::Money,
+    fastcart_kernel::Pagination,
+    fastcart_module_catalog::Category,
+    fastcart_module_catalog::Collection,
+    fastcart_module_catalog::Dimensions,
+    fastcart_module_catalog::Product,
+    fastcart_module_catalog::ProductImage,
+    fastcart_module_catalog::ProductOption,
+    fastcart_module_catalog::ProductOptionValue,
+    fastcart_module_catalog::ProductStatus,
+    fastcart_module_catalog::ProductVariant,
+    fastcart_module_catalog::Tag,
+    fastcart_module_cart::Address,
+    fastcart_module_cart::Cart,
+    fastcart_module_cart::CartAdjustment,
+    fastcart_module_cart::CartDiscount,
+    fastcart_module_cart::CartItem,
+    fastcart_module_cart::CartShippingMethod,
+    fastcart_module_cart::CartStatus,
+    fastcart_module_cart::CartTaxLine,
+    fastcart_module_cart::CartTotals,
+    fastcart_module_checkout::CheckoutSession,
+    fastcart_module_checkout::CheckoutStateHistory,
+    fastcart_module_checkout::CheckoutStatus,
+    fastcart_module_inventory::InventoryItem,
+    fastcart_module_inventory::InventoryLevel,
+    fastcart_module_inventory::InventoryLocation,
+    fastcart_module_inventory::InventoryMovement,
+    fastcart_module_inventory::InventoryReservation,
+    fastcart_module_inventory::ReservationStatus,
+    fastcart_module_order::FulfillmentStatus,
+    fastcart_module_order::Order,
+    fastcart_module_order::OrderAdjustment,
+    fastcart_module_order::OrderFulfillment,
+    fastcart_module_order::OrderItem,
+    fastcart_module_order::OrderItemAdjustment,
+    fastcart_module_order::OrderRefund,
+    fastcart_module_order::OrderStatus,
+    fastcart_module_order::OrderStatusHistory,
+    fastcart_module_order::PaymentStatus,
+    fastcart_module_order::RefundStatus,
+    fastcart_module_payment::Payment,
+    fastcart_module_payment::PaymentAttempt,
+    fastcart_module_payment::PaymentSession,
+    fastcart_module_payment::PaymentWebhookRecord,
+    fastcart_module_payment::Refund,
+    fastcart_module_payment::WebhookStatus,
+    fastcart_module_pricing::Price,
+    fastcart_module_pricing::PriceList,
+    fastcart_module_pricing::PriceListRule,
+    fastcart_module_pricing::PriceListStatus,
+    fastcart_module_pricing::PriceListType,
+    fastcart_module_pricing::SelectedPrice,
+    fastcart_module_promotion::Coupon,
+    fastcart_module_promotion::Promotion,
+    fastcart_module_promotion::PromotionApplication,
+    fastcart_module_promotion::PromotionResult,
+    fastcart_module_promotion::PromotionRule,
+    fastcart_module_promotion::PromotionRuleAttribute,
+    fastcart_module_promotion::PromotionRuleOperator,
+    fastcart_module_promotion::PromotionStatus,
+    fastcart_module_promotion::PromotionType,
+    fastcart_module_promotion::PromotionUsage,
+)))]
+struct GeneratedSchemas;
+
 /// Builds the OpenAPI 3.1 document.
 #[must_use]
 pub fn document() -> Value {
+    static DOCUMENT: OnceLock<Value> = OnceLock::new();
+    DOCUMENT.get_or_init(build_document).clone()
+}
+
+fn build_document() -> Value {
     let mut paths: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for route in routes() {
         paths
@@ -55,6 +137,17 @@ pub fn document() -> Value {
             "schemas": schemas(),
         },
     })
+}
+
+fn generated_schemas() -> Map<String, Value> {
+    let document = <GeneratedSchemas as utoipa::OpenApi>::openapi();
+    let value = serde_json::to_value(document).unwrap_or(Value::Null);
+    value
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Axum handler serving the document at `GET /openapi.json`.
@@ -3972,6 +4065,9 @@ fn schemas() -> Value {
             ("new_password", string()),
         ], &["current_password", "new_password"]),
     }
+    for (name, schema) in generated_schemas() {
+        schemas.insert(name, schema);
+    }
     Value::Object(schemas)
 }
 
@@ -4112,6 +4208,32 @@ mod tests {
         ] {
             assert!(paths.contains_key(key), "missing path {key}");
         }
+    }
+
+    #[test]
+    fn utoipa_schemas_match_rust_field_names() {
+        let document = document();
+        let schemas = document["components"]["schemas"]
+            .as_object()
+            .expect("schemas");
+        let properties = |name: &str| {
+            schemas[name]["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name} has no properties"))
+        };
+        assert!(properties("Cart").contains_key("items"));
+        assert!(!properties("Cart").contains_key("line_items"));
+        assert!(properties("Order").contains_key("items"));
+        assert!(!properties("Order").contains_key("line_items"));
+        assert!(properties("CartTotals").contains_key("total"));
+        assert!(!properties("CartTotals").contains_key("grand_total"));
+        assert!(properties("InventoryLevel").contains_key("stocked_quantity"));
+        assert!(properties("Coupon").contains_key("usage_count"));
+        assert!(properties("SelectedPrice").contains_key("price_id"));
+        let status = schemas["CheckoutStatus"]["enum"]
+            .as_array()
+            .expect("checkout status enum");
+        assert!(status.iter().any(|value| value == "order_placed"));
     }
 
     #[test]

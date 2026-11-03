@@ -54,11 +54,12 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - Transactional outbox with retry/backoff and in-process event bus.
 - SQLite-backed persistent job queue with atomic claiming and lease expiry.
 - Signed webhook delivery from outbox events with idempotent fan-out, retry/backoff, crash recovery and replay.
-- Provider-independent transactional email with queued `send_email` jobs, a log provider and an in-memory test provider.
+- Provider-independent transactional email with queued `send_email` jobs, SMTP (`lettre`) and Resend (`resend-rs`) providers, plus log and in-memory test providers.
 - Storefront SSR rendering through a bounded Node sidecar pool, with active theme context and trusted store resolution.
 - Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; email jobs; simple job handlers.
 - Store-scoped Moka cache with generation-based invalidation.
 - Prometheus-compatible `/metrics` with latency histograms, plus baseline security response headers.
+- OpenAPI 3.1 schemas generated from the Rust response types with `utoipa`, with a cached document and schema-reference validation.
 - Local object storage with path-traversal protection.
 - Plugin manifest registry with capability checks and dependency resolution.
 - AI provider/model/tool registries with an auditable agent-task state machine.
@@ -102,6 +103,11 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_CONFIG` — configuration path
 - `FASTCART_SERVER_HOST`, `FASTCART_SERVER_PORT`, `FASTCART_LOG_LEVEL`
 - `FASTCART_PAYMENT_WEBHOOK_SECRET` — enables sandbox webhook verification
+- `FASTCART_EMAIL_PROVIDER` — `log`, `smtp` or `resend`
+- `FASTCART_EMAIL_FROM` — default sender address
+- `FASTCART_SMTP_HOST`, `FASTCART_SMTP_PORT`, `FASTCART_SMTP_USERNAME`,
+  `FASTCART_SMTP_PASSWORD`, `FASTCART_SMTP_SECURITY` — SMTP delivery
+- `FASTCART_RESEND_API_KEY` — Resend delivery
 - `FASTCART_STOREFRONT_ENABLED`, `FASTCART_STOREFRONT_RUNTIME` — enable SSR and select `node`/`v8`
 - `FASTCART_STOREFRONT_NODE_URL`, `FASTCART_STOREFRONT_NODE_SECRET` — Node sidecar endpoint and bearer secret
 - `FASTCART_INTERNAL_FETCH_SECRET` — mounts the secret-gated `/internal/storefront` HTTP surface
@@ -159,7 +165,7 @@ pnpm install
 pnpm lint && pnpm typecheck && pnpm build
 ```
 
-The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries and cross-store tenant isolation.
+The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries, openapi schema/type parity, SQLite write serialization under concurrency, and cross-store tenant isolation.
 
 ## Roadmap
 
