@@ -1,0 +1,28 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+log_level = "info"
+
+[database]
+platform_path = "./data/platform.sqlite"
+stores_dir = "./data/stores"
+journal_mode = "wal"
+busy_timeout_ms = 5000
+
+[storage]
+provider = "local"
+root = "./data/assets"
+
+[cache]
+max_capacity = 10000
+
+[storefront]
+enabled = true
+runtime = "v8"
+worker_count = 2
+queue_capacity = 128
+request_timeout_ms = 10000
+
+[jobs]
+enabled = true
+worker_count = 2

@@ -1,0 +1,39 @@
+# Rust
+/target/
+**/target/
+
+# Node
+node_modules/
+.pnpm-store/
+apps/*/dist/
+apps/storefront/.output/
+apps/storefront/.nitro/
+apps/storefront/.tanstack/
+packages/*/dist/
+
+# Local design documents (kept out of version control)
+/docs/
+
+# Runtime data
+/data/*
+!/data/.gitkeep
+!/data/stores/
+!/data/stores/.gitkeep
+!/data/assets/
+!/data/assets/.gitkeep
+!/data/backups/
+!/data/backups/.gitkeep
+
+# Local configuration and secrets
+/config/config.toml
+.env
+.env.*
+!.env.example
+
+# Tooling
+.DS_Store
+*.log
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/

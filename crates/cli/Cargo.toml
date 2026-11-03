@@ -1,0 +1,19 @@
+[package]
+name = "fastcart-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fastcart"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+fastcart-server.workspace = true
+
+[lints]
+workspace = true

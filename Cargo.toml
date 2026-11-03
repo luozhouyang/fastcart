@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/server",
+    "crates/kernel",
+    "crates/platform",
+    "crates/commerce",
+    "crates/infrastructure",
+    "crates/api",
+    "crates/storefront",
+    "crates/storefront-runtime/runtime-api",
+    "crates/storefront-runtime/runtime-v8",
+    "crates/storefront-runtime/runtime-pool",
+    "crates/storefront-runtime/runtime-bridge",
+    "crates/storefront-runtime/runtime-node",
+    "crates/plugin",
+    "crates/ai",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = "0.8.9"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+toml = "1.1.8"
+tower-http = { version = "0.7.1", features = ["trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "1.29.0", features = ["v7", "serde"] }
+
+fastcart-ai = { path = "crates/ai" }
+fastcart-api = { path = "crates/api" }
+fastcart-commerce = { path = "crates/commerce" }
+fastcart-infrastructure = { path = "crates/infrastructure" }
+fastcart-kernel = { path = "crates/kernel" }
+fastcart-platform = { path = "crates/platform" }
+fastcart-plugin = { path = "crates/plugin" }
+fastcart-runtime-api = { path = "crates/storefront-runtime/runtime-api" }
+fastcart-runtime-bridge = { path = "crates/storefront-runtime/runtime-bridge" }
+fastcart-runtime-node = { path = "crates/storefront-runtime/runtime-node" }
+fastcart-runtime-pool = { path = "crates/storefront-runtime/runtime-pool" }
+fastcart-runtime-v8 = { path = "crates/storefront-runtime/runtime-v8" }
+fastcart-server = { path = "apps/server" }
+fastcart-storefront = { path = "crates/storefront" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,9 @@
+node_modules
+target
+dist
+.tanstack
+pnpm-lock.yaml
+Cargo.lock
+data
+docs/architecture
+apps/storefront/src/routeTree.gen.ts

@@ -1,0 +1,9 @@
+{
+  "id": "default",
+  "name": "Fastcart Default Theme",
+  "version": "0.1.0",
+  "runtime": "tanstack-start",
+  "entry": "server.js",
+  "settings_schema": "settings.schema.json",
+  "assets_manifest": "assets.json"
+}
