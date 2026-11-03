@@ -26,6 +26,8 @@ fastcart-module-webhook.workspace = true
 fastcart-platform.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 
 [lints]

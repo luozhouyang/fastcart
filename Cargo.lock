@@ -937,6 +937,7 @@ dependencies = [
 name = "fastcart-workflows"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "fastcart-infrastructure",
  "fastcart-kernel",
  "fastcart-module-cart",
@@ -954,6 +955,7 @@ dependencies = [
  "fastcart-platform",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
