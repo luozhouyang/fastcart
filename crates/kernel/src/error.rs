@@ -25,7 +25,7 @@ pub enum KernelError {
 ///
 /// Presentation layers map these variants to stable API error codes. Database
 /// and provider details must not be forwarded to clients verbatim.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AppError {
     /// Input failed validation.
     #[error("{0}")]
@@ -36,7 +36,7 @@ pub enum AppError {
     /// The request conflicts with current state.
     #[error("{0}")]
     Conflict(String),
-    /// Authentication is missing or invalid.
+    /// The caller is not authenticated.
     #[error("unauthorized")]
     Unauthorized,
     /// The actor is not allowed to perform the operation.
@@ -54,6 +54,9 @@ pub enum AppError {
     /// Unexpected internal failure.
     #[error("internal error: {0}")]
     Internal(String),
+    /// The feature is not implemented yet.
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
 }
 
 impl AppError {
@@ -70,6 +73,63 @@ impl AppError {
             Self::Database(_) => "DATABASE_ERROR",
             Self::ExternalService(_) => "EXTERNAL_SERVICE_ERROR",
             Self::Internal(_) => "INTERNAL_ERROR",
+            Self::NotImplemented(_) => "NOT_IMPLEMENTED",
         }
+    }
+
+    /// Creates a validation error.
+    pub fn validation(message: impl Into<String>) -> Self {
+        Self::Validation(message.into())
+    }
+
+    /// Creates a not-found error for a named resource.
+    pub fn not_found(resource: &str, id: impl std::fmt::Display) -> Self {
+        Self::NotFound(format!("{resource} not found: {id}"))
+    }
+
+    /// Creates a conflict error.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::Conflict(message.into())
+    }
+
+    /// Creates a database error.
+    pub fn database(message: impl Into<String>) -> Self {
+        Self::Database(message.into())
+    }
+
+    /// Creates an internal error.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+
+    /// Returns true when the error represents a missing resource.
+    #[must_use]
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound(_))
+    }
+}
+
+impl From<KernelError> for AppError {
+    fn from(error: KernelError) -> Self {
+        Self::Validation(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+
+    #[test]
+    fn error_codes_are_stable() {
+        assert_eq!(AppError::Validation("x".into()).code(), "VALIDATION_ERROR");
+        assert_eq!(AppError::Unauthorized.code(), "UNAUTHORIZED");
+        assert_eq!(AppError::Forbidden.code(), "FORBIDDEN");
+        assert_eq!(AppError::not_found("product", "prod_1").code(), "NOT_FOUND");
+    }
+
+    #[test]
+    fn not_found_messages_include_the_identifier() {
+        let error = AppError::not_found("product", "prod_1");
+        assert!(error.to_string().contains("prod_1"));
     }
 }
