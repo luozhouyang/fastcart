@@ -18,6 +18,7 @@ sqlx.workspace = true
 tokio.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-kernel.workspace = true
+utoipa.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

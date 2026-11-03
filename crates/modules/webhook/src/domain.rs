@@ -15,7 +15,7 @@ pub const MAX_EVENT_LENGTH: usize = 128;
 pub const MAX_RESPONSE_BODY_BYTES: usize = 2_048;
 
 /// A registered webhook endpoint. The signing secret is intentionally absent.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WebhookEndpoint {
     /// Endpoint identifier.
     pub id: WebhookId,
@@ -71,7 +71,7 @@ pub struct UpdateWebhookEndpointInput {
 }
 
 /// Delivery lifecycle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
     /// Waiting for its next attempt.
@@ -116,7 +116,7 @@ impl std::fmt::Display for DeliveryStatus {
 }
 
 /// One event delivery to one endpoint.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WebhookDelivery {
     /// Delivery identifier.
     pub id: WebhookDeliveryId,

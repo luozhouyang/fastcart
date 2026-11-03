@@ -18,7 +18,7 @@ pub const MAX_URL_LENGTH: usize = 2048;
 pub const MAX_REDIRECT_PATH_LENGTH: usize = 2048;
 
 /// Publication state of a page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PageStatus {
     /// Work in progress; not visible to storefronts.
@@ -53,7 +53,7 @@ impl PageStatus {
 }
 
 /// A store content page.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     /// Page identifier.
     pub id: PageId,
@@ -82,7 +82,7 @@ pub struct Page {
 }
 
 /// An immutable snapshot of a page body.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PageVersion {
     /// Version identifier.
     pub id: String,
@@ -99,7 +99,7 @@ pub struct PageVersion {
 }
 
 /// A navigation menu with its items.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Navigation {
     /// Navigation identifier.
     pub id: NavigationId,
@@ -118,7 +118,7 @@ pub struct Navigation {
 }
 
 /// A single entry in a navigation menu.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NavigationItem {
     /// Item identifier.
     pub id: String,
@@ -137,7 +137,7 @@ pub struct NavigationItem {
 }
 
 /// A navigation tree with nested items.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NavigationTree {
     /// Navigation identifier.
     pub id: NavigationId,
@@ -152,7 +152,7 @@ pub struct NavigationTree {
 }
 
 /// A navigation item with its nested children.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NavigationTreeItem {
     /// Item identifier.
     pub id: String,
@@ -169,11 +169,12 @@ pub struct NavigationTreeItem {
     /// Free-form extension metadata.
     pub metadata: Metadata,
     /// Nested child items.
+    #[schema(no_recursion)]
     pub children: Vec<NavigationTreeItem>,
 }
 
 /// An HTTP redirect registered by the storefront.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Redirect {
     /// Redirect identifier.
     pub id: String,

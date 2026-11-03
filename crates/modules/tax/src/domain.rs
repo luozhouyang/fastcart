@@ -9,7 +9,7 @@ use fastcart_kernel::{
 pub const MAX_RATE_BPS: i64 = 100_000;
 
 /// A product tax category such as standard, reduced or zero-rated.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TaxCategory {
     /// Category identifier.
     pub id: TaxCategoryId,
@@ -48,7 +48,7 @@ pub struct UpdateTaxCategoryInput {
 }
 
 /// A country or country+province tax jurisdiction.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TaxRegion {
     /// Region identifier.
     pub id: TaxRegionId,
@@ -93,7 +93,7 @@ pub struct UpdateTaxRegionInput {
 }
 
 /// A configured tax rate for a region and optional category.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TaxRate {
     /// Rate identifier.
     pub id: TaxRateId,
@@ -154,7 +154,17 @@ pub struct UpdateTaxRateInput {
 }
 
 /// Split of one monetary amount into tax, net and gross components.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    utoipa::ToSchema,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct TaxBreakdown {
     /// Tax portion in minor units.
     pub tax_amount: i64,
@@ -165,7 +175,7 @@ pub struct TaxBreakdown {
 }
 
 /// A calculated tax line for one cart or order item.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TaxLine {
     /// Destination country.
     pub country_code: CountryCode,

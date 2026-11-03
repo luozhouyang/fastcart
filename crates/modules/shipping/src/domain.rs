@@ -6,7 +6,7 @@ use fastcart_kernel::{
 };
 
 /// A shipping profile groups options that share fulfilment rules.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShippingProfile {
     /// Profile identifier.
     pub id: ShippingProfileId,
@@ -45,7 +45,7 @@ pub struct UpdateShippingProfileInput {
 }
 
 /// A purchasable flat-rate shipping choice.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShippingOption {
     /// Option identifier.
     pub id: ShippingOptionId,
@@ -102,7 +102,7 @@ pub struct UpdateShippingOptionInput {
 }
 
 /// A destination- and subtotal-specific shipping price.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShippingRate {
     /// Rate identifier.
     pub id: String,
@@ -167,7 +167,7 @@ pub struct UpdateShippingRateInput {
 }
 
 /// The rate chosen for a destination and cart subtotal.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SelectedShippingRate {
     /// Option being priced.
     pub option_id: ShippingOptionId,
@@ -182,7 +182,7 @@ pub struct SelectedShippingRate {
 }
 
 /// An enabled option with its resolved amount for a destination.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedShippingOption {
     /// The option record.
     pub option: ShippingOption,

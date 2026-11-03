@@ -40,6 +40,40 @@ use crate::state::AppContext;
     fastcart_module_catalog::ProductStatus,
     fastcart_module_catalog::ProductVariant,
     fastcart_module_catalog::Tag,
+    fastcart_module_store::PublishableApiKey,
+    fastcart_module_store::Region,
+    crate::routes::admin_campaigns::CampaignDto,
+    crate::routes::admin_campaigns::CreateCampaignRequest,
+    crate::routes::admin_campaigns::LinkPromotionRequest,
+    crate::routes::admin_campaigns::UpdateCampaignRequest,
+    crate::routes::admin_regions::CreatePublishableKeyRequest,
+    crate::routes::admin_regions::CreateRegionRequest,
+    crate::routes::admin_regions::CreatedPublishableKeyDto,
+    crate::routes::admin_regions::PublishableKeyDto,
+    crate::routes::admin_regions::RegionDto,
+    crate::routes::admin_regions::UpdateRegionRequest,
+    fastcart_module_content::Navigation,
+    fastcart_module_content::NavigationItem,
+    fastcart_module_content::NavigationTree,
+    fastcart_module_content::NavigationTreeItem,
+    fastcart_module_content::Page,
+    fastcart_module_content::PageStatus,
+    fastcart_module_content::PageVersion,
+    fastcart_module_content::Redirect,
+    fastcart_module_shipping::ResolvedShippingOption,
+    fastcart_module_shipping::SelectedShippingRate,
+    fastcart_module_shipping::ShippingOption,
+    fastcart_module_shipping::ShippingProfile,
+    fastcart_module_shipping::ShippingRate,
+    fastcart_module_store::SalesChannel,
+    fastcart_module_tax::TaxBreakdown,
+    fastcart_module_tax::TaxCategory,
+    fastcart_module_tax::TaxLine,
+    fastcart_module_tax::TaxRate,
+    fastcart_module_tax::TaxRegion,
+    fastcart_module_webhook::DeliveryStatus,
+    fastcart_module_webhook::WebhookDelivery,
+    fastcart_module_webhook::WebhookEndpoint,
     fastcart_module_cart::Address,
     fastcart_module_cart::Cart,
     fastcart_module_cart::CartAdjustment,
@@ -81,6 +115,7 @@ use crate::state::AppContext;
     fastcart_module_pricing::PriceListStatus,
     fastcart_module_pricing::PriceListType,
     fastcart_module_pricing::SelectedPrice,
+    fastcart_module_promotion::Campaign,
     fastcart_module_promotion::Coupon,
     fastcart_module_promotion::Promotion,
     fastcart_module_promotion::PromotionApplication,
@@ -590,6 +625,8 @@ fn admin_routes() -> Vec<Route> {
     routes.extend(admin_payment_routes());
     routes.extend(admin_pricing_routes());
     routes.extend(admin_promotion_routes());
+    routes.extend(admin_campaign_routes());
+    routes.extend(admin_region_routes());
     routes.extend(admin_shipping_routes());
     routes.extend(admin_tax_routes());
     routes.extend(admin_theme_routes());
@@ -1668,6 +1705,124 @@ fn admin_promotion_routes() -> Vec<Route> {
     ]
 }
 
+fn admin_campaign_routes() -> Vec<Route> {
+    vec![
+        get(
+            "/api/v1/admin/campaigns",
+            "List campaigns",
+            Auth::Admin,
+            PAGED,
+            ok(Schema::Page("Campaign")),
+        ),
+        post(
+            "/api/v1/admin/campaigns",
+            "Create a campaign",
+            Auth::Admin,
+            Some("CreateCampaignRequest"),
+            created(Schema::Ref("Campaign")),
+        ),
+        get(
+            "/api/v1/admin/campaigns/{id}",
+            "Get a campaign",
+            Auth::Admin,
+            &[],
+            ok(Schema::Ref("Campaign")),
+        ),
+        patch(
+            "/api/v1/admin/campaigns/{id}",
+            "Update a campaign",
+            Auth::Admin,
+            "UpdateCampaignRequest",
+            ok(Schema::Ref("Campaign")),
+        ),
+        del(
+            "/api/v1/admin/campaigns/{id}",
+            "Delete a campaign",
+            Auth::Admin,
+            no_content(),
+        ),
+        get(
+            "/api/v1/admin/campaigns/{id}/promotions",
+            "List promotions linked to a campaign",
+            Auth::Admin,
+            &[],
+            ok(Schema::Array("String")),
+        ),
+        post(
+            "/api/v1/admin/campaigns/{id}/promotions",
+            "Link a promotion to a campaign",
+            Auth::Admin,
+            Some("LinkPromotionRequest"),
+            no_content(),
+        ),
+        del(
+            "/api/v1/admin/campaigns/{id}/promotions/{promotion_id}",
+            "Unlink a promotion from a campaign",
+            Auth::Admin,
+            no_content(),
+        ),
+    ]
+}
+
+fn admin_region_routes() -> Vec<Route> {
+    vec![
+        get(
+            "/api/v1/admin/regions",
+            "List regions",
+            Auth::Admin,
+            PAGED,
+            ok(Schema::Page("RegionDto")),
+        ),
+        post(
+            "/api/v1/admin/regions",
+            "Create a region",
+            Auth::Admin,
+            Some("CreateRegionRequest"),
+            created(Schema::Ref("RegionDto")),
+        ),
+        get(
+            "/api/v1/admin/regions/{id}",
+            "Get a region",
+            Auth::Admin,
+            &[],
+            ok(Schema::Ref("RegionDto")),
+        ),
+        patch(
+            "/api/v1/admin/regions/{id}",
+            "Update a region",
+            Auth::Admin,
+            "UpdateRegionRequest",
+            ok(Schema::Ref("RegionDto")),
+        ),
+        del(
+            "/api/v1/admin/regions/{id}",
+            "Delete a region",
+            Auth::Admin,
+            no_content(),
+        ),
+        get(
+            "/api/v1/admin/publishable-api-keys",
+            "List publishable API keys",
+            Auth::Admin,
+            &[],
+            ok(Schema::Array("PublishableKeyDto")),
+        ),
+        post(
+            "/api/v1/admin/publishable-api-keys",
+            "Create a publishable API key",
+            Auth::Admin,
+            Some("CreatePublishableKeyRequest"),
+            created(Schema::Ref("CreatedPublishableKeyDto")),
+        ),
+        del(
+            "/api/v1/admin/publishable-api-keys/{id}",
+            "Revoke a publishable API key",
+            Auth::Admin,
+            no_content(),
+        ),
+    ]
+}
+
 fn admin_shipping_routes() -> Vec<Route> {
     vec![
         get(
@@ -2335,6 +2490,20 @@ fn store_routes() -> Vec<Route> {
             &[],
             ok(Schema::Ref("StoreTheme")),
         ),
+        get(
+            "/api/v1/store/regions",
+            "List storefront regions",
+            Auth::Public,
+            PAGED,
+            ok(Schema::Page("RegionDto")),
+        ),
+        get(
+            "/api/v1/store/regions/{id}",
+            "Get a storefront region",
+            Auth::Public,
+            &[],
+            ok(Schema::Ref("RegionDto")),
+        ),
     ]
 }
 
@@ -2705,6 +2874,7 @@ fn schemas() -> Value {
     }
     schema! {
         // Errors and pagination.
+        "String": string(),
         "ErrorEnvelope": object(&[
             ("error", object(&[
                 ("code", string()),
@@ -2712,33 +2882,26 @@ fn schemas() -> Value {
                 ("request_id", nullable(string())),
             ], &["code", "message"])),
         ], &["error"]),
+
+
         "PageInfo": object(&[
             ("limit", integer()),
             ("offset", integer()),
             ("total", integer()),
         ], &["limit", "offset", "total"]),
-        "Pagination": object(&[
-            ("limit", integer()),
-            ("offset", integer()),
-        ], &[]),
+
+
         "PageMeta": object(&[
             ("limit", integer()),
             ("offset", integer()),
             ("total", integer()),
             ("has_more", boolean()),
         ], &["limit", "offset", "total"]),
-        "Metadata": map_of(json!({})),
+
+
         "JsonObject": json!({"type": "object", "additionalProperties": true}),
-        "Dimensions": object(&[
-            ("length", nullable(number())),
-            ("width", nullable(number())),
-            ("height", nullable(number())),
-            ("weight", nullable(number())),
-        ], &[]),
-        "Money": object(&[
-            ("amount", integer()),
-            ("currency_code", string()),
-        ], &["amount", "currency_code"]),
+
+
         "Totals": object(&[
             ("currency_code", string()),
             ("subtotal", integer()),
@@ -2747,6 +2910,8 @@ fn schemas() -> Value {
             ("tax_total", integer()),
             ("grand_total", integer()),
         ], &["currency_code", "subtotal", "grand_total"]),
+
+
 
         // Identity and platform resources.
         "User": object(&[
@@ -2757,6 +2922,8 @@ fn schemas() -> Value {
             ("status", string_enum(&["active", "disabled"])),
             ("email_verified_at", nullable(integer())),
         ], &["id", "email", "status"]),
+
+
         "Store": object(&[
             ("id", string()),
             ("name", string()),
@@ -2769,6 +2936,8 @@ fn schemas() -> Value {
             ("created_at", integer()),
             ("updated_at", integer()),
         ], &["id", "name", "slug", "status"]),
+
+
         "Domain": object(&[
             ("id", string()),
             ("store_id", string()),
@@ -2776,6 +2945,8 @@ fn schemas() -> Value {
             ("is_primary", boolean()),
             ("verified_at", nullable(integer())),
         ], &["id", "store_id", "hostname", "is_primary"]),
+
+
         "Membership": object(&[
             ("id", string()),
             ("user_id", string()),
@@ -2785,10 +2956,14 @@ fn schemas() -> Value {
             ("created_at", integer()),
             ("updated_at", integer()),
         ], &["id", "user_id", "store_id", "roles"]),
+
+
         "Role": object(&[
             ("name", string()),
             ("description", string()),
         ], &["name", "description"]),
+
+
         "ApiToken": object(&[
             ("id", string()),
             ("user_id", string()),
@@ -2801,55 +2976,35 @@ fn schemas() -> Value {
             ("last_used_at", nullable(integer())),
             ("created_at", integer()),
         ], &["id", "user_id", "name", "prefix", "scopes"]),
+
+
         "CreatedApiToken": object(&[
             ("token", string()),
             ("record", schema_ref("ApiToken")),
         ], &["token", "record"]),
+
+
         "ProvisioningResponse": object(&[
             ("store", schema_ref("Store")),
             ("steps", array_of(string())),
             ("already_active", boolean()),
         ], &["store", "steps", "already_active"]),
+
+
         "LoginResponse": object(&[
             ("user", schema_ref("User")),
             ("csrf_token", string()),
             ("expires_at", integer()),
         ], &["user", "csrf_token", "expires_at"]),
+
+
         "MeResponse": object(&[
             ("user", schema_ref("User")),
             ("store_id", optional_string()),
             ("permissions", array_of(string())),
         ], &["user", "permissions"]),
 
-        // Commerce resources.
-        "Address": object(&[
-            ("id", string()),
-            ("is_default_shipping", boolean()),
-            ("is_default_billing", boolean()),
-            ("first_name", optional_string()),
-            ("last_name", optional_string()),
-            ("company", optional_string()),
-            ("address_1", optional_string()),
-            ("address_2", optional_string()),
-            ("city", optional_string()),
-            ("province", optional_string()),
-            ("postal_code", optional_string()),
-            ("country_code", optional_string()),
-            ("phone", optional_string()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id"]),
-        "ProductImage": object(&[
-            ("id", string()),
-            ("product_id", string()),
-            ("url", string()),
-            ("alt", optional_string()),
-            ("variant_id", optional_string()),
-            ("rank", integer()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-        ], &["id", "product_id", "url"]),
+
         "Variant": object(&[
             ("id", string()),
             ("product_id", string()),
@@ -2865,63 +3020,8 @@ fn schemas() -> Value {
             ("created_at", integer()),
             ("updated_at", integer()),
         ], &["id", "product_id", "title"]),
-        "Product": object(&[
-            ("id", string()),
-            ("title", string()),
-            ("handle", optional_string()),
-            ("subtitle", optional_string()),
-            ("description", optional_string()),
-            ("thumbnail", optional_string()),
-            ("status", string_enum(&["draft", "active", "archived"])),
-            ("weight", nullable(number())),
-            ("dimensions", nullable(schema_ref("Dimensions"))),
-            ("variants", array_of(schema_ref("Variant"))),
-            ("categories", array_of(schema_ref("Category"))),
-            ("collections", array_of(schema_ref("Collection"))),
-            ("tags", array_of(schema_ref("Tag"))),
-            ("images", array_of(schema_ref("ProductImage"))),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-            ("deleted_at", nullable(integer())),
-        ], &["id", "title", "status"]),
-        "Category": object(&[
-            ("id", string()),
-            ("title", string()),
-            ("handle", optional_string()),
-            ("parent_id", optional_string()),
-            ("description", optional_string()),
-            ("is_active", boolean()),
-            ("is_internal", boolean()),
-            ("rank", integer()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "title"]),
-        "Collection": object(&[
-            ("id", string()),
-            ("title", string()),
-            ("handle", optional_string()),
-            ("description", optional_string()),
-            ("is_published", boolean()),
-            ("rank", integer()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "title"]),
-        "Tag": object(&[
-            ("id", string()),
-            ("value", string()),
-        ], &["id", "value"]),
-        "SalesChannel": object(&[
-            ("id", string()),
-            ("name", string()),
-            ("description", optional_string()),
-            ("is_enabled", boolean()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "name"]),
+
+
         "LineItem": object(&[
             ("id", string()),
             ("cart_id", optional_string()),
@@ -2932,20 +3032,8 @@ fn schemas() -> Value {
             ("total_price", integer()),
             ("metadata", schema_ref("Metadata")),
         ], &["id", "variant_id", "quantity"]),
-        "Cart": object(&[
-            ("id", string()),
-            ("currency_code", string()),
-            ("email", optional_string()),
-            ("customer_id", optional_string()),
-            ("sales_channel_id", optional_string()),
-            ("line_items", array_of(schema_ref("LineItem"))),
-            ("shipping_address", nullable(schema_ref("Address"))),
-            ("billing_address", nullable(schema_ref("Address"))),
-            ("totals", schema_ref("Totals")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-            ("expires_at", nullable(integer())),
-        ], &["id", "currency_code"]),
+
+
         "Checkout": object(&[
             ("id", string()),
             ("cart_id", string()),
@@ -2958,39 +3046,8 @@ fn schemas() -> Value {
             ("updated_at", integer()),
             ("expires_at", nullable(integer())),
         ], &["id", "cart_id", "status"]),
-        "CheckoutSession": schema_ref("Checkout"),
-        "OrderRefund": object(&[
-            ("id", string()),
-            ("payment_id", optional_string()),
-            ("amount", integer()),
-            ("currency_code", string()),
-            ("status", string()),
-            ("reason", optional_string()),
-            ("created_at", integer()),
-        ], &["id", "amount", "currency_code", "status"]),
-        "Order": object(&[
-            ("id", string()),
-            ("display_number", integer()),
-            ("status", string()),
-            ("payment_status", string()),
-            ("customer_id", optional_string()),
-            ("email", optional_string()),
-            ("currency_code", string()),
-            ("line_items", array_of(schema_ref("LineItem"))),
-            ("refunds", array_of(schema_ref("OrderRefund"))),
-            ("totals", schema_ref("Totals")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-            ("canceled_at", nullable(integer())),
-        ], &["id", "status", "payment_status", "currency_code"]),
-        "OrderStatusHistory": object(&[
-            ("id", string()),
-            ("order_id", string()),
-            ("from_status", optional_string()),
-            ("to_status", string()),
-            ("reason", optional_string()),
-            ("created_at", integer()),
-        ], &["id", "order_id", "to_status"]),
+
+
         "Customer": object(&[
             ("id", string()),
             ("email", string()),
@@ -3002,6 +3059,8 @@ fn schemas() -> Value {
             ("created_at", integer()),
             ("updated_at", integer()),
         ], &["id", "email", "status"]),
+
+
         "CustomerGroup": object(&[
             ("id", string()),
             ("name", string()),
@@ -3009,24 +3068,22 @@ fn schemas() -> Value {
             ("created_at", integer()),
             ("updated_at", integer()),
         ], &["id", "name"]),
+
+
         "CustomerSessionResponse": object(&[
             ("customer", schema_ref("Customer")),
             ("csrf_token", string()),
             ("expires_at", integer()),
         ], &["customer", "csrf_token", "expires_at"]),
+
+
         "CompleteCheckoutResponse": object(&[
             ("checkout", schema_ref("Checkout")),
             ("order", schema_ref("Order")),
             ("payment", schema_ref("Payment")),
         ], &["checkout", "order", "payment"]),
-        "CheckoutStateHistory": object(&[
-            ("id", string()),
-            ("checkout_id", string()),
-            ("from_status", optional_string()),
-            ("to_status", string()),
-            ("reason", optional_string()),
-            ("created_at", integer()),
-        ], &["id", "checkout_id", "to_status"]),
+
+
         "VariantAvailability": object(&[
             ("variant_id", string()),
             ("available", integer()),
@@ -3034,142 +3091,39 @@ fn schemas() -> Value {
             ("allow_backorder", boolean()),
         ], &["variant_id", "available"]),
 
-        // Store content and settings.
-        "Page": object(&[
-            ("id", string()),
-            ("title", string()),
-            ("handle", string()),
-            ("body", optional_string()),
-            ("status", string_enum(&["draft", "published", "archived"])),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-            ("published_at", nullable(integer())),
-        ], &["id", "title", "handle", "status"]),
-        "PageVersion": object(&[
-            ("id", string()),
-            ("page_id", string()),
-            ("version", integer()),
-            ("title", string()),
-            ("handle", string()),
-            ("body", optional_string()),
-            ("status", string()),
-            ("created_at", integer()),
-        ], &["id", "page_id", "version"]),
-        "Navigation": object(&[
-            ("id", string()),
-            ("title", string()),
-            ("handle", string()),
-            ("is_active", boolean()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "title", "handle"]),
-        "NavigationItem": object(&[
-            ("id", string()),
-            ("navigation_id", string()),
-            ("parent_id", optional_string()),
-            ("title", string()),
-            ("url", optional_string()),
-            ("item_type", optional_string()),
-            ("rank", integer()),
-            ("metadata", schema_ref("Metadata")),
-        ], &["id", "navigation_id", "title"]),
-        "NavigationTree": object(&[
-            ("id", string()),
-            ("handle", string()),
-            ("title", string()),
-            ("items", array_of(schema_ref("NavigationItem"))),
-        ], &["id", "handle", "items"]),
-        "Redirect": object(&[
-            ("id", string()),
-            ("from_path", string()),
-            ("to_path", string()),
-            ("status_code", integer()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "from_path", "to_path"]),
+
         "SettingsMap": map_of(string()),
+
+
         "SettingValue": object(&[
             ("key", string()),
             ("value", string()),
         ], &["key", "value"]),
+
+
         "ReindexResponse": object(&[
             ("indexed", boolean()),
         ], &["indexed"]),
 
-        // Inventory.
-        "InventoryLocation": object(&[
-            ("id", string()),
-            ("name", string()),
-            ("address", nullable(schema_ref("Metadata"))),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "name"]),
-        "InventoryItem": object(&[
-            ("id", string()),
-            ("sku", optional_string()),
-            ("variant_id", optional_string()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id"]),
-        "InventoryLevel": object(&[
-            ("id", string()),
-            ("inventory_item_id", string()),
-            ("location_id", string()),
-            ("available", integer()),
-            ("reserved", integer()),
-            ("incoming", integer()),
-            ("updated_at", integer()),
-        ], &["inventory_item_id", "location_id", "available"]),
+
         "InventoryAvailability": object(&[
             ("variant_id", string()),
             ("available", integer()),
         ], &["variant_id", "available"]),
-        "InventoryMovement": object(&[
-            ("id", string()),
-            ("inventory_item_id", string()),
-            ("location_id", string()),
-            ("quantity_delta", integer()),
-            ("reason", string()),
-            ("reference", optional_string()),
-            ("created_at", integer()),
-        ], &["id", "inventory_item_id", "location_id", "quantity_delta", "reason"]),
-        "InventoryReservation": object(&[
-            ("id", string()),
-            ("inventory_item_id", string()),
-            ("location_id", string()),
-            ("variant_id", string()),
-            ("quantity", integer()),
-            ("status", string()),
-            ("checkout_id", optional_string()),
-            ("expires_at", nullable(integer())),
-            ("created_at", integer()),
-        ], &["id", "variant_id", "quantity", "status"]),
+
+
         "TransferResponse": object(&[
             ("from", schema_ref("InventoryLevel")),
             ("to", schema_ref("InventoryLevel")),
         ], &["from", "to"]),
+
+
         "ReleasedResponse": object(&[("released", integer())], &["released"]),
+
+
         "CommittedResponse": object(&[("committed", integer())], &["committed"]),
 
-        // Payments.
-        "Payment": object(&[
-            ("id", string()),
-            ("order_id", optional_string()),
-            ("provider", string()),
-            ("provider_payment_id", optional_string()),
-            ("amount", integer()),
-            ("currency_code", string()),
-            ("status", string()),
-            ("captured_at", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "provider", "amount", "currency_code", "status"]),
+
         "PaymentRefund": object(&[
             ("id", string()),
             ("payment_id", optional_string()),
@@ -3182,220 +3136,20 @@ fn schemas() -> Value {
             ("created_at", integer()),
             ("updated_at", integer()),
         ], &["id", "amount", "currency_code", "status"]),
-        "PaymentSession": object(&[
-            ("id", string()),
-            ("cart_id", optional_string()),
-            ("checkout_id", optional_string()),
-            ("order_id", optional_string()),
-            ("provider", string()),
-            ("provider_session_id", optional_string()),
-            ("amount", integer()),
-            ("currency_code", string()),
-            ("status", string()),
-            ("data", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "provider", "amount", "currency_code", "status"]),
-        "PaymentAttempt": object(&[
-            ("id", string()),
-            ("payment_session_id", string()),
-            ("amount", integer()),
-            ("currency_code", string()),
-            ("status", string()),
-            ("provider_reference", optional_string()),
-            ("error", optional_string()),
-            ("created_at", integer()),
-        ], &["id", "payment_session_id", "amount", "status"]),
-        "PaymentWebhookRecord": object(&[
-            ("id", string()),
-            ("provider", string()),
-            ("provider_event_id", string()),
-            ("event_type", string()),
-            ("payload", string()),
-            ("status", string()),
-            ("attempts", integer()),
-            ("processed_at", nullable(integer())),
-            ("last_error", optional_string()),
-            ("created_at", integer()),
-        ], &["id", "provider", "provider_event_id", "status"]),
 
-        // Pricing and promotions.
-        "PriceList": object(&[
-            ("id", string()),
-            ("title", string()),
-            ("description", optional_string()),
-            ("price_type", string()),
-            ("status", string()),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "title", "price_type", "status"]),
-        "Price": object(&[
-            ("id", string()),
-            ("price_list_id", optional_string()),
-            ("variant_id", string()),
-            ("currency_code", string()),
-            ("amount", integer()),
-            ("min_quantity", integer()),
-            ("max_quantity", nullable(integer())),
-            ("customer_group_id", optional_string()),
-            ("sales_channel_id", optional_string()),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "variant_id", "currency_code", "amount"]),
-        "SelectedPrice": object(&[
-            ("amount", integer()),
-            ("currency_code", string()),
-            ("price_list_id", optional_string()),
-            ("variant_id", optional_string()),
-            ("quantity", integer()),
-        ], &["amount", "currency_code"]),
-        "Promotion": object(&[
-            ("id", string()),
-            ("code", optional_string()),
-            ("title", string()),
-            ("promotion_type", string()),
-            ("value", integer()),
-            ("status", string()),
-            ("is_automatic", boolean()),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("usage_limit", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "title", "promotion_type", "value", "status"]),
-        "PromotionUsage": object(&[("usage_count", integer())], &["usage_count"]),
-        "Coupon": object(&[
-            ("id", string()),
-            ("code", string()),
-            ("promotion_id", string()),
-            ("usage_limit", nullable(integer())),
-            ("used_count", integer()),
-            ("starts_at", nullable(integer())),
-            ("ends_at", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "code", "promotion_id"]),
+
         "CouponValidation": object(&[
             ("valid", boolean()),
             ("coupon", nullable(schema_ref("Coupon"))),
         ], &["valid"]),
 
-        // Shipping.
-        "ShippingProfile": object(&[
-            ("id", string()),
-            ("name", string()),
-            ("profile_type", optional_string()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "name"]),
-        "ShippingOption": object(&[
-            ("id", string()),
-            ("profile_id", string()),
-            ("name", string()),
-            ("amount_minor", integer()),
-            ("currency_code", string()),
-            ("is_enabled", boolean()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "profile_id", "name", "amount_minor", "currency_code"]),
-        "ShippingRate": object(&[
-            ("id", string()),
-            ("shipping_option_id", string()),
-            ("country_code", optional_string()),
-            ("province_code", optional_string()),
-            ("amount_minor", integer()),
-            ("currency_code", string()),
-            ("min_subtotal", nullable(integer())),
-            ("max_subtotal", nullable(integer())),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "shipping_option_id", "amount_minor", "currency_code"]),
-        "ResolvedShippingOption": object(&[
-            ("id", string()),
-            ("profile_id", string()),
-            ("name", string()),
-            ("amount_minor", integer()),
-            ("currency_code", string()),
-            ("rates", array_of(schema_ref("ShippingRate"))),
-        ], &["id", "name", "amount_minor", "currency_code"]),
-        "SelectedShippingRate": object(&[
-            ("id", string()),
-            ("shipping_option_id", string()),
-            ("country_code", optional_string()),
-            ("province_code", optional_string()),
-            ("amount_minor", integer()),
-            ("currency_code", string()),
-        ], &["id", "amount_minor", "currency_code"]),
 
-        // Tax.
-        "TaxCategory": object(&[
-            ("id", string()),
-            ("name", string()),
-            ("code", string()),
-            ("description", optional_string()),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "name", "code"]),
-        "TaxRegion": object(&[
-            ("id", string()),
-            ("name", string()),
-            ("country_code", string()),
-            ("province_code", optional_string()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "name", "country_code"]),
-        "TaxRate": object(&[
-            ("id", string()),
-            ("tax_region_id", string()),
-            ("tax_category_id", optional_string()),
-            ("name", string()),
-            ("rate_bps", integer()),
-            ("is_inclusive", boolean()),
-            ("is_default", boolean()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "tax_region_id", "name", "rate_bps"]),
-        "TaxBreakdown": object(&[
-            ("tax_amount", integer()),
-            ("net_amount", integer()),
-            ("gross_amount", integer()),
-        ], &["tax_amount", "net_amount", "gross_amount"]),
-        "TaxLine": object(&[
-            ("amount_minor", integer()),
-            ("tax_amount", integer()),
-            ("net_amount", integer()),
-            ("gross_amount", integer()),
-            ("rate_bps", integer()),
-            ("category_id", optional_string()),
-        ], &["amount_minor", "tax_amount"]),
         "TaxCalculationResponse": object(&[
             ("lines", array_of(schema_ref("TaxLine"))),
             ("totals", schema_ref("TaxBreakdown")),
         ], &["lines", "totals"]),
 
-        // Webhooks.
-        "WebhookEndpoint": object(&[
-            ("id", string()),
-            ("url", string()),
-            ("events", array_of(string())),
-            ("is_active", boolean()),
-            ("metadata", schema_ref("Metadata")),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "url", "events", "is_active"]),
+
         "CreatedWebhookEndpoint": object(&[
             ("id", string()),
             ("url", string()),
@@ -3406,26 +3160,18 @@ fn schemas() -> Value {
             ("updated_at", integer()),
             ("secret", string()),
         ], &["id", "url", "events", "secret"]),
+
+
         "RotatedSecret": object(&[("secret", string())], &["secret"]),
-        "WebhookDelivery": object(&[
-            ("id", string()),
-            ("endpoint_id", string()),
-            ("event_id", string()),
-            ("event_type", string()),
-            ("payload", json!({"type": "object", "additionalProperties": true})),
-            ("status", string()),
-            ("attempts", integer()),
-            ("response_status", nullable(integer())),
-            ("response_body", optional_string()),
-            ("next_retry_at", nullable(integer())),
-            ("created_at", integer()),
-            ("updated_at", integer()),
-        ], &["id", "endpoint_id", "event_type", "status"]),
+
+
         "WebhookSignature": object(&[
             ("signature", string()),
             ("timestamp", integer()),
             ("algorithm", string()),
         ], &["signature", "timestamp"]),
+
+
         "WebhookEnvelope": object(&[
             ("id", string()),
             ("type", string()),
@@ -3434,6 +3180,8 @@ fn schemas() -> Value {
             ("data", json!({"type": "object", "additionalProperties": true})),
             ("signature", schema_ref("WebhookSignature")),
         ], &["id", "type", "created_at", "store_id", "data"]),
+
+
         "PaymentWebhook": object(&[
             ("provider", string()),
             ("provider_event_id", string()),
@@ -3441,6 +3189,8 @@ fn schemas() -> Value {
             ("payload", json!({"type": "object", "additionalProperties": true})),
             ("signature", schema_ref("WebhookSignature")),
         ], &["provider", "provider_event_id", "event_type", "payload"]),
+
+
 
         // Themes and operations.
         "ThemeManifest": object(&[
@@ -3452,6 +3202,8 @@ fn schemas() -> Value {
             ("settings_schema", optional_string()),
             ("assets_manifest", optional_string()),
         ], &["id", "name", "version", "runtime", "entry"]),
+
+
         "Theme": object(&[
             ("id", string()),
             ("manifest", schema_ref("ThemeManifest")),
@@ -3462,44 +3214,62 @@ fn schemas() -> Value {
             ("created_at", integer()),
             ("updated_at", integer()),
         ], &["id", "manifest", "bundle_path", "settings", "is_active"]),
+
+
         "StoreTheme": object(&[
             ("id", string()),
             ("manifest", schema_ref("ThemeManifest")),
             ("bundle_path", string()),
             ("settings", json!({"type": "object", "additionalProperties": true})),
         ], &["id", "manifest", "bundle_path", "settings"]),
+
+
         "RegisterThemeRequest": object(&[
             ("manifest", schema_ref("ThemeManifest")),
             ("bundle_path", string()),
             ("settings_schema", nullable(json!({"type": "object", "additionalProperties": true}))),
             ("settings", nullable(json!({"type": "object", "additionalProperties": true}))),
         ], &["manifest", "bundle_path"]),
+
+
         "UpdateThemeSettingsRequest": object(&[
             ("settings", json!({"type": "object", "additionalProperties": true})),
         ], &["settings"]),
+
+
         "HealthStatus": object(&[
             ("status", string()),
             ("service", string()),
             ("version", string()),
         ], &["status"]),
+
+
         "LivenessStatus": object(&[("status", string())], &["status"]),
+
+
         "ReadinessStatus": object(&[
             ("status", string()),
             ("service", optional_string()),
             ("version", optional_string()),
         ], &["status"]),
 
+
+
         // Request bodies: authentication and platform.
         "LoginRequest": object(&[
             ("email", string()),
             ("password", string()),
         ], &["email", "password"]),
+
+
         "SetupRequest": object(&[
             ("email", string()),
             ("password", string()),
             ("first_name", optional_string()),
             ("last_name", optional_string()),
         ], &["email", "password"]),
+
+
         "CreateUserRequest": object(&[
             ("email", string()),
             ("password", string()),
@@ -3508,12 +3278,16 @@ fn schemas() -> Value {
             ("store_id", optional_string()),
             ("roles", array_of(string())),
         ], &["email", "password"]),
+
+
         "CreateApiTokenRequest": object(&[
             ("name", string()),
             ("store_id", optional_string()),
             ("scopes", array_of(string())),
             ("ttl_seconds", nullable(integer())),
         ], &["name"]),
+
+
         "CreateStoreRequest": object(&[
             ("name", string()),
             ("slug", string()),
@@ -3522,25 +3296,37 @@ fn schemas() -> Value {
             ("currency_code", optional_string()),
             ("timezone", optional_string()),
         ], &["name", "slug", "primary_domain"]),
+
+
         "UpdateStoreRequest": object(&[
             ("name", optional_string()),
             ("locale", optional_string()),
             ("currency_code", optional_string()),
             ("timezone", optional_string()),
         ], &[]),
+
+
         "DeleteStoreRequest": object(&[
             ("backup", boolean()),
             ("purge_data", boolean()),
         ], &[]),
+
+
         "DomainRequest": object(&[
             ("hostname", string()),
             ("is_primary", boolean()),
         ], &["hostname"]),
+
+
         "PrimaryDomainRequest": object(&[("hostname", string())], &["hostname"]),
+
+
         "MembershipRequest": object(&[
             ("user_id", string()),
             ("roles", array_of(string())),
         ], &["user_id", "roles"]),
+
+
 
         // Request bodies: catalog and settings.
         "CreateProductRequest": object(&[
@@ -3559,6 +3345,8 @@ fn schemas() -> Value {
             ("tag_values", array_of(string())),
             ("images", array_of(string())),
         ], &["title"]),
+
+
         "UpdateProductRequest": object(&[
             ("title", optional_string()),
             ("handle", optional_string()),
@@ -3570,6 +3358,8 @@ fn schemas() -> Value {
             ("dimensions", nullable(schema_ref("Dimensions"))),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
+
+
         "CreateVariantRequest": object(&[
             ("title", string()),
             ("sku", optional_string()),
@@ -3584,6 +3374,8 @@ fn schemas() -> Value {
             ("option_value_ids", array_of(string())),
             ("option_values", array_of(json!({"type": "object", "additionalProperties": true}))),
         ], &["title"]),
+
+
         "UpdateVariantRequest": object(&[
             ("title", optional_string()),
             ("sku", optional_string()),
@@ -3596,6 +3388,8 @@ fn schemas() -> Value {
             ("tax_category_id", optional_string()),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
+
+
         "CreateImageRequest": object(&[
             ("url", string()),
             ("alt", optional_string()),
@@ -3603,7 +3397,11 @@ fn schemas() -> Value {
             ("rank", nullable(integer())),
             ("metadata", schema_ref("Metadata")),
         ], &["url"]),
+
+
         "ImageReorderRequest": object(&[("image_ids", array_of(string()))], &["image_ids"]),
+
+
         "CreateCategoryRequest": object(&[
             ("title", string()),
             ("handle", optional_string()),
@@ -3614,6 +3412,8 @@ fn schemas() -> Value {
             ("rank", nullable(integer())),
             ("metadata", schema_ref("Metadata")),
         ], &["title"]),
+
+
         "UpdateCategoryRequest": object(&[
             ("title", optional_string()),
             ("handle", optional_string()),
@@ -3624,6 +3424,8 @@ fn schemas() -> Value {
             ("rank", nullable(integer())),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
+
+
         "CreateCollectionRequest": object(&[
             ("title", string()),
             ("handle", optional_string()),
@@ -3632,6 +3434,8 @@ fn schemas() -> Value {
             ("rank", nullable(integer())),
             ("metadata", schema_ref("Metadata")),
         ], &["title"]),
+
+
         "UpdateCollectionRequest": object(&[
             ("title", optional_string()),
             ("handle", optional_string()),
@@ -3640,22 +3444,38 @@ fn schemas() -> Value {
             ("rank", nullable(integer())),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
+
+
         "CollectionProductsRequest": object(&[("product_ids", array_of(string()))], &["product_ids"]),
+
+
         "TagRequest": object(&[("value", string())], &["value"]),
+
+
         "ProductTagRequest": object(&[("tag_id", string())], &["tag_id"]),
+
+
         "SettingsRequest": object(&[("values", map_of(string()))], &["values"]),
+
+
         "SettingRequest": object(&[("value", string())], &["value"]),
+
+
         "CreateSalesChannelRequest": object(&[
             ("name", string()),
             ("description", optional_string()),
             ("metadata", schema_ref("Metadata")),
         ], &["name"]),
+
+
         "UpdateSalesChannelRequest": object(&[
             ("name", optional_string()),
             ("description", optional_string()),
             ("is_enabled", nullable(boolean())),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
+
+
 
         // Request bodies: content.
         "CreatePageRequest": object(&[
@@ -3665,6 +3485,8 @@ fn schemas() -> Value {
             ("status", optional_string()),
             ("metadata", schema_ref("Metadata")),
         ], &["title", "handle"]),
+
+
         "UpdatePageRequest": object(&[
             ("title", optional_string()),
             ("handle", optional_string()),
@@ -3672,17 +3494,23 @@ fn schemas() -> Value {
             ("status", optional_string()),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
+
+
         "CreateNavigationRequest": object(&[
             ("title", string()),
             ("handle", string()),
             ("metadata", schema_ref("Metadata")),
         ], &["title", "handle"]),
+
+
         "UpdateNavigationRequest": object(&[
             ("title", optional_string()),
             ("handle", optional_string()),
             ("is_active", nullable(boolean())),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
+
+
         "NavigationItemRequest": object(&[
             ("title", string()),
             ("url", optional_string()),
@@ -3691,13 +3519,19 @@ fn schemas() -> Value {
             ("rank", nullable(integer())),
             ("metadata", schema_ref("Metadata")),
         ], &["title"]),
+
+
         "NavigationItemReorderRequest": object(&[("item_ids", array_of(string()))], &["item_ids"]),
+
+
         "CreateRedirectRequest": object(&[
             ("from_path", string()),
             ("to_path", string()),
             ("status_code", nullable(integer())),
             ("metadata", schema_ref("Metadata")),
         ], &["from_path", "to_path"]),
+
+
 
         // Request bodies: customers.
         "UpdateCustomerRequest": object(&[
@@ -3708,6 +3542,8 @@ fn schemas() -> Value {
             ("status", optional_string()),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "AddressRequest": object(&[
             ("is_default_shipping", nullable(boolean())),
             ("is_default_billing", nullable(boolean())),
@@ -3723,11 +3559,17 @@ fn schemas() -> Value {
             ("phone", optional_string()),
             ("metadata", schema_ref("Metadata")),
         ], &[]),
+
+
         "CreateGroupRequest": object(&[
             ("name", string()),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["name"]),
+
+
         "GroupCustomerRequest": object(&[("customer_id", string())], &["customer_id"]),
+
+
 
         // Request bodies: inventory.
         "CreateInventoryLocationRequest": object(&[
@@ -3735,16 +3577,22 @@ fn schemas() -> Value {
             ("address", nullable(schema_ref("Metadata"))),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["name"]),
+
+
         "UpdateInventoryLocationRequest": object(&[
             ("name", optional_string()),
             ("address", nullable(schema_ref("Metadata"))),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "CreateInventoryItemRequest": object(&[
             ("sku", optional_string()),
             ("variant_id", optional_string()),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "InventoryAdjustmentRequest": object(&[
             ("inventory_item_id", string()),
             ("location_id", string()),
@@ -3752,6 +3600,8 @@ fn schemas() -> Value {
             ("reason", string()),
             ("reference", optional_string()),
         ], &["inventory_item_id", "location_id", "quantity_delta", "reason"]),
+
+
         "InventoryTransferRequest": object(&[
             ("inventory_item_id", string()),
             ("from_location_id", string()),
@@ -3759,38 +3609,56 @@ fn schemas() -> Value {
             ("quantity", integer()),
             ("reason", optional_string()),
         ], &["inventory_item_id", "from_location_id", "to_location_id", "quantity"]),
+
+
         "ReservationRequest": object(&[
             ("lines", array_of(json!({"type": "object", "additionalProperties": true}))),
             ("checkout_id", string()),
             ("ttl_seconds", integer()),
         ], &["lines", "checkout_id", "ttl_seconds"]),
+
+
         "ReleaseReservationsRequest": object(&[
             ("reservation_ids", array_of(string())),
         ], &[]),
+
+
         "CommitReservationsRequest": object(&[
             ("checkout_id", string()),
             ("order_id", string()),
         ], &["checkout_id", "order_id"]),
 
+
+
         // Request bodies: orders and payments.
         "CancelOrderRequest": object(&[("reason", optional_string())], &[]),
+
+
         "FulfillOrderRequest": object(&[
             ("tracking_numbers", array_of(string())),
             ("shipped_at", nullable(integer())),
             ("partial", boolean()),
         ], &[]),
+
+
         "RefundOrderRequest": object(&[
             ("payment_id", string()),
             ("amount", integer()),
             ("currency", string()),
             ("reason", optional_string()),
         ], &["payment_id", "amount", "currency"]),
+
+
         "CreatePaymentRefundRequest": object(&[
             ("amount", integer()),
             ("reason", optional_string()),
             ("idempotency_key", optional_string()),
         ], &["amount"]),
+
+
         "FailSessionRequest": object(&[("reason", optional_string())], &[]),
+
+
 
         // Request bodies: pricing and promotions.
         "CreatePriceListRequest": object(&[
@@ -3803,6 +3671,8 @@ fn schemas() -> Value {
             ("metadata", nullable(schema_ref("Metadata"))),
             ("rules", array_of(json!({"type": "object", "additionalProperties": true}))),
         ], &["title"]),
+
+
         "UpdatePriceListRequest": object(&[
             ("title", optional_string()),
             ("description", optional_string()),
@@ -3813,6 +3683,8 @@ fn schemas() -> Value {
             ("metadata", nullable(schema_ref("Metadata"))),
             ("rules", array_of(json!({"type": "object", "additionalProperties": true}))),
         ], &[]),
+
+
         "PriceRequest": object(&[
             ("price_list_id", optional_string()),
             ("variant_id", string()),
@@ -3826,6 +3698,8 @@ fn schemas() -> Value {
             ("ends_at", nullable(integer())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["variant_id", "currency_code", "amount"]),
+
+
         "UpdatePriceRequest": object(&[
             ("price_list_id", nullable(string())),
             ("variant_id", optional_string()),
@@ -3839,9 +3713,13 @@ fn schemas() -> Value {
             ("ends_at", nullable(integer())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "BulkPricesRequest": object(&[
             ("prices", array_of(schema_ref("PriceRequest"))),
         ], &["prices"]),
+
+
         "CalculatePricesRequest": object(&[
             ("variant_ids", array_of(string())),
             ("currency", string()),
@@ -3849,6 +3727,8 @@ fn schemas() -> Value {
             ("customer_group_id", optional_string()),
             ("sales_channel_id", optional_string()),
         ], &["variant_ids", "currency"]),
+
+
         "CreatePromotionRequest": object(&[
             ("code", optional_string()),
             ("title", string()),
@@ -3862,6 +3742,8 @@ fn schemas() -> Value {
             ("metadata", nullable(schema_ref("Metadata"))),
             ("rules", array_of(json!({"type": "object", "additionalProperties": true}))),
         ], &["title", "promotion_type", "value"]),
+
+
         "UpdatePromotionRequest": object(&[
             ("code", nullable(string())),
             ("title", optional_string()),
@@ -3875,6 +3757,8 @@ fn schemas() -> Value {
             ("metadata", nullable(schema_ref("Metadata"))),
             ("rules", array_of(json!({"type": "object", "additionalProperties": true}))),
         ], &[]),
+
+
         "CreateCouponRequest": object(&[
             ("code", string()),
             ("promotion_id", string()),
@@ -3883,6 +3767,8 @@ fn schemas() -> Value {
             ("ends_at", nullable(integer())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["code", "promotion_id"]),
+
+
         "UpdateCouponRequest": object(&[
             ("code", optional_string()),
             ("promotion_id", optional_string()),
@@ -3891,7 +3777,11 @@ fn schemas() -> Value {
             ("ends_at", nullable(integer())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "ValidateCouponRequest": object(&[("code", string())], &["code"]),
+
+
 
         // Request bodies: shipping and tax.
         "CreateShippingProfileRequest": object(&[
@@ -3899,11 +3789,15 @@ fn schemas() -> Value {
             ("profile_type", optional_string()),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["name"]),
+
+
         "UpdateShippingProfileRequest": object(&[
             ("name", optional_string()),
             ("profile_type", optional_string()),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "CreateShippingOptionRequest": object(&[
             ("profile_id", string()),
             ("name", string()),
@@ -3912,6 +3806,8 @@ fn schemas() -> Value {
             ("is_enabled", nullable(boolean())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["profile_id", "name", "amount_minor", "currency"]),
+
+
         "UpdateShippingOptionRequest": object(&[
             ("name", optional_string()),
             ("amount_minor", nullable(integer())),
@@ -3919,6 +3815,8 @@ fn schemas() -> Value {
             ("is_enabled", nullable(boolean())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "CreateShippingRateRequest": object(&[
             ("country_code", optional_string()),
             ("province_code", optional_string()),
@@ -3928,6 +3826,8 @@ fn schemas() -> Value {
             ("max_subtotal", nullable(integer())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["amount_minor", "currency"]),
+
+
         "UpdateShippingRateRequest": object(&[
             ("country_code", nullable(string())),
             ("province_code", nullable(string())),
@@ -3937,29 +3837,41 @@ fn schemas() -> Value {
             ("max_subtotal", nullable(integer())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "AddShippingLocationRequest": object(&[("location_id", string())], &["location_id"]),
+
+
         "CreateTaxCategoryRequest": object(&[
             ("name", string()),
             ("code", string()),
             ("description", optional_string()),
         ], &["name", "code"]),
+
+
         "UpdateTaxCategoryRequest": object(&[
             ("name", optional_string()),
             ("code", optional_string()),
             ("description", nullable(string())),
         ], &[]),
+
+
         "CreateTaxRegionRequest": object(&[
             ("name", string()),
             ("country_code", string()),
             ("province_code", optional_string()),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["name", "country_code"]),
+
+
         "UpdateTaxRegionRequest": object(&[
             ("name", optional_string()),
             ("country_code", optional_string()),
             ("province_code", nullable(string())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "CreateTaxRateRequest": object(&[
             ("region_id", string()),
             ("category_id", optional_string()),
@@ -3969,6 +3881,8 @@ fn schemas() -> Value {
             ("is_default", nullable(boolean())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["region_id", "name", "rate_bps"]),
+
+
         "UpdateTaxRateRequest": object(&[
             ("category_id", nullable(string())),
             ("name", optional_string()),
@@ -3977,6 +3891,8 @@ fn schemas() -> Value {
             ("is_default", nullable(boolean())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
+
+
         "TaxCalculateRequest": object(&[
             ("country", string()),
             ("province", optional_string()),
@@ -3985,6 +3901,8 @@ fn schemas() -> Value {
             ("lines", array_of(json!({"type": "object", "additionalProperties": true}))),
         ], &["country"]),
 
+
+
         // Request bodies: webhooks.
         "CreateWebhookRequest": object(&[
             ("url", string()),
@@ -3992,11 +3910,15 @@ fn schemas() -> Value {
             ("secret", optional_string()),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["url", "events"]),
+
+
         "UpdateWebhookRequest": object(&[
             ("url", optional_string()),
             ("events", array_of(string())),
             ("is_active", nullable(boolean())),
         ], &[]),
+
+
 
         // Request bodies: carts, checkouts and storefront customers.
         "CreateCartRequest": object(&[
@@ -4005,14 +3927,22 @@ fn schemas() -> Value {
             ("sales_channel_id", optional_string()),
             ("expires_in_seconds", nullable(integer())),
         ], &["currency_code"]),
+
+
         "AddItemRequest": object(&[
             ("variant_id", string()),
             ("quantity", integer()),
             ("country_code", optional_string()),
             ("province_code", optional_string()),
         ], &["variant_id", "quantity"]),
+
+
         "UpdateItemRequest": object(&[("quantity", integer())], &["quantity"]),
+
+
         "SetEmailRequest": object(&[("email", string())], &["email"]),
+
+
         "SetCartAddressRequest": object(&[
             ("type", string_enum(&["shipping", "billing"])),
             ("first_name", optional_string()),
@@ -4026,12 +3956,18 @@ fn schemas() -> Value {
             ("country_code", optional_string()),
             ("phone", optional_string()),
         ], &["type"]),
+
+
         "SetShippingMethodRequest": object(&[
             ("shipping_option_id", string()),
             ("country_code", optional_string()),
             ("province_code", optional_string()),
         ], &["shipping_option_id"]),
+
+
         "DiscountRequest": object(&[("code", string())], &["code"]),
+
+
         "CreateCheckoutRequest": object(&[
             ("cart_id", string()),
             ("email", optional_string()),
@@ -4041,25 +3977,35 @@ fn schemas() -> Value {
             ("country_code", optional_string()),
             ("province_code", optional_string()),
         ], &["cart_id"]),
+
+
         "CompleteCheckoutRequest": object(&[
             ("country_code", optional_string()),
             ("province_code", optional_string()),
         ], &[]),
+
+
         "RegisterCustomerRequest": object(&[
             ("email", string()),
             ("password", string()),
             ("first_name", optional_string()),
             ("last_name", optional_string()),
         ], &["email", "password"]),
+
+
         "CustomerLoginRequest": object(&[
             ("email", string()),
             ("password", string()),
         ], &["email", "password"]),
+
+
         "UpdateProfileRequest": object(&[
             ("first_name", optional_string()),
             ("last_name", optional_string()),
             ("phone", optional_string()),
         ], &[]),
+
+
         "ChangePasswordRequest": object(&[
             ("current_password", string()),
             ("new_password", string()),
@@ -4185,12 +4131,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 128);
-        assert_eq!(count("/api/v1/store"), 36);
+        assert_eq!(count("/api/v1/admin"), 136);
+        assert_eq!(count("/api/v1/store"), 38);
         assert_eq!(count("/api/v1/webhooks"), 1);
-        assert_eq!(count("/internal/storefront"), 36);
+        assert_eq!(count("/internal/storefront"), 38);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 225);
+        assert_eq!(paths.len(), 237);
 
         for key in [
             "/api/v1/platform/stores",
@@ -4298,7 +4244,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 313);
+        assert_eq!(operation_count, 333);
     }
 
     #[test]
