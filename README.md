@@ -7,7 +7,8 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 > **Status: backend implementation complete; UI and SSR runtime are still being built.**
 > The platform, commerce modules, workflows and HTTP APIs are implemented and
 > covered by unit and integration tests. The React admin/storefront applications
-> are shells, and the V8/Node storefront runtime bridge is not wired yet.
+> are shells. Storefront runtime adapters (worker pool, in-process fetch bridge
+> and Node sidecar) exist, but are not yet wired into the server.
 
 ## Why Fastcart
 
@@ -146,7 +147,8 @@ The suite covers module rules, repository behaviour, platform auth/RBAC, cart an
 ## Roadmap
 
 - React admin and storefront feature UIs.
-- V8/Node storefront SSR runtime bridge and theme page rendering.
+- Wire the storefront runtime into the server and implement theme page rendering.
+- Embedded V8 runtime adapter.
 - OpenAPI generation and generated TypeScript SDKs.
 - Additional payment/shipping/tax providers and webhook delivery registration.
 - PostgreSQL adapter for high-traffic stores.

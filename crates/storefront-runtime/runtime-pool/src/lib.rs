@@ -2,24 +2,46 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use fastcart_runtime_api::{RuntimeError, RuntimeRequest, RuntimeResponse, StorefrontRuntime};
+use tokio::sync::Semaphore;
 
-/// A round-robin pool of storefront runtime workers.
+/// A round-robin pool of storefront runtime workers with bounded concurrency
+/// and per-request timeouts.
 pub struct RuntimePool {
     workers: Vec<Arc<dyn StorefrontRuntime>>,
     next: AtomicUsize,
+    inflight: Arc<Semaphore>,
+    capacity: usize,
 }
 
 impl RuntimePool {
-    /// Creates a pool. A pool must contain at least one worker.
+    /// Creates a pool of workers.
+    ///
+    /// The default in-flight limit is 64 requests per worker.
     pub fn new(workers: Vec<Arc<dyn StorefrontRuntime>>) -> Result<Self, RuntimeError> {
+        let capacity = workers.len().saturating_mul(64).max(1);
+        Self::with_capacity(workers, capacity)
+    }
+
+    /// Creates a pool with an explicit in-flight request limit.
+    ///
+    /// Requests arriving while the pool is saturated fail fast with
+    /// [`RuntimeError::WorkerUnavailable`] instead of growing unbounded queues.
+    pub fn with_capacity(
+        workers: Vec<Arc<dyn StorefrontRuntime>>,
+        capacity: usize,
+    ) -> Result<Self, RuntimeError> {
         if workers.is_empty() {
             return Err(RuntimeError::EmptyPool);
         }
+        let capacity = capacity.max(1);
         Ok(Self {
             workers,
             next: AtomicUsize::new(0),
+            inflight: Arc::new(Semaphore::new(capacity)),
+            capacity,
         })
     }
 
@@ -35,6 +57,19 @@ impl RuntimePool {
         self.workers.is_empty()
     }
 
+    /// Maximum concurrent render requests.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Requests currently occupying a slot.
+    #[must_use]
+    pub fn inflight(&self) -> usize {
+        self.capacity
+            .saturating_sub(self.inflight.available_permits())
+    }
+
     fn next_worker(&self) -> &Arc<dyn StorefrontRuntime> {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         &self.workers[index]
@@ -44,7 +79,20 @@ impl RuntimePool {
 #[async_trait::async_trait]
 impl StorefrontRuntime for RuntimePool {
     async fn render(&self, request: RuntimeRequest) -> Result<RuntimeResponse, RuntimeError> {
-        self.next_worker().render(request).await
+        let timeout_ms = request.timeout_ms.max(1);
+        let permit = self.inflight.clone().try_acquire_owned().map_err(|_| {
+            RuntimeError::WorkerUnavailable("runtime pool is at capacity".to_owned())
+        })?;
+        let result = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            self.next_worker().render(request),
+        )
+        .await;
+        drop(permit);
+        match result {
+            Ok(response) => response,
+            Err(_) => Err(RuntimeError::Timeout(timeout_ms)),
+        }
     }
 
     async fn health_check(&self) -> Result<(), RuntimeError> {
@@ -64,11 +112,15 @@ impl StorefrontRuntime for RuntimePool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use bytes::Bytes;
     use fastcart_kernel::{CurrencyCode, StoreContext, StoreId};
     use fastcart_runtime_api::{
         RuntimeBody, RuntimeError, RuntimeRequest, RuntimeResponse, StorefrontRuntime,
     };
+    use tokio::sync::Notify;
 
     use super::RuntimePool;
 
@@ -94,7 +146,56 @@ mod tests {
         }
     }
 
-    fn request() -> RuntimeRequest {
+    struct SlowRuntime;
+
+    #[async_trait::async_trait]
+    impl StorefrontRuntime for SlowRuntime {
+        async fn render(&self, _request: RuntimeRequest) -> Result<RuntimeResponse, RuntimeError> {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(RuntimeResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: RuntimeBody::Full(Bytes::new()),
+            })
+        }
+
+        async fn health_check(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingRuntime {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorefrontRuntime for BlockingRuntime {
+        async fn render(&self, _request: RuntimeRequest) -> Result<RuntimeResponse, RuntimeError> {
+            self.started.notify_waiters();
+            self.release.notified().await;
+            Ok(RuntimeResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: RuntimeBody::Full(Bytes::new()),
+            })
+        }
+
+        async fn health_check(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    fn request(timeout_ms: u64) -> RuntimeRequest {
         RuntimeRequest {
             request_id: "req_test".to_owned(),
             store: StoreContext {
@@ -108,7 +209,7 @@ mod tests {
             url: "/".to_owned(),
             headers: Vec::new(),
             body: None,
-            timeout_ms: 1_000,
+            timeout_ms,
         }
     }
 
@@ -122,12 +223,45 @@ mod tests {
 
     #[tokio::test]
     async fn pool_delegates_to_a_worker() {
-        let pool = RuntimePool::new(vec![std::sync::Arc::new(FixedRuntime)]).unwrap();
+        let pool = RuntimePool::new(vec![Arc::new(FixedRuntime)]).unwrap();
 
         assert_eq!(pool.len(), 1);
         assert!(!pool.is_empty());
-        assert_eq!(pool.render(request()).await.unwrap().status, 200);
+        assert_eq!(pool.capacity(), 64);
+        assert_eq!(pool.render(request(1_000)).await.unwrap().status, 200);
         pool.health_check().await.unwrap();
         pool.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn renders_time_out() {
+        let pool = RuntimePool::new(vec![Arc::new(SlowRuntime)]).unwrap();
+        let error = pool.render(request(10)).await.unwrap_err();
+        assert!(matches!(error, RuntimeError::Timeout(10)));
+    }
+
+    #[tokio::test]
+    async fn saturated_pools_reject_new_requests() {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let runtime = BlockingRuntime {
+            started: started.clone(),
+            release: release.clone(),
+        };
+        let pool = Arc::new(RuntimePool::with_capacity(vec![Arc::new(runtime)], 1).unwrap());
+
+        let first = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.render(request(5_000)).await })
+        };
+        started.notified().await;
+
+        assert_eq!(pool.inflight(), 1);
+        let error = pool.render(request(1_000)).await.unwrap_err();
+        assert!(matches!(error, RuntimeError::WorkerUnavailable(_)));
+
+        release.notify_waiters();
+        first.await.unwrap().unwrap();
+        assert_eq!(pool.inflight(), 0);
     }
 }
