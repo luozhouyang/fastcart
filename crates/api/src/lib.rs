@@ -9,9 +9,9 @@
 //! - `/api/v1/webhooks` — provider callbacks
 //! - `/internal/storefront` — trusted SSR-to-commerce boundary
 //!
-//! Middleware order (outermost first): request id → tracing → body limit →
-//! CORS. Route-specific authentication and store resolution are layered per
-//! namespace.
+//! Middleware order (outermost first): request id → metrics → tracing → body
+//! limit → CORS. Route-specific authentication and store resolution are layered
+//! per namespace.
 
 pub mod dto;
 pub mod routes;
@@ -51,6 +51,14 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
             Duration::from_secs(30),
         ))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            context.config.cookie_secure,
+            fastcart_http::security_headers_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            context.metrics.clone(),
+            fastcart_http::metrics_middleware,
+        ))
         .layer(axum::middleware::from_fn(
             fastcart_http::request_id_middleware,
         ))

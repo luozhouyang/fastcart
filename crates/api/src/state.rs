@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fastcart_http::RateLimiter;
+use fastcart_http::{Metrics, RateLimiter};
 use fastcart_infrastructure::{EventBus, StoreCache, StoreDatabaseManager};
 use fastcart_module_payment::{ManualProvider, ProviderRegistry};
 use fastcart_platform::{AuthService, PlatformStore, StoreProvisioningService, StoreResolver};
@@ -64,6 +64,8 @@ pub struct AppContext {
     pub login_limiter: RateLimiter,
     /// Registered payment providers shared by all stores.
     pub payment_providers: ProviderRegistry,
+    /// HTTP request metrics.
+    pub metrics: Arc<Metrics>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -103,6 +105,7 @@ impl AppContext {
             cache,
             login_limiter: RateLimiter::new(10, Duration::from_secs(5 * 60)),
             payment_providers,
+            metrics: Arc::new(Metrics::new()),
         }
     }
 }

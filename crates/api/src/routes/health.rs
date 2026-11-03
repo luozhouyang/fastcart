@@ -5,7 +5,8 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use serde_json::{Value, json};
 
@@ -17,6 +18,14 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/health", get(health))
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
+        .route("/metrics", get(metrics))
+}
+
+async fn metrics(State(context): State<Arc<AppContext>>) -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        context.metrics.render(),
+    )
 }
 
 async fn health(State(context): State<Arc<AppContext>>) -> Json<Value> {
