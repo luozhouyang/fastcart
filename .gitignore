@@ -28,6 +28,10 @@ packages/*/dist/
 # Local configuration and secrets
 /config/config.toml
 .env
+
+# Claude Code local harness state
+/.claude/worktrees/
+/.claude/settings.local.json
 .env.*
 !.env.example
 
