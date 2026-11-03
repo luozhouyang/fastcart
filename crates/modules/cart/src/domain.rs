@@ -18,7 +18,7 @@ pub const DEFAULT_CART_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 pub const MAX_ITEM_QUANTITY: i64 = 1_000_000;
 
 /// Lifecycle state of a cart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CartStatus {
     /// The cart accepts mutations.
@@ -62,7 +62,7 @@ impl CartStatus {
 ///
 /// The billing and shipping roles are tracked by the owning cart fields rather
 /// than by this value.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(default)]
 pub struct Address {
     /// Given name.
@@ -143,7 +143,7 @@ impl AddressInput {
 }
 
 /// A priced line item snapshot.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CartItem {
     /// Line item identifier.
     pub id: LineItemId,
@@ -178,7 +178,7 @@ pub struct CartItem {
 }
 
 /// A cart-level promotion or coupon snapshot.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CartDiscount {
     /// Promotion that produced the discount, when known.
     pub promotion_id: Option<PromotionId>,
@@ -193,7 +193,7 @@ pub struct CartDiscount {
 }
 
 /// A selected shipping method snapshot.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CartShippingMethod {
     /// Shipping option identifier.
     pub shipping_option_id: ShippingOptionId,
@@ -210,7 +210,7 @@ pub struct CartShippingMethod {
 }
 
 /// A line or shipping adjustment snapshot.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CartAdjustment {
     /// Promotion that produced the adjustment, when known.
     pub promotion_id: Option<PromotionId>,
@@ -223,7 +223,7 @@ pub struct CartAdjustment {
 }
 
 /// A tax line computed by the tax workflow and stored on the cart.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CartTaxLine {
     /// Tax rate name, for example `US sales tax`.
     pub name: String,
@@ -240,7 +240,7 @@ pub struct CartTaxLine {
 }
 
 /// Commercial summary derived from the stored cart rows.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CartTotals {
     /// Sum of `unit_price * quantity` before discounts.
     pub item_subtotal: i64,
@@ -284,7 +284,7 @@ impl CartTotals {
 }
 
 /// The cart aggregate returned by every service read.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Cart {
     /// Cart identifier.
     pub id: CartId,

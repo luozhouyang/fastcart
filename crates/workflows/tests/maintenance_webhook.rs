@@ -16,7 +16,7 @@ use fastcart_infrastructure::{
 use fastcart_kernel::DomainEventEnvelope;
 use fastcart_module_webhook::{CreateWebhookEndpointInput, WebhookService};
 use fastcart_platform::{CreateStoreInput, PlatformStore, StoreProvisioningService};
-use fastcart_workflows::run_maintenance;
+use fastcart_workflows::run_maintenance_with_options;
 use tokio::net::TcpListener;
 
 #[derive(Clone, Debug)]
@@ -78,6 +78,7 @@ async fn maintenance_dispatches_outbox_events_to_webhooks() {
     let database = databases.database(&store.id).await.unwrap();
     let (url, mock) = spawn_mock().await;
     let endpoint = WebhookService::new(database.clone())
+        .with_private_networks_allowed(true)
         .create_endpoint(CreateWebhookEndpointInput {
             url,
             events: vec!["order.placed".to_owned()],
@@ -107,7 +108,8 @@ async fn maintenance_dispatches_outbox_events_to_webhooks() {
     registry.register(provider.clone()).unwrap();
     let email = EmailService::new(registry);
 
-    let report = run_maintenance(&platform, &databases, &EventBus::new(8), &email).await;
+    let report =
+        run_maintenance_with_options(&platform, &databases, &EventBus::new(8), &email, true).await;
     assert_eq!(report.outbox_dispatched, 1);
     assert_eq!(report.webhooks_delivered, 1);
     assert_eq!(report.webhooks_failed, 0);

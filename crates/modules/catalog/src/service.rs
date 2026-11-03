@@ -672,6 +672,52 @@ impl CatalogService {
         Ok(PageResult::new(categories, count, pagination))
     }
 
+    /// Lists active, non-internal categories for storefronts.
+    pub async fn list_published_categories(
+        &self,
+        parent_id: Option<&str>,
+        pagination: Pagination,
+    ) -> Result<PageResult<Category>, AppError> {
+        let pagination = checked_pagination(pagination)?;
+        let (condition, bind) = match parent_id {
+            Some(parent_id) => (
+                "deleted_at IS NULL AND is_active = 1 AND is_internal = 0 AND parent_id = ?",
+                Some(parent_id.to_owned()),
+            ),
+            None => (
+                "deleted_at IS NULL AND is_active = 1 AND is_internal = 0",
+                None,
+            ),
+        };
+        let count_sql = format!("SELECT COUNT(*) FROM categories WHERE {condition}");
+        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        if let Some(bind) = bind.as_ref() {
+            count_query = count_query.bind(bind);
+        }
+        let count = count_query
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let list_sql = format!(
+            "SELECT * FROM categories WHERE {condition}              ORDER BY rank ASC, title ASC, id ASC LIMIT ? OFFSET ?"
+        );
+        let mut list_query = sqlx::query(&list_sql);
+        if let Some(bind) = bind.as_ref() {
+            list_query = list_query.bind(bind);
+        }
+        let rows = list_query
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let mut categories = Vec::with_capacity(rows.len());
+        for row in &rows {
+            categories.push(category_from_row(row)?);
+        }
+        Ok(PageResult::new(categories, count, pagination))
+    }
+
     /// Soft-deletes a category after checking for children and linked products.
     pub async fn delete_category(&self, id: &str) -> Result<(), AppError> {
         self.get_category(id).await?;
@@ -912,6 +958,33 @@ impl CatalogService {
         let rows = sqlx::query(
             "SELECT * FROM collections WHERE deleted_at IS NULL \
              ORDER BY rank ASC, created_at ASC, id ASC LIMIT ? OFFSET ?",
+        )
+        .bind(pagination.limit)
+        .bind(pagination.offset)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let mut collections = Vec::with_capacity(rows.len());
+        for row in &rows {
+            collections.push(collection_from_row(row)?);
+        }
+        Ok(PageResult::new(collections, count, pagination))
+    }
+
+    /// Lists published collections for storefronts.
+    pub async fn list_published_collections(
+        &self,
+        pagination: Pagination,
+    ) -> Result<PageResult<Collection>, AppError> {
+        let pagination = checked_pagination(pagination)?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM collections WHERE deleted_at IS NULL AND is_published = 1",
+        )
+        .fetch_one(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let rows = sqlx::query(
+            "SELECT * FROM collections WHERE deleted_at IS NULL AND is_published = 1              ORDER BY rank ASC, created_at ASC, id ASC LIMIT ? OFFSET ?",
         )
         .bind(pagination.limit)
         .bind(pagination.offset)

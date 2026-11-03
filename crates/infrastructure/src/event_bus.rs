@@ -117,16 +117,24 @@ pub async fn fetch_pending_outbox(
     limit: i64,
 ) -> Result<Vec<OutboxRecord>, sqlx::Error> {
     let now = now_timestamp();
+    let stale_cutoff = now.saturating_sub(300);
     sqlx::query_as::<_, OutboxRecord>(
-        "SELECT id, event_type, version, payload, idempotency_key, created_at,
-                processed_at, attempts, next_retry_at, last_error
-         FROM outbox
-         WHERE processed_at IS NULL
-           AND (next_retry_at IS NULL OR next_retry_at <= ?)
-         ORDER BY created_at ASC
-         LIMIT ?",
+        "UPDATE outbox
+         SET claimed_at = ?, claimed_by = 'maintenance'
+         WHERE id IN (
+             SELECT id FROM outbox
+             WHERE processed_at IS NULL
+               AND (next_retry_at IS NULL OR next_retry_at <= ?)
+               AND (claimed_at IS NULL OR claimed_at <= ?)
+             ORDER BY created_at ASC
+             LIMIT ?
+         )
+         RETURNING id, event_type, version, payload, idempotency_key, created_at,
+                   processed_at, attempts, next_retry_at, last_error",
     )
     .bind(now)
+    .bind(now)
+    .bind(stale_cutoff)
     .bind(limit.clamp(1, 1000))
     .fetch_all(pool)
     .await
@@ -134,11 +142,14 @@ pub async fn fetch_pending_outbox(
 
 /// Marks an outbox row as processed.
 pub async fn mark_outbox_processed(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE outbox SET processed_at = ?, last_error = NULL WHERE id = ?")
-        .bind(now_timestamp())
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE outbox SET processed_at = ?, last_error = NULL,
+         claimed_at = NULL, claimed_by = NULL WHERE id = ?",
+    )
+    .bind(now_timestamp())
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -155,13 +166,16 @@ pub async fn mark_outbox_failed(
     let attempts = attempts.unwrap_or(0).saturating_add(1);
     let backoff = 2_i64.saturating_pow(u32::try_from(attempts.min(12)).unwrap_or(12));
     let next_retry_at = now_timestamp().saturating_add(backoff.min(3_600));
-    sqlx::query("UPDATE outbox SET attempts = ?, last_error = ?, next_retry_at = ? WHERE id = ?")
-        .bind(attempts)
-        .bind(error)
-        .bind(next_retry_at)
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE outbox SET attempts = ?, last_error = ?, next_retry_at = ?,
+         claimed_at = NULL, claimed_by = NULL WHERE id = ?",
+    )
+    .bind(attempts)
+    .bind(error)
+    .bind(next_retry_at)
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -197,7 +211,7 @@ mod tests {
                 id TEXT PRIMARY KEY, event_type TEXT NOT NULL, version INTEGER NOT NULL,
                 payload TEXT NOT NULL, idempotency_key TEXT, created_at INTEGER NOT NULL,
                 processed_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
-                next_retry_at INTEGER, last_error TEXT)",
+                next_retry_at INTEGER, last_error TEXT, claimed_at INTEGER, claimed_by TEXT)",
         )
         .execute(&pool)
         .await
@@ -222,6 +236,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outbox_rows_are_claimed_once() {
+        let pool = connect_memory().await.unwrap();
+        sqlx::query(
+            "CREATE TABLE outbox (
+                id TEXT PRIMARY KEY, event_type TEXT NOT NULL, version INTEGER NOT NULL,
+                payload TEXT NOT NULL, idempotency_key TEXT, created_at INTEGER NOT NULL,
+                processed_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at INTEGER, last_error TEXT, claimed_at INTEGER, claimed_by TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let event = DomainEventEnvelope::new("order.placed", None, serde_json::json!({}));
+        append_outbox_event(&pool, &event).await.unwrap();
+        let first = fetch_pending_outbox(&pool, 10).await.unwrap();
+        let second = fetch_pending_outbox(&pool, 10).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(second.is_empty());
+    }
+
+    #[tokio::test]
     async fn failed_outbox_rows_are_retried_later() {
         let pool = connect_memory().await.unwrap();
         sqlx::query(
@@ -229,7 +264,7 @@ mod tests {
                 id TEXT PRIMARY KEY, event_type TEXT NOT NULL, version INTEGER NOT NULL,
                 payload TEXT NOT NULL, idempotency_key TEXT, created_at INTEGER NOT NULL,
                 processed_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
-                next_retry_at INTEGER, last_error TEXT)",
+                next_retry_at INTEGER, last_error TEXT, claimed_at INTEGER, claimed_by TEXT)",
         )
         .execute(&pool)
         .await

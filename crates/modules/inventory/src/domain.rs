@@ -6,7 +6,7 @@ use fastcart_kernel::{
 };
 
 /// A warehouse, store or other physical location that holds stock.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InventoryLocation {
     /// Location identifier.
     pub id: InventoryLocationId,
@@ -45,7 +45,7 @@ pub struct UpdateLocationInput {
 }
 
 /// An inventory item, optionally linked to a catalog variant and/or SKU.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InventoryItem {
     /// Item identifier.
     pub id: InventoryItemId,
@@ -73,7 +73,7 @@ pub struct CreateInventoryItemInput {
 }
 
 /// Stock held for one item at one location.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InventoryLevel {
     /// Level identifier.
     pub id: String,
@@ -108,7 +108,9 @@ pub fn available_quantity_from(stocked_quantity: i64, reserved_quantity: i64) ->
 }
 
 /// Lifecycle state of an inventory reservation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ReservationStatus {
     /// Stock is held but not yet shipped.
@@ -142,7 +144,7 @@ impl ReservationStatus {
 }
 
 /// A quantity of one inventory item held at one location.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InventoryReservation {
     /// Reservation identifier.
     pub id: ReservationId,
@@ -212,7 +214,7 @@ impl ReservationReference {
 pub type Reference = ReservationReference;
 
 /// An audit record for a change in stocked quantity.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InventoryMovement {
     /// Movement identifier.
     pub id: String,

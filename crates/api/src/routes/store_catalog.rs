@@ -86,7 +86,7 @@ async fn list_categories(
 ) -> ApiResult<Json<PageResponse<fastcart_module_catalog::Category>>> {
     let pagination = PaginationQuery { limit, offset }.pagination()?;
     let page = CatalogService::new(db)
-        .list_categories(None, pagination)
+        .list_published_categories(None, pagination)
         .await?;
     Ok(Json(PageResponse::from_page(page)))
 }
@@ -96,7 +96,9 @@ async fn list_collections(
     PaginationQuery { limit, offset }: PaginationQuery,
 ) -> ApiResult<Json<PageResponse<fastcart_module_catalog::Collection>>> {
     let pagination = PaginationQuery { limit, offset }.pagination()?;
-    let page = CatalogService::new(db).list_collections(pagination).await?;
+    let page = CatalogService::new(db)
+        .list_published_collections(pagination)
+        .await?;
     Ok(Json(PageResponse::from_page(page)))
 }
 

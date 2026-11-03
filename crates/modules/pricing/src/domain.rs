@@ -14,7 +14,7 @@ use fastcart_kernel::{
 use serde::{Deserialize, Serialize};
 
 /// Whether a price list is a sale or an override list.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PriceListType {
     /// Discounted prices that are compared against a base price.
@@ -50,7 +50,7 @@ impl FromStr for PriceListType {
 }
 
 /// Lifecycle state of a price list.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PriceListStatus {
     /// The list exists but is not applied.
@@ -86,7 +86,7 @@ impl FromStr for PriceListStatus {
 }
 
 /// An attribute condition attached to a price list.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceListRule {
     /// Rule identifier.
     pub id: String,
@@ -126,7 +126,7 @@ impl PriceListRuleInput {
 }
 
 /// A named collection of prices and rules.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PriceList {
     /// Price list identifier.
     pub id: String,
@@ -231,7 +231,7 @@ pub struct UpdatePriceListInput {
 }
 
 /// A price for one variant in one currency.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Price {
     /// Price identifier.
     pub id: String,
@@ -404,7 +404,7 @@ pub struct PriceContext {
 }
 
 /// The price chosen for a variant.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectedPrice {
     /// Winning price identifier.
     pub price_id: String,

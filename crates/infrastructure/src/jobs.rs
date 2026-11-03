@@ -179,29 +179,34 @@ impl JobQueue {
         .await
     }
 
-    /// Marks a claimed job as completed.
-    pub async fn complete(&self, id: &str) -> Result<(), sqlx::Error> {
+    /// Marks a job completed only when `worker_id` still holds its lease.
+    pub async fn complete(&self, id: &str, worker_id: &str) -> Result<bool, sqlx::Error> {
         let now = now_timestamp();
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE jobs SET status = 'completed', locked_at = NULL, locked_by = NULL,
-             last_error = NULL, updated_at = ? WHERE id = ?",
+             last_error = NULL, updated_at = ?
+             WHERE id = ? AND status = 'running' AND locked_by = ?",
         )
         .bind(now)
         .bind(id)
+        .bind(worker_id)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     /// Records a failure and either reschedules or permanently fails the job.
     ///
     /// Returns true when the job will be retried.
-    pub async fn fail(&self, id: &str, error: &str) -> Result<bool, sqlx::Error> {
-        let row: Option<(i64, i64)> =
-            sqlx::query_as("SELECT attempts, max_attempts FROM jobs WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
+    pub async fn fail(&self, id: &str, error: &str, worker_id: &str) -> Result<bool, sqlx::Error> {
+        let row: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT attempts, max_attempts FROM jobs
+             WHERE id = ? AND status = 'running' AND locked_by = ?",
+        )
+        .bind(id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some((attempts, max_attempts)) = row else {
             return Ok(false);
         };
@@ -212,7 +217,7 @@ impl JobQueue {
         sqlx::query(
             "UPDATE jobs SET attempts = ?, status = ?, available_at = ?,
              locked_at = NULL, locked_by = NULL, last_error = ?, updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND status = 'running' AND locked_by = ?",
         )
         .bind(attempts)
         .bind(if retry {
@@ -224,6 +229,7 @@ impl JobQueue {
         .bind(error)
         .bind(now)
         .bind(id)
+        .bind(worker_id)
         .execute(&self.pool)
         .await?;
         Ok(retry)
@@ -316,7 +322,7 @@ mod tests {
         assert_eq!(first[0].status, status::RUNNING);
 
         assert!(queue.claim("worker-b", 10).await.unwrap().is_empty());
-        queue.complete(&first[0].id).await.unwrap();
+        assert!(queue.complete(&first[0].id, "worker-a").await.unwrap());
         assert_eq!(queue.count_by_status(status::COMPLETED).await.unwrap(), 1);
     }
 
@@ -347,7 +353,7 @@ mod tests {
             .unwrap();
         queue.claim("worker", 1).await.unwrap();
 
-        assert!(queue.fail(&job.id, "boom").await.unwrap());
+        assert!(queue.fail(&job.id, "boom", "worker").await.unwrap());
         // Backoff moves availability into the future.
         assert!(queue.claim("worker", 1).await.unwrap().is_empty());
 
@@ -357,7 +363,7 @@ mod tests {
             .await
             .unwrap();
         queue.claim("worker", 1).await.unwrap();
-        assert!(!queue.fail(&job.id, "boom again").await.unwrap());
+        assert!(!queue.fail(&job.id, "boom again", "worker").await.unwrap());
         assert_eq!(queue.count_by_status(status::FAILED).await.unwrap(), 1);
     }
 

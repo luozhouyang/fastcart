@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use fastcart_kernel::Metadata;
 
 /// Publication state of a product or variant.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductStatus {
     /// Created but not visible in storefronts.
@@ -50,7 +50,7 @@ impl ProductStatus {
 }
 
 /// Physical dimensions in the store's configured unit system.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Dimensions {
     /// Length.
     pub length: Option<f64>,
@@ -61,7 +61,7 @@ pub struct Dimensions {
 }
 
 /// A sellable catalog product.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Product {
     /// Product identifier.
     pub id: String,
@@ -102,7 +102,7 @@ pub struct Product {
 }
 
 /// A concrete purchasable variant of a product.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProductVariant {
     /// Variant identifier.
     pub id: String,
@@ -139,7 +139,7 @@ pub struct ProductVariant {
 }
 
 /// A product option, such as size or colour.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProductOption {
     /// Option identifier.
     pub id: String,
@@ -156,7 +156,7 @@ pub struct ProductOption {
 }
 
 /// A single value of a product option.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProductOptionValue {
     /// Option value identifier.
     pub id: String,
@@ -171,7 +171,7 @@ pub struct ProductOptionValue {
 }
 
 /// A product image.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProductImage {
     /// Image identifier.
     pub id: String,
@@ -192,7 +192,7 @@ pub struct ProductImage {
 }
 
 /// A node in the category hierarchy.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Category {
     /// Category identifier.
     pub id: String,
@@ -219,7 +219,7 @@ pub struct Category {
 }
 
 /// A curated collection of products.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Collection {
     /// Collection identifier.
     pub id: String,
@@ -242,7 +242,7 @@ pub struct Collection {
 }
 
 /// A free-form product tag.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tag {
     /// Tag identifier.
     pub id: String,

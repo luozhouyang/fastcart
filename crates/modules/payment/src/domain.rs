@@ -10,7 +10,7 @@ use fastcart_kernel::{
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle status of a payment session, attempt or payment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentStatus {
     /// The session exists but no action has been taken yet.
@@ -109,7 +109,7 @@ impl std::fmt::Display for PaymentStatus {
 }
 
 /// Lifecycle status of a refund.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefundStatus {
     /// The refund was accepted but not confirmed yet.
@@ -144,7 +144,7 @@ impl RefundStatus {
 }
 
 /// Processing status of a persisted webhook event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookStatus {
     /// The event was persisted but not processed yet.
@@ -178,7 +178,7 @@ impl WebhookStatus {
 }
 
 /// A provider-backed payment session belonging to a cart, checkout or order.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaymentSession {
     /// Session identifier.
     pub id: PaymentSessionId,
@@ -207,7 +207,7 @@ pub struct PaymentSession {
 }
 
 /// One attempt to create, authorize or capture a payment.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaymentAttempt {
     /// Attempt identifier.
     pub id: PaymentAttemptId,
@@ -228,7 +228,7 @@ pub struct PaymentAttempt {
 }
 
 /// A captured payment.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Payment {
     /// Payment identifier.
     pub id: PaymentId,
@@ -255,7 +255,7 @@ pub struct Payment {
 }
 
 /// A refund against a captured payment.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Refund {
     /// Refund identifier.
     pub id: RefundId,
@@ -271,6 +271,8 @@ pub struct Refund {
     pub status: RefundStatus,
     /// Provider-assigned refund identifier.
     pub provider_refund_id: Option<String>,
+    /// Caller-supplied idempotency key, retained for replay.
+    pub idempotency_key: Option<String>,
     /// Human-readable refund reason.
     pub reason: Option<String>,
     /// Creation timestamp in Unix seconds.
@@ -280,7 +282,7 @@ pub struct Refund {
 }
 
 /// A persisted webhook event used for replay protection and audit trails.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaymentWebhookRecord {
     /// Local record identifier.
     pub id: WebhookId,

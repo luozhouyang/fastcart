@@ -11,8 +11,9 @@ use axum::Router;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
+use fastcart_email::EmailMessage;
 use fastcart_http::{ApiError, ApiJson, ApiQuery, ApiResult, CustomerActor};
-use fastcart_infrastructure::StoreDatabase;
+use fastcart_infrastructure::{JobQueue, StoreDatabase};
 use fastcart_kernel::{
     ActorContext, AppError, CartId, CountryCode, LineItemId, Metadata, ShippingOptionId, VariantId,
     now_timestamp,
@@ -22,6 +23,7 @@ use fastcart_module_checkout::{CheckoutService, CheckoutSession, CheckoutStatus}
 use fastcart_module_customer::CustomerService;
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_payment::PaymentService;
+use fastcart_module_store::StoreService;
 use fastcart_workflows::{CartContext, CartWorkflow, CheckoutWorkflow, CreateCheckoutRequest};
 
 use super::{StoreDb, ensure_cart_access};
@@ -179,6 +181,14 @@ async fn create_cart(
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateCartRequest>,
 ) -> ApiResult<(StatusCode, Json<Cart>)> {
+    if let Some(channel_id) = request.sales_channel_id.as_deref() {
+        let channel = StoreService::new(db.clone())
+            .get_sales_channel(channel_id)
+            .await?;
+        if channel.is_disabled {
+            return Err(ApiError::validation("sales channel is disabled"));
+        }
+    }
     let mut input = CreateCartInput::new(request.currency_code);
     input.email = request.email;
     input.sales_channel_id = request.sales_channel_id;
@@ -521,6 +531,21 @@ async fn complete_checkout(
     )
     .await?;
     let result = workflow.complete(&checkout_id, &cart_context).await?;
+    let message = EmailMessage::new(
+        result.order.email.clone(),
+        format!("Order #{} confirmed", result.order.display_number),
+    )
+    .with_text(format!(
+        "Thank you for your order. Total: {} {}.",
+        result.order.total, result.order.currency_code
+    ));
+    if let Err(error) = context
+        .email
+        .enqueue(&JobQueue::new(db.pool().clone()), message, Some(10))
+        .await
+    {
+        tracing::warn!(order_id = %result.order.id, error = %error, "failed to enqueue order confirmation email");
+    }
     Ok(Json(CompleteCheckoutResponse {
         checkout: result.checkout,
         order: result.order,
@@ -541,22 +566,32 @@ async fn cancel_checkout(
         .get_cart(&checkout.cart_id)
         .await?;
     ensure_cart_access(&cart, &actor)?;
-    if let Some(session_id) = checkout.payment_session_id.as_ref() {
-        let payment = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
-        let _ = payment.cancel_session(session_id.as_str()).await;
-    }
-    let _ = InventoryService::new(db)
-        .release_checkout(&checkout_id)
-        .await;
-    Ok(Json(
+    let checkout = if checkout.status == CheckoutStatus::Canceled {
+        checkout
+    } else {
+        // Claim the cancellation before touching payment or stock. A concurrent
+        // completion then either wins the state transition or fails cleanly.
         service
             .transition(
                 &checkout_id,
                 CheckoutStatus::Canceled,
                 Some("canceled by customer"),
             )
-            .await?,
-    ))
+            .await?
+    };
+    if let Some(session_id) = checkout.payment_session_id.as_ref() {
+        let payment = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
+        if let Err(error) = payment.cancel_session(session_id.as_str()).await {
+            tracing::warn!(checkout_id = %checkout_id, error = %error, "failed to cancel payment session");
+        }
+    }
+    if let Err(error) = InventoryService::new(db)
+        .release_checkout(&checkout_id)
+        .await
+    {
+        tracing::warn!(checkout_id = %checkout_id, error = %error, "failed to release checkout reservations");
+    }
+    Ok(Json(checkout))
 }
 
 async fn checkout_history(

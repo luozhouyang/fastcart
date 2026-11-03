@@ -11,7 +11,7 @@ use serde_json::Value;
 /// The checkout module only models the state machine. The actual validation,
 /// pricing and payment work is orchestrated by workflows that call into the
 /// cart, pricing, payment and order modules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckoutStatus {
     /// The session has been created but not validated yet.
@@ -112,7 +112,7 @@ impl CheckoutStatus {
 }
 
 /// A checkout session converting a cart into an order.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CheckoutSession {
     /// Checkout identifier.
     pub id: CheckoutId,
@@ -151,7 +151,7 @@ pub struct CheckoutSession {
 }
 
 /// One recorded checkout state transition.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CheckoutStateHistory {
     /// History row identifier.
     pub id: String,

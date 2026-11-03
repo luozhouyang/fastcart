@@ -1066,6 +1066,36 @@ impl InventoryService {
             .iter()
             .map(row_to_reserved)
             .collect::<Result<Vec<_>, _>>()?;
+        if rows.is_empty() {
+            let any_reservations: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM inventory_reservations WHERE checkout_id = ?",
+            )
+            .bind(checkout_id.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if any_reservations == 0 {
+                // Digital-only checkouts legitimately have no reservations.
+                tx.commit().await.map_err(database_error)?;
+                return Ok(0);
+            }
+            let committed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM inventory_reservations
+                 WHERE checkout_id = ? AND status = 'committed' AND order_id = ?",
+            )
+            .bind(checkout_id.as_str())
+            .bind(order_id.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if committed > 0 {
+                tx.commit().await.map_err(database_error)?;
+                return Ok(0);
+            }
+            return Err(AppError::conflict(
+                "checkout reservations expired or were released before commit",
+            ));
+        }
 
         for row in &rows {
             let affected = sqlx::query(

@@ -57,6 +57,17 @@ impl LocalStorage {
         &self.root
     }
 
+    async fn safe_existing(&self, key: &str) -> Result<PathBuf> {
+        let root = tokio::fs::canonicalize(&self.root).await?;
+        let path = tokio::fs::canonicalize(self.resolve(key)?).await?;
+        if !path.starts_with(&root) {
+            return Err(InfrastructureError::InvalidInput(format!(
+                "storage key escapes the root: {key}"
+            )));
+        }
+        Ok(path)
+    }
+
     fn resolve(&self, key: &str) -> Result<PathBuf> {
         let relative = Path::new(key);
         if key.is_empty()
@@ -82,10 +93,37 @@ impl Storage for LocalStorage {
         content_type: Option<&str>,
     ) -> Result<StorageObject> {
         let path = self.resolve(key)?;
+        tokio::fs::create_dir_all(&self.root).await?;
+        let root = tokio::fs::canonicalize(&self.root).await?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
+            let canonical_parent = tokio::fs::canonicalize(parent).await?;
+            if !canonical_parent.starts_with(&root) {
+                return Err(InfrastructureError::InvalidInput(format!(
+                    "storage key escapes the root: {key}"
+                )));
+            }
         }
-        tokio::fs::write(&path, bytes).await?;
+        if tokio::fs::symlink_metadata(&path)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(InfrastructureError::InvalidInput(format!(
+                "storage key points at a symbolic link: {key}"
+            )));
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                InfrastructureError::InvalidInput("storage key has no file name".to_owned())
+            })?;
+        let temporary = path.with_file_name(format!(
+            ".{file_name}.{}.tmp",
+            uuid::Uuid::now_v7().simple()
+        ));
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(&temporary, &path).await?;
         Ok(StorageObject {
             key: key.to_owned(),
             bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -94,17 +132,28 @@ impl Storage for LocalStorage {
     }
 
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
-        let path = self.resolve(key)?;
+        let path = self.safe_existing(key).await?;
         Ok(tokio::fs::read(path).await?)
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {
-        let path = self.resolve(key)?;
-        Ok(tokio::fs::try_exists(path).await?)
+        match self.safe_existing(key).await {
+            Ok(path) => Ok(tokio::fs::try_exists(path).await?),
+            Err(InfrastructureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        let path = self.resolve(key)?;
+        let path = match self.safe_existing(key).await {
+            Ok(path) => path,
+            Err(InfrastructureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -132,6 +181,24 @@ mod tests {
         storage.delete("products/a.txt").await.unwrap();
         assert!(!storage.exists("products/a.txt").await.unwrap());
         storage.delete("products/a.txt").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_symbolic_link_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("nested/link")).unwrap();
+
+        assert!(
+            storage
+                .put("nested/link/escape.txt", b"x", None)
+                .await
+                .is_err()
+        );
+        assert!(storage.get("nested/link/escape.txt").await.is_err());
     }
 
     #[tokio::test]

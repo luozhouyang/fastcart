@@ -61,9 +61,13 @@ impl StoreDatabase {
         &self.pool
     }
 
-    /// Begins a write transaction.
+    /// Begins an immediate write transaction.
+    ///
+    /// `BEGIN IMMEDIATE` takes the SQLite write lock up front, avoiding
+    /// `SQLITE_BUSY_SNAPSHOT` failures when concurrent deferred transactions
+    /// upgrade from read to write.
     pub async fn begin(&self) -> Result<Transaction<'_, sqlx::Sqlite>> {
-        Ok(self.pool.begin().await?)
+        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
     }
 
     /// Runs a quick health check.
@@ -242,24 +246,54 @@ impl StoreDatabaseManager {
             .execute(database.pool())
             .await?;
 
-        let bytes = tokio::fs::read(destination).await?;
+        let mut file = tokio::fs::File::open(destination).await?;
         let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let sha256 = hex::encode(hasher.finalize());
+        let mut bytes = 0_u64;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            let read = tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            bytes += u64::try_from(read).unwrap_or(u64::MAX);
+        }
 
         Ok(BackupManifest {
             store_id: store_id.to_string(),
             created_at: now_timestamp(),
             file: destination.to_string_lossy().into_owned(),
-            bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            sha256,
+            bytes,
+            sha256: hex::encode(hasher.finalize()),
         })
     }
 
-    /// Verifies a backup file without touching the live database.
+    /// Verifies a backup file without creating or modifying it.
     pub async fn verify_backup(path: impl AsRef<Path>) -> Result<()> {
-        let pool = connect_sqlite(path.as_ref(), &DatabaseOptions::default()).await?;
-        let result = verify_integrity(&pool).await;
+        let path = path.as_ref();
+        let metadata = tokio::fs::metadata(path).await.map_err(|error| {
+            InfrastructureError::InvalidInput(format!("backup is not readable: {error}"))
+        })?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(InfrastructureError::Integrity(
+                "backup file is empty or not a regular file".to_owned(),
+            ));
+        }
+        let pool = connect_sqlite(path, &DatabaseOptions::default()).await?;
+        let result = async {
+            verify_integrity(&pool).await?;
+            let objects: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")
+                    .fetch_one(&pool)
+                    .await?;
+            if objects == 0 {
+                return Err(InfrastructureError::Integrity(
+                    "backup contains no schema objects".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        .await;
         pool.close().await;
         result
     }
@@ -270,14 +304,25 @@ impl StoreDatabaseManager {
     /// store before invoking this operation.
     pub async fn restore(&self, store_id: &StoreId, backup: impl AsRef<Path>) -> Result<()> {
         let backup = backup.as_ref();
-        Self::verify_backup(backup).await?;
         let destination = self.database_path(store_id)?;
+        let canonical_backup = tokio::fs::canonicalize(backup).await?;
+        let canonical_destination = if destination.exists() {
+            tokio::fs::canonicalize(&destination).await?
+        } else {
+            destination.clone()
+        };
+        if canonical_backup == canonical_destination {
+            return Err(InfrastructureError::InvalidInput(
+                "backup and restore paths must differ".to_owned(),
+            ));
+        }
+        Self::verify_backup(&canonical_backup).await?;
         self.close(store_id).await;
         if destination.exists() {
             let previous = destination.with_extension("sqlite.pre-restore");
             tokio::fs::copy(&destination, &previous).await?;
         }
-        tokio::fs::copy(backup, &destination).await?;
+        tokio::fs::copy(&canonical_backup, &destination).await?;
         self.migrated.write().await.remove(store_id.as_str());
         self.database(store_id).await?;
         Ok(())
@@ -426,5 +471,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(value, "a");
+    }
+    #[tokio::test]
+    async fn immediate_transactions_serialize_concurrent_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = StoreDatabaseManager::new(
+            dir.path().join("stores"),
+            DatabaseOptions::default().with_max_connections(8),
+        );
+        let database = manager.database(&StoreId::new()).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE concurrency_probe (id INTEGER PRIMARY KEY AUTOINCREMENT, value INTEGER NOT NULL)",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let database = std::sync::Arc::new(database);
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let database = database.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut tx = database.begin().await.unwrap();
+                let value: i64 =
+                    sqlx::query_scalar("SELECT COALESCE(MAX(value), 0) + 1 FROM concurrency_probe")
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap();
+                sqlx::query("INSERT INTO concurrency_probe (value) VALUES (?)")
+                    .bind(value)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                tx.commit().await.unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let values: Vec<i64> =
+            sqlx::query_scalar("SELECT value FROM concurrency_probe ORDER BY value")
+                .fetch_all(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(values, (1..=8).collect::<Vec<_>>());
     }
 }

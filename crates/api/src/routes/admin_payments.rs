@@ -15,6 +15,9 @@ use fastcart_http::extractors::ApiQuery;
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{ActorContext, Metadata, OrderId};
+use fastcart_module_order::{
+    OrderService, PaymentStatus as OrderPaymentStatus, RefundStatus as OrderRefundStatus,
+};
 use fastcart_module_payment::{
     ListPaymentsFilter, Payment, PaymentAttempt, PaymentService, PaymentSession, PaymentStatus,
     PaymentWebhookRecord, Refund,
@@ -233,6 +236,20 @@ async fn create_refund(
         }
         None => service.refund(&id, request.amount, request.reason).await?,
     };
+    if let Some(order_id) = refund.order_id.clone() {
+        let payment = service.get_payment(&id).await?;
+        let (payment_status, refund_status) = match payment.status {
+            PaymentStatus::Refunded => (OrderPaymentStatus::Refunded, OrderRefundStatus::Refunded),
+            PaymentStatus::PartiallyRefunded => (
+                OrderPaymentStatus::PartiallyRefunded,
+                OrderRefundStatus::PartiallyRefunded,
+            ),
+            _ => (OrderPaymentStatus::Captured, OrderRefundStatus::NotRefunded),
+        };
+        let orders = OrderService::new(db);
+        orders.set_payment_status(&order_id, payment_status).await?;
+        orders.set_refund_status(&order_id, refund_status).await?;
+    }
     Ok((StatusCode::CREATED, Json(refund_dto(&refund))))
 }
 
@@ -484,6 +501,7 @@ mod tests {
             currency_code: "USD".to_owned(),
             status: RefundStatus::Succeeded,
             provider_refund_id: Some("manual_refund_1".to_owned()),
+            idempotency_key: None,
             reason: Some("damaged".to_owned()),
             created_at: 20,
             updated_at: 20,

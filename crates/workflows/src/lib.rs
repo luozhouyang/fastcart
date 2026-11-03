@@ -9,4 +9,4 @@ pub mod maintenance;
 
 pub use cart::{CartContext, CartWorkflow};
 pub use checkout::{CheckoutWorkflow, CompleteCheckoutResult, CreateCheckoutRequest};
-pub use maintenance::{MaintenanceReport, run_maintenance};
+pub use maintenance::{MaintenanceReport, run_maintenance, run_maintenance_with_options};

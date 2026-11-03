@@ -511,6 +511,20 @@ impl PromotionService {
         order_id: Option<&str>,
     ) -> Result<PromotionUsage, AppError> {
         let now = now_timestamp();
+        if let Some(order_id) = order_id {
+            if let Some(existing) = sqlx::query_as::<_, PromotionUsageRow>(
+                "SELECT id, promotion_id, coupon_id, customer_id, order_id, created_at
+                 FROM promotion_usage WHERE promotion_id = ? AND order_id = ?",
+            )
+            .bind(promotion_id)
+            .bind(order_id)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?
+            {
+                return Ok(existing.into_usage());
+            }
+        }
         let mut transaction = self.db.begin().await.map_err(AppError::from)?;
 
         let promotion: Option<(Option<i64>, i64)> =
@@ -545,14 +559,18 @@ impl PromotionService {
             if coupon_limit.is_some_and(|limit| coupon_count >= limit) {
                 return Err(AppError::conflict("coupon usage limit reached"));
             }
-            sqlx::query(
-                "UPDATE coupons SET usage_count = usage_count + 1, updated_at = ? WHERE id = ?",
+            let updated = sqlx::query(
+                "UPDATE coupons SET usage_count = usage_count + 1, updated_at = ?
+                 WHERE id = ? AND (usage_limit IS NULL OR usage_count < usage_limit)",
             )
             .bind(now)
             .bind(coupon_id)
             .execute(&mut *transaction)
             .await
             .map_err(database_error)?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::conflict("coupon usage limit reached"));
+            }
         }
 
         let id = EventId::new().to_string();
@@ -570,14 +588,18 @@ impl PromotionService {
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
-        sqlx::query(
-            "UPDATE promotions SET usage_count = usage_count + 1, updated_at = ? WHERE id = ?",
+        let updated = sqlx::query(
+            "UPDATE promotions SET usage_count = usage_count + 1, updated_at = ?
+             WHERE id = ? AND (usage_limit IS NULL OR usage_count < usage_limit)",
         )
         .bind(now)
         .bind(promotion_id)
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::conflict("promotion usage limit reached"));
+        }
         transaction.commit().await.map_err(database_error)?;
 
         Ok(PromotionUsage {
@@ -776,6 +798,29 @@ async fn insert_promotion_rules(
         });
     }
     Ok(stored)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PromotionUsageRow {
+    id: String,
+    promotion_id: String,
+    coupon_id: Option<String>,
+    customer_id: Option<String>,
+    order_id: Option<String>,
+    created_at: i64,
+}
+
+impl PromotionUsageRow {
+    fn into_usage(self) -> PromotionUsage {
+        PromotionUsage {
+            id: self.id,
+            promotion_id: self.promotion_id,
+            coupon_id: self.coupon_id,
+            customer_id: self.customer_id,
+            order_id: self.order_id,
+            created_at: self.created_at,
+        }
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]

@@ -9,7 +9,7 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiQuery, ApiResult, PaginationQuery};
-use fastcart_kernel::{AppError, CustomerId, OrderId, PaymentId};
+use fastcart_kernel::{CustomerId, OrderId, PaymentId};
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::{
     FulfillmentInput, Order, OrderFilter, OrderRefund, OrderService, OrderStatus,
@@ -74,6 +74,7 @@ struct RefundOrderRequest {
     amount: i64,
     currency: String,
     reason: Option<String>,
+    idempotency_key: Option<String>,
 }
 
 // -------------------------------------------------------------------------
@@ -163,7 +164,7 @@ async fn get_order_by_number(
 // -------------------------------------------------------------------------
 
 async fn confirm_order(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -172,11 +173,21 @@ async fn confirm_order(
         .require_permission("orders.write")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
-    Ok(Json(OrderService::new(db).confirm(&id).await?))
+    let order = OrderService::new(db).confirm(&id).await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "order.confirmed",
+        "order",
+        order.id.as_str(),
+        serde_json::Value::Null,
+    )
+    .await;
+    Ok(Json(order))
 }
 
 async fn process_order(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -185,7 +196,17 @@ async fn process_order(
         .require_permission("orders.write")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
-    Ok(Json(OrderService::new(db).start_processing(&id).await?))
+    let order = OrderService::new(db).start_processing(&id).await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "order.processing_started",
+        "order",
+        order.id.as_str(),
+        serde_json::Value::Null,
+    )
+    .await;
+    Ok(Json(order))
 }
 
 async fn cancel_order(
@@ -202,19 +223,15 @@ async fn cancel_order(
     let orders = OrderService::new(db.clone());
     let current = orders.get(&id).await?;
     if current.status == OrderStatus::Canceled {
+        // Restocking is idempotent; retry it after an interrupted cancellation.
+        InventoryService::new(db).restock_order(&id).await?;
         return Ok(Json(current));
     }
-    if !current.status.is_cancelable() {
-        return Err(ApiError::new(AppError::conflict(format!(
-            "order in state {} cannot be canceled",
-            current.status.as_str()
-        ))));
-    }
     let reason = request.reason;
-    // Return committed stock before marking the order canceled. Restocking is
-    // idempotent, so an interrupted cancellation can be retried safely.
-    InventoryService::new(db).restock_order(&id).await?;
+    // Claim the cancellation first so a concurrent fulfillment cannot ship an
+    // order that was already restocked.
     let order = orders.cancel(&id, reason.as_deref()).await?;
+    InventoryService::new(db).restock_order(&id).await?;
     record_store_audit(
         &context,
         &actor,
@@ -228,7 +245,7 @@ async fn cancel_order(
 }
 
 async fn fulfill_order(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -241,6 +258,18 @@ async fn fulfill_order(
     let order = OrderService::new(db)
         .fulfill(&id, map_fulfillment_input(request))
         .await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "order.fulfilled",
+        "order",
+        order.id.as_str(),
+        serde_json::json!({
+            "fulfillment_status": order.fulfillment_status.as_str(),
+            "status": order.status.as_str(),
+        }),
+    )
+    .await;
     Ok(Json(order))
 }
 
@@ -276,11 +305,26 @@ async fn create_refund(
     let amount = request.amount;
     let reason = request.reason.clone();
     let payments = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
-    payments.get_payment(payment_id.as_str()).await?;
+    let payment = payments.get_payment(payment_id.as_str()).await?;
+    if payment.order_id.as_ref() != Some(&id) {
+        return Err(ApiError::validation(
+            "refund payment does not belong to this order",
+        ));
+    }
+    if payment.currency_code != request.currency {
+        return Err(ApiError::validation(
+            "refund currency does not match the payment currency",
+        ));
+    }
+    // Move money first; an order record must never claim a refund that the
+    // provider did not accept.
+    let idempotency_key = request.idempotency_key.clone();
+    payments
+        .refund_with_idempotency(payment_id.as_str(), amount, reason, idempotency_key)
+        .await?;
     let order = OrderService::new(db)
         .add_refund(&id, map_refund_input(request))
         .await?;
-    payments.refund(payment_id.as_str(), amount, reason).await?;
     record_store_audit(
         &context,
         &actor,
@@ -360,6 +404,7 @@ mod tests {
             amount: 500,
             currency: "USD".to_owned(),
             reason: Some("damaged".to_owned()),
+            idempotency_key: None,
         });
 
         assert_eq!(input.payment_id, payment_id);

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Supported promotion discount types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromotionType {
     /// A percentage of the eligible line subtotal in basis points.
@@ -52,7 +52,7 @@ impl FromStr for PromotionType {
 }
 
 /// Lifecycle state of a promotion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromotionStatus {
     /// Prepared but not applied.
@@ -95,7 +95,7 @@ impl FromStr for PromotionStatus {
 }
 
 /// Attributes a promotion rule can restrict.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromotionRuleAttribute {
     /// Minimum cart subtotal.
@@ -150,7 +150,7 @@ impl FromStr for PromotionRuleAttribute {
 }
 
 /// Comparison operator used by promotion rules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromotionRuleOperator {
     /// Equality with a scalar or one of a list.
@@ -193,7 +193,7 @@ impl FromStr for PromotionRuleOperator {
 }
 
 /// A condition attached to a promotion.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromotionRule {
     /// Rule identifier.
     pub id: String,
@@ -237,7 +237,7 @@ impl PromotionRuleInput {
 }
 
 /// A discount campaign.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Promotion {
     /// Promotion identifier.
     pub id: String,
@@ -404,7 +404,7 @@ pub struct PromotionFilter {
 }
 
 /// A coupon that unlocks a promotion.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Coupon {
     /// Coupon identifier.
     pub id: String,
@@ -500,7 +500,7 @@ pub struct CouponFilter {
 }
 
 /// A recorded promotion usage.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromotionUsage {
     /// Usage identifier.
     pub id: String,
@@ -564,7 +564,7 @@ pub struct PromotionContext {
 }
 
 /// One discount produced by a promotion.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromotionApplication {
     /// Promotion that produced the application.
     pub promotion_id: String,
@@ -581,7 +581,7 @@ pub struct PromotionApplication {
 }
 
 /// The applications produced by one promotion.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromotionResult {
     /// Promotion that produced the result.
     pub promotion_id: String,

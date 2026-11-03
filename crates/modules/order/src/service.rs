@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{StoreDatabase, append_outbox_event, database_error};
 use fastcart_kernel::{
-    AppError, CurrencyCode, CustomerId, EventId, FulfillmentId, LineItemId, Metadata, OrderId,
-    Pagination, PaymentId, ProductId, RefundId, Timestamp, VariantId, normalize_email,
-    now_timestamp, validate_email, validate_length, validate_metadata,
+    AppError, CurrencyCode, CustomerId, DomainEventEnvelope, EventId, FulfillmentId, LineItemId,
+    Metadata, OrderId, Pagination, PaymentId, ProductId, RefundId, Timestamp, VariantId,
+    normalize_email, now_timestamp, validate_email, validate_length, validate_metadata,
     validate_non_negative_amount, validate_quantity,
 };
 use serde_json::Value;
@@ -450,13 +450,67 @@ impl OrderService {
                 status.as_str()
             )));
         }
-        sqlx::query("UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?")
-            .bind(status.as_str())
-            .bind(now_timestamp())
-            .bind(id.as_str())
-            .execute(self.db.pool())
-            .await
-            .map_err(database_error)?;
+        let updated = sqlx::query(
+            "UPDATE orders SET payment_status = ?, updated_at = ?
+             WHERE id = ? AND payment_status = ?",
+        )
+        .bind(status.as_str())
+        .bind(now_timestamp())
+        .bind(id.as_str())
+        .bind(order.payment_status.as_str())
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::conflict(
+                "order payment status changed concurrently",
+            ));
+        }
+        self.get(id).await
+    }
+
+    /// Updates the order-level refund status from the payment source of truth.
+    pub async fn set_refund_status(
+        &self,
+        id: &OrderId,
+        status: RefundStatus,
+    ) -> Result<Order, AppError> {
+        let order = self.load_order(id).await?;
+        if order.refund_status == status {
+            return Ok(order);
+        }
+        let allowed = match order.refund_status {
+            RefundStatus::NotRefunded => {
+                matches!(
+                    status,
+                    RefundStatus::PartiallyRefunded | RefundStatus::Refunded
+                )
+            }
+            RefundStatus::PartiallyRefunded => matches!(status, RefundStatus::Refunded),
+            RefundStatus::Refunded => false,
+        };
+        if !allowed {
+            return Err(AppError::conflict(format!(
+                "cannot transition refund status from {} to {}",
+                order.refund_status.as_str(),
+                status.as_str()
+            )));
+        }
+        let updated = sqlx::query(
+            "UPDATE orders SET refund_status = ?, updated_at = ? WHERE id = ? AND refund_status = ?",
+        )
+        .bind(status.as_str())
+        .bind(now_timestamp())
+        .bind(id.as_str())
+        .bind(order.refund_status.as_str())
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::conflict(
+                "order refund status changed concurrently",
+            ));
+        }
         self.get(id).await
     }
 
@@ -507,17 +561,30 @@ impl OrderService {
                 order.status.as_str()
             )));
         }
+        if order.fulfillment_status != FulfillmentStatus::NotFulfilled {
+            return Err(AppError::conflict(
+                "orders with fulfilled items cannot be canceled",
+            ));
+        }
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query("UPDATE orders SET status = ?, canceled_at = ?, updated_at = ? WHERE id = ?")
-            .bind(OrderStatus::Canceled.as_str())
-            .bind(now)
-            .bind(now)
-            .bind(id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
+        let updated = sqlx::query(
+            "UPDATE orders SET status = ?, canceled_at = ?, updated_at = ?
+             WHERE id = ? AND status = ?",
+        )
+        .bind(OrderStatus::Canceled.as_str())
+        .bind(now)
+        .bind(now)
+        .bind(id.as_str())
+        .bind(order.status.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict("order status changed concurrently"));
+        }
         insert_history(
             &mut tx,
             id,
@@ -527,6 +594,14 @@ impl OrderService {
             now,
         )
         .await?;
+        let event = DomainEventEnvelope::new(
+            "order.canceled",
+            Some(self.db.store_id().clone()),
+            serde_json::json!({"order_id": id.as_str(), "reason": reason}),
+        );
+        append_outbox_event(&mut *tx, &event)
+            .await
+            .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
 
         self.load_order(id).await
@@ -535,7 +610,10 @@ impl OrderService {
     /// Records a fulfillment and updates the order fulfillment status.
     pub async fn fulfill(&self, id: &OrderId, input: FulfillmentInput) -> Result<Order, AppError> {
         let order = self.load_order(id).await?;
-        if matches!(order.status, OrderStatus::Canceled | OrderStatus::Completed) {
+        if !matches!(
+            order.status,
+            OrderStatus::Confirmed | OrderStatus::Processing
+        ) {
             return Err(AppError::conflict(format!(
                 "order in state {} cannot be fulfilled",
                 order.status.as_str()
@@ -559,6 +637,11 @@ impl OrderService {
         } else {
             "fulfillment recorded"
         };
+        let next_order_status = if input.partial {
+            order.status
+        } else {
+            OrderStatus::Fulfilled
+        };
 
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         sqlx::query(
@@ -577,23 +660,44 @@ impl OrderService {
         .await
         .map_err(database_error)?;
 
-        sqlx::query("UPDATE orders SET fulfillment_status = ?, updated_at = ? WHERE id = ?")
-            .bind(next_status.as_str())
-            .bind(now)
-            .bind(id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
+        let updated = sqlx::query(
+            "UPDATE orders SET fulfillment_status = ?, status = ?, updated_at = ?
+             WHERE id = ? AND status = ?",
+        )
+        .bind(next_status.as_str())
+        .bind(next_order_status.as_str())
+        .bind(now)
+        .bind(id.as_str())
+        .bind(order.status.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict("order status changed concurrently"));
+        }
 
         insert_history(
             &mut tx,
             id,
-            order.status,
+            next_order_status,
             Some(order.status),
             Some(note),
             now,
         )
         .await?;
+        let event = DomainEventEnvelope::new(
+            "order.fulfilled",
+            Some(self.db.store_id().clone()),
+            serde_json::json!({
+                "order_id": id.as_str(),
+                "fulfillment_status": next_status.as_str(),
+                "partial": input.partial,
+            }),
+        );
+        append_outbox_event(&mut *tx, &event)
+            .await
+            .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
 
         self.load_order(id).await
@@ -666,16 +770,25 @@ impl OrderService {
         .await
         .map_err(database_error)?;
 
-        sqlx::query(
-            "UPDATE orders SET refund_status = ?, payment_status = ?, updated_at = ? WHERE id = ?",
+        let updated = sqlx::query(
+            "UPDATE orders SET refund_status = ?, payment_status = ?, updated_at = ?
+             WHERE id = ? AND refund_status = ? AND payment_status = ?",
         )
         .bind(refund_status.as_str())
         .bind(payment_status.as_str())
         .bind(now)
         .bind(id.as_str())
+        .bind(order.refund_status.as_str())
+        .bind(order.payment_status.as_str())
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict(
+                "order refund status changed concurrently",
+            ));
+        }
 
         insert_history(
             &mut tx,
@@ -686,6 +799,19 @@ impl OrderService {
             now,
         )
         .await?;
+        let event = DomainEventEnvelope::new(
+            "order.refunded",
+            Some(self.db.store_id().clone()),
+            serde_json::json!({
+                "order_id": id.as_str(),
+                "payment_id": input.payment_id.as_str(),
+                "amount": input.amount,
+                "currency_code": currency,
+            }),
+        );
+        append_outbox_event(&mut *tx, &event)
+            .await
+            .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
 
         self.load_order(id).await
@@ -734,13 +860,19 @@ impl OrderService {
     ) -> Result<(), AppError> {
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query("UPDATE orders SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(next.as_str())
-            .bind(now)
-            .bind(id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
+        let updated =
+            sqlx::query("UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                .bind(next.as_str())
+                .bind(now)
+                .bind(id.as_str())
+                .bind(previous.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict("order status changed concurrently"));
+        }
         insert_history(&mut tx, id, next, Some(previous), note, now).await?;
         tx.commit().await.map_err(database_error)?;
         Ok(())
@@ -921,6 +1053,18 @@ impl OrderService {
             .await;
             if let Err(error) = result {
                 if is_unique_violation(&error) {
+                    // Another checkout with the same key committed first.
+                    // Return the winner instead of failing the caller.
+                    tx.rollback()
+                        .await
+                        .map_err(|error| CreateAttemptError::Failed(database_error(error)))?;
+                    if let Some(existing) = self
+                        .find_order_id_by_key(key)
+                        .await
+                        .map_err(CreateAttemptError::Failed)?
+                    {
+                        return Ok(existing);
+                    }
                     return Err(CreateAttemptError::Failed(AppError::conflict(
                         "idempotency key was used concurrently".to_owned(),
                     )));
@@ -928,6 +1072,21 @@ impl OrderService {
                 return Err(CreateAttemptError::Failed(database_error(error)));
             }
         }
+
+        let event = DomainEventEnvelope::new(
+            "order.placed",
+            Some(self.db.store_id().clone()),
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "display_number": display_number,
+                "email": order.email,
+                "currency_code": order.currency_code,
+                "total": order.total,
+            }),
+        );
+        append_outbox_event(&mut *tx, &event)
+            .await
+            .map_err(|error| CreateAttemptError::Failed(database_error(error)))?;
 
         tx.commit()
             .await
@@ -1607,6 +1766,7 @@ mod tests {
             .create_order(order_input(vec![item(100, 2)]))
             .await
             .unwrap();
+        let order = service.confirm(&order.id).await.unwrap();
 
         let fulfilled = service
             .fulfill(
@@ -1635,6 +1795,7 @@ mod tests {
             .create_order(order_input(vec![item(100, 3)]))
             .await
             .unwrap();
+        let order = service.confirm(&order.id).await.unwrap();
 
         let partial = service
             .fulfill(

@@ -356,13 +356,21 @@ impl CheckoutService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query("UPDATE checkout_sessions SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(to.as_str())
-            .bind(now)
-            .bind(id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
+        let updated = sqlx::query(
+            "UPDATE checkout_sessions SET status = ?, updated_at = ?
+             WHERE id = ? AND status = ?",
+        )
+        .bind(to.as_str())
+        .bind(now)
+        .bind(id.as_str())
+        .bind(session.status.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict("checkout status changed concurrently"));
+        }
         insert_history(&mut tx, id, Some(session.status), to, reason, now).await?;
         tx.commit().await.map_err(database_error)?;
 
@@ -385,10 +393,10 @@ impl CheckoutService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE checkout_sessions
              SET status = ?, payment_session_id = ?, updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND status = 'ready_for_payment' AND payment_session_id IS NULL",
         )
         .bind(CheckoutStatus::PaymentPending.as_str())
         .bind(payment_session_id.as_str())
@@ -397,6 +405,12 @@ impl CheckoutService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict(
+                "payment session was attached concurrently",
+            ));
+        }
         insert_history(
             &mut tx,
             id,
@@ -427,8 +441,9 @@ impl CheckoutService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query(
-            "UPDATE checkout_sessions SET status = ?, order_id = ?, updated_at = ? WHERE id = ?",
+        let updated = sqlx::query(
+            "UPDATE checkout_sessions SET status = ?, order_id = ?, updated_at = ?
+             WHERE id = ? AND status = 'payment_confirmed' AND order_id IS NULL",
         )
         .bind(CheckoutStatus::OrderPlaced.as_str())
         .bind(order_id.as_str())
@@ -437,6 +452,12 @@ impl CheckoutService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict(
+                "order was placed concurrently for this checkout",
+            ));
+        }
         insert_history(
             &mut tx,
             id,
@@ -469,13 +490,20 @@ impl CheckoutService {
 
         for (id, status) in &due {
             let from = CheckoutStatus::from_stored(status)?;
-            sqlx::query("UPDATE checkout_sessions SET status = ?, updated_at = ? WHERE id = ?")
-                .bind(CheckoutStatus::Failed.as_str())
-                .bind(now)
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .map_err(database_error)?;
+            let updated = sqlx::query(
+                "UPDATE checkout_sessions SET status = ?, updated_at = ?
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(CheckoutStatus::Failed.as_str())
+            .bind(now)
+            .bind(id)
+            .bind(status)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if updated.rows_affected() == 0 {
+                continue;
+            }
             insert_history(
                 &mut tx,
                 &CheckoutId::from_string(id.clone()),

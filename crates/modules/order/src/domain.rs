@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Lifecycle state of an order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
     /// Order captured but not yet confirmed.
@@ -72,7 +72,7 @@ impl OrderStatus {
 }
 
 /// State of the money collection for an order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentStatus {
     /// Waiting for a payment.
@@ -120,7 +120,7 @@ impl PaymentStatus {
 }
 
 /// Fulfillment progress of an order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FulfillmentStatus {
     /// Nothing has shipped.
@@ -160,7 +160,7 @@ impl FulfillmentStatus {
 }
 
 /// Refund progress of an order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefundStatus {
     /// Nothing was refunded.
@@ -196,7 +196,7 @@ impl RefundStatus {
 }
 
 /// An order with every historical commercial snapshot attached.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Order {
     /// Order identifier.
     pub id: OrderId,
@@ -251,7 +251,7 @@ pub struct Order {
 }
 
 /// A historical snapshot of one purchased line item.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderItem {
     /// Line item identifier.
     pub id: LineItemId,
@@ -292,7 +292,7 @@ pub struct OrderItem {
 }
 
 /// A discount or surcharge allocated to a line item.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderItemAdjustment {
     /// Adjustment identifier.
     pub id: String,
@@ -311,7 +311,7 @@ pub struct OrderItemAdjustment {
 }
 
 /// A discount or surcharge applied to the whole order.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderAdjustment {
     /// Adjustment identifier.
     pub id: String,
@@ -328,7 +328,7 @@ pub struct OrderAdjustment {
 }
 
 /// One order status transition.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderStatusHistory {
     /// History row identifier.
     pub id: String,
@@ -345,7 +345,7 @@ pub struct OrderStatusHistory {
 }
 
 /// A fulfillment record for an order.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderFulfillment {
     /// Fulfillment identifier.
     pub id: FulfillmentId,
@@ -368,7 +368,7 @@ pub struct OrderFulfillment {
 }
 
 /// A refund record for an order.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderRefund {
     /// Refund identifier.
     pub id: RefundId,

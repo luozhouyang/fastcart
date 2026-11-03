@@ -24,6 +24,8 @@ pub struct MaintenanceReport {
     pub checkouts_expired: u64,
     /// Outbox events dispatched.
     pub outbox_dispatched: u64,
+    /// Expired jobs returned to the pending queue.
+    pub jobs_reaped: u64,
     /// Background jobs processed.
     pub jobs_processed: u64,
     /// Webhook deliveries accepted by their endpoints.
@@ -44,6 +46,19 @@ pub async fn run_maintenance(
     databases: &StoreDatabaseManager,
     events: &EventBus,
     email: &EmailService,
+) -> MaintenanceReport {
+    run_maintenance_with_options(platform, databases, events, email, false).await
+}
+
+/// Runs one maintenance sweep with explicit delivery options.
+///
+/// `allow_private_webhooks` is intended for tests and local development only.
+pub async fn run_maintenance_with_options(
+    platform: &PlatformStore,
+    databases: &StoreDatabaseManager,
+    events: &EventBus,
+    email: &EmailService,
+    allow_private_webhooks: bool,
 ) -> MaintenanceReport {
     let mut report = MaintenanceReport::default();
     let now = now_timestamp();
@@ -97,6 +112,13 @@ pub async fn run_maintenance(
                 }
             }
             let queue = JobQueue::new(database.pool().clone());
+            match queue.reap_expired(300).await {
+                Ok(count) => report.jobs_reaped += count,
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "job lease reap failed");
+                    report.failures += 1;
+                }
+            }
             match queue.claim("maintenance", 25).await {
                 Ok(jobs) => {
                     for job in jobs {
@@ -129,17 +151,25 @@ pub async fn run_maintenance(
                             ))),
                         };
                         match outcome {
-                            Ok(()) => {
-                                if let Err(error) = queue.complete(&job.id).await {
+                            Ok(()) => match queue.complete(&job.id, "maintenance").await {
+                                Ok(true) => report.jobs_processed += 1,
+                                Ok(false) => {
+                                    tracing::warn!(
+                                        store_id = %store.id,
+                                        job_id = %job.id,
+                                        "job completion rejected because the lease was lost"
+                                    );
+                                    report.failures += 1;
+                                }
+                                Err(error) => {
                                     tracing::warn!(store_id = %store.id, error = %error, "job completion failed");
                                     report.failures += 1;
-                                } else {
-                                    report.jobs_processed += 1;
                                 }
-                            }
+                            },
                             Err(error) => {
                                 tracing::warn!(store_id = %store.id, job_type = %job.job_type, error = %error, "job failed");
-                                let _ = queue.fail(&job.id, &error.to_string()).await;
+                                let _ =
+                                    queue.fail(&job.id, &error.to_string(), "maintenance").await;
                                 report.failures += 1;
                             }
                         }
@@ -152,7 +182,8 @@ pub async fn run_maintenance(
             }
             match fetch_pending_outbox(database.pool(), 100).await {
                 Ok(records) => {
-                    let webhooks = WebhookService::new(database.clone());
+                    let webhooks = WebhookService::new(database.clone())
+                        .with_private_networks_allowed(allow_private_webhooks);
                     for record in records {
                         let mut fan_out_failed = false;
                         if let Some(event) = record.to_envelope(Some(store.id.clone())) {
@@ -196,6 +227,7 @@ pub async fn run_maintenance(
                 }
             }
             match WebhookService::new(database.clone())
+                .with_private_networks_allowed(allow_private_webhooks)
                 .deliver_due(now, 10)
                 .await
             {

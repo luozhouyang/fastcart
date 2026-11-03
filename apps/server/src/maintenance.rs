@@ -24,6 +24,7 @@ pub async fn maintenance_loop(context: Arc<AppContext>) {
                 reservations_released = report.reservations_released,
                 checkouts_expired = report.checkouts_expired,
                 outbox_dispatched = report.outbox_dispatched,
+                jobs_reaped = report.jobs_reaped,
                 jobs_processed = report.jobs_processed,
                 webhooks_delivered = report.webhooks_delivered,
                 webhooks_failed = report.webhooks_failed,

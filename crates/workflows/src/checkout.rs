@@ -14,7 +14,9 @@ use fastcart_module_order::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, Order, OrderService,
     OrderStatus, PaymentStatus as OrderPaymentStatus,
 };
-use fastcart_module_payment::{CreatePaymentSessionInput, Payment, PaymentService};
+use fastcart_module_payment::{
+    CreatePaymentSessionInput, Payment, PaymentService, PaymentStatus as PaymentSessionStatus,
+};
 use fastcart_module_promotion::PromotionService;
 
 use crate::cart::{CartContext, CartWorkflow};
@@ -278,36 +280,37 @@ impl CheckoutWorkflow {
             .payment_session_id
             .clone()
             .ok_or_else(|| AppError::conflict("checkout has no payment session"))?;
-
-        let payment = self.payment.capture(payment_session_id.as_str()).await?;
-
-        let checkout = match checkout.status {
-            CheckoutStatus::OrderPlaced => {
-                let order_id = checkout
-                    .order_id
-                    .clone()
-                    .ok_or_else(|| AppError::conflict("checkout has no order"))?;
-                let order = self.order.get(&order_id).await?;
-                return Ok(CompleteCheckoutResult {
-                    order,
-                    payment,
-                    checkout,
-                });
+        if checkout.status == CheckoutStatus::OrderPlaced {
+            let order_id = checkout
+                .order_id
+                .clone()
+                .ok_or_else(|| AppError::conflict("checkout has no order"))?;
+            let order = self.order.get(&order_id).await?;
+            let payment = self
+                .payment
+                .payment_for_session_id(payment_session_id.as_str())
+                .await?;
+            if let Ok(cart) = self.carts.get_cart(&checkout.cart_id).await {
+                self.record_promotion_usage(&cart, &order).await;
             }
-            CheckoutStatus::PaymentPending => {
-                self.checkout
-                    .transition(checkout_id, CheckoutStatus::PaymentConfirmed, None)
-                    .await?
-            }
-            CheckoutStatus::PaymentConfirmed => checkout.clone(),
-            other => {
-                return Err(AppError::conflict(format!(
-                    "cannot complete checkout in status {}",
-                    other.as_str()
-                )));
-            }
-        };
+            return Ok(CompleteCheckoutResult {
+                order,
+                payment,
+                checkout,
+            });
+        }
+        if !matches!(
+            checkout.status,
+            CheckoutStatus::PaymentPending | CheckoutStatus::PaymentConfirmed
+        ) {
+            return Err(AppError::conflict(format!(
+                "cannot complete checkout in status {}",
+                checkout.status.as_str()
+            )));
+        }
 
+        // Validate the cart snapshot before charging the customer. A price or
+        // stock change must not result in a captured payment without an order.
         let cart = self.carts.recalculate(&checkout.cart_id, context).await?;
         let totals = serde_json::to_value(&cart.totals)
             .map_err(|error| AppError::validation(error.to_string()))?;
@@ -315,6 +318,22 @@ impl CheckoutWorkflow {
             return Err(AppError::conflict(
                 "cart totals changed since checkout was created",
             ));
+        }
+
+        let checkout = if checkout.status == CheckoutStatus::PaymentPending {
+            self.checkout
+                .transition(checkout_id, CheckoutStatus::PaymentConfirmed, None)
+                .await?
+        } else {
+            checkout
+        };
+
+        let payment = self.payment.capture(payment_session_id.as_str()).await?;
+        if payment.status != PaymentSessionStatus::Captured {
+            return Err(AppError::conflict(format!(
+                "payment is in state {} and cannot complete this checkout",
+                payment.status
+            )));
         }
 
         let mut items = Vec::with_capacity(cart.items.len());
@@ -392,7 +411,7 @@ impl CheckoutWorkflow {
         let shipping_total = cart.totals.shipping_total;
         let total = items_total + shipping_total + shipping_tax;
 
-        let order = self
+        let order = match self
             .order
             .create_order(CreateOrderInput {
                 customer_id: cart.customer_id.clone(),
@@ -412,16 +431,62 @@ impl CheckoutWorkflow {
                 tax_total,
                 total,
                 metadata: Metadata::empty(),
-                idempotency_key: checkout.idempotency_key.clone(),
+                idempotency_key: Some(format!("checkout:{}", checkout.id.as_str())),
             })
-            .await?;
+            .await
+        {
+            Ok(order) => order,
+            Err(error) => {
+                self.compensate(&checkout, &payment, None).await;
+                return Err(error);
+            }
+        };
+
+        let order = match self.finish_order(&checkout, &cart, &payment, &order).await {
+            Ok(order) => order,
+            Err(error) => {
+                self.compensate(&checkout, &payment, Some(&order)).await;
+                return Err(error);
+            }
+        };
+
+        self.record_promotion_usage(&cart, &order).await;
+        let checkout = self.checkout.get(&checkout.id).await?;
+        Ok(CompleteCheckoutResult {
+            order,
+            payment,
+            checkout,
+        })
+    }
+
+    async fn finish_order(
+        &self,
+        checkout: &CheckoutSession,
+        cart: &fastcart_module_cart::Cart,
+        payment: &Payment,
+        order: &Order,
+    ) -> Result<Order, AppError> {
+        // A concurrent retry may already have completed this checkout. Treat
+        // the placed state as success so the loser never compensates a good order.
+        let current_checkout = self.checkout.get(&checkout.id).await?;
+        if current_checkout.status == CheckoutStatus::OrderPlaced {
+            if current_checkout.order_id.as_ref() == Some(&order.id) {
+                return self.order.get(&order.id).await;
+            }
+            return Err(AppError::conflict(
+                "checkout was placed for a different order",
+            ));
+        }
 
         self.payment
             .assign_order(payment.id.as_str(), &order.id)
             .await?;
-        self.order
-            .set_payment_status(&order.id, OrderPaymentStatus::Captured)
-            .await?;
+        let current = self.order.get(&order.id).await?;
+        if current.payment_status != OrderPaymentStatus::Captured {
+            self.order
+                .set_payment_status(&order.id, OrderPaymentStatus::Captured)
+                .await?;
+        }
         if self.order.get(&order.id).await?.status == OrderStatus::Pending {
             self.order.confirm(&order.id).await?;
         }
@@ -429,21 +494,63 @@ impl CheckoutWorkflow {
 
         self.inventory.commit(&checkout.id, &order.id).await?;
 
-        let checkout = self
+        if let Err(error) = self
             .checkout
             .mark_order_placed(&checkout.id, &order.id)
-            .await?;
-
-        if cart.status == fastcart_module_cart::CartStatus::Open {
-            self.carts.complete_cart(&cart.id).await?;
+            .await
+        {
+            let latest = self.checkout.get(&checkout.id).await?;
+            let placed = latest.status == CheckoutStatus::OrderPlaced
+                && latest.order_id.as_ref() == Some(&order.id);
+            if !placed {
+                return Err(error);
+            }
         }
 
-        self.record_promotion_usage(&cart, &order).await;
-        Ok(CompleteCheckoutResult {
-            order,
-            payment,
-            checkout,
-        })
+        if cart.status == fastcart_module_cart::CartStatus::Open {
+            if let Err(error) = self.carts.complete_cart(&cart.id).await {
+                let latest = self.carts.get_cart(&cart.id).await?;
+                if latest.status != fastcart_module_cart::CartStatus::Completed {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(order)
+    }
+
+    async fn compensate(
+        &self,
+        checkout: &CheckoutSession,
+        payment: &Payment,
+        order: Option<&Order>,
+    ) {
+        if let Some(order) = order {
+            let _ = self.inventory.restock_order(&order.id).await;
+            let _ = self
+                .order
+                .cancel(&order.id, Some("checkout compensation"))
+                .await;
+            let _ = self
+                .order
+                .set_payment_status(&order.id, OrderPaymentStatus::Refunded)
+                .await;
+        }
+        let _ = self.inventory.release_checkout(&checkout.id).await;
+        if let Err(error) = self
+            .payment
+            .refund(
+                payment.id.as_str(),
+                payment.amount,
+                Some("checkout compensation".to_owned()),
+            )
+            .await
+        {
+            tracing::error!(
+                payment_id = %payment.id,
+                error = %error,
+                "checkout compensation refund failed; manual reconciliation is required"
+            );
+        }
     }
 
     async fn record_promotion_usage(&self, cart: &fastcart_module_cart::Cart, order: &Order) {

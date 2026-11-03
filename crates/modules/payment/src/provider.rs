@@ -74,6 +74,8 @@ pub struct CaptureRequest {
     pub amount: i64,
     /// ISO-style currency code.
     pub currency_code: String,
+    /// Optional key used by the provider to deduplicate retries.
+    pub idempotency_key: Option<String>,
     /// Provider-independent extension metadata.
     pub metadata: Metadata,
 }
@@ -455,6 +457,7 @@ mod tests {
                 provider_session_id: "manual_session".to_owned(),
                 amount: 1500,
                 currency_code: "USD".to_owned(),
+                idempotency_key: None,
                 metadata: Metadata::empty(),
             })
             .await
