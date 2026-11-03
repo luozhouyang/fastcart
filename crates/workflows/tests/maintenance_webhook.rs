@@ -7,8 +7,11 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::serve;
+use fastcart_email::{
+    EmailMessage, EmailProviderRegistry, EmailService, MemoryEmailProvider, SendEmailJob,
+};
 use fastcart_infrastructure::{
-    DatabaseOptions, EventBus, StoreDatabaseManager, append_outbox_event,
+    DatabaseOptions, EventBus, JobQueue, NewJob, StoreDatabaseManager, append_outbox_event,
 };
 use fastcart_kernel::DomainEventEnvelope;
 use fastcart_module_webhook::{CreateWebhookEndpointInput, WebhookService};
@@ -90,10 +93,27 @@ async fn maintenance_dispatches_outbox_events_to_webhooks() {
     );
     append_outbox_event(database.pool(), &event).await.unwrap();
 
-    let report = run_maintenance(&platform, &databases, &EventBus::new(8)).await;
+    let message = EmailMessage::new("buyer@example.com", "Order confirmed")
+        .with_text("Your order is on its way.");
+    JobQueue::new(database.pool().clone())
+        .enqueue(NewJob::new(
+            SendEmailJob::JOB_TYPE,
+            serde_json::to_value(SendEmailJob::from_message(&message)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let provider = Arc::new(MemoryEmailProvider::new("memory"));
+    let registry = EmailProviderRegistry::new();
+    registry.register(provider.clone()).unwrap();
+    let email = EmailService::new(registry);
+
+    let report = run_maintenance(&platform, &databases, &EventBus::new(8), &email).await;
     assert_eq!(report.outbox_dispatched, 1);
     assert_eq!(report.webhooks_delivered, 1);
     assert_eq!(report.webhooks_failed, 0);
+    assert_eq!(report.jobs_processed, 1);
+    assert_eq!(provider.sent_count(), 1);
+    assert_eq!(provider.messages()[0].subject, "Order confirmed");
 
     let captured = mock.captured.lock().unwrap().clone();
     assert_eq!(captured.len(), 1);

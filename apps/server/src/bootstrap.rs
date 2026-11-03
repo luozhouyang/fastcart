@@ -36,6 +36,11 @@ pub async fn run(config: Config) -> Result<()> {
         .context("server failed")?;
 
     maintenance.abort();
+    if let Some(runtime) = &state.storefront_runtime
+        && let Err(error) = runtime.shutdown().await
+    {
+        tracing::warn!(error = %error, "storefront runtime shutdown failed");
+    }
     state.databases.close_all().await;
     tracing::info!("fastcart server stopped");
     Ok(())

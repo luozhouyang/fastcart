@@ -1,5 +1,6 @@
 //! Periodic maintenance over active store databases.
 
+use fastcart_email::EmailService;
 use fastcart_infrastructure::{
     EventBus, JobQueue, StoreDatabaseManager, fetch_pending_outbox, mark_outbox_failed,
     mark_outbox_processed,
@@ -42,6 +43,7 @@ pub async fn run_maintenance(
     platform: &PlatformStore,
     databases: &StoreDatabaseManager,
     events: &EventBus,
+    email: &EmailService,
 ) -> MaintenanceReport {
     let mut report = MaintenanceReport::default();
     let now = now_timestamp();
@@ -112,6 +114,16 @@ pub async fn run_maintenance(
                                 .await
                                 .map(|_| ()),
                             "dispatch_outbox" => Ok(()),
+                            "send_email" => match serde_json::from_str(&job.payload) {
+                                Ok(payload) => email
+                                    .process_job(&payload)
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(fastcart_kernel::AppError::from),
+                                Err(error) => Err(fastcart_kernel::AppError::validation(format!(
+                                    "invalid send_email payload: {error}"
+                                ))),
+                            },
                             other => Err(fastcart_kernel::AppError::validation(format!(
                                 "no handler for job type {other}"
                             ))),

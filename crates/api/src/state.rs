@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fastcart_email::EmailService;
 use fastcart_http::{Metrics, RateLimiter};
 use fastcart_infrastructure::{EventBus, StoreCache, StoreDatabaseManager};
 use fastcart_module_payment::{ManualProvider, ProviderRegistry};
 use fastcart_platform::{AuthService, PlatformStore, StoreProvisioningService, StoreResolver};
+use fastcart_runtime_api::StorefrontRuntime;
 
 /// HTTP-facing configuration.
 #[derive(Clone, Debug)]
@@ -26,6 +28,13 @@ pub struct ApiConfig {
     pub backup_dir: PathBuf,
     /// Shared secret used to verify sandbox/manual payment webhooks.
     pub manual_payment_secret: Option<String>,
+    /// Timeout applied to storefront SSR render requests in milliseconds.
+    pub storefront_timeout_ms: u64,
+    /// Optional shared secret required by the internal storefront HTTP surface.
+    ///
+    /// When absent, internal routes are not mounted over HTTP; the in-process
+    /// bridge remains the only way to reach them.
+    pub internal_fetch_secret: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -38,6 +47,8 @@ impl Default for ApiConfig {
             max_body_bytes: 2 * 1024 * 1024,
             backup_dir: PathBuf::from("./data/backups"),
             manual_payment_secret: None,
+            storefront_timeout_ms: 10_000,
+            internal_fetch_secret: None,
         }
     }
 }
@@ -66,6 +77,10 @@ pub struct AppContext {
     pub payment_providers: ProviderRegistry,
     /// HTTP request metrics.
     pub metrics: Arc<Metrics>,
+    /// Optional storefront SSR runtime shared by all stores.
+    pub storefront_runtime: Option<Arc<dyn StorefrontRuntime>>,
+    /// Provider-independent transactional email delivery.
+    pub email: EmailService,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -106,6 +121,15 @@ impl AppContext {
             login_limiter: RateLimiter::new(10, Duration::from_secs(5 * 60)),
             payment_providers,
             metrics: Arc::new(Metrics::new()),
+            storefront_runtime: None,
+            email: EmailService::with_default_registry(),
         }
+    }
+
+    /// Installs the process-wide storefront runtime, if SSR is configured.
+    #[must_use]
+    pub fn with_storefront_runtime(mut self, runtime: Option<Arc<dyn StorefrontRuntime>>) -> Self {
+        self.storefront_runtime = runtime;
+        self
     }
 }

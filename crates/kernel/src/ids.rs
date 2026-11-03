@@ -130,6 +130,12 @@ define_id!(
 );
 define_id!(PageId, "page", "Identifier of a content page.");
 define_id!(NavigationId, "nav", "Identifier of a navigation menu.");
+define_id!(ThemeId, "theme", "Identifier of a storefront theme.");
+define_id!(
+    ThemeActivationId,
+    "thact",
+    "Identifier of a theme activation."
+);
 define_id!(SessionId, "sess", "Identifier of an admin session.");
 define_id!(ApiTokenId, "token", "Identifier of an API token.");
 define_id!(JobId, "job", "Identifier of a background job.");

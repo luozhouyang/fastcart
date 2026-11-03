@@ -1,0 +1,365 @@
+//! End-to-end theme registry HTTP flow: register, activate, roll back and delete.
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use fastcart_api::{ApiConfig, AppContext, build_router};
+use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
+use fastcart_platform::PlatformStore;
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+struct Fixture {
+    app: Router,
+    _dir: tempfile::TempDir,
+}
+
+async fn fixture() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let platform = PlatformStore::in_memory().await.unwrap();
+    let databases = Arc::new(StoreDatabaseManager::new(
+        dir.path().join("stores"),
+        DatabaseOptions::default().with_max_connections(2),
+    ));
+    let config = ApiConfig {
+        cookie_secure: false,
+        backup_dir: dir.path().join("backups"),
+        ..ApiConfig::default()
+    };
+    let context = Arc::new(AppContext::new(
+        config,
+        platform,
+        databases,
+        StoreCache::default_capacity(),
+    ));
+    Fixture {
+        app: build_router(context),
+        _dir: dir,
+    }
+}
+
+async fn request(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let body = match body {
+        Some(value) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(value.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+fn cookie_value(cookies: &[String], name: &str) -> Option<String> {
+    cookies.iter().find_map(|cookie| {
+        let (cookie_name, rest) = cookie.split_once('=')?;
+        (cookie_name.trim() == name).then(|| rest.split(';').next().unwrap_or("").to_owned())
+    })
+}
+
+fn theme_body(id: &str) -> Value {
+    json!({
+        "manifest": {
+            "id": id,
+            "name": format!("Theme {id}"),
+            "version": "1.0.0",
+            "runtime": "v8",
+            "entry": "dist/server.js",
+            "settings_schema": "settings.schema.json",
+            "assets_manifest": "assets.json"
+        },
+        "bundle_path": format!("themes/{id}"),
+        "settings_schema": {
+            "type": "object",
+            "properties": { "logo": { "type": "string" } },
+            "required": ["logo"]
+        },
+        "settings": { "logo": "/logo.svg" }
+    })
+}
+
+#[tokio::test]
+async fn theme_registry_admin_and_storefront_flow() {
+    let fixture = fixture().await;
+    let app = fixture.app;
+
+    // Bootstrap an administrator and a store.
+    let setup = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/platform/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": "owner@example.com",
+                        "password": "admin-pass-123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(setup.status(), StatusCode::OK);
+    let cookies: Vec<String> = setup
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_owned))
+        .collect();
+    let session = cookie_value(&cookies, "fc_admin_session").unwrap();
+    let csrf = cookie_value(&cookies, "fc_csrf").unwrap();
+    let admin_auth = format!("fc_admin_session={session}; fc_csrf={csrf}");
+    let admin_headers = [
+        ("cookie", admin_auth.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+    ];
+
+    let (status, store) = request(
+        &app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(json!({
+            "name": "Demo",
+            "slug": "demo",
+            "primary_domain": "shop.example.com"
+        })),
+        &admin_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{store}");
+    let store_id = store["id"].as_str().unwrap().to_owned();
+    let store_headers = [
+        ("cookie", admin_auth.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+        ("x-store-id", store_id.as_str()),
+    ];
+    let host = [("host", "shop.example.com")];
+
+    // Registering a theme returns 201 and never reveals internal rows.
+    let (status, first) = request(
+        &app,
+        "POST",
+        "/api/v1/admin/themes",
+        Some(theme_body("default")),
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["manifest"]["id"], "default");
+    assert_eq!(first["bundle_path"], "themes/default");
+    assert_eq!(first["settings"]["logo"], "/logo.svg");
+    assert_eq!(first["is_active"], false);
+    let first_id = first["id"].as_str().unwrap().to_owned();
+
+    // Duplicate manifest identifiers conflict.
+    let (status, duplicate) = request(
+        &app,
+        "POST",
+        "/api/v1/admin/themes",
+        Some(theme_body("default")),
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+
+    // Invalid manifests and settings are rejected.
+    let mut invalid = theme_body("invalid");
+    invalid["manifest"]["id"] = json!("Bad Theme");
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/admin/themes",
+        Some(invalid),
+        &store_headers,
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    let mut invalid_settings = theme_body("invalid-settings");
+    invalid_settings["settings"] = json!({});
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/admin/themes",
+        Some(invalid_settings),
+        &store_headers,
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    // Administrative reads.
+    let (status, listed) = request(&app, "GET", "/api/v1/admin/themes", None, &store_headers).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["pagination"]["total"], 1);
+
+    let (status, fetched) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/admin/themes/{first_id}"),
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["id"], first_id);
+
+    // No active theme yet.
+    let (status, _) = request(
+        &app,
+        "GET",
+        "/api/v1/admin/themes/active",
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = request(&app, "GET", "/api/v1/store/theme", None, &host).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Activate the first theme and expose it publicly.
+    let (status, active) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/admin/themes/{first_id}/activate"),
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{active}");
+    assert_eq!(active["is_active"], true);
+
+    let (status, public) = request(&app, "GET", "/api/v1/store/theme", None, &host).await;
+    assert_eq!(status, StatusCode::OK, "{public}");
+    assert_eq!(public["manifest"]["id"], "default");
+    assert_eq!(public["bundle_path"], "themes/default");
+    assert_eq!(public["settings"]["logo"], "/logo.svg");
+    assert!(public.get("settings_schema").is_none());
+
+    let (status, admin_active) = request(
+        &app,
+        "GET",
+        "/api/v1/admin/themes/active",
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{admin_active}");
+    assert_eq!(admin_active["id"], first_id);
+
+    // Register and activate a second theme, then roll back to the first.
+    let (status, second) = request(
+        &app,
+        "POST",
+        "/api/v1/admin/themes",
+        Some(theme_body("alternate")),
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    let second_id = second["id"].as_str().unwrap().to_owned();
+
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/admin/themes/{second_id}/activate"),
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, public) = request(&app, "GET", "/api/v1/store/theme", None, &host).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(public["manifest"]["id"], "alternate");
+
+    let (status, rolled_back) = request(
+        &app,
+        "POST",
+        "/api/v1/admin/themes/rollback",
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rolled_back}");
+    assert_eq!(rolled_back["id"], first_id);
+    assert_eq!(rolled_back["is_active"], true);
+
+    // Settings are schema-validated.
+    let (status, _) = request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/admin/themes/{first_id}/settings"),
+        Some(json!({ "settings": { "brand_color": "#000" } })),
+        &store_headers,
+    )
+    .await;
+    assert!(status.is_client_error());
+
+    let (status, updated) = request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/admin/themes/{first_id}/settings"),
+        Some(json!({ "settings": { "logo": "/new-logo.svg" } })),
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["settings"]["logo"], "/new-logo.svg");
+
+    // The active theme cannot be deleted; inactive themes can.
+    let (status, _) = request(
+        &app,
+        "DELETE",
+        &format!("/api/v1/admin/themes/{first_id}"),
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _) = request(
+        &app,
+        "DELETE",
+        &format!("/api/v1/admin/themes/{second_id}"),
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = request(
+        &app,
+        "GET",
+        "/api/v1/admin/themes/theme_missing",
+        None,
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

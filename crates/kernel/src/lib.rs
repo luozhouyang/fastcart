@@ -19,7 +19,8 @@ pub use ids::{
     JobId, LineItemId, NavigationId, OptionId, OptionValueId, OrderId, PageId, PaymentAttemptId,
     PaymentId, PaymentSessionId, PriceId, PriceListId, ProductId, PromotionId, RefundId,
     ReservationId, SessionId, ShippingOptionId, ShippingProfileId, StoreId, TagId, TaxCategoryId,
-    TaxRateId, TaxRegionId, UserId, VariantId, WebhookDeliveryId, WebhookId,
+    TaxRateId, TaxRegionId, ThemeActivationId, ThemeId, UserId, VariantId, WebhookDeliveryId,
+    WebhookId,
 };
 pub use money::{CurrencyCode, Money, Rounding};
 pub use types::{

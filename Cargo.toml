@@ -32,6 +32,8 @@ members = [
     "crates/modules/tax",
     "crates/modules/content",
     "crates/modules/webhook",
+    "crates/modules/theme",
+    "crates/email",
 ]
 
 [workspace.package]
@@ -89,7 +91,9 @@ fastcart-module-promotion = { path = "crates/modules/promotion" }
 fastcart-module-shipping = { path = "crates/modules/shipping" }
 fastcart-module-store = { path = "crates/modules/store" }
 fastcart-module-tax = { path = "crates/modules/tax" }
+fastcart-module-theme = { path = "crates/modules/theme" }
 fastcart-module-webhook = { path = "crates/modules/webhook" }
+fastcart-email = { path = "crates/email" }
 fastcart-platform = { path = "crates/platform" }
 fastcart-plugin = { path = "crates/plugin" }
 fastcart-runtime-api = { path = "crates/storefront-runtime/runtime-api" }

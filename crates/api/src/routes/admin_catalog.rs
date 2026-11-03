@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use fastcart_http::extractors::ApiQuery;
@@ -29,7 +29,7 @@ use fastcart_module_store::{
 };
 use serde::Deserialize;
 
-use super::StoreDb;
+use super::{StoreDb, record_store_audit};
 use crate::dto::PageResponse;
 use crate::state::AppContext;
 
@@ -530,6 +530,7 @@ async fn update_product(
 }
 
 async fn delete_product(
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -539,6 +540,15 @@ async fn delete_product(
     CatalogService::new(db)
         .delete_product(product_id.as_str())
         .await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "product.deleted",
+        "product",
+        product_id.as_str(),
+        serde_json::Value::Null,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -556,6 +566,7 @@ async fn publish_product(
 }
 
 async fn archive_product(
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -565,6 +576,15 @@ async fn archive_product(
     let product = CatalogService::new(db)
         .archive_product(product_id.as_str())
         .await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "product.archived",
+        "product",
+        product_id.as_str(),
+        serde_json::Value::Null,
+    )
+    .await;
     Ok(Json(product))
 }
 

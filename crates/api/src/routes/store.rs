@@ -33,6 +33,7 @@ fn scoped(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         .merge(super::store_customer::router())
         .merge(super::store_content::router())
         .merge(super::store_inventory::router())
+        .merge(super::store_theme::router())
         .fallback(not_implemented)
         .layer(middleware::from_fn(customer_auth_middleware))
         .layer(middleware::from_fn_with_state(

@@ -41,6 +41,7 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         .merge(super::admin_promotions::router())
         .merge(super::admin_shipping::router())
         .merge(super::admin_tax::router())
+        .merge(super::admin_theme::router())
         .merge(super::admin_webhooks::router())
         .fallback(not_implemented)
         .layer(middleware::from_fn_with_state(

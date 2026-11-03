@@ -138,6 +138,12 @@ pub struct StorefrontConfig {
     pub queue_capacity: usize,
     /// SSR request timeout in milliseconds.
     pub request_timeout_ms: u64,
+    /// Base URL of the Node.js sidecar, used when `runtime = "node"`.
+    pub node_url: Option<String>,
+    /// Optional bearer secret for sidecar requests.
+    pub node_secret: Option<String>,
+    /// Optional shared secret enabling the internal storefront HTTP surface.
+    pub internal_fetch_secret: Option<String>,
 }
 
 impl Default for StorefrontConfig {
@@ -148,6 +154,9 @@ impl Default for StorefrontConfig {
             worker_count: 2,
             queue_capacity: 128,
             request_timeout_ms: 10_000,
+            node_url: None,
+            node_secret: None,
+            internal_fetch_secret: None,
         }
     }
 }
@@ -220,6 +229,23 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_PAYMENT_WEBHOOK_SECRET") {
             self.payments.webhook_secret = Some(value);
         }
+        if let Ok(value) = env::var("FASTCART_STOREFRONT_ENABLED") {
+            self.storefront.enabled = value
+                .parse()
+                .context("FASTCART_STOREFRONT_ENABLED must be true or false")?;
+        }
+        if let Ok(value) = env::var("FASTCART_STOREFRONT_RUNTIME") {
+            self.storefront.runtime = value;
+        }
+        if let Ok(value) = env::var("FASTCART_STOREFRONT_NODE_URL") {
+            self.storefront.node_url = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_STOREFRONT_NODE_SECRET") {
+            self.storefront.node_secret = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_INTERNAL_FETCH_SECRET") {
+            self.storefront.internal_fetch_secret = Some(value);
+        }
         Ok(())
     }
 
@@ -233,6 +259,19 @@ impl Config {
         }
         if self.storefront.request_timeout_ms == 0 {
             bail!("storefront.request_timeout_ms must be greater than zero");
+        }
+        if !matches!(self.storefront.runtime.as_str(), "v8" | "node") {
+            bail!("storefront.runtime must be either \"v8\" or \"node\"");
+        }
+        if self.storefront.enabled
+            && self.storefront.runtime == "node"
+            && self
+                .storefront
+                .node_url
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            bail!("storefront.node_url is required when the node runtime is enabled");
         }
         if self.jobs.enabled && self.jobs.worker_count == 0 {
             bail!("jobs.worker_count must be greater than zero when jobs are enabled");

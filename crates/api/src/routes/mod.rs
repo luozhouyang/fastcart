@@ -11,6 +11,7 @@ pub mod admin_pricing;
 pub mod admin_promotions;
 pub mod admin_shipping;
 pub mod admin_tax;
+pub mod admin_theme;
 pub mod admin_webhooks;
 pub mod auth;
 pub mod health;
@@ -21,6 +22,8 @@ pub mod store_catalog;
 pub mod store_content;
 pub mod store_customer;
 pub mod store_inventory;
+pub mod store_theme;
+pub mod storefront;
 pub mod webhooks;
 
 use std::collections::BTreeSet;
@@ -37,9 +40,56 @@ use fastcart_infrastructure::{StoreDatabase, StoreDatabaseManager};
 use fastcart_kernel::{ActorContext, AppError, StoreContext, StoreId};
 use fastcart_module_cart::Cart;
 use fastcart_module_customer::CustomerService;
-use fastcart_platform::{MembershipStatus, PlatformStore};
+use fastcart_platform::{MembershipStatus, NewAudit, PlatformStore};
+use subtle::ConstantTimeEq;
 
 use crate::state::AppContext;
+
+/// Appends an auditable store-scoped admin action.
+///
+/// Auditing is best-effort: a logging failure must not fail the business
+/// operation that already completed.
+pub async fn record_store_audit(
+    context: &AppContext,
+    actor: &ActorContext,
+    action: &str,
+    resource_type: &str,
+    resource_id: &str,
+    data: serde_json::Value,
+) {
+    let entry = NewAudit {
+        actor_id: actor.user_id.as_ref().map(ToString::to_string),
+        store_id: actor.store_id.as_ref().map(ToString::to_string),
+        action: action.to_owned(),
+        resource_type: Some(resource_type.to_owned()),
+        resource_id: Some(resource_id.to_owned()),
+        data,
+        ip_address: None,
+    };
+    if let Err(error) = context.platform.record_audit(entry).await {
+        tracing::warn!(error = %error, action, "failed to write store audit log");
+    }
+}
+
+/// Requires the configured secret on the internal storefront HTTP surface.
+///
+/// The in-process bridge does not need this middleware; it exists only for a
+/// trusted sidecar that must call commerce services over loopback HTTP.
+pub async fn internal_fetch_auth_middleware(
+    State(expected): State<String>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let provided = request
+        .headers()
+        .get("x-fastcart-internal-secret")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !bool::from(provided.as_bytes().ct_eq(expected.as_bytes())) {
+        return Err(ApiError::new(AppError::Forbidden));
+    }
+    Ok(next.run(request).await)
+}
 
 /// State for the store database middleware.
 #[derive(Clone)]

@@ -15,6 +15,7 @@ pub async fn maintenance_loop(context: Arc<AppContext>) {
             &context.platform,
             &context.databases,
             &context.events,
+            &context.email,
         )
         .await;
         if report != fastcart_workflows::MaintenanceReport::default() {

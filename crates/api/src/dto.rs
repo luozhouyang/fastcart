@@ -5,8 +5,11 @@
 //! leaking.
 
 use fastcart_kernel::{PageResult, Pagination};
+use fastcart_module_theme::Theme;
 use fastcart_platform::{Membership, Store, StoreDomain, User};
+use fastcart_storefront::ThemeManifest;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Pagination metadata in the public contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,4 +398,64 @@ pub struct CreatedApiTokenResponse {
     pub token: String,
     /// Persisted metadata.
     pub record: ApiTokenDto,
+}
+
+/// A registered storefront theme as exposed to administrators.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ThemeDto {
+    /// Theme identifier.
+    pub id: String,
+    /// Parsed theme manifest.
+    pub manifest: ThemeManifest,
+    /// Bundle-relative asset root.
+    pub bundle_path: String,
+    /// JSON Schema used to validate settings.
+    pub settings_schema: Option<Value>,
+    /// Current theme settings.
+    pub settings: Value,
+    /// Whether this is the active theme.
+    pub is_active: bool,
+    /// Creation timestamp.
+    pub created_at: i64,
+    /// Last update timestamp.
+    pub updated_at: i64,
+}
+
+impl From<Theme> for ThemeDto {
+    fn from(theme: Theme) -> Self {
+        Self {
+            id: theme.id.to_string(),
+            manifest: theme.manifest,
+            bundle_path: theme.bundle_path,
+            settings_schema: theme.settings_schema,
+            settings: theme.settings,
+            is_active: theme.is_active,
+            created_at: theme.created_at,
+            updated_at: theme.updated_at,
+        }
+    }
+}
+
+/// The active storefront theme exposed to public storefronts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoreThemeDto {
+    /// Theme identifier.
+    pub id: String,
+    /// Parsed theme manifest.
+    pub manifest: ThemeManifest,
+    /// Bundle-relative asset root.
+    pub bundle_path: String,
+    /// Current theme settings.
+    pub settings: Value,
+}
+
+impl From<Theme> for StoreThemeDto {
+    fn from(theme: Theme) -> Self {
+        Self {
+            id: theme.id.to_string(),
+            manifest: theme.manifest,
+            bundle_path: theme.bundle_path,
+            settings: theme.settings,
+        }
+    }
 }

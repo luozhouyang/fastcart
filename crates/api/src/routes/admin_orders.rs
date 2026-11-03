@@ -9,17 +9,16 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiQuery, ApiResult, PaginationQuery};
-use fastcart_kernel::{ActorContext, AppError, CustomerId, OrderId, PaymentId};
+use fastcart_kernel::{AppError, CustomerId, OrderId, PaymentId};
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::{
     FulfillmentInput, Order, OrderFilter, OrderRefund, OrderService, OrderStatus,
     OrderStatusHistory, PaymentStatus, RefundInput,
 };
 use fastcart_module_payment::PaymentService;
-use fastcart_platform::NewAudit;
 use serde::Deserialize;
 
-use super::StoreDb;
+use super::{StoreDb, record_store_audit};
 use crate::dto::PageResponse;
 use crate::state::AppContext;
 
@@ -216,10 +215,11 @@ async fn cancel_order(
     // idempotent, so an interrupted cancellation can be retried safely.
     InventoryService::new(db).restock_order(&id).await?;
     let order = orders.cancel(&id, reason.as_deref()).await?;
-    record_audit(
+    record_store_audit(
         &context,
         &actor,
         "order.canceled",
+        "order",
         order.id.as_str(),
         serde_json::json!({"reason": reason}),
     )
@@ -281,10 +281,11 @@ async fn create_refund(
         .add_refund(&id, map_refund_input(request))
         .await?;
     payments.refund(payment_id.as_str(), amount, reason).await?;
-    record_audit(
+    record_store_audit(
         &context,
         &actor,
         "order.refunded",
+        "order",
         order.id.as_str(),
         serde_json::json!({
             "payment_id": payment_id,
@@ -294,27 +295,6 @@ async fn create_refund(
     )
     .await;
     Ok(Json(order))
-}
-
-async fn record_audit(
-    context: &AppContext,
-    actor: &ActorContext,
-    action: &str,
-    resource_id: &str,
-    data: serde_json::Value,
-) {
-    let entry = NewAudit {
-        actor_id: actor.user_id.as_ref().map(ToString::to_string),
-        store_id: actor.store_id.as_ref().map(ToString::to_string),
-        action: action.to_owned(),
-        resource_type: Some("order".to_owned()),
-        resource_id: Some(resource_id.to_owned()),
-        data,
-        ip_address: None,
-    };
-    if let Err(error) = context.platform.record_audit(entry).await {
-        tracing::warn!(error = %error, "failed to write order audit log");
-    }
 }
 
 async fn list_refunds(
