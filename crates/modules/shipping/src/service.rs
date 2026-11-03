@@ -10,8 +10,9 @@ use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
 use crate::domain::{
-    CreateShippingOptionInput, CreateShippingProfileInput, CreateShippingRateInput,
-    ResolvedShippingOption, SelectedShippingRate, ShippingOption, ShippingProfile, ShippingRate,
+    CreateFulfillmentSetInput, CreateShippingOptionInput, CreateShippingProfileInput,
+    CreateShippingRateInput, FulfillmentSet, ResolvedShippingOption, SelectedShippingRate,
+    ShippingOption, ShippingProfile, ShippingRate, UpdateFulfillmentSetInput,
     UpdateShippingOptionInput, UpdateShippingProfileInput, UpdateShippingRateInput,
     normalize_province, rate_specificity, validate_amount, validate_shipping_name,
     validate_subtotal_range,
@@ -62,10 +63,31 @@ fn row_to_option(row: &SqliteRow) -> Result<ShippingOption, AppError> {
         price_type: row.try_get("price_type").map_err(database_error)?,
         amount_minor: row.try_get("amount").map_err(database_error)?,
         currency: currency_from_row(row)?,
+        provider_id: row.try_get("provider_id").map_err(database_error)?,
+        provider_data: serde_json::from_str(
+            &row.try_get::<String, _>("provider_data")
+                .map_err(database_error)?,
+        )
+        .map_err(|error| AppError::internal(format!("invalid provider_data: {error}")))?,
+        fulfillment_set_id: row.try_get("fulfillment_set_id").map_err(database_error)?,
         is_enabled: row
             .try_get::<i64, _>("is_enabled")
             .map_err(database_error)?
             != 0,
+        metadata: Metadata::from_json_str(
+            &row.try_get::<String, _>("metadata")
+                .map_err(database_error)?,
+        ),
+        created_at: row.try_get("created_at").map_err(database_error)?,
+        updated_at: row.try_get("updated_at").map_err(database_error)?,
+    })
+}
+
+fn row_to_fulfillment_set(row: &SqliteRow) -> Result<FulfillmentSet, AppError> {
+    Ok(FulfillmentSet {
+        id: row.try_get("id").map_err(database_error)?,
+        name: row.try_get("name").map_err(database_error)?,
+        set_type: row.try_get("set_type").map_err(database_error)?,
         metadata: Metadata::from_json_str(
             &row.try_get::<String, _>("metadata")
                 .map_err(database_error)?,
@@ -103,7 +125,8 @@ fn row_to_rate(row: &SqliteRow) -> Result<ShippingRate, AppError> {
 
 const PROFILE_COLUMNS: &str = "id, name, type AS profile_type, metadata, created_at, updated_at";
 const OPTION_COLUMNS: &str = "id, profile_id, name, price_type, amount, currency_code, \
-     is_enabled, metadata, created_at, updated_at";
+     provider_id, provider_data, fulfillment_set_id, is_enabled, metadata, created_at, \
+     updated_at";
 const RATE_COLUMNS: &str = "id, shipping_option_id, country_code, province_code, amount, \
      currency_code, min_subtotal, max_subtotal, metadata, created_at";
 
@@ -119,6 +142,22 @@ async fn ensure_profile_in_tx(
             .map_err(database_error)?;
     if existing.is_none() {
         return Err(AppError::not_found("shipping profile", id));
+    }
+    Ok(())
+}
+
+async fn ensure_fulfillment_set_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<(), AppError> {
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM fulfillment_sets WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    if existing.is_none() {
+        return Err(AppError::not_found("fulfillment set", id));
     }
     Ok(())
 }
@@ -258,6 +297,118 @@ impl ShippingService {
         Ok(())
     }
 
+    // Fulfillment sets
+
+    /// Creates a fulfillment set.
+    pub async fn create_fulfillment_set(
+        &self,
+        input: CreateFulfillmentSetInput,
+    ) -> Result<FulfillmentSet, AppError> {
+        validate_shipping_name(&input.name, "name")?;
+        let set_type = input.set_type.unwrap_or_else(|| "shipping".to_owned());
+        validate_length(&set_type, "type", 64)?;
+        validate_metadata_option(input.metadata.as_ref())?;
+        let id = format!("fset_{}", Uuid::now_v7().simple());
+        let now = now_timestamp();
+        sqlx::query(
+            "INSERT INTO fulfillment_sets (id, name, type, metadata, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(input.name.trim())
+        .bind(set_type.trim())
+        .bind(metadata_string(input.metadata))
+        .bind(now)
+        .bind(now)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        self.get_fulfillment_set(&id).await
+    }
+
+    /// Loads a fulfillment set.
+    pub async fn get_fulfillment_set(&self, id: &str) -> Result<FulfillmentSet, AppError> {
+        let row = sqlx::query(
+            "SELECT id, name, type AS set_type, metadata, created_at, updated_at
+             FROM fulfillment_sets WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("fulfillment set", id))?;
+        row_to_fulfillment_set(&row)
+    }
+
+    /// Lists fulfillment sets ordered by name.
+    pub async fn list_fulfillment_sets(
+        &self,
+        pagination: Pagination,
+    ) -> Result<PageResult<FulfillmentSet>, AppError> {
+        let pagination = Pagination::new(Some(pagination.limit), Some(pagination.offset))?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fulfillment_sets")
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let rows = sqlx::query(
+            "SELECT id, name, type AS set_type, metadata, created_at, updated_at
+             FROM fulfillment_sets ORDER BY name, id LIMIT ? OFFSET ?",
+        )
+        .bind(pagination.limit)
+        .bind(pagination.offset)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let sets = rows
+            .iter()
+            .map(row_to_fulfillment_set)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PageResult::new(sets, count, pagination))
+    }
+
+    /// Partially updates a fulfillment set.
+    pub async fn update_fulfillment_set(
+        &self,
+        id: &str,
+        input: UpdateFulfillmentSetInput,
+    ) -> Result<FulfillmentSet, AppError> {
+        let existing = self.get_fulfillment_set(id).await?;
+        let name = input.name.unwrap_or(existing.name);
+        validate_shipping_name(&name, "name")?;
+        let set_type = input.set_type.unwrap_or(existing.set_type);
+        validate_length(&set_type, "type", 64)?;
+        validate_metadata_option(input.metadata.as_ref())?;
+        let metadata = input.metadata.unwrap_or(existing.metadata);
+        sqlx::query(
+            "UPDATE fulfillment_sets SET name = ?, type = ?, metadata = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(name.trim())
+        .bind(set_type.trim())
+        .bind(metadata.to_json_string())
+        .bind(now_timestamp())
+        .bind(id)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        self.get_fulfillment_set(id).await
+    }
+
+    /// Deletes a fulfillment set; options referencing it keep existing but lose
+    /// their set association.
+    pub async fn delete_fulfillment_set(&self, id: &str) -> Result<(), AppError> {
+        let affected = sqlx::query("DELETE FROM fulfillment_sets WHERE id = ?")
+            .bind(id)
+            .execute(self.db.pool())
+            .await
+            .map_err(database_error)?
+            .rows_affected();
+        if affected == 0 {
+            return Err(AppError::not_found("fulfillment set", id));
+        }
+        Ok(())
+    }
+
     // Options
 
     /// Creates a flat-price shipping option inside a profile.
@@ -268,21 +419,35 @@ impl ShippingService {
         validate_shipping_name(&input.name, "name")?;
         validate_amount(input.amount_minor)?;
         validate_metadata_option(input.metadata.as_ref())?;
+        let provider_id = input.provider_id.unwrap_or_else(|| "manual".to_owned());
+        validate_length(provider_id.trim(), "provider_id", 64)?;
+        let provider_data = input
+            .provider_data
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !provider_data.is_object() {
+            return Err(AppError::validation("provider_data must be a JSON object"));
+        }
         let mut tx = self.db.begin().await?;
         ensure_profile_in_tx(&mut tx, &input.profile_id).await?;
+        if let Some(set_id) = input.fulfillment_set_id.as_deref() {
+            ensure_fulfillment_set_in_tx(&mut tx, set_id).await?;
+        }
         let now = now_timestamp();
         let id = ShippingOptionId::new();
         sqlx::query(
             "INSERT INTO shipping_options \
-             (id, profile_id, name, price_type, amount, currency_code, is_enabled, metadata, \
-              created_at, updated_at) \
-             VALUES (?, ?, ?, 'flat', ?, ?, ?, ?, ?, ?)",
+             (id, profile_id, name, price_type, amount, currency_code, provider_id, \
+              provider_data, fulfillment_set_id, is_enabled, metadata, created_at, updated_at) \
+             VALUES (?, ?, ?, 'flat', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.as_str())
         .bind(input.profile_id.as_str())
         .bind(input.name.trim())
         .bind(input.amount_minor)
         .bind(input.currency.as_str())
+        .bind(provider_id.trim())
+        .bind(provider_data.to_string())
+        .bind(input.fulfillment_set_id.as_deref())
         .bind(i64::from(input.is_enabled.unwrap_or(true)))
         .bind(metadata_string(input.metadata))
         .bind(now)
@@ -382,16 +547,40 @@ impl ShippingService {
         let amount_minor = input.amount_minor.unwrap_or(existing.amount_minor);
         validate_amount(amount_minor)?;
         let currency = input.currency.unwrap_or(existing.currency);
+        let provider_id = input.provider_id.unwrap_or(existing.provider_id);
+        validate_length(provider_id.trim(), "provider_id", 64)?;
+        let provider_data = input.provider_data.unwrap_or(existing.provider_data);
+        if !provider_data.is_object() {
+            return Err(AppError::validation("provider_data must be a JSON object"));
+        }
+        let fulfillment_set_id = input
+            .fulfillment_set_id
+            .unwrap_or(existing.fulfillment_set_id);
+        if let Some(set_id) = fulfillment_set_id.as_deref() {
+            let exists: Option<String> =
+                sqlx::query_scalar("SELECT id FROM fulfillment_sets WHERE id = ?")
+                    .bind(set_id)
+                    .fetch_optional(self.db.pool())
+                    .await
+                    .map_err(database_error)?;
+            if exists.is_none() {
+                return Err(AppError::not_found("fulfillment set", set_id));
+            }
+        }
         let is_enabled = input.is_enabled.unwrap_or(existing.is_enabled);
         validate_metadata_option(input.metadata.as_ref())?;
         let metadata = input.metadata.unwrap_or(existing.metadata);
         sqlx::query(
             "UPDATE shipping_options SET name = ?, amount = ?, currency_code = ?, \
-             is_enabled = ?, metadata = ?, updated_at = ? WHERE id = ?",
+             provider_id = ?, provider_data = ?, fulfillment_set_id = ?, is_enabled = ?, \
+             metadata = ?, updated_at = ? WHERE id = ?",
         )
         .bind(name)
         .bind(amount_minor)
         .bind(currency.as_str())
+        .bind(provider_id.trim())
+        .bind(provider_data.to_string())
+        .bind(fulfillment_set_id.as_deref())
         .bind(i64::from(is_enabled))
         .bind(metadata.to_json_string())
         .bind(now_timestamp())

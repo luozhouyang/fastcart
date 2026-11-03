@@ -225,6 +225,9 @@ async fn storefront_cart_checkout_and_order_flow() {
             name: "Standard".to_owned(),
             amount_minor: 0,
             currency: currency.clone(),
+            provider_id: None,
+            provider_data: None,
+            fulfillment_set_id: None,
             is_enabled: Some(true),
             metadata: None,
         })

@@ -149,6 +149,9 @@ async fn complete_checkout_flow_is_consistent_and_idempotent() {
             name: "Standard shipping".to_owned(),
             amount_minor: 500,
             currency: currency.clone(),
+            provider_id: None,
+            provider_data: None,
+            fulfillment_set_id: None,
             is_enabled: Some(true),
             metadata: None,
         })
@@ -351,6 +354,9 @@ async fn checkout_requires_stock_availability() {
             name: "Standard".to_owned(),
             amount_minor: 0,
             currency: currency.clone(),
+            provider_id: None,
+            provider_data: None,
+            fulfillment_set_id: None,
             is_enabled: Some(true),
             metadata: None,
         })

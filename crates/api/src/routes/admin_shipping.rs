@@ -14,12 +14,13 @@ use fastcart_kernel::{
     ShippingProfileId,
 };
 use fastcart_module_shipping::{
-    CreateShippingOptionInput, CreateShippingProfileInput, CreateShippingRateInput,
-    ResolvedShippingOption, SelectedShippingRate, ShippingOption, ShippingProfile, ShippingRate,
-    ShippingService, UpdateShippingOptionInput, UpdateShippingProfileInput,
-    UpdateShippingRateInput,
+    CreateFulfillmentSetInput, CreateShippingOptionInput, CreateShippingProfileInput,
+    CreateShippingRateInput, FulfillmentSet, ResolvedShippingOption, SelectedShippingRate,
+    ShippingOption, ShippingProfile, ShippingRate, ShippingService, UpdateFulfillmentSetInput,
+    UpdateShippingOptionInput, UpdateShippingProfileInput, UpdateShippingRateInput,
 };
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::dto::PageResponse;
 use crate::routes::StoreDb;
@@ -61,6 +62,94 @@ pub fn router() -> Router<Arc<AppContext>> {
             "/shipping/rates/{id}",
             get(get_rate).patch(update_rate).delete(delete_rate),
         )
+        .route(
+            "/shipping/fulfillment-sets",
+            get(list_fulfillment_sets).post(create_fulfillment_set),
+        )
+        .route(
+            "/shipping/fulfillment-sets/{id}",
+            get(get_fulfillment_set)
+                .patch(update_fulfillment_set)
+                .delete(delete_fulfillment_set),
+        )
+        .route("/shipping/providers", get(list_providers))
+}
+
+// Fulfillment sets and providers
+
+async fn list_fulfillment_sets(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    PaginationQuery { limit, offset }: PaginationQuery,
+) -> ApiResult<Json<PageResponse<FulfillmentSet>>> {
+    require_permission(&actor, READ_PERMISSION)?;
+    let pagination = PaginationQuery { limit, offset }.pagination()?;
+    let page = ShippingService::new(db)
+        .list_fulfillment_sets(pagination)
+        .await?;
+    Ok(Json(PageResponse::from_page(page)))
+}
+
+async fn create_fulfillment_set(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    ApiJson(request): ApiJson<CreateFulfillmentSetRequest>,
+) -> ApiResult<(StatusCode, Json<FulfillmentSet>)> {
+    require_permission(&actor, WRITE_PERMISSION)?;
+    let set = ShippingService::new(db)
+        .create_fulfillment_set(request.into_input())
+        .await?;
+    Ok((StatusCode::CREATED, Json(set)))
+}
+
+async fn get_fulfillment_set(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<FulfillmentSet>> {
+    require_permission(&actor, READ_PERMISSION)?;
+    Ok(Json(
+        ShippingService::new(db).get_fulfillment_set(&id).await?,
+    ))
+}
+
+async fn update_fulfillment_set(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<UpdateFulfillmentSetRequest>,
+) -> ApiResult<Json<FulfillmentSet>> {
+    require_permission(&actor, WRITE_PERMISSION)?;
+    Ok(Json(
+        ShippingService::new(db)
+            .update_fulfillment_set(&id, request.into_input())
+            .await?,
+    ))
+}
+
+async fn delete_fulfillment_set(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_permission(&actor, WRITE_PERMISSION)?;
+    ShippingService::new(db).delete_fulfillment_set(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_providers(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+) -> ApiResult<Json<Vec<String>>> {
+    require_permission(&actor, READ_PERMISSION)?;
+    Ok(Json(
+        context
+            .shipping_providers
+            .list()
+            .into_iter()
+            .map(|provider| provider.id().to_owned())
+            .collect(),
+    ))
 }
 
 // Profiles
@@ -154,15 +243,16 @@ async fn list_options(
 }
 
 async fn create_option(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateShippingOptionRequest>,
 ) -> ApiResult<(StatusCode, Json<ShippingOption>)> {
     require_permission(&actor, WRITE_PERMISSION)?;
-    let option = ShippingService::new(db)
-        .create_option(request.into_input()?)
-        .await?;
+    let input = request.into_input()?;
+    let provider_id = input.provider_id.as_deref().unwrap_or("manual");
+    ensure_provider(&context, provider_id)?;
+    let option = ShippingService::new(db).create_option(input).await?;
     Ok((StatusCode::CREATED, Json(option)))
 }
 
@@ -179,7 +269,7 @@ async fn get_option(
 }
 
 async fn update_option(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -187,9 +277,11 @@ async fn update_option(
 ) -> ApiResult<Json<ShippingOption>> {
     require_permission(&actor, WRITE_PERMISSION)?;
     let id = ShippingOptionId::from_string(id);
-    let option = ShippingService::new(db)
-        .update_option(&id, request.into_input()?)
-        .await?;
+    let input = request.into_input()?;
+    if let Some(provider_id) = input.provider_id.as_deref() {
+        ensure_provider(&context, provider_id)?;
+    }
+    let option = ShippingService::new(db).update_option(&id, input).await?;
     Ok(Json(option))
 }
 
@@ -342,6 +434,15 @@ fn require_permission(actor: &ActorContext, permission: &str) -> ApiResult<()> {
     actor.require_permission(permission).map_err(ApiError::new)
 }
 
+fn ensure_provider(context: &AppContext, provider_id: &str) -> ApiResult<()> {
+    if context.shipping_providers.get(provider_id).is_none() {
+        return Err(ApiError::new(AppError::validation(format!(
+            "unknown fulfillment provider: {provider_id}"
+        ))));
+    }
+    Ok(())
+}
+
 /// Distinguishes an absent field from an explicit JSON `null`.
 fn nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -407,6 +508,9 @@ struct CreateShippingOptionRequest {
     name: String,
     amount_minor: i64,
     currency: String,
+    provider_id: Option<String>,
+    provider_data: Option<Value>,
+    fulfillment_set_id: Option<String>,
     is_enabled: Option<bool>,
     metadata: Option<Metadata>,
 }
@@ -418,6 +522,9 @@ impl CreateShippingOptionRequest {
             name: self.name,
             amount_minor: self.amount_minor,
             currency: parse_currency(self.currency)?,
+            provider_id: self.provider_id,
+            provider_data: self.provider_data,
+            fulfillment_set_id: self.fulfillment_set_id,
             is_enabled: self.is_enabled,
             metadata: self.metadata,
         })
@@ -429,6 +536,10 @@ struct UpdateShippingOptionRequest {
     name: Option<String>,
     amount_minor: Option<i64>,
     currency: Option<String>,
+    provider_id: Option<String>,
+    provider_data: Option<Value>,
+    #[serde(default, deserialize_with = "nullable")]
+    fulfillment_set_id: Option<Option<String>>,
     is_enabled: Option<bool>,
     metadata: Option<Metadata>,
 }
@@ -440,9 +551,48 @@ impl UpdateShippingOptionRequest {
             name: self.name,
             amount_minor: self.amount_minor,
             currency,
+            provider_id: self.provider_id,
+            provider_data: self.provider_data,
+            fulfillment_set_id: self.fulfillment_set_id,
             is_enabled: self.is_enabled,
             metadata: self.metadata,
         })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFulfillmentSetRequest {
+    name: String,
+    #[serde(rename = "type")]
+    set_type: Option<String>,
+    metadata: Option<Metadata>,
+}
+
+impl CreateFulfillmentSetRequest {
+    fn into_input(self) -> CreateFulfillmentSetInput {
+        CreateFulfillmentSetInput {
+            name: self.name,
+            set_type: self.set_type,
+            metadata: self.metadata,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateFulfillmentSetRequest {
+    name: Option<String>,
+    #[serde(rename = "type")]
+    set_type: Option<String>,
+    metadata: Option<Metadata>,
+}
+
+impl UpdateFulfillmentSetRequest {
+    fn into_input(self) -> UpdateFulfillmentSetInput {
+        UpdateFulfillmentSetInput {
+            name: self.name,
+            set_type: self.set_type,
+            metadata: self.metadata,
+        }
     }
 }
 

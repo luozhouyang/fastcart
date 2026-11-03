@@ -4,6 +4,46 @@ use fastcart_kernel::{
     AppError, CountryCode, CurrencyCode, Metadata, ShippingOptionId, ShippingProfileId, Timestamp,
     validate_length, validate_non_negative_amount,
 };
+use serde_json::Value;
+
+/// A group of shipping options fulfilled by the same provider setup.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FulfillmentSet {
+    /// Set identifier.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Set type, currently `shipping`.
+    pub set_type: String,
+    /// Extension metadata.
+    pub metadata: Metadata,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: Timestamp,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: Timestamp,
+}
+
+/// Input for creating a fulfillment set.
+#[derive(Clone, Debug, Default)]
+pub struct CreateFulfillmentSetInput {
+    /// Human-readable name.
+    pub name: String,
+    /// Set type; defaults to `shipping`.
+    pub set_type: Option<String>,
+    /// Extension metadata.
+    pub metadata: Option<Metadata>,
+}
+
+/// Input for partially updating a fulfillment set.
+#[derive(Clone, Debug, Default)]
+pub struct UpdateFulfillmentSetInput {
+    /// Replacement name.
+    pub name: Option<String>,
+    /// Replacement set type.
+    pub set_type: Option<String>,
+    /// Replacement metadata.
+    pub metadata: Option<Metadata>,
+}
 
 /// A shipping profile groups options that share fulfilment rules.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -59,6 +99,12 @@ pub struct ShippingOption {
     pub amount_minor: i64,
     /// Currency of the flat amount.
     pub currency: CurrencyCode,
+    /// Registered fulfillment provider that owns the option.
+    pub provider_id: String,
+    /// Provider-specific configuration.
+    pub provider_data: Value,
+    /// Optional fulfillment set grouping.
+    pub fulfillment_set_id: Option<String>,
     /// Whether the option can be offered to customers.
     pub is_enabled: bool,
     /// Extension metadata.
@@ -80,6 +126,12 @@ pub struct CreateShippingOptionInput {
     pub amount_minor: i64,
     /// Currency of the flat amount.
     pub currency: CurrencyCode,
+    /// Fulfillment provider identifier; defaults to `manual`.
+    pub provider_id: Option<String>,
+    /// Provider-specific configuration.
+    pub provider_data: Option<Value>,
+    /// Optional fulfillment set grouping.
+    pub fulfillment_set_id: Option<String>,
     /// Whether the option starts enabled.
     pub is_enabled: Option<bool>,
     /// Extension metadata.
@@ -95,6 +147,12 @@ pub struct UpdateShippingOptionInput {
     pub amount_minor: Option<i64>,
     /// Replacement currency.
     pub currency: Option<CurrencyCode>,
+    /// Replacement fulfillment provider.
+    pub provider_id: Option<String>,
+    /// Replacement provider configuration.
+    pub provider_data: Option<Value>,
+    /// Replacement fulfillment set; `Some(None)` clears it.
+    pub fulfillment_set_id: Option<Option<String>>,
     /// Replacement enabled flag.
     pub is_enabled: Option<bool>,
     /// Replacement metadata.

@@ -6,8 +6,9 @@ use fastcart_kernel::{
 };
 
 use crate::domain::{
-    CreateShippingOptionInput, CreateShippingProfileInput, CreateShippingRateInput,
-    UpdateShippingOptionInput, UpdateShippingRateInput,
+    CreateFulfillmentSetInput, CreateShippingOptionInput, CreateShippingProfileInput,
+    CreateShippingRateInput, UpdateFulfillmentSetInput, UpdateShippingOptionInput,
+    UpdateShippingRateInput,
 };
 use crate::service::ShippingService;
 
@@ -48,6 +49,9 @@ async fn option(
             name: "Standard".to_owned(),
             amount_minor,
             currency: usd(),
+            provider_id: None,
+            provider_data: None,
+            fulfillment_set_id: None,
             is_enabled: Some(true),
             metadata: None,
         })
@@ -169,6 +173,9 @@ async fn options_belong_to_profiles_and_validate() {
                 name: "Missing".to_owned(),
                 amount_minor: 100,
                 currency: usd(),
+                provider_id: None,
+                provider_data: None,
+                fulfillment_set_id: None,
                 is_enabled: None,
                 metadata: None,
             })
@@ -182,6 +189,9 @@ async fn options_belong_to_profiles_and_validate() {
                 name: "Negative".to_owned(),
                 amount_minor: -1,
                 currency: usd(),
+                provider_id: None,
+                provider_data: None,
+                fulfillment_set_id: None,
                 is_enabled: None,
                 metadata: None,
             })
@@ -195,6 +205,9 @@ async fn options_belong_to_profiles_and_validate() {
                 name: "  ".to_owned(),
                 amount_minor: 100,
                 currency: usd(),
+                provider_id: None,
+                provider_data: None,
+                fulfillment_set_id: None,
                 is_enabled: None,
                 metadata: None,
             })
@@ -553,4 +566,107 @@ async fn tied_rates_are_ordered_by_identifier() {
         .unwrap()
         .unwrap();
     assert_eq!(selected.rate_id.as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
+async fn fulfillment_sets_are_managed_and_linked_to_options() {
+    let (_db, service) = setup().await;
+    let sets = service
+        .list_fulfillment_sets(Pagination {
+            limit: 10,
+            offset: 0,
+        })
+        .await
+        .unwrap();
+    assert!(sets.data.iter().any(|set| set.id == "fset_default"));
+
+    let set = service
+        .create_fulfillment_set(CreateFulfillmentSetInput {
+            name: "Express".to_owned(),
+            set_type: Some("shipping".to_owned()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let profile_id = profile(&service, "Default").await;
+    let option_id = service
+        .create_option(CreateShippingOptionInput {
+            profile_id: profile_id.clone(),
+            name: "Express".to_owned(),
+            amount_minor: 900,
+            currency: usd(),
+            provider_id: Some("manual".to_owned()),
+            provider_data: Some(serde_json::json!({"zone": "eu"})),
+            fulfillment_set_id: Some(set.id.clone()),
+            is_enabled: Some(true),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let option = service.get_option(&option_id).await.unwrap();
+    assert_eq!(option.provider_id, "manual");
+    assert_eq!(option.provider_data, serde_json::json!({"zone": "eu"}));
+    assert_eq!(option.fulfillment_set_id.as_deref(), Some(set.id.as_str()));
+
+    let updated = service
+        .update_fulfillment_set(
+            &set.id,
+            UpdateFulfillmentSetInput {
+                name: Some("Express shipping".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.name, "Express shipping");
+
+    let cleared = service
+        .update_option(
+            &option_id,
+            UpdateShippingOptionInput {
+                fulfillment_set_id: Some(None),
+                provider_data: Some(serde_json::json!({})),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(cleared.fulfillment_set_id.is_none());
+
+    let missing_set = service
+        .create_option(CreateShippingOptionInput {
+            profile_id,
+            name: "Missing set".to_owned(),
+            amount_minor: 100,
+            currency: usd(),
+            provider_id: None,
+            provider_data: None,
+            fulfillment_set_id: Some("fset_missing".to_owned()),
+            is_enabled: None,
+            metadata: None,
+        })
+        .await;
+    assert!(matches!(missing_set, Err(AppError::NotFound(_))));
+
+    let invalid_data = service
+        .create_option(CreateShippingOptionInput {
+            profile_id: ShippingProfileId::new(),
+            name: "Bad data".to_owned(),
+            amount_minor: 100,
+            currency: usd(),
+            provider_id: None,
+            provider_data: Some(serde_json::json!([])),
+            fulfillment_set_id: None,
+            is_enabled: None,
+            metadata: None,
+        })
+        .await;
+    assert!(matches!(invalid_data, Err(AppError::Validation(_))));
+
+    service.delete_fulfillment_set(&set.id).await.unwrap();
+    assert!(matches!(
+        service.get_fulfillment_set(&set.id).await,
+        Err(AppError::NotFound(_))
+    ));
 }

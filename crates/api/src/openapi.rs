@@ -60,6 +60,7 @@ use crate::state::AppContext;
     fastcart_module_content::PageStatus,
     fastcart_module_content::PageVersion,
     fastcart_module_content::Redirect,
+    fastcart_module_shipping::FulfillmentSet,
     fastcart_module_shipping::ResolvedShippingOption,
     fastcart_module_shipping::SelectedShippingRate,
     fastcart_module_shipping::ShippingOption,
@@ -1858,6 +1859,47 @@ fn admin_shipping_routes() -> Vec<Route> {
             "Delete a shipping profile",
             Auth::Admin,
             no_content(),
+        ),
+        get(
+            "/api/v1/admin/shipping/fulfillment-sets",
+            "List fulfillment sets",
+            Auth::Admin,
+            PAGED,
+            ok(Schema::Page("FulfillmentSet")),
+        ),
+        post(
+            "/api/v1/admin/shipping/fulfillment-sets",
+            "Create a fulfillment set",
+            Auth::Admin,
+            Some("CreateFulfillmentSetRequest"),
+            created(Schema::Ref("FulfillmentSet")),
+        ),
+        get(
+            "/api/v1/admin/shipping/fulfillment-sets/{id}",
+            "Get a fulfillment set",
+            Auth::Admin,
+            &[],
+            ok(Schema::Ref("FulfillmentSet")),
+        ),
+        patch(
+            "/api/v1/admin/shipping/fulfillment-sets/{id}",
+            "Update a fulfillment set",
+            Auth::Admin,
+            "UpdateFulfillmentSetRequest",
+            ok(Schema::Ref("FulfillmentSet")),
+        ),
+        del(
+            "/api/v1/admin/shipping/fulfillment-sets/{id}",
+            "Delete a fulfillment set",
+            Auth::Admin,
+            no_content(),
+        ),
+        get(
+            "/api/v1/admin/shipping/providers",
+            "List registered fulfillment providers",
+            Auth::Admin,
+            &[],
+            ok(Schema::Array("String")),
         ),
         get(
             "/api/v1/admin/shipping/options",
@@ -3803,6 +3845,9 @@ fn schemas() -> Value {
             ("name", string()),
             ("amount_minor", integer()),
             ("currency", string()),
+            ("provider_id", optional_string()),
+            ("provider_data", nullable(schema_ref("Metadata"))),
+            ("fulfillment_set_id", optional_string()),
             ("is_enabled", nullable(boolean())),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &["profile_id", "name", "amount_minor", "currency"]),
@@ -3812,7 +3857,24 @@ fn schemas() -> Value {
             ("name", optional_string()),
             ("amount_minor", nullable(integer())),
             ("currency", optional_string()),
+            ("provider_id", optional_string()),
+            ("provider_data", nullable(schema_ref("Metadata"))),
+            ("fulfillment_set_id", nullable(string())),
             ("is_enabled", nullable(boolean())),
+            ("metadata", nullable(schema_ref("Metadata"))),
+        ], &[]),
+
+
+        "CreateFulfillmentSetRequest": object(&[
+            ("name", string()),
+            ("type", optional_string()),
+            ("metadata", nullable(schema_ref("Metadata"))),
+        ], &["name"]),
+
+
+        "UpdateFulfillmentSetRequest": object(&[
+            ("name", optional_string()),
+            ("type", optional_string()),
             ("metadata", nullable(schema_ref("Metadata"))),
         ], &[]),
 
@@ -4131,12 +4193,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 136);
+        assert_eq!(count("/api/v1/admin"), 139);
         assert_eq!(count("/api/v1/store"), 38);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/internal/storefront"), 38);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 237);
+        assert_eq!(paths.len(), 240);
 
         for key in [
             "/api/v1/platform/stores",
@@ -4244,7 +4306,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 333);
+        assert_eq!(operation_count, 339);
     }
 
     #[test]

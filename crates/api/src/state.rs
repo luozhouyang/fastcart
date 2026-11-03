@@ -79,6 +79,8 @@ pub struct AppContext {
     pub bootstrap_lock: Arc<Mutex<()>>,
     /// Registered payment providers shared by all stores.
     pub payment_providers: ProviderRegistry,
+    /// Registered fulfillment providers shared by all stores.
+    pub shipping_providers: fastcart_module_shipping::FulfillmentProviderRegistry,
     /// HTTP request metrics.
     pub metrics: Arc<Metrics>,
     /// Optional storefront SSR runtime shared by all stores.
@@ -125,6 +127,8 @@ impl AppContext {
             login_limiter: RateLimiter::new(10, Duration::from_secs(5 * 60)),
             bootstrap_lock: Arc::new(Mutex::new(())),
             payment_providers,
+            shipping_providers:
+                fastcart_module_shipping::FulfillmentProviderRegistry::with_defaults(),
             metrics: Arc::new(Metrics::new()),
             storefront_runtime: None,
             email: EmailService::with_default_registry(),
