@@ -8,11 +8,12 @@ use fastcart_kernel::{
 use sqlx::{QueryBuilder, Sqlite};
 
 use crate::domain::{
-    Campaign, Coupon, CouponFilter, CreateCampaignInput, CreateCouponInput, CreatePromotionInput,
-    Promotion, PromotionCart, PromotionContext, PromotionFilter, PromotionResult, PromotionRule,
-    PromotionRuleInput, PromotionStatus, PromotionUsage, UpdateCampaignInput, UpdateCouponInput,
-    UpdatePromotionInput, calculate_promotions, normalize_code, validate_promotion_fields,
-    validate_usage_limit, validate_window, window_contains,
+    Campaign, CampaignBudgetType, Coupon, CouponFilter, CreateCampaignInput, CreateCouponInput,
+    CreatePromotionInput, Promotion, PromotionCart, PromotionContext, PromotionFilter,
+    PromotionResult, PromotionRule, PromotionRuleInput, PromotionStatus, PromotionUsage,
+    UpdateCampaignInput, UpdateCouponInput, UpdatePromotionInput, calculate_promotions,
+    normalize_code, validate_campaign_budget, validate_promotion_fields, validate_usage_limit,
+    validate_window, window_contains,
 };
 
 const PROMOTION_COLUMNS: &str = "id, code, title, type AS promotion_type, value, status, \
@@ -513,19 +514,26 @@ impl PromotionService {
         if input.budget_limit.is_some_and(|limit| limit <= 0) {
             return Err(AppError::validation("campaign budget must be positive"));
         }
+        validate_campaign_budget(
+            input.budget_type,
+            input.currency_code.as_ref(),
+            input.budget_limit,
+        )?;
         validate_window(input.starts_at, input.ends_at, "campaign")?;
         validate_metadata(&input.metadata)?;
         let id = format!("camp_{}", uuid::Uuid::now_v7().simple());
         let now = now_timestamp();
         sqlx::query(
             "INSERT INTO campaigns
-             (id, name, description, budget_limit, budget_used, starts_at, ends_at, metadata,
-              created_at, updated_at)
-             VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+             (id, name, description, budget_type, currency_code, budget_limit, budget_used,
+              starts_at, ends_at, metadata, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(name)
         .bind(input.description.as_deref())
+        .bind(input.budget_type.as_str())
+        .bind(input.currency_code.as_ref().map(ToString::to_string))
         .bind(input.budget_limit)
         .bind(input.starts_at)
         .bind(input.ends_at)
@@ -541,8 +549,8 @@ impl PromotionService {
     /// Loads a campaign by identifier.
     pub async fn get_campaign(&self, id: &str) -> Result<Campaign, AppError> {
         let row = sqlx::query_as::<_, CampaignRow>(
-            "SELECT id, name, description, budget_limit, budget_used, starts_at, ends_at,
-                    metadata, created_at, updated_at FROM campaigns WHERE id = ?",
+            "SELECT id, name, description, budget_type, currency_code, budget_limit,
+                    budget_used, starts_at, ends_at, metadata, created_at, updated_at FROM campaigns WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(self.db.pool())
@@ -562,8 +570,8 @@ impl PromotionService {
             .await
             .map_err(database_error)?;
         let rows = sqlx::query_as::<_, CampaignRow>(
-            "SELECT id, name, description, budget_limit, budget_used, starts_at, ends_at,
-                    metadata, created_at, updated_at FROM campaigns
+            "SELECT id, name, description, budget_type, currency_code, budget_limit,
+                    budget_used, starts_at, ends_at, metadata, created_at, updated_at FROM campaigns
              ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
         )
         .bind(pagination.limit)
@@ -598,10 +606,17 @@ impl PromotionService {
                 }
             },
         )?;
-        let budget_limit = input.budget_limit.unwrap_or(existing.budget_limit);
-        if budget_limit.is_some_and(|limit| limit <= 0) {
-            return Err(AppError::validation("campaign budget must be positive"));
+        let budget_type = input.budget_type.unwrap_or(existing.budget_type);
+        if budget_type != existing.budget_type && existing.budget_used > 0 {
+            return Err(AppError::conflict(
+                "campaign budget type cannot change after usage has been recorded",
+            ));
         }
+        let currency_code = input
+            .currency_code
+            .unwrap_or_else(|| existing.currency_code.clone());
+        let budget_limit = input.budget_limit.unwrap_or(existing.budget_limit);
+        validate_campaign_budget(budget_type, currency_code.as_ref(), budget_limit)?;
         if budget_limit.is_some_and(|limit| limit < existing.budget_used) {
             return Err(AppError::conflict(
                 "campaign budget cannot be below consumed usage",
@@ -614,8 +629,9 @@ impl PromotionService {
         validate_metadata(&metadata)?;
         let now = now_timestamp();
         let updated = sqlx::query(
-            "UPDATE campaigns SET name = ?, description = ?, budget_limit = ?, starts_at = ?,
-             ends_at = ?, metadata = ?, updated_at = ? WHERE id = ?",
+            "UPDATE campaigns SET name = ?, description = ?, budget_type = ?, currency_code = ?,
+             budget_limit = ?, starts_at = ?, ends_at = ?, metadata = ?, updated_at = ?
+             WHERE id = ?",
         )
         .bind(&name)
         .bind(
@@ -624,6 +640,8 @@ impl PromotionService {
                 .as_deref()
                 .or(existing.description.as_deref()),
         )
+        .bind(budget_type.as_str())
+        .bind(currency_code.as_ref().map(ToString::to_string))
         .bind(budget_limit)
         .bind(starts_at)
         .bind(ends_at)
@@ -707,14 +725,26 @@ impl PromotionService {
             .map_err(database_error)
     }
 
-    /// Records one usage and increments promotion and coupon counters.
+    /// Records one usage and increments promotion, coupon and campaign counters.
+    ///
+    /// `usage_amount` is the discount granted in minor units and is charged
+    /// against monetary campaign budgets. Usage-count campaigns consume one unit
+    /// regardless of the amount.
     pub async fn record_usage(
         &self,
         promotion_id: &str,
         coupon_id: Option<&str>,
         customer_id: Option<&str>,
         order_id: Option<&str>,
+        usage_amount: i64,
+        currency_code: Option<&str>,
     ) -> Result<PromotionUsage, AppError> {
+        if usage_amount < 0 {
+            return Err(AppError::validation(
+                "promotion usage amount must not be negative",
+            ));
+        }
+        let usage_currency = currency_code.map(|code| code.trim().to_ascii_uppercase());
         let now = now_timestamp();
         if let Some(order_id) = order_id {
             if let Some(existing) = sqlx::query_as::<_, PromotionUsageRow>(
@@ -806,8 +836,9 @@ impl PromotionService {
             return Err(AppError::conflict("promotion usage limit reached"));
         }
 
-        let campaigns: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
-            "SELECT c.id, c.budget_limit, c.budget_used FROM campaigns c
+        let campaigns: Vec<CampaignBudgetRow> = sqlx::query_as(
+            "SELECT c.id, c.budget_type, c.currency_code, c.budget_limit, c.budget_used
+             FROM campaigns c
              JOIN campaign_promotions cp ON cp.campaign_id = c.id
              WHERE cp.promotion_id = ?",
         )
@@ -815,16 +846,41 @@ impl PromotionService {
         .fetch_all(&mut *transaction)
         .await
         .map_err(database_error)?;
-        for (campaign_id, budget_limit, budget_used) in campaigns {
-            if budget_limit.is_some_and(|limit| budget_used >= limit) {
+        for campaign in campaigns {
+            let budget_type: CampaignBudgetType = campaign.budget_type.parse()?;
+            let increment = match budget_type {
+                CampaignBudgetType::Usage => 1,
+                CampaignBudgetType::Spend => {
+                    let campaign_currency = campaign.currency_code.ok_or_else(|| {
+                        AppError::conflict("spend campaign is missing its currency")
+                    })?;
+                    let usage_currency = usage_currency.as_deref().ok_or_else(|| {
+                        AppError::validation(
+                            "a currency is required to consume a spend campaign budget",
+                        )
+                    })?;
+                    if campaign_currency != usage_currency {
+                        return Err(AppError::conflict(format!(
+                            "campaign currency {campaign_currency} does not match {usage_currency}"
+                        )));
+                    }
+                    usage_amount
+                }
+            };
+            if campaign
+                .budget_limit
+                .is_some_and(|limit| campaign.budget_used.saturating_add(increment) > limit)
+            {
                 return Err(AppError::conflict("campaign budget exhausted"));
             }
             let updated = sqlx::query(
-                "UPDATE campaigns SET budget_used = budget_used + 1, updated_at = ?
-                 WHERE id = ? AND (budget_limit IS NULL OR budget_used < budget_limit)",
+                "UPDATE campaigns SET budget_used = budget_used + ?, updated_at = ?
+                 WHERE id = ? AND (budget_limit IS NULL OR budget_used + ? <= budget_limit)",
             )
+            .bind(increment)
             .bind(now)
-            .bind(&campaign_id)
+            .bind(&campaign.id)
+            .bind(increment)
             .execute(&mut *transaction)
             .await
             .map_err(database_error)?;
@@ -1033,10 +1089,21 @@ async fn insert_promotion_rules(
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct CampaignBudgetRow {
+    id: String,
+    budget_type: String,
+    currency_code: Option<String>,
+    budget_limit: Option<i64>,
+    budget_used: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 struct CampaignRow {
     id: String,
     name: String,
     description: Option<String>,
+    budget_type: String,
+    currency_code: Option<String>,
     budget_limit: Option<i64>,
     budget_used: i64,
     starts_at: Option<i64>,
@@ -1052,6 +1119,13 @@ impl CampaignRow {
             id: self.id,
             name: self.name,
             description: self.description,
+            budget_type: self
+                .budget_type
+                .parse()
+                .unwrap_or(CampaignBudgetType::Usage),
+            currency_code: self
+                .currency_code
+                .and_then(|code| code.parse::<fastcart_kernel::CurrencyCode>().ok()),
             budget_limit: self.budget_limit,
             budget_used: self.budget_used,
             starts_at: self.starts_at,
@@ -1187,10 +1261,10 @@ mod tests {
 
     use super::PromotionService;
     use crate::domain::{
-        CreateCampaignInput, CreateCouponInput, CreatePromotionInput, Promotion, PromotionCart,
-        PromotionContext, PromotionFilter, PromotionLine, PromotionRule, PromotionRuleAttribute,
-        PromotionRuleInput, PromotionRuleOperator, PromotionStatus, PromotionType,
-        UpdatePromotionInput, calculate_promotions,
+        CampaignBudgetType, CreateCampaignInput, CreateCouponInput, CreatePromotionInput,
+        Promotion, PromotionCart, PromotionContext, PromotionFilter, PromotionLine, PromotionRule,
+        PromotionRuleAttribute, PromotionRuleInput, PromotionRuleOperator, PromotionStatus,
+        PromotionType, UpdatePromotionInput, calculate_promotions,
     };
 
     async fn service() -> PromotionService {
@@ -1828,6 +1902,8 @@ mod tests {
                 Some(&coupon.id),
                 Some("cust_1"),
                 Some("order_1"),
+                0,
+                None,
             )
             .await
             .unwrap();
@@ -1855,12 +1931,12 @@ mod tests {
             .await
             .unwrap();
         service
-            .record_usage(&promotion.id, None, None, None)
+            .record_usage(&promotion.id, None, None, None, 0, None)
             .await
             .unwrap();
         assert!(matches!(
             service
-                .record_usage(&promotion.id, None, None, None)
+                .record_usage(&promotion.id, None, None, None, 0, None)
                 .await
                 .unwrap_err(),
             AppError::Conflict(_)
@@ -1878,12 +1954,12 @@ mod tests {
             .await
             .unwrap();
         service
-            .record_usage(&coupon_promotion.id, Some(&coupon.id), None, None)
+            .record_usage(&coupon_promotion.id, Some(&coupon.id), None, None, 0, None)
             .await
             .unwrap();
         assert!(matches!(
             service
-                .record_usage(&coupon_promotion.id, Some(&coupon.id), None, None)
+                .record_usage(&coupon_promotion.id, Some(&coupon.id), None, None, 0, None)
                 .await
                 .unwrap_err(),
             AppError::Conflict(_)
@@ -1989,15 +2065,81 @@ mod tests {
         );
 
         service
-            .record_usage(&promotion.id, None, None, Some("order_1"))
+            .record_usage(&promotion.id, None, None, Some("order_1"), 0, None)
             .await
             .unwrap();
         let exhausted = service
-            .record_usage(&promotion.id, None, None, Some("order_2"))
+            .record_usage(&promotion.id, None, None, Some("order_2"), 0, None)
             .await
             .unwrap_err();
         assert!(matches!(exhausted, AppError::Conflict(_)));
         let stored = service.get_campaign(&campaign.id).await.unwrap();
         assert_eq!(stored.budget_used, 1);
+    }
+
+    #[tokio::test]
+    async fn spend_campaign_budgets_track_monetary_amounts() {
+        let service = service().await;
+        let promotion = service
+            .create_promotion(
+                CreatePromotionInput::new("Spend budget", PromotionType::Percentage, 1000).active(),
+            )
+            .await
+            .unwrap();
+        let campaign = service
+            .create_campaign(CreateCampaignInput {
+                name: "Spend".to_owned(),
+                budget_type: CampaignBudgetType::Spend,
+                currency_code: Some(usd()),
+                budget_limit: Some(1_000),
+                ..CreateCampaignInput::default()
+            })
+            .await
+            .unwrap();
+        service
+            .link_promotion(&campaign.id, &promotion.id)
+            .await
+            .unwrap();
+
+        service
+            .record_usage(&promotion.id, None, None, Some("order_1"), 600, Some("USD"))
+            .await
+            .unwrap();
+        let stored = service.get_campaign(&campaign.id).await.unwrap();
+        assert_eq!(stored.budget_used, 600);
+        assert_eq!(stored.budget_spent().unwrap().amount_minor(), 600);
+
+        let wrong_currency = service
+            .record_usage(&promotion.id, None, None, Some("order_2"), 100, Some("EUR"))
+            .await
+            .unwrap_err();
+        assert!(matches!(wrong_currency, AppError::Conflict(_)));
+
+        let exhausted = service
+            .record_usage(&promotion.id, None, None, Some("order_3"), 500, Some("USD"))
+            .await
+            .unwrap_err();
+        assert!(matches!(exhausted, AppError::Conflict(_)));
+        assert_eq!(
+            service
+                .get_campaign(&campaign.id)
+                .await
+                .unwrap()
+                .budget_used,
+            600
+        );
+
+        service
+            .record_usage(&promotion.id, None, None, Some("order_4"), 400, Some("USD"))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .get_campaign(&campaign.id)
+                .await
+                .unwrap()
+                .budget_used,
+            1_000
+        );
     }
 }

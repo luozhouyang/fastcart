@@ -8,9 +8,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
-use fastcart_kernel::{ActorContext, Metadata};
+use fastcart_kernel::{ActorContext, CurrencyCode, Metadata};
 use fastcart_module_promotion::{
-    Campaign, CreateCampaignInput, PromotionService, UpdateCampaignInput,
+    Campaign, CampaignBudgetType, CreateCampaignInput, PromotionService, UpdateCampaignInput,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,9 +47,13 @@ pub struct CampaignDto {
     pub name: String,
     /// Optional description.
     pub description: Option<String>,
-    /// Maximum usages.
+    /// Budget accounting mode.
+    pub budget_type: CampaignBudgetType,
+    /// Currency of a monetary budget.
+    pub currency_code: Option<CurrencyCode>,
+    /// Maximum usages or spend in minor units.
     pub budget_limit: Option<i64>,
-    /// Consumed usages.
+    /// Usages or spend already consumed.
     pub budget_used: i64,
     /// Start timestamp.
     pub starts_at: Option<i64>,
@@ -69,6 +73,8 @@ impl From<Campaign> for CampaignDto {
             id: campaign.id,
             name: campaign.name,
             description: campaign.description,
+            budget_type: campaign.budget_type,
+            currency_code: campaign.currency_code,
             budget_limit: campaign.budget_limit,
             budget_used: campaign.budget_used,
             starts_at: campaign.starts_at,
@@ -87,7 +93,13 @@ pub struct CreateCampaignRequest {
     pub name: String,
     /// Optional description.
     pub description: Option<String>,
-    /// Maximum usages.
+    /// Budget accounting mode; defaults to usage.
+    #[serde(default)]
+    pub budget_type: CampaignBudgetType,
+    /// Currency required by spend budgets.
+    #[serde(default)]
+    pub currency_code: Option<CurrencyCode>,
+    /// Maximum usages or spend in minor units.
     pub budget_limit: Option<i64>,
     /// Start timestamp.
     pub starts_at: Option<i64>,
@@ -105,6 +117,10 @@ pub struct UpdateCampaignRequest {
     pub name: Option<String>,
     /// New description.
     pub description: Option<String>,
+    /// New budget accounting mode.
+    pub budget_type: Option<CampaignBudgetType>,
+    /// New budget currency; `null` clears it.
+    pub currency_code: Option<Option<CurrencyCode>>,
     /// New budget; `null` makes it unlimited.
     pub budget_limit: Option<Option<i64>>,
     /// New start; `null` clears it.
@@ -166,6 +182,8 @@ async fn create_campaign(
         .create_campaign(CreateCampaignInput {
             name: request.name,
             description: request.description,
+            budget_type: request.budget_type,
+            currency_code: request.currency_code,
             budget_limit: request.budget_limit,
             starts_at: request.starts_at,
             ends_at: request.ends_at,
@@ -198,6 +216,8 @@ async fn update_campaign(
             UpdateCampaignInput {
                 name: request.name,
                 description: request.description,
+                budget_type: request.budget_type,
+                currency_code: request.currency_code,
                 budget_limit: request.budget_limit,
                 starts_at: request.starts_at,
                 ends_at: request.ends_at,

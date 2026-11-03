@@ -1,7 +1,7 @@
 //! Checkout orchestration: cart validation, stock reservation, payment capture
 //! and idempotent order placement.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{AppError, CartId, CheckoutId, Metadata, now_timestamp};
@@ -554,21 +554,23 @@ impl CheckoutWorkflow {
     }
 
     async fn record_promotion_usage(&self, cart: &fastcart_module_cart::Cart, order: &Order) {
-        let mut promotions: HashSet<String> = HashSet::new();
+        let mut promotions: HashMap<String, i64> = HashMap::new();
         for item in &cart.items {
             for adjustment in &item.adjustments {
                 if let Some(promotion_id) = adjustment.promotion_id.as_ref() {
-                    promotions.insert(promotion_id.to_string());
+                    *promotions.entry(promotion_id.to_string()).or_default() +=
+                        adjustment.amount.max(0);
                 }
             }
         }
         for adjustment in &cart.shipping_adjustments {
             if let Some(promotion_id) = adjustment.promotion_id.as_ref() {
-                promotions.insert(promotion_id.to_string());
+                *promotions.entry(promotion_id.to_string()).or_default() +=
+                    adjustment.amount.max(0);
             }
         }
         let customer_id = cart.customer_id.as_ref().map(ToString::to_string);
-        for promotion_id in promotions {
+        for (promotion_id, amount) in promotions {
             let coupon_id = cart
                 .discounts
                 .iter()
@@ -591,6 +593,8 @@ impl CheckoutWorkflow {
                     coupon_id.as_deref(),
                     customer_id.as_deref(),
                     Some(order.id.as_str()),
+                    amount,
+                    Some(&order.currency_code),
                 )
                 .await
             {

@@ -77,14 +77,28 @@ async fn complete_checkout_flow_is_consistent_and_idempotent() {
         .await
         .unwrap();
 
-    // 10% automatic promotion.
+    // 10% automatic promotion backed by a monetary campaign budget.
     let promotions = PromotionService::new(db.clone());
-    promotions
+    let promotion = promotions
         .create_promotion(
             CreatePromotionInput::new("Ten percent", PromotionType::Percentage, 1_000)
                 .active()
                 .automatic(),
         )
+        .await
+        .unwrap();
+    let campaign = promotions
+        .create_campaign(fastcart_module_promotion::CreateCampaignInput {
+            name: "Ten percent budget".to_owned(),
+            budget_type: fastcart_module_promotion::CampaignBudgetType::Spend,
+            currency_code: Some(currency.clone()),
+            budget_limit: Some(1_000),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    promotions
+        .link_promotion(&campaign.id, &promotion.id)
         .await
         .unwrap();
 
@@ -227,6 +241,16 @@ async fn complete_checkout_flow_is_consistent_and_idempotent() {
     assert_eq!(completed.order.items.len(), 1);
     assert_eq!(completed.order.items[0].product_title, "Classic T-Shirt");
     assert_eq!(completed.order.items[0].quantity, 2);
+
+    // The campaign spends exactly the discount granted to the order.
+    assert_eq!(
+        promotions
+            .get_campaign(&campaign.id)
+            .await
+            .unwrap()
+            .budget_used,
+        400
+    );
 
     // Stock is committed, not merely reserved.
     assert_eq!(
