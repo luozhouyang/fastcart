@@ -475,6 +475,8 @@ dependencies = [
  "fastcart-kernel",
  "serde",
  "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -509,14 +511,18 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "fastcart-infrastructure",
  "fastcart-kernel",
+ "fastcart-platform",
  "http-body-util",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -615,13 +621,15 @@ dependencies = [
 name = "fastcart-module-customer"
 version = "0.1.0"
 dependencies = [
- "async-trait",
+ "argon2",
  "fastcart-infrastructure",
  "fastcart-kernel",
+ "hex",
+ "rand",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
- "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -641,6 +649,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -666,8 +675,12 @@ dependencies = [
  "async-trait",
  "fastcart-infrastructure",
  "fastcart-kernel",
+ "hex",
+ "hmac",
+ "rand",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",
@@ -721,6 +734,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -781,6 +795,8 @@ name = "fastcart-plugin"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -851,6 +867,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

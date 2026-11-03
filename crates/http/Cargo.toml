@@ -10,13 +10,18 @@ async-trait.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+fastcart-infrastructure.workspace = true
 fastcart-kernel.workspace = true
+fastcart-platform.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 
 [lints]
