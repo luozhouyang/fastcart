@@ -52,6 +52,68 @@ impl PageStatus {
     }
 }
 
+/// Kind of snapshot stored for a page body.
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageVersionKind {
+    /// A working draft snapshot.
+    Draft,
+    /// A snapshot captured when the page was published.
+    Published,
+}
+
+impl PageVersionKind {
+    /// Returns the storage representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Published => "published",
+        }
+    }
+
+    /// Parses a stored kind, returning `None` for unknown values.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "draft" => Some(Self::Draft),
+            "published" => Some(Self::Published),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a page revision was authored by a human or an AI task.
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageRevisionOrigin {
+    /// Authored through the admin UI or API.
+    Manual,
+    /// Authored by an AI task.
+    Ai,
+}
+
+impl PageRevisionOrigin {
+    /// Returns the storage representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Ai => "ai",
+        }
+    }
+
+    /// Parses a stored origin, returning `None` for unknown values.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "manual" => Some(Self::Manual),
+            "ai" => Some(Self::Ai),
+            _ => None,
+        }
+    }
+}
+
 /// A store content page.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
@@ -65,6 +127,8 @@ pub struct Page {
     pub status: PageStatus,
     /// Page classifier such as `custom`, `home` or `faq`.
     pub page_type: String,
+    /// Optimistic concurrency token; incremented on every write.
+    pub revision: i64,
     /// Structured page body.
     pub body: Value,
     /// Structured SEO metadata.
@@ -92,6 +156,10 @@ pub struct PageVersion {
     pub version: i64,
     /// Snapshotted body.
     pub body: Value,
+    /// Whether this is a draft or published snapshot.
+    pub kind: PageVersionKind,
+    /// Whether a human or an AI task authored the snapshot.
+    pub origin: PageRevisionOrigin,
     /// Actor that created the snapshot, when known.
     pub created_by: Option<String>,
     /// Creation timestamp in Unix seconds.
@@ -231,6 +299,15 @@ pub struct UpdatePageInput {
     /// Replacement extension metadata.
     #[serde(default)]
     pub metadata: Option<Metadata>,
+    /// Revision the caller last observed; stale values are rejected.
+    #[serde(default)]
+    pub base_revision: Option<i64>,
+    /// Whether a human or an AI task authored the update.
+    #[serde(default)]
+    pub origin: Option<PageRevisionOrigin>,
+    /// Actor that authored the update, when known.
+    #[serde(default)]
+    pub created_by: Option<String>,
 }
 
 /// Input for creating a navigation menu.

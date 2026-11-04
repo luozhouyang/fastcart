@@ -7,18 +7,19 @@ use fastcart_kernel::{
     AppError, Metadata, NavigationId, PageId, PageResult, Pagination, now_timestamp,
     validate_handle, validate_length, validate_metadata,
 };
+use fastcart_storefront::{PageBody, StorefrontError, ThemeEditorManifest};
 use serde_json::Value;
 use sqlx::FromRow;
 
 use crate::domain::{
     CreateNavigationInput, CreatePageInput, CreateRedirectInput, MAX_PAGE_TYPE_LENGTH,
     MAX_REDIRECT_PATH_LENGTH, MAX_TITLE_LENGTH, MAX_URL_LENGTH, Navigation, NavigationItem,
-    NavigationItemInput, NavigationTree, NavigationTreeItem, Page, PageStatus, PageVersion,
-    Redirect, UpdateNavigationInput, UpdatePageInput, generate_id, resolve_handle,
-    validate_page_content, validate_page_title, validate_redirect_status,
+    NavigationItemInput, NavigationTree, NavigationTreeItem, Page, PageRevisionOrigin, PageStatus,
+    PageVersion, PageVersionKind, Redirect, UpdateNavigationInput, UpdatePageInput, generate_id,
+    resolve_handle, validate_page_content, validate_page_title, validate_redirect_status,
 };
 
-const PAGE_COLUMNS: &str = "id, title, handle, status, page_type, body, seo, metadata, \
+const PAGE_COLUMNS: &str = "id, title, handle, status, page_type, body, seo, metadata, revision, \
      published_at, created_at, updated_at, deleted_at";
 
 const NAVIGATION_COLUMNS: &str = "id, name, handle, metadata, created_at, updated_at";
@@ -29,13 +30,43 @@ const NAVIGATION_ITEM_COLUMNS: &str = "id, navigation_id, parent_id, title, url,
 #[derive(Clone, Debug)]
 pub struct ContentService {
     db: StoreDatabase,
+    editor_manifest: Option<ThemeEditorManifest>,
 }
 
 impl ContentService {
-    /// Creates a service bound to one store database.
+    /// Creates a service bound to one store database without a theme editor
+    /// manifest. Page bodies are still structurally validated.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self {
+            db,
+            editor_manifest: None,
+        }
+    }
+
+    /// Creates a service bound to one store database, optionally validating
+    /// page bodies against the active theme editor manifest.
+    #[must_use]
+    pub fn with_editor_manifest(
+        db: StoreDatabase,
+        editor_manifest: Option<ThemeEditorManifest>,
+    ) -> Self {
+        Self {
+            db,
+            editor_manifest,
+        }
+    }
+
+    /// Validates a page body structurally and, when a manifest is available,
+    /// against the theme editor contract.
+    fn validate_body(&self, body: &Value) -> Result<PageBody, AppError> {
+        let parsed = PageBody::parse(body).map_err(storefront_error)?;
+        if let Some(editor) = self.editor_manifest.as_ref() {
+            parsed
+                .validate_with_editor(editor)
+                .map_err(storefront_error)?;
+        }
+        Ok(parsed)
     }
 
     /// Creates a page. The handle defaults to a slug of the title.
@@ -60,6 +91,7 @@ impl ContentService {
             None => "custom".to_owned(),
         };
         validate_page_content(&body, &seo)?;
+        self.validate_body(&body)?;
         validate_metadata(&metadata)?;
         self.ensure_page_handle_available(&handle, None).await?;
 
@@ -69,8 +101,8 @@ impl ContentService {
         let seo_json = serialize_json(&seo, "seo")?;
         sqlx::query(
             "INSERT INTO pages (id, title, handle, status, page_type, body, seo, metadata, \
-             published_at, created_at, updated_at, deleted_at) \
-             VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, NULL, ?, ?, NULL)",
+             revision, published_at, created_at, updated_at, deleted_at) \
+             VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, 1, NULL, ?, ?, NULL)",
         )
         .bind(id.as_str())
         .bind(&title)
@@ -83,7 +115,7 @@ impl ContentService {
         .bind(now)
         .execute(self.db.pool())
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_conflict(error, "page handle already exists"))?;
 
         self.get_page(&id).await
     }
@@ -150,52 +182,148 @@ impl ContentService {
         Ok(PageResult::new(data, count, pagination))
     }
 
-    /// Updates page fields. Content changes do not alter published snapshots.
-    pub async fn update_page(&self, id: &PageId, input: UpdatePageInput) -> Result<Page, AppError> {
-        let existing = self.fetch_page_row(id, false).await?;
+    /// Searches non-deleted pages by title or handle, newest first.
+    ///
+    /// The query is matched case-insensitively and LIKE wildcards in user
+    /// input are escaped. An absent or blank query matches every page.
+    pub async fn search_pages(
+        &self,
+        query: Option<&str>,
+        pagination: Pagination,
+    ) -> Result<PageResult<Page>, AppError> {
+        let pattern = like_pattern(query);
+        let conditions = if pattern.is_some() {
+            " WHERE deleted_at IS NULL AND (LOWER(title) LIKE LOWER(?) ESCAPE '\\' \
+             OR LOWER(handle) LIKE LOWER(?) ESCAPE '\\')"
+        } else {
+            " WHERE deleted_at IS NULL"
+        };
 
-        let title = match input.title {
+        let count_sql = format!("SELECT COUNT(*) FROM pages{conditions}");
+        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        if let Some(pattern) = pattern.as_deref() {
+            count_query = count_query.bind(pattern).bind(pattern);
+        }
+        let count = count_query
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let list_sql = format!(
+            "SELECT {PAGE_COLUMNS} FROM pages{conditions} \
+             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        );
+        let mut list_query = sqlx::query_as::<_, PageRow>(&list_sql);
+        if let Some(pattern) = pattern.as_deref() {
+            list_query = list_query.bind(pattern).bind(pattern);
+        }
+        let rows = list_query
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let data = rows.into_iter().map(PageRow::into_page).collect();
+        Ok(PageResult::new(data, count, pagination))
+    }
+
+    /// Updates page fields inside one immediate transaction.
+    ///
+    /// When `base_revision` is supplied it must match the stored revision;
+    /// stale writers receive a conflict carrying the current revision. Content
+    /// changes create a draft snapshot but do not alter published snapshots.
+    pub async fn update_page(&self, id: &PageId, input: UpdatePageInput) -> Result<Page, AppError> {
+        let UpdatePageInput {
+            title,
+            handle,
+            page_type,
+            body,
+            seo,
+            metadata,
+            base_revision,
+            origin,
+            created_by,
+        } = input;
+
+        let mut tx = self.db.begin().await?;
+        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ? AND deleted_at IS NULL");
+        let existing = sqlx::query_as::<_, PageRow>(&sql)
+            .bind(id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("page", id))?;
+
+        if let Some(base_revision) = base_revision
+            && base_revision != existing.revision
+        {
+            return Err(revision_conflict(existing.revision));
+        }
+
+        let title = match title {
             Some(title) => {
                 validate_page_title(&title)?;
                 title.trim().to_owned()
             }
             None => existing.title.clone(),
         };
-        let handle = match input.handle {
+        let handle = match handle {
             Some(handle) => {
                 validate_handle(&handle, "handle")?;
                 handle
             }
             None => existing.handle.clone(),
         };
-        self.ensure_page_handle_available(&handle, Some(id)).await?;
-        let page_type = match input.page_type {
+        let duplicate: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pages WHERE handle = ? AND id <> ?")
+                .bind(&handle)
+                .bind(id.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        if duplicate > 0 {
+            return Err(AppError::conflict(format!(
+                "page handle already exists: {handle}"
+            )));
+        }
+        let page_type = match page_type {
             Some(page_type) => {
                 validate_length(&page_type, "page_type", MAX_PAGE_TYPE_LENGTH)?;
                 page_type.trim().to_owned()
             }
             None => existing.page_type.clone(),
         };
-        let body = match input.body {
+        let body_supplied = body.is_some();
+        let body = match body {
             Some(body) => body,
             None => parse_json(&existing.body),
         };
-        let seo = match input.seo {
+        let seo = match seo {
             Some(seo) => seo,
             None => parse_json(&existing.seo),
         };
-        let metadata = match input.metadata {
+        let metadata = match metadata {
             Some(metadata) => metadata,
             None => Metadata::from_json_str(&existing.metadata),
         };
         validate_page_content(&body, &seo)?;
+        // A metadata-only update must remain possible after the active theme
+        // changed; the stored body is validated when it is replaced or
+        // published, not on every unrelated field edit.
+        if body_supplied {
+            self.validate_body(&body)?;
+        }
         validate_metadata(&metadata)?;
 
         let body_json = serialize_json(&body, "body")?;
         let seo_json = serialize_json(&seo, "seo")?;
-        sqlx::query(
+        let body_changed = body_json != existing.body;
+        let now = now_timestamp();
+        let result = sqlx::query(
             "UPDATE pages SET title = ?, handle = ?, page_type = ?, body = ?, seo = ?, \
-             metadata = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+             metadata = ?, revision = revision + 1, updated_at = ? \
+             WHERE id = ? AND revision = ? AND deleted_at IS NULL",
         )
         .bind(&title)
         .bind(&handle)
@@ -203,12 +331,33 @@ impl ContentService {
         .bind(&body_json)
         .bind(&seo_json)
         .bind(metadata.to_json_string())
-        .bind(now_timestamp())
+        .bind(now)
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .bind(existing.revision)
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(revision_conflict(existing.revision));
+        }
 
+        if body_changed {
+            let next_version = next_page_version(&mut tx, id).await?;
+            let origin = origin.unwrap_or(PageRevisionOrigin::Manual);
+            insert_page_version(
+                &mut tx,
+                id,
+                next_version,
+                &body_json,
+                created_by.as_deref(),
+                PageVersionKind::Draft,
+                origin,
+                now,
+            )
+            .await?;
+        }
+
+        tx.commit().await.map_err(database_error)?;
         self.get_page(id).await
     }
 
@@ -231,6 +380,9 @@ impl ContentService {
     }
 
     /// Publishes a page and snapshots its current body as a new version.
+    ///
+    /// The stored body is validated against the active theme editor manifest
+    /// before publishing, and the revision is bumped so stale writers conflict.
     pub async fn publish_page(&self, id: &PageId) -> Result<Page, AppError> {
         let mut tx = self.db.begin().await?;
         let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ? AND deleted_at IS NULL");
@@ -241,17 +393,14 @@ impl ContentService {
             .map_err(database_error)?
             .ok_or_else(|| AppError::not_found("page", id))?;
 
+        self.validate_body(&parse_json(&row.body))?;
+
         let now = now_timestamp();
-        let next_version: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM page_versions WHERE page_id = ?",
-        )
-        .bind(id.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        let next_version = next_page_version(&mut tx, id).await?;
 
         sqlx::query(
-            "UPDATE pages SET status = 'published', published_at = ?, updated_at = ? WHERE id = ?",
+            "UPDATE pages SET status = 'published', published_at = ?, updated_at = ?, \
+             revision = revision + 1 WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(now)
         .bind(now)
@@ -260,18 +409,17 @@ impl ContentService {
         .await
         .map_err(database_error)?;
 
-        sqlx::query(
-            "INSERT INTO page_versions (id, page_id, version, body, created_by, created_at) \
-             VALUES (?, ?, ?, ?, NULL, ?)",
+        insert_page_version(
+            &mut tx,
+            id,
+            next_version,
+            &row.body,
+            None,
+            PageVersionKind::Published,
+            PageRevisionOrigin::Manual,
+            now,
         )
-        .bind(generate_id("pver"))
-        .bind(id.as_str())
-        .bind(next_version)
-        .bind(&row.body)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        .await?;
 
         tx.commit().await.map_err(database_error)?;
         self.get_page(id).await
@@ -281,8 +429,8 @@ impl ContentService {
     pub async fn unpublish_page(&self, id: &PageId) -> Result<Page, AppError> {
         self.fetch_page_row(id, false).await?;
         sqlx::query(
-            "UPDATE pages SET status = 'draft', published_at = NULL, updated_at = ? \
-             WHERE id = ? AND deleted_at IS NULL",
+            "UPDATE pages SET status = 'draft', published_at = NULL, updated_at = ?, \
+             revision = revision + 1 WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(now_timestamp())
         .bind(id.as_str())
@@ -296,8 +444,8 @@ impl ContentService {
     pub async fn archive_page(&self, id: &PageId) -> Result<Page, AppError> {
         self.fetch_page_row(id, false).await?;
         sqlx::query(
-            "UPDATE pages SET status = 'archived', published_at = NULL, updated_at = ? \
-             WHERE id = ? AND deleted_at IS NULL",
+            "UPDATE pages SET status = 'archived', published_at = NULL, updated_at = ?, \
+             revision = revision + 1 WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(now_timestamp())
         .bind(id.as_str())
@@ -311,8 +459,8 @@ impl ContentService {
     pub async fn list_page_versions(&self, page_id: &PageId) -> Result<Vec<PageVersion>, AppError> {
         self.fetch_page_row(page_id, false).await?;
         let rows = sqlx::query_as::<_, PageVersionRow>(
-            "SELECT id, page_id, version, body, created_by, created_at FROM page_versions \
-             WHERE page_id = ? ORDER BY version ASC",
+            "SELECT id, page_id, version, body, created_by, kind, origin, created_at \
+             FROM page_versions WHERE page_id = ? ORDER BY version ASC",
         )
         .bind(page_id.as_str())
         .fetch_all(self.db.pool())
@@ -322,19 +470,35 @@ impl ContentService {
     }
 
     /// Restores a page body from a stored version and snapshots the restore.
-    pub async fn restore_version(&self, page_id: &PageId, version: i64) -> Result<Page, AppError> {
+    ///
+    /// The restored body becomes the draft body; publishing remains an
+    /// explicit separate step. The source version row is left untouched. When
+    /// `base_revision` is supplied it must match the current revision, so a
+    /// stale editor cannot overwrite a newer change.
+    pub async fn restore_version(
+        &self,
+        page_id: &PageId,
+        version: i64,
+        base_revision: Option<i64>,
+    ) -> Result<Page, AppError> {
         let mut tx = self.db.begin().await?;
         let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ? AND deleted_at IS NULL");
-        sqlx::query_as::<_, PageRow>(&sql)
+        let existing = sqlx::query_as::<_, PageRow>(&sql)
             .bind(page_id.as_str())
             .fetch_optional(&mut *tx)
             .await
             .map_err(database_error)?
             .ok_or_else(|| AppError::not_found("page", page_id))?;
 
+        if let Some(base_revision) = base_revision
+            && base_revision != existing.revision
+        {
+            return Err(revision_conflict(existing.revision));
+        }
+
         let version_row = sqlx::query_as::<_, PageVersionRow>(
-            "SELECT id, page_id, version, body, created_by, created_at FROM page_versions \
-             WHERE page_id = ? AND version = ?",
+            "SELECT id, page_id, version, body, created_by, kind, origin, created_at \
+             FROM page_versions WHERE page_id = ? AND version = ?",
         )
         .bind(page_id.as_str())
         .bind(version)
@@ -344,34 +508,30 @@ impl ContentService {
         .ok_or_else(|| AppError::not_found("page version", format!("{page_id}@{version}")))?;
 
         let now = now_timestamp();
-        let next_version: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM page_versions WHERE page_id = ?",
-        )
-        .bind(page_id.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(database_error)?;
-
-        sqlx::query("UPDATE pages SET body = ?, updated_at = ? WHERE id = ?")
-            .bind(&version_row.body)
-            .bind(now)
-            .bind(page_id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
+        self.validate_body(&parse_json(&version_row.body))?;
+        let next_version = next_page_version(&mut tx, page_id).await?;
 
         sqlx::query(
-            "INSERT INTO page_versions (id, page_id, version, body, created_by, created_at) \
-             VALUES (?, ?, ?, ?, NULL, ?)",
+            "UPDATE pages SET body = ?, updated_at = ?, revision = revision + 1 WHERE id = ?",
         )
-        .bind(generate_id("pver"))
-        .bind(page_id.as_str())
-        .bind(next_version)
         .bind(&version_row.body)
         .bind(now)
+        .bind(page_id.as_str())
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+
+        insert_page_version(
+            &mut tx,
+            page_id,
+            next_version,
+            &version_row.body,
+            None,
+            PageVersionKind::Draft,
+            PageRevisionOrigin::Manual,
+            now,
+        )
+        .await?;
 
         tx.commit().await.map_err(database_error)?;
         self.get_page(page_id).await
@@ -454,6 +614,57 @@ impl ContentService {
              LIMIT ? OFFSET ?"
         );
         let rows = sqlx::query_as::<_, NavigationRow>(&sql)
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let mut data = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = NavigationId::from_string(row.id.clone());
+            let items = self.items_for_navigation(&id).await?;
+            data.push(row.into_navigation(items));
+        }
+        Ok(PageResult::new(data, count, pagination))
+    }
+
+    /// Searches navigations by name or handle, newest first.
+    ///
+    /// The query is matched case-insensitively and LIKE wildcards in user
+    /// input are escaped. An absent or blank query matches every navigation.
+    pub async fn search_navigations(
+        &self,
+        query: Option<&str>,
+        pagination: Pagination,
+    ) -> Result<PageResult<Navigation>, AppError> {
+        let pattern = like_pattern(query);
+        let conditions = if pattern.is_some() {
+            " WHERE LOWER(name) LIKE LOWER(?) ESCAPE '\\' \
+             OR LOWER(handle) LIKE LOWER(?) ESCAPE '\\'"
+        } else {
+            ""
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM navigations{conditions}");
+        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        if let Some(pattern) = pattern.as_deref() {
+            count_query = count_query.bind(pattern).bind(pattern);
+        }
+        let count = count_query
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let list_sql = format!(
+            "SELECT {NAVIGATION_COLUMNS} FROM navigations{conditions} \
+             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        );
+        let mut list_query = sqlx::query_as::<_, NavigationRow>(&list_sql);
+        if let Some(pattern) = pattern.as_deref() {
+            list_query = list_query.bind(pattern).bind(pattern);
+        }
+        let rows = list_query
             .bind(pagination.limit)
             .bind(pagination.offset)
             .fetch_all(self.db.pool())
@@ -961,6 +1172,84 @@ fn validate_rank(rank: i64) -> Result<(), AppError> {
     Ok(())
 }
 
+fn storefront_error(error: StorefrontError) -> AppError {
+    AppError::validation(error.to_string())
+}
+
+fn unique_conflict(error: sqlx::Error, message: &str) -> AppError {
+    match &error {
+        sqlx::Error::Database(database) if database.is_unique_violation() => {
+            AppError::conflict(message)
+        }
+        _ => database_error(error),
+    }
+}
+
+fn revision_conflict(current: i64) -> AppError {
+    AppError::conflict(format!(
+        "page revision conflict: current revision is {current}"
+    ))
+}
+
+/// Builds a case-insensitive `LIKE` pattern, escaping wildcards.
+fn like_pattern(query: Option<&str>) -> Option<String> {
+    let query = query?.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for character in query.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    Some(pattern)
+}
+
+async fn next_page_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    page_id: &PageId,
+) -> Result<i64, AppError> {
+    sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) + 1 FROM page_versions WHERE page_id = ?")
+        .bind(page_id.as_str())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_page_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    page_id: &PageId,
+    version: i64,
+    body: &str,
+    created_by: Option<&str>,
+    kind: PageVersionKind,
+    origin: PageRevisionOrigin,
+    created_at: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO page_versions \
+         (id, page_id, version, body, created_by, kind, origin, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(generate_id("pver"))
+    .bind(page_id.as_str())
+    .bind(version)
+    .bind(body)
+    .bind(created_by)
+    .bind(kind.as_str())
+    .bind(origin.as_str())
+    .bind(created_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
 fn serialize_json(value: &Value, field: &str) -> Result<String, AppError> {
     serde_json::to_string(value)
         .map_err(|error| AppError::internal(format!("could not serialize {field}: {error}")))
@@ -1029,6 +1318,7 @@ struct PageRow {
     body: String,
     seo: String,
     metadata: String,
+    revision: i64,
     published_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
@@ -1047,6 +1337,7 @@ impl PageRow {
             handle: self.handle,
             status,
             page_type: self.page_type,
+            revision: self.revision,
             body: parse_json(&self.body),
             seo: parse_json(&self.seo),
             metadata: Metadata::from_json_str(&self.metadata),
@@ -1065,6 +1356,8 @@ struct PageVersionRow {
     version: i64,
     body: String,
     created_by: Option<String>,
+    kind: String,
+    origin: String,
     created_at: i64,
 }
 
@@ -1075,6 +1368,8 @@ impl PageVersionRow {
             page_id: PageId::from_string(self.page_id),
             version: self.version,
             body: parse_json(&self.body),
+            kind: PageVersionKind::parse(&self.kind).unwrap_or(PageVersionKind::Published),
+            origin: PageRevisionOrigin::parse(&self.origin).unwrap_or(PageRevisionOrigin::Manual),
             created_by: self.created_by,
             created_at: self.created_at,
         }

@@ -16,6 +16,7 @@ tracing.workspace = true
 fastcart-kernel.workspace = true
 utoipa.workspace = true
 fastcart-infrastructure.workspace = true
+fastcart-storefront.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

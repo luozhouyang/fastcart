@@ -30,6 +30,10 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/themes/rollback", post(rollback_theme))
         .route("/themes/{id}", get(get_theme).delete(delete_theme))
         .route("/themes/{id}/settings", patch(update_theme_settings))
+        .route(
+            "/themes/{id}/editor-manifest",
+            get(get_theme_editor_manifest),
+        )
         .route("/themes/{id}/activate", post(activate_theme))
 }
 
@@ -41,6 +45,7 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(rollback_theme))
         .routes(routes!(get_theme, delete_theme))
         .routes(routes!(update_theme_settings))
+        .routes(routes!(get_theme_editor_manifest))
         .routes(routes!(activate_theme))
 }
 
@@ -58,6 +63,9 @@ pub struct RegisterThemeRequest {
     settings_schema: Option<Value>,
     #[serde(default)]
     settings: Option<Value>,
+    /// Raw editor manifest; required when `manifest.editor` is present.
+    #[serde(default)]
+    editor_manifest: Option<Value>,
 }
 
 impl From<RegisterThemeRequest> for RegisterThemeInput {
@@ -67,6 +75,7 @@ impl From<RegisterThemeRequest> for RegisterThemeInput {
             bundle_path: request.bundle_path,
             settings_schema: request.settings_schema,
             settings: request.settings,
+            editor_manifest: request.editor_manifest,
         }
     }
 }
@@ -132,6 +141,7 @@ async fn register_theme(
             "manifest_id": theme.manifest.id.clone(),
             "version": theme.manifest.version.clone(),
             "bundle_path": theme.bundle_path.clone(),
+            "has_editor_manifest": theme.editor_manifest.is_some(),
         }),
     )
     .await;
@@ -154,6 +164,28 @@ async fn get_theme(
     authorize(&actor, "themes.read")?;
     let theme = ThemeService::new(db).get(&ThemeId::from_string(id)).await?;
     Ok(Json(ThemeDto::from(theme)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/themes/{id}/editor-manifest",
+    tag = "Admin",
+    summary = "Get a theme editor manifest",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = serde_json::Value))
+)]
+async fn get_theme_editor_manifest(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    authorize(&actor, "themes.read")?;
+    let manifest = ThemeService::new(db)
+        .editor_manifest(&ThemeId::from_string(id))
+        .await?;
+    let manifest = serde_json::to_value(manifest)
+        .map_err(|error| ApiError::new(AppError::internal(error.to_string())))?;
+    Ok(Json(manifest))
 }
 
 #[utoipa::path(

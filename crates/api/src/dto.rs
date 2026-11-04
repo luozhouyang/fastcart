@@ -17,7 +17,9 @@ use fastcart_module_shipping::ResolvedShippingOption;
 use fastcart_module_store::Region;
 use fastcart_module_theme::Theme;
 use fastcart_platform::{Membership, Store, StoreDomain, User};
-use fastcart_storefront::ThemeManifest;
+use fastcart_storefront::{
+    CapabilityRequirement, ThemeEditorRef, ThemeManifest, ThemeRequirements,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -697,6 +699,118 @@ impl From<CustomerGroup> for CustomerGroupDto {
     }
 }
 
+/// Bundle-relative references to a theme editor surface.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = ThemeEditorRef)]
+pub struct ThemeEditorRefDto {
+    /// ESM entry that exports render and field components.
+    pub entry: String,
+    /// JSON file describing categories, components and fields.
+    pub manifest: String,
+    /// Editor manifest schema version.
+    #[serde(default = "default_editor_schema_version")]
+    pub schema_version: u32,
+}
+
+impl From<ThemeEditorRef> for ThemeEditorRefDto {
+    fn from(editor: ThemeEditorRef) -> Self {
+        Self {
+            entry: editor.entry,
+            manifest: editor.manifest,
+            schema_version: editor.schema_version,
+        }
+    }
+}
+
+impl From<ThemeEditorRefDto> for ThemeEditorRef {
+    fn from(editor: ThemeEditorRefDto) -> Self {
+        Self {
+            entry: editor.entry,
+            manifest: editor.manifest,
+            schema_version: editor.schema_version,
+        }
+    }
+}
+
+/// One capability required by a theme.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = CapabilityRequirement)]
+pub struct CapabilityRequirementDto {
+    /// Capability identifier.
+    pub id: String,
+    /// Required capability version.
+    pub version: u32,
+    /// Whether activation may proceed when the capability is missing.
+    #[serde(default)]
+    pub optional: bool,
+}
+
+impl From<CapabilityRequirement> for CapabilityRequirementDto {
+    fn from(capability: CapabilityRequirement) -> Self {
+        Self {
+            id: capability.id,
+            version: capability.version,
+            optional: capability.optional,
+        }
+    }
+}
+
+impl From<CapabilityRequirementDto> for CapabilityRequirement {
+    fn from(capability: CapabilityRequirementDto) -> Self {
+        Self {
+            id: capability.id,
+            version: capability.version,
+            optional: capability.optional,
+        }
+    }
+}
+
+/// Platform contracts and capabilities a theme depends on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = ThemeRequirements)]
+pub struct ThemeRequirementsDto {
+    /// Required storefront data API version.
+    #[serde(default = "default_data_api_version")]
+    pub data_api: u32,
+    /// Optional or required plugin capabilities.
+    #[serde(default)]
+    pub capabilities: Vec<CapabilityRequirementDto>,
+}
+
+impl From<ThemeRequirements> for ThemeRequirementsDto {
+    fn from(requires: ThemeRequirements) -> Self {
+        Self {
+            data_api: requires.data_api,
+            capabilities: requires
+                .capabilities
+                .into_iter()
+                .map(CapabilityRequirementDto::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<ThemeRequirementsDto> for ThemeRequirements {
+    fn from(requires: ThemeRequirementsDto) -> Self {
+        Self {
+            data_api: requires.data_api,
+            capabilities: requires
+                .capabilities
+                .into_iter()
+                .map(CapabilityRequirement::from)
+                .collect(),
+        }
+    }
+}
+
+const fn default_editor_schema_version() -> u32 {
+    fastcart_storefront::theme::SUPPORTED_EDITOR_SCHEMA_VERSION
+}
+
+const fn default_data_api_version() -> u32 {
+    fastcart_storefront::theme::SUPPORTED_DATA_API_VERSION
+}
+
 /// A validated theme manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = ThemeManifest)]
@@ -715,6 +829,12 @@ pub struct ThemeManifestDto {
     pub settings_schema: Option<String>,
     /// Optional asset manifest file.
     pub assets_manifest: Option<String>,
+    /// Optional editor bundle and manifest references.
+    #[serde(default)]
+    pub editor: Option<ThemeEditorRefDto>,
+    /// Optional platform contracts and capabilities the theme depends on.
+    #[serde(default)]
+    pub requires: Option<ThemeRequirementsDto>,
 }
 
 impl From<ThemeManifest> for ThemeManifestDto {
@@ -727,6 +847,8 @@ impl From<ThemeManifest> for ThemeManifestDto {
             entry: manifest.entry,
             settings_schema: manifest.settings_schema,
             assets_manifest: manifest.assets_manifest,
+            editor: manifest.editor.map(ThemeEditorRefDto::from),
+            requires: manifest.requires.map(ThemeRequirementsDto::from),
         }
     }
 }
@@ -741,6 +863,8 @@ impl From<ThemeManifestDto> for ThemeManifest {
             entry: manifest.entry,
             settings_schema: manifest.settings_schema,
             assets_manifest: manifest.assets_manifest,
+            editor: manifest.editor.map(ThemeEditorRef::from),
+            requires: manifest.requires.map(ThemeRequirements::from),
         }
     }
 }
@@ -803,6 +927,10 @@ pub struct ThemeDto {
     pub settings_schema: Option<Value>,
     /// Current theme settings.
     pub settings: Value,
+    /// Raw editor manifest, when the theme exposes an editor.
+    pub editor_manifest: Option<Value>,
+    /// Editor manifest schema version.
+    pub schema_version: u32,
     /// Whether this is the active theme.
     pub is_active: bool,
     /// Creation timestamp.
@@ -821,6 +949,8 @@ impl From<Theme> for ThemeDto {
             bundle_path: theme.bundle_path,
             settings_schema: theme.settings_schema,
             settings: theme.settings,
+            editor_manifest: theme.editor_manifest,
+            schema_version: theme.schema_version,
             is_active: theme.is_active,
             created_at: theme.created_at,
             updated_at: theme.updated_at,

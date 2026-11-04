@@ -12,12 +12,14 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use fastcart_http::extractors::ApiQuery;
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
+use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{ActorContext, AppError, Metadata, NavigationId, PageId, Pagination};
 use fastcart_module_content::{
     ContentService, CreateNavigationInput, CreatePageInput, CreateRedirectInput, Navigation,
-    NavigationItem, NavigationItemInput, NavigationTree, Page, PageStatus, PageVersion, Redirect,
-    UpdateNavigationInput, UpdatePageInput,
+    NavigationItem, NavigationItemInput, NavigationTree, Page, PageRevisionOrigin, PageStatus,
+    PageVersion, Redirect, UpdateNavigationInput, UpdatePageInput,
 };
+use fastcart_module_theme::ThemeService;
 use serde::Deserialize;
 use serde_json::Value;
 use utoipa_axum::router::OpenApiRouter;
@@ -143,8 +145,15 @@ impl From<CreatePageRequest> for CreatePageInput {
 }
 
 /// Partial page update body.
+///
+/// HTTP updates are optimistic: callers must send the revision they observed.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdatePageRequest {
+    /// Revision the caller last observed.
+    base_revision: i64,
+    /// Revision author, either `manual` or `ai`.
+    #[serde(default)]
+    origin: Option<String>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -159,16 +168,26 @@ pub struct UpdatePageRequest {
     metadata: Option<Metadata>,
 }
 
-impl From<UpdatePageRequest> for UpdatePageInput {
-    fn from(request: UpdatePageRequest) -> Self {
-        Self {
+impl TryFrom<UpdatePageRequest> for UpdatePageInput {
+    type Error = ApiError;
+
+    fn try_from(request: UpdatePageRequest) -> Result<Self, Self::Error> {
+        let origin = request
+            .origin
+            .as_deref()
+            .map(parse_page_revision_origin)
+            .transpose()?;
+        Ok(Self {
             title: request.title,
             handle: request.handle,
             page_type: request.page_type,
             body: request.body,
             seo: request.seo,
             metadata: request.metadata,
-        }
+            base_revision: Some(request.base_revision),
+            origin,
+            created_by: None,
+        })
     }
 }
 
@@ -262,6 +281,25 @@ fn parse_page_status(value: &str) -> ApiResult<PageStatus> {
     PageStatus::parse(value).ok_or_else(|| ApiError::validation("invalid page status"))
 }
 
+/// Parses a page revision origin strictly.
+fn parse_page_revision_origin(value: &str) -> ApiResult<PageRevisionOrigin> {
+    PageRevisionOrigin::parse(value)
+        .ok_or_else(|| ApiError::validation("invalid page revision origin"))
+}
+
+/// Builds a content service bound to the active theme editor manifest.
+async fn content_service(db: StoreDatabase) -> ApiResult<ContentService> {
+    let editor_manifest = ThemeService::new(db.clone())
+        .active_editor_manifest()
+        .await?;
+    Ok(ContentService::with_editor_manifest(db, editor_manifest))
+}
+
+/// Returns the authenticated actor identifier, when one is available.
+fn actor_id(actor: &ActorContext) -> Option<String> {
+    actor.user_id.as_ref().map(|id| id.as_str().to_owned())
+}
+
 /// Enforces a permission at the handler boundary.
 fn authorize(actor: &ActorContext, permission: &str) -> ApiResult<()> {
     actor.require_permission(permission).map_err(ApiError::new)
@@ -330,7 +368,7 @@ async fn create_page(
     ApiJson(input): ApiJson<CreatePageRequest>,
 ) -> ApiResult<(StatusCode, Json<Page>)> {
     authorize(&actor, "themes.write")?;
-    let page = ContentService::new(db).create_page(input.into()).await?;
+    let page = content_service(db).await?.create_page(input.into()).await?;
     Ok((StatusCode::CREATED, Json(page)))
 }
 
@@ -370,8 +408,11 @@ async fn update_page(
 ) -> ApiResult<Json<Page>> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    let page = ContentService::new(db)
-        .update_page(&page_id, input.into())
+    let mut input = UpdatePageInput::try_from(input)?;
+    input.created_by = actor_id(&actor);
+    let page = content_service(db)
+        .await?
+        .update_page(&page_id, input)
         .await?;
     Ok(Json(page))
 }
@@ -391,7 +432,7 @@ async fn delete_page(
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    ContentService::new(db).delete_page(&page_id).await?;
+    content_service(db).await?.delete_page(&page_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -410,7 +451,7 @@ async fn publish_page(
 ) -> ApiResult<Json<Page>> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    let page = ContentService::new(db).publish_page(&page_id).await?;
+    let page = content_service(db).await?.publish_page(&page_id).await?;
     Ok(Json(page))
 }
 
@@ -429,7 +470,7 @@ async fn unpublish_page(
 ) -> ApiResult<Json<Page>> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    let page = ContentService::new(db).unpublish_page(&page_id).await?;
+    let page = content_service(db).await?.unpublish_page(&page_id).await?;
     Ok(Json(page))
 }
 
@@ -448,7 +489,7 @@ async fn archive_page(
 ) -> ApiResult<Json<Page>> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    let page = ContentService::new(db).archive_page(&page_id).await?;
+    let page = content_service(db).await?.archive_page(&page_id).await?;
     Ok(Json(page))
 }
 
@@ -471,23 +512,35 @@ async fn list_page_versions(
     Ok(Json(versions))
 }
 
+/// Optional optimistic revision for a page restore.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct RestorePageVersionQuery {
+    /// Revision the caller last observed.
+    #[serde(default)]
+    base_revision: Option<i64>,
+}
+
 #[utoipa::path(
     post,
     path = "/content/pages/{id}/versions/{version}/restore",
     tag = "Admin",
     summary = "Restore a page version",
     security(("adminSession" = []), ("apiToken" = [])),
+    params(RestorePageVersionQuery),
     responses((status = 200, body = Page))
 )]
 async fn restore_page_version(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, version)): Path<(String, i64)>,
+    ApiQuery(query): ApiQuery<RestorePageVersionQuery>,
 ) -> ApiResult<Json<Page>> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    let page = ContentService::new(db)
-        .restore_version(&page_id, version)
+    let page = content_service(db)
+        .await?
+        .restore_version(&page_id, version, query.base_revision)
         .await?;
     Ok(Json(page))
 }

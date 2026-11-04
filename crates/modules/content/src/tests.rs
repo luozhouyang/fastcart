@@ -2,11 +2,12 @@
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{AppError, Metadata, NavigationId, PageId, Pagination, StoreId};
+use fastcart_storefront::ThemeEditorManifest;
 use serde_json::json;
 
 use crate::{
     ContentService, CreateNavigationInput, CreatePageInput, CreateRedirectInput, MAX_BODY_BYTES,
-    NavigationItemInput, PageStatus, UpdatePageInput,
+    NavigationItemInput, PageRevisionOrigin, PageStatus, PageVersionKind, UpdatePageInput,
 };
 
 async fn service() -> ContentService {
@@ -14,12 +15,22 @@ async fn service() -> ContentService {
     ContentService::new(db)
 }
 
+fn body_with(id: &str, title: &str) -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "content": [{
+            "type": "Hero",
+            "props": { "id": id, "title": title }
+        }]
+    })
+}
+
 fn page_input(title: &str) -> CreatePageInput {
     CreatePageInput {
         title: title.to_owned(),
         handle: None,
         page_type: None,
-        body: json!({ "blocks": [] }),
+        body: body_with("hero-1", title),
         seo: json!({ "title": title }),
         metadata: Metadata::empty(),
     }
@@ -70,8 +81,9 @@ async fn creates_reads_updates_and_soft_deletes_pages() {
                 title: Some("About Fastcart".to_owned()),
                 handle: Some("about-fastcart".to_owned()),
                 page_type: Some("home".to_owned()),
-                body: Some(json!({ "blocks": [{ "type": "hero" }] })),
+                body: Some(body_with("hero-2", "About")),
                 seo: Some(json!({ "title": "About" })),
+                base_revision: Some(page.revision),
                 ..Default::default()
             },
         )
@@ -80,7 +92,7 @@ async fn creates_reads_updates_and_soft_deletes_pages() {
     assert_eq!(updated.title, "About Fastcart");
     assert_eq!(updated.handle, "about-fastcart");
     assert_eq!(updated.page_type, "home");
-    assert_eq!(updated.body, json!({ "blocks": [{ "type": "hero" }] }));
+    assert_eq!(updated.body, body_with("hero-2", "About"));
     assert_eq!(updated.seo, json!({ "title": "About" }));
 
     service.delete_page(&page.id).await.unwrap();
@@ -183,21 +195,225 @@ async fn publishing_snapshots_body_and_timestamp() {
         .update_page(
             &page.id,
             UpdatePageInput {
-                body: Some(json!({ "blocks": [{ "type": "updated" }] })),
+                body: Some(body_with("hero-2", "Updated")),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
     assert_eq!(updated.status, PageStatus::Published);
-    assert_eq!(updated.body, json!({ "blocks": [{ "type": "updated" }] }));
-    assert_eq!(service.list_page_versions(&page.id).await.unwrap().len(), 1);
+    assert_eq!(updated.body, body_with("hero-2", "Updated"));
+    let versions = service.list_page_versions(&page.id).await.unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[1].kind, PageVersionKind::Draft);
+    assert_eq!(versions[1].origin, PageRevisionOrigin::Manual);
 
     service.publish_page(&page.id).await.unwrap();
     let versions = service.list_page_versions(&page.id).await.unwrap();
-    assert_eq!(versions.len(), 2);
-    assert_eq!(versions[1].version, 2);
-    assert_eq!(versions[1].body, updated.body);
+    assert_eq!(versions.len(), 3);
+    assert_eq!(versions[2].version, 3);
+    assert_eq!(versions[2].body, updated.body);
+    assert_eq!(versions[2].kind, PageVersionKind::Published);
+    assert_eq!(versions[2].origin, PageRevisionOrigin::Manual);
+}
+
+#[tokio::test]
+async fn revisions_start_at_one_and_increment_on_writes() {
+    let service = service().await;
+    let page = service.create_page(page_input("Home")).await.unwrap();
+    assert_eq!(page.revision, 1);
+
+    let updated = service
+        .update_page(
+            &page.id,
+            UpdatePageInput {
+                title: Some("Home".to_owned()),
+                base_revision: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.revision, 2);
+
+    let published = service.publish_page(&page.id).await.unwrap();
+    assert_eq!(published.revision, 3);
+
+    let draft = service.unpublish_page(&page.id).await.unwrap();
+    assert_eq!(draft.revision, 4);
+
+    let archived = service.archive_page(&page.id).await.unwrap();
+    assert_eq!(archived.revision, 5);
+}
+
+#[tokio::test]
+async fn stale_base_revision_returns_conflict_with_current_revision() {
+    let service = service().await;
+    let page = service.create_page(page_input("Home")).await.unwrap();
+
+    let updated = service
+        .update_page(
+            &page.id,
+            UpdatePageInput {
+                title: Some("Home 2".to_owned()),
+                base_revision: Some(page.revision),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.revision, 2);
+
+    let error = service
+        .update_page(
+            &page.id,
+            UpdatePageInput {
+                title: Some("Home 3".to_owned()),
+                base_revision: Some(page.revision),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        AppError::Conflict(message) => {
+            assert!(message.contains("current revision is 2"), "{message}");
+        }
+        other => panic!("expected conflict, got {other:?}"),
+    }
+    assert_eq!(service.get_page(&page.id).await.unwrap().title, "Home 2");
+}
+
+#[tokio::test]
+async fn body_updates_create_draft_versions_with_origin() {
+    let service = service().await;
+    let page = service.create_page(page_input("Home")).await.unwrap();
+    let body = body_with("hero-ai", "AI Draft");
+
+    let updated = service
+        .update_page(
+            &page.id,
+            UpdatePageInput {
+                body: Some(body.clone()),
+                base_revision: Some(page.revision),
+                origin: Some(PageRevisionOrigin::Ai),
+                created_by: Some("user_123".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.revision, 2);
+
+    let versions = service.list_page_versions(&page.id).await.unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].kind, PageVersionKind::Draft);
+    assert_eq!(versions[0].origin, PageRevisionOrigin::Ai);
+    assert_eq!(versions[0].created_by.as_deref(), Some("user_123"));
+    assert_eq!(versions[0].body, body);
+
+    // Metadata-only updates do not create another body snapshot.
+    service
+        .update_page(
+            &page.id,
+            UpdatePageInput {
+                title: Some("Renamed".to_owned()),
+                base_revision: Some(updated.revision),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(service.list_page_versions(&page.id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn searches_pages_and_navigations_case_insensitively() {
+    let service = service().await;
+    let about = service.create_page(page_input("About Us")).await.unwrap();
+    service.create_page(page_input("Contact")).await.unwrap();
+    service
+        .create_page(CreatePageInput {
+            handle: Some("finding-nemo".to_owned()),
+            ..page_input("Movie")
+        })
+        .await
+        .unwrap();
+    let removed = service
+        .create_page(page_input("About Archive"))
+        .await
+        .unwrap();
+    service.delete_page(&removed.id).await.unwrap();
+
+    let matches = service
+        .search_pages(Some("ABOUT"), pagination(10, 0))
+        .await
+        .unwrap();
+    assert_eq!(matches.count, 1);
+    assert_eq!(matches.data[0].id, about.id);
+
+    // Handle matching works even when the title differs.
+    let by_handle = service
+        .search_pages(Some("nemo"), pagination(10, 0))
+        .await
+        .unwrap();
+    assert_eq!(by_handle.count, 1);
+    assert_eq!(by_handle.data[0].handle, "finding-nemo");
+
+    // LIKE wildcards in user input are escaped rather than expanded.
+    assert_eq!(
+        service
+            .search_pages(Some("%"), pagination(10, 0))
+            .await
+            .unwrap()
+            .count,
+        0
+    );
+    assert_eq!(
+        service
+            .search_pages(Some("_"), pagination(10, 0))
+            .await
+            .unwrap()
+            .count,
+        0
+    );
+    assert_eq!(
+        service
+            .search_pages(None, pagination(10, 0))
+            .await
+            .unwrap()
+            .count,
+        3
+    );
+
+    let main = service
+        .create_navigation(navigation_input("Main Menu"))
+        .await
+        .unwrap();
+    service
+        .create_navigation(navigation_input("Footer"))
+        .await
+        .unwrap();
+    let found = service
+        .search_navigations(Some("main"), pagination(10, 0))
+        .await
+        .unwrap();
+    assert_eq!(found.count, 1);
+    assert_eq!(found.data[0].id, main.id);
+
+    let found_by_handle = service
+        .search_navigations(Some("footer"), pagination(10, 0))
+        .await
+        .unwrap();
+    assert_eq!(found_by_handle.count, 1);
+    assert_eq!(
+        service
+            .search_navigations(Some("%"), pagination(10, 0))
+            .await
+            .unwrap()
+            .count,
+        0
+    );
 }
 
 #[tokio::test]
@@ -222,7 +438,7 @@ async fn versions_can_be_listed_and_restored_as_new_snapshots() {
     let first_body = page.body.clone();
     service.publish_page(&page.id).await.unwrap();
 
-    let second_body = json!({ "blocks": [{ "type": "second" }] });
+    let second_body = body_with("hero-2", "Second");
     service
         .update_page(
             &page.id,
@@ -236,19 +452,27 @@ async fn versions_can_be_listed_and_restored_as_new_snapshots() {
     service.publish_page(&page.id).await.unwrap();
 
     let versions = service.list_page_versions(&page.id).await.unwrap();
-    assert_eq!(versions.len(), 2);
+    assert_eq!(versions.len(), 3);
     assert_eq!(versions[0].version, 1);
     assert_eq!(versions[1].version, 2);
+    assert_eq!(versions[1].kind, PageVersionKind::Draft);
+    assert_eq!(versions[2].version, 3);
+    assert_eq!(versions[2].kind, PageVersionKind::Published);
 
-    let restored = service.restore_version(&page.id, 1).await.unwrap();
+    let restored = service.restore_version(&page.id, 1, None).await.unwrap();
     assert_eq!(restored.body, first_body);
 
     let versions = service.list_page_versions(&page.id).await.unwrap();
-    assert_eq!(versions.len(), 3);
-    assert_eq!(versions[2].version, 3);
-    assert_eq!(versions[2].body, first_body);
+    assert_eq!(versions.len(), 4);
+    assert_eq!(versions[3].version, 4);
+    assert_eq!(versions[3].body, first_body);
+    assert_eq!(versions[3].kind, PageVersionKind::Draft);
+    assert_eq!(versions[3].origin, PageRevisionOrigin::Manual);
 
-    let error = service.restore_version(&page.id, 99).await.unwrap_err();
+    let error = service
+        .restore_version(&page.id, 99, None)
+        .await
+        .unwrap_err();
     assert!(error.is_not_found());
 }
 
@@ -643,7 +867,7 @@ async fn missing_resources_return_not_found_errors() {
     );
     assert!(
         service
-            .restore_version(&page_id, 1)
+            .restore_version(&page_id, 1, None)
             .await
             .unwrap_err()
             .is_not_found()
@@ -811,4 +1035,92 @@ async fn reorder_rejects_duplicate_foreign_and_missing_items() {
         .await
         .unwrap_err();
     assert!(error.is_not_found());
+}
+
+#[tokio::test]
+async fn metadata_updates_survive_a_theme_that_no_longer_matches_the_body() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let plain = ContentService::new(db.clone());
+    let page = plain.create_page(page_input("Legacy Hero")).await.unwrap();
+
+    let editor = ThemeEditorManifest::parse(&json!({
+        "schema_version": 1,
+        "categories": {
+            "product": { "title": "Product", "components": ["ProductGrid"] }
+        },
+        "components": {
+            "ProductGrid": {
+                "title": "Product Grid",
+                "category": "product",
+                "fields": {
+                    "collection": {
+                        "type": "data_source",
+                        "source": "collection",
+                        "required": true
+                    }
+                },
+                "defaultProps": {},
+                "slots": []
+            }
+        }
+    }))
+    .unwrap();
+    let themed = ContentService::with_editor_manifest(db, Some(editor));
+
+    let updated = themed
+        .update_page(
+            &page.id,
+            UpdatePageInput {
+                title: Some("Renamed".to_owned()),
+                base_revision: Some(page.revision),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.title, "Renamed");
+    assert_eq!(updated.body, page.body);
+
+    let error = themed
+        .update_page(
+            &page.id,
+            UpdatePageInput {
+                body: Some(body_with("hero-2", "New")),
+                base_revision: Some(updated.revision),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)));
+}
+
+#[tokio::test]
+async fn stale_restore_reports_a_revision_conflict() {
+    let service = service().await;
+    let page = service.create_page(page_input("Versioned")).await.unwrap();
+    let published = service.publish_page(&page.id).await.unwrap();
+    let updated = service
+        .update_page(
+            &page.id,
+            UpdatePageInput {
+                body: Some(body_with("hero-2", "Second")),
+                base_revision: Some(published.revision),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = service
+        .restore_version(&page.id, 1, Some(page.revision))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)));
+
+    let restored = service
+        .restore_version(&page.id, 1, Some(updated.revision))
+        .await
+        .unwrap();
+    assert_eq!(restored.body, page.body);
 }

@@ -2,7 +2,7 @@
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{AppError, Pagination, StoreId, ThemeId};
-use fastcart_storefront::ThemeManifest;
+use fastcart_storefront::{ThemeEditorRef, ThemeManifest};
 use serde_json::{Value, json};
 
 use crate::{RegisterThemeInput, ThemeService, UpdateThemeSettingsInput};
@@ -36,6 +36,49 @@ fn manifest(id: &str) -> ThemeManifest {
         entry: "dist/server.js".to_owned(),
         settings_schema: Some("settings.schema.json".to_owned()),
         assets_manifest: Some("assets.json".to_owned()),
+        editor: None,
+        requires: None,
+    }
+}
+
+fn editor_ref() -> ThemeEditorRef {
+    ThemeEditorRef {
+        entry: "dist/editor.js".to_owned(),
+        manifest: "editor.manifest.json".to_owned(),
+        schema_version: 1,
+    }
+}
+
+fn editor_manifest_value() -> Value {
+    json!({
+        "schema_version": 1,
+        "categories": {
+            "hero": { "title": "Hero", "components": ["Hero"] }
+        },
+        "components": {
+            "Hero": {
+                "title": "Hero",
+                "category": "hero",
+                "fields": {
+                    "title": { "type": "text", "required": true }
+                },
+                "defaultProps": { "title": "Welcome" },
+                "slots": []
+            }
+        },
+        "root": { "fields": { "title": { "type": "text" } } }
+    })
+}
+
+fn editor_input(id: &str, editor_manifest: Option<Value>) -> RegisterThemeInput {
+    let mut declared = manifest(id);
+    declared.editor = Some(editor_ref());
+    RegisterThemeInput {
+        manifest: declared,
+        bundle_path: format!("themes/{id}"),
+        settings_schema: None,
+        settings: None,
+        editor_manifest,
     }
 }
 
@@ -45,6 +88,7 @@ fn input(id: &str) -> RegisterThemeInput {
         bundle_path: format!("themes/{id}"),
         settings_schema: Some(schema()),
         settings: Some(json!({ "logo": "/logo.svg" })),
+        editor_manifest: None,
     }
 }
 
@@ -273,6 +317,91 @@ async fn deletes_inactive_themes_and_refuses_the_active_one() {
 }
 
 #[tokio::test]
+async fn registers_and_returns_editor_manifests() {
+    let service = service().await;
+    let editor = editor_manifest_value();
+
+    let theme = service
+        .register(editor_input("editor", Some(editor.clone())))
+        .await
+        .unwrap();
+    assert_eq!(theme.editor_manifest, Some(editor));
+    assert_eq!(theme.schema_version, 1);
+
+    let fetched = service.get(&theme.id).await.unwrap();
+    assert_eq!(fetched.editor_manifest, theme.editor_manifest);
+    assert_eq!(fetched.schema_version, 1);
+
+    let listed = service.list(pagination(10, 0)).await.unwrap();
+    assert_eq!(listed.data[0].editor_manifest, theme.editor_manifest);
+
+    let parsed = service.editor_manifest(&theme.id).await.unwrap();
+    assert_eq!(parsed.schema_version, 1);
+    assert!(parsed.components.contains_key("Hero"));
+}
+
+#[tokio::test]
+async fn themes_without_an_editor_default_to_schema_version_one() {
+    let service = service().await;
+    let theme = service.register(input("plain")).await.unwrap();
+
+    assert!(theme.editor_manifest.is_none());
+    assert_eq!(theme.schema_version, 1);
+
+    let error = service.editor_manifest(&theme.id).await.unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn rejects_editor_manifests_that_do_not_match_the_theme() {
+    let service = service().await;
+
+    let error = service
+        .register(editor_input("missing", None))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)));
+
+    let error = service
+        .register(editor_input(
+            "invalid",
+            Some(json!({ "schema_version": 1, "components": {} })),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)));
+
+    let error = service
+        .register(RegisterThemeInput {
+            editor_manifest: Some(editor_manifest_value()),
+            ..input("orphan")
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)));
+}
+
+#[tokio::test]
+async fn exposes_the_active_editor_manifest() {
+    let service = service().await;
+    assert!(service.active_editor_manifest().await.unwrap().is_none());
+
+    let plain = service.register(input("plain")).await.unwrap();
+    service.activate(&plain.id).await.unwrap();
+    assert!(service.active_editor_manifest().await.unwrap().is_none());
+
+    let themed = service
+        .register(editor_input("editor", Some(editor_manifest_value())))
+        .await
+        .unwrap();
+    service.activate(&themed.id).await.unwrap();
+
+    let active = service.active_editor_manifest().await.unwrap().unwrap();
+    assert_eq!(active.schema_version, 1);
+    assert!(active.components.contains_key("Hero"));
+}
+
+#[tokio::test]
 async fn missing_themes_return_not_found_errors() {
     let service = service().await;
     let missing = ThemeId::new();
@@ -280,6 +409,13 @@ async fn missing_themes_return_not_found_errors() {
     assert!(service.get(&missing).await.unwrap_err().is_not_found());
     assert!(service.activate(&missing).await.unwrap_err().is_not_found());
     assert!(service.delete(&missing).await.unwrap_err().is_not_found());
+    assert!(
+        service
+            .editor_manifest(&missing)
+            .await
+            .unwrap_err()
+            .is_not_found()
+    );
     assert!(
         service
             .update_settings(

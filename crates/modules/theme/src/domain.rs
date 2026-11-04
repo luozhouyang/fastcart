@@ -18,6 +18,11 @@ pub struct Theme {
     pub settings_schema: Option<Value>,
     /// Current theme settings.
     pub settings: Value,
+    /// Raw validated editor manifest, when the theme exposes an editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_manifest: Option<Value>,
+    /// Editor manifest schema version; `1` for themes without an editor.
+    pub schema_version: u32,
     /// Whether this theme is the store's active theme.
     pub is_active: bool,
     /// Creation timestamp in Unix seconds.
@@ -39,6 +44,10 @@ pub struct RegisterThemeInput {
     /// Initial settings; defaults to an empty object.
     #[serde(default)]
     pub settings: Option<Value>,
+    /// Raw editor manifest JSON. Required when the theme manifest references
+    /// an editor and rejected otherwise.
+    #[serde(default)]
+    pub editor_manifest: Option<Value>,
 }
 
 /// Input for replacing theme settings.

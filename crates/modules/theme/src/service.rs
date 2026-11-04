@@ -4,14 +4,16 @@ use fastcart_infrastructure::{StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, PageResult, Pagination, ThemeActivationId, ThemeId, now_timestamp,
 };
-use fastcart_storefront::{StorefrontError, ThemeManifest, validate_bundle_path};
+use fastcart_storefront::{
+    StorefrontError, ThemeEditorManifest, ThemeManifest, validate_bundle_path,
+};
 use serde_json::Value;
 use sqlx::FromRow;
 
 use crate::domain::{RegisterThemeInput, Theme, UpdateThemeSettingsInput};
 
-const THEME_COLUMNS: &str = "id, manifest, bundle_path, settings_schema, settings, is_active, \
-     created_at, updated_at";
+const THEME_COLUMNS: &str = "id, manifest, bundle_path, settings_schema, settings, \
+     editor_manifest, schema_version, is_active, created_at, updated_at";
 
 /// Application service for the storefront theme registry.
 #[derive(Clone, Debug)]
@@ -33,6 +35,7 @@ impl ThemeService {
             bundle_path,
             settings_schema,
             settings,
+            editor_manifest,
         } = input;
 
         manifest.validate().map_err(storefront_error)?;
@@ -42,6 +45,35 @@ impl ThemeService {
         }
         let settings = settings.unwrap_or_else(|| serde_json::json!({}));
         validate_settings(settings_schema.as_ref(), &settings)?;
+
+        let schema_version = manifest
+            .editor
+            .as_ref()
+            .map_or(1, |editor| editor.schema_version);
+        let editor_manifest = match (manifest.editor.as_ref(), editor_manifest) {
+            (Some(editor), Some(raw)) => {
+                let parsed = ThemeEditorManifest::parse(&raw).map_err(storefront_error)?;
+                if parsed.schema_version != editor.schema_version {
+                    return Err(AppError::validation(format!(
+                        "editor manifest schema version {} does not match theme manifest \
+                         version {}",
+                        parsed.schema_version, editor.schema_version
+                    )));
+                }
+                Some(raw)
+            }
+            (Some(_), None) => {
+                return Err(AppError::validation(
+                    "theme manifest references an editor manifest but none was supplied",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(AppError::validation(
+                    "editor_manifest supplied for a theme that does not declare an editor",
+                ));
+            }
+            (None, None) => None,
+        };
 
         if self.manifest_id_exists(&manifest.id).await? {
             return Err(AppError::conflict(format!(
@@ -58,12 +90,16 @@ impl ThemeService {
             None => None,
         };
         let settings_json = serialize_json(&settings, "settings")?;
+        let editor_manifest_json = match editor_manifest.as_ref() {
+            Some(raw) => Some(serialize_json(raw, "editor_manifest")?),
+            None => None,
+        };
 
         sqlx::query(
             "INSERT INTO themes \
              (id, manifest_id, name, version, runtime, manifest, bundle_path, settings_schema, \
-              settings, is_active, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+              settings, editor_manifest, schema_version, is_active, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
         )
         .bind(id.as_str())
         .bind(&manifest.id)
@@ -74,11 +110,13 @@ impl ThemeService {
         .bind(&bundle_path)
         .bind(settings_schema_json.as_deref())
         .bind(&settings_json)
+        .bind(editor_manifest_json.as_deref())
+        .bind(i64::from(schema_version))
         .bind(now)
         .bind(now)
         .execute(self.db.pool())
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_conflict(error, "theme already registered"))?;
 
         self.get(&id).await
     }
@@ -120,6 +158,33 @@ impl ThemeService {
             .await
             .map_err(database_error)?;
         row.map(ThemeRow::into_theme).transpose()
+    }
+
+    /// Loads and parses a theme's stored editor manifest.
+    ///
+    /// Returns a conflict when the theme exists but has no editor manifest or
+    /// when the stored payload no longer matches the editor contract.
+    pub async fn editor_manifest(&self, id: &ThemeId) -> Result<ThemeEditorManifest, AppError> {
+        let theme = self.get(id).await?;
+        let raw = theme
+            .editor_manifest
+            .ok_or_else(|| AppError::conflict(format!("theme has no editor manifest: {id}")))?;
+        ThemeEditorManifest::parse(&raw).map_err(|error| {
+            AppError::conflict(format!("stored theme editor manifest is invalid: {error}"))
+        })
+    }
+
+    /// Loads the active theme's editor manifest, when it declares one.
+    pub async fn active_editor_manifest(&self) -> Result<Option<ThemeEditorManifest>, AppError> {
+        let Some(theme) = self.active().await? else {
+            return Ok(None);
+        };
+        let Some(raw) = theme.editor_manifest else {
+            return Ok(None);
+        };
+        ThemeEditorManifest::parse(&raw).map(Some).map_err(|error| {
+            AppError::conflict(format!("stored theme editor manifest is invalid: {error}"))
+        })
     }
 
     /// Replaces a theme's settings after schema validation.
@@ -256,18 +321,22 @@ impl ThemeService {
     }
 
     /// Deletes an inactive theme.
+    ///
+    /// The active check is part of the delete statement so a concurrent
+    /// activation cannot slip between the check and the delete.
     pub async fn delete(&self, id: &ThemeId) -> Result<(), AppError> {
-        let theme = self.fetch_row(id).await?;
-        if theme.is_active != 0 {
-            return Err(AppError::conflict("cannot delete the active theme"));
-        }
-
-        let result = sqlx::query("DELETE FROM themes WHERE id = ?")
+        let result = sqlx::query("DELETE FROM themes WHERE id = ? AND is_active = 0")
             .bind(id.as_str())
             .execute(self.db.pool())
             .await
             .map_err(database_error)?;
         if result.rows_affected() == 0 {
+            // Distinguish a missing theme from an active one without relying
+            // on the pre-delete state.
+            let theme = self.fetch_row(id).await?;
+            if theme.is_active != 0 {
+                return Err(AppError::conflict("cannot delete the active theme"));
+            }
             return Err(AppError::not_found("theme", id));
         }
         Ok(())
@@ -295,6 +364,15 @@ impl ThemeService {
 
 fn storefront_error(error: StorefrontError) -> AppError {
     AppError::validation(error.to_string())
+}
+
+fn unique_conflict(error: sqlx::Error, message: &str) -> AppError {
+    match &error {
+        sqlx::Error::Database(database) if database.is_unique_violation() => {
+            AppError::conflict(message)
+        }
+        _ => database_error(error),
+    }
 }
 
 fn validate_settings_schema(schema: &Value) -> Result<(), AppError> {
@@ -331,6 +409,8 @@ struct ThemeRow {
     bundle_path: String,
     settings_schema: Option<String>,
     settings: String,
+    editor_manifest: Option<String>,
+    schema_version: i64,
     is_active: i64,
     created_at: i64,
     updated_at: i64,
@@ -350,6 +430,18 @@ impl ThemeRow {
         let settings: Value = serde_json::from_str(&self.settings).map_err(|error| {
             AppError::internal(format!("invalid stored theme settings: {error}"))
         })?;
+        let editor_manifest: Option<Value> = match self.editor_manifest {
+            Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
+                AppError::internal(format!("invalid stored theme editor manifest: {error}"))
+            })?),
+            None => None,
+        };
+        let schema_version = u32::try_from(self.schema_version).map_err(|_| {
+            AppError::internal(format!(
+                "invalid stored theme schema version: {}",
+                self.schema_version
+            ))
+        })?;
 
         Ok(Theme {
             id: ThemeId::from_string(self.id),
@@ -357,6 +449,8 @@ impl ThemeRow {
             bundle_path: self.bundle_path,
             settings_schema,
             settings,
+            editor_manifest,
+            schema_version,
             is_active: self.is_active != 0,
             created_at: self.created_at,
             updated_at: self.updated_at,

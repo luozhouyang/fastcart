@@ -12,7 +12,8 @@ mod tests;
 
 pub use domain::{
     CreateNavigationInput, CreatePageInput, CreateRedirectInput, MAX_BODY_BYTES, Navigation,
-    NavigationItem, NavigationItemInput, NavigationTree, NavigationTreeItem, Page, PageStatus,
-    PageVersion, Redirect, UpdateNavigationInput, UpdatePageInput,
+    NavigationItem, NavigationItemInput, NavigationTree, NavigationTreeItem, Page,
+    PageRevisionOrigin, PageStatus, PageVersion, PageVersionKind, Redirect, UpdateNavigationInput,
+    UpdatePageInput,
 };
 pub use service::ContentService;
