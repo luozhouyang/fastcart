@@ -11,15 +11,19 @@ use std::sync::Arc;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Request, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header::{
     CONNECTION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue, TE, TRAILER, TRANSFER_ENCODING,
     UPGRADE,
 };
 use axum::response::{IntoResponse, Response};
-use fastcart_http::{ApiError, RequestId};
-use fastcart_kernel::{AppError, CurrencyCode, StoreContext, StoreId, now_timestamp};
+use fastcart_http::{ApiError, CART_ID_COOKIE, CUSTOMER_SESSION_COOKIE, RequestId, parse_cookies};
+use fastcart_infrastructure::StoreDatabase;
+use fastcart_kernel::{AppError, CartId, CurrencyCode, StoreContext, StoreId, now_timestamp};
+use fastcart_module_cart::CartService;
 use fastcart_module_content::{ContentService, Page, PageStatus};
+use fastcart_module_customer::CustomerService;
 use fastcart_module_theme::ThemeService;
 use fastcart_runtime_api::{
     PageContext, RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest, RuntimeResponse,
@@ -105,7 +109,16 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
     let mut data = BTreeMap::new();
     data.insert(
         fastcart_storefront::page::RESERVED_CONTEXT_KEY.to_owned(),
-        build_context_data(&store, &host, &currency, &theme, DataMode::Production),
+        build_context_data(
+            &database,
+            request.headers(),
+            &store,
+            &host,
+            &currency,
+            &theme,
+            DataMode::Production,
+        )
+        .await,
     );
     if let Some(compiled) = compiled.as_ref()
         && !compiled.bindings.is_empty()
@@ -124,6 +137,7 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
         {
             Ok(bag) => data.extend(bag),
             Err(error) => {
+                context.metrics.record_storefront_data_failure();
                 tracing::warn!(error = %error, "storefront data resolution failed");
             }
         }
@@ -299,16 +313,46 @@ pub(crate) fn compile_page(
 
 /// Builds the reserved `context` entry injected into every data bag.
 ///
-/// Cart and customer data stay `null` until preview and customer context work
-/// supplies a request-scoped identity; the shape is fixed now so themes can
-/// depend on it.
-pub(crate) fn build_context_data(
+/// The authenticated customer and their active cart are resolved from
+/// store-scoped cookies. Lookup failures degrade to anonymous/null context
+/// rather than failing the render: a theme must always receive a stable shape.
+pub(crate) async fn build_context_data(
+    db: &StoreDatabase,
+    headers: &HeaderMap,
     store: &fastcart_platform::Store,
     host: &str,
     currency: &CurrencyCode,
     theme: &fastcart_module_theme::Theme,
     mode: DataMode,
 ) -> serde_json::Value {
+    let cookies = parse_cookies(headers);
+    let customer = match cookies.get(CUSTOMER_SESSION_COOKIE) {
+        Some(token) => match CustomerService::new(db.clone())
+            .session_customer(token)
+            .await
+        {
+            Ok(customer) => customer,
+            Err(error) => {
+                tracing::warn!(error = %error, "could not resolve customer session context");
+                None
+            }
+        },
+        None => None,
+    };
+    let cart = resolve_context_cart(
+        db,
+        cookies.get(CART_ID_COOKIE).map(String::as_str),
+        customer.as_ref(),
+    )
+    .await;
+    let customer = customer.map(|customer| {
+        json!({
+            "id": customer.id.as_str(),
+            "email": customer.email,
+            "first_name": customer.first_name,
+            "last_name": customer.last_name,
+        })
+    });
     json!({
         "store": {
             "id": store.id.as_str(),
@@ -323,9 +367,61 @@ pub(crate) fn build_context_data(
             "version": theme.manifest.version,
             "settings": theme.settings,
         },
-        "cart": serde_json::Value::Null,
-        "customer": serde_json::Value::Null,
+        "cart": cart,
+        "customer": customer,
         "mode": mode.as_str(),
+    })
+}
+
+/// Resolves the active cart for the request context.
+///
+/// An authenticated customer's newest open cart wins. Guests may present a
+/// cart id cookie, but only for a guest cart; a customer-scoped cart must never
+/// be exposed by guessing an identifier.
+async fn resolve_context_cart(
+    db: &StoreDatabase,
+    cookie: Option<&str>,
+    customer: Option<&fastcart_module_customer::Customer>,
+) -> serde_json::Value {
+    let service = CartService::new(db.clone());
+    let mut cart = None;
+    if let Some(customer) = customer {
+        match service.active_cart_for_customer(&customer.id).await {
+            Ok(found) => cart = found,
+            Err(error) => {
+                tracing::warn!(error = %error, "could not resolve customer cart context");
+            }
+        }
+    }
+    if cart.is_none()
+        && let Some(id) = cookie
+    {
+        match service.get_cart(&CartId::from_string(id)).await {
+            Ok(found) => {
+                let belongs = match (&found.customer_id, customer) {
+                    (None, _) => true,
+                    (Some(owner), Some(customer)) => owner == &customer.id,
+                    (Some(_), None) => false,
+                };
+                if belongs && found.status == fastcart_module_cart::CartStatus::Open {
+                    cart = Some(found);
+                }
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "could not resolve cart cookie context");
+            }
+        }
+    }
+    cart.map_or(serde_json::Value::Null, |cart| {
+        json!({
+            "id": cart.id.as_str(),
+            "currency": cart.currency_code.as_str(),
+            "status": cart.status.as_str(),
+            "item_count": cart.items.iter().map(|item| item.quantity).sum::<i64>(),
+            "subtotal": cart.totals.subtotal,
+            "total": cart.totals.total,
+        })
     })
 }
 

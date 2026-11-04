@@ -841,6 +841,43 @@ impl CustomerService {
         })
     }
 
+    /// Validates a session token without refreshing its last-used timestamp.
+    ///
+    /// This is the read-only counterpart of [`Self::authenticate_session`],
+    /// intended for rendering contexts (for example SSR) that need to
+    /// personalize a page without producing a side effect. Unknown, revoked or
+    /// expired sessions and sessions owned by soft-deleted or disabled
+    /// customers resolve to `None`. Database failures are still surfaced as
+    /// [`AppError`].
+    pub async fn session_customer(&self, token: &str) -> Result<Option<Customer>, AppError> {
+        if token.len() < 32 {
+            return Ok(None);
+        }
+        let row = sqlx::query_as::<_, SessionCustomerRow>(
+            "SELECT s.id AS session_id, s.expires_at,
+                    c.id, c.email, c.first_name, c.last_name, c.phone, c.has_account,
+                    c.status, c.email_verified_at, c.metadata, c.created_at, c.updated_at
+             FROM customer_sessions s
+             JOIN customers c ON c.id = s.customer_id
+             WHERE s.token_hash = ? AND s.revoked_at IS NULL AND c.deleted_at IS NULL",
+        )
+        .bind(hash_token(token))
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.expires_at <= now_timestamp() {
+            return Ok(None);
+        }
+        let customer = row.into_customer();
+        if customer.status != CustomerStatus::Active {
+            return Ok(None);
+        }
+        Ok(Some(customer))
+    }
+
     /// Revokes the session identified by a token. Unknown tokens are ignored.
     pub async fn logout(&self, token: &str) -> Result<(), AppError> {
         sqlx::query(
@@ -2028,6 +2065,160 @@ mod tests {
         let authenticated = service.authenticate_session(&session.token).await.unwrap();
         assert_eq!(authenticated.customer.id, customer.id);
         assert_eq!(authenticated.session_id, session.session_id);
+    }
+
+    #[tokio::test]
+    async fn session_customer_lookup_is_read_only() {
+        let (service, db) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "hunter2hunter2",
+            ))
+            .await
+            .unwrap();
+        let session = service
+            .login("owner@example.com", "hunter2hunter2")
+            .await
+            .unwrap();
+
+        // A sentinel proves the lookup never touches last_used_at, even when
+        // the call happens within the same clock tick as session creation.
+        sqlx::query("UPDATE customer_sessions SET last_used_at = 1 WHERE id = ?")
+            .bind(session.session_id.as_str())
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let found = service
+            .session_customer(&session.token)
+            .await
+            .unwrap()
+            .expect("valid session resolves to its customer");
+        assert_eq!(found.id, customer.id);
+        assert_eq!(found.email, customer.email);
+        assert!(found.has_account);
+
+        let last_used_at: i64 =
+            sqlx::query_scalar("SELECT last_used_at FROM customer_sessions WHERE id = ?")
+                .bind(session.session_id.as_str())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(last_used_at, 1);
+
+        // The side-effecting variant still refreshes the timestamp.
+        service.authenticate_session(&session.token).await.unwrap();
+        let refreshed: i64 =
+            sqlx::query_scalar("SELECT last_used_at FROM customer_sessions WHERE id = ?")
+                .bind(session.session_id.as_str())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert!(refreshed > 1);
+    }
+
+    #[tokio::test]
+    async fn session_customer_lookup_rejects_invalid_sessions() {
+        let (service, db) = service().await;
+        service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "hunter2hunter2",
+            ))
+            .await
+            .unwrap();
+
+        // Unknown and too-short tokens resolve to None rather than an error.
+        assert!(
+            service
+                .session_customer(&"a".repeat(64))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(service.session_customer("short").await.unwrap().is_none());
+
+        // Revoked session.
+        let revoked = service
+            .login("owner@example.com", "hunter2hunter2")
+            .await
+            .unwrap();
+        service.logout(&revoked.token).await.unwrap();
+        assert!(
+            service
+                .session_customer(&revoked.token)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Expired session.
+        let expired = service
+            .login("owner@example.com", "hunter2hunter2")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE customer_sessions SET expires_at = 0 WHERE id = ?")
+            .bind(expired.session_id.as_str())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert!(
+            service
+                .session_customer(&expired.token)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Disabled customer.
+        let disabled = service
+            .login("owner@example.com", "hunter2hunter2")
+            .await
+            .unwrap();
+        service
+            .update_customer(
+                &disabled.customer.id,
+                UpdateCustomerInput {
+                    status: Some(CustomerStatus::Disabled),
+                    ..UpdateCustomerInput::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            service
+                .session_customer(&disabled.token)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn session_customer_lookup_rejects_soft_deleted_customers() {
+        let (service, _) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new(
+                "owner@example.com",
+                "hunter2hunter2",
+            ))
+            .await
+            .unwrap();
+        let session = service
+            .login("owner@example.com", "hunter2hunter2")
+            .await
+            .unwrap();
+
+        service.delete_customer(&customer.id).await.unwrap();
+
+        assert!(
+            service
+                .session_customer(&session.token)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -8,7 +8,9 @@ use axum::http::{Request, StatusCode};
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::Metadata;
+use fastcart_module_cart::{CartService, CreateCartInput};
 use fastcart_module_content::{ContentService, CreatePageInput};
+use fastcart_module_customer::{CustomerService, RegisterCustomerInput};
 use fastcart_module_theme::{RegisterThemeInput, ThemeService};
 use fastcart_platform::{CreateStoreInput, PlatformStore, StoreProvisioningService};
 use fastcart_runtime_api::{
@@ -330,6 +332,54 @@ async fn injects_the_published_page_and_resolved_data() {
     // A deleted or missing reference degrades to null instead of failing.
     assert!(grid["collection"].is_null());
     assert_eq!(grid["products"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn injects_customer_and_cart_context_from_cookies() {
+    let (runtime, requests) = RecordingRuntime::new();
+    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let customers = CustomerService::new(fixture.database.clone());
+    let customer = customers
+        .register(RegisterCustomerInput::new(
+            "shopper@example.com",
+            "correct-horse-battery-staple",
+        ))
+        .await
+        .expect("customer");
+    let session = customers
+        .login("shopper@example.com", "correct-horse-battery-staple")
+        .await
+        .expect("customer session");
+    let cart = CartService::new(fixture.database.clone())
+        .create_cart(CreateCartInput {
+            customer_id: Some(customer.id.clone()),
+            ..CreateCartInput::new("USD")
+        })
+        .await
+        .expect("cart");
+    let cookie = format!(
+        "fc_customer_session={}; fc_cart_id={}",
+        session.token,
+        cart.id.as_str()
+    );
+
+    let (status, body) = send(
+        &fixture.app,
+        "/",
+        "shop.example.com",
+        &[("cookie", cookie.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let requests = requests.lock().unwrap();
+    let data = requests[0].data.as_ref().expect("data bag");
+    let context = data.get("context").expect("reserved context entry");
+    assert_eq!(context["customer"]["id"], customer.id.as_str());
+    assert_eq!(context["customer"]["email"], "shopper@example.com");
+    assert_eq!(context["cart"]["id"], cart.id.as_str());
+    assert_eq!(context["cart"]["item_count"], 0);
+    assert_eq!(context["cart"]["currency"], "USD");
 }
 
 #[tokio::test]

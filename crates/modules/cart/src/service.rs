@@ -160,6 +160,32 @@ impl CartService {
         Ok(cart)
     }
 
+    /// Returns the newest open cart owned by the customer.
+    ///
+    /// Carts in any other lifecycle state (completed or expired) are ignored,
+    /// as are carts belonging to other customers. Returns `None` when the
+    /// customer has no open cart; database failures are surfaced as
+    /// [`AppError`].
+    pub async fn active_cart_for_customer(
+        &self,
+        customer_id: &CustomerId,
+    ) -> Result<Option<Cart>, AppError> {
+        let cart_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM carts WHERE customer_id = ? AND status = ? \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(customer_id.as_str())
+        .bind(CartStatus::Open.as_str())
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?;
+
+        match cart_id {
+            Some(cart_id) => self.get_cart(&CartId::from_string(cart_id)).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Adds a line snapshot, merging into an existing variant line.
     ///
     /// When the variant is already present its quantity is incremented and the
@@ -1769,6 +1795,91 @@ mod tests {
             .find(|cart| !cart.items.is_empty())
             .unwrap();
         assert_eq!(with_items.totals.item_subtotal, 500);
+    }
+
+    #[tokio::test]
+    async fn finds_newest_active_cart_for_customer() {
+        let service = service().await;
+        let customer = CustomerId::new();
+        let other = CustomerId::new();
+
+        let first = service
+            .create_cart(CreateCartInput {
+                customer_id: Some(customer.clone()),
+                ..create_input("USD")
+            })
+            .await
+            .unwrap();
+        let second = service
+            .create_cart(CreateCartInput {
+                customer_id: Some(customer.clone()),
+                ..create_input("EUR")
+            })
+            .await
+            .unwrap();
+        let other_cart = service
+            .create_cart(CreateCartInput {
+                customer_id: Some(other.clone()),
+                ..create_input("USD")
+            })
+            .await
+            .unwrap();
+
+        // Creation timestamps can collide within one clock tick; pin them so
+        // the newest-cart ordering is deterministic.
+        for (cart_id, created_at) in [
+            (&first.id, 1_i64),
+            (&second.id, 2_i64),
+            (&other_cart.id, 3_i64),
+        ] {
+            sqlx::query("UPDATE carts SET created_at = ? WHERE id = ?")
+                .bind(created_at)
+                .bind(cart_id.as_str())
+                .execute(service.db.pool())
+                .await
+                .unwrap();
+        }
+
+        let active = service
+            .active_cart_for_customer(&customer)
+            .await
+            .unwrap()
+            .expect("customer has an active cart");
+        assert_eq!(active.id, second.id);
+
+        // Completing the newest cart falls back to the older open one.
+        service.complete_cart(&second.id).await.unwrap();
+        let active = service
+            .active_cart_for_customer(&customer)
+            .await
+            .unwrap()
+            .expect("older cart is still open");
+        assert_eq!(active.id, first.id);
+
+        // Another customer's carts are never returned.
+        let active_other = service
+            .active_cart_for_customer(&other)
+            .await
+            .unwrap()
+            .expect("other customer has an active cart");
+        assert_eq!(active_other.id, other_cart.id);
+
+        // With no open carts the result is None.
+        service.complete_cart(&first.id).await.unwrap();
+        assert!(
+            service
+                .active_cart_for_customer(&customer)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            service
+                .active_cart_for_customer(&CustomerId::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
