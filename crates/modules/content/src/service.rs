@@ -19,8 +19,9 @@ use crate::domain::{
     resolve_handle, validate_page_content, validate_page_title, validate_redirect_status,
 };
 
-const PAGE_COLUMNS: &str = "id, title, handle, status, page_type, body, seo, metadata, revision, \
-     published_at, created_at, updated_at, deleted_at";
+const PAGE_COLUMNS: &str = "id, title, handle, status, page_type, body, published_body, \
+     published_title, published_handle, published_page_type, published_seo, published_metadata, \
+     seo, metadata, revision, published_at, created_at, updated_at, deleted_at";
 
 const NAVIGATION_COLUMNS: &str = "id, name, handle, metadata, created_at, updated_at";
 
@@ -100,9 +101,12 @@ impl ContentService {
         let body_json = serialize_json(&body, "body")?;
         let seo_json = serialize_json(&seo, "seo")?;
         sqlx::query(
-            "INSERT INTO pages (id, title, handle, status, page_type, body, seo, metadata, \
-             revision, published_at, created_at, updated_at, deleted_at) \
-             VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, 1, NULL, ?, ?, NULL)",
+            "INSERT INTO pages (id, title, handle, status, page_type, body, published_body, \
+             published_title, published_handle, published_page_type, published_seo, \
+             published_metadata, seo, metadata, revision, published_at, created_at, updated_at, \
+             deleted_at) \
+             VALUES (?, ?, ?, 'draft', ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, 1, NULL, \
+             ?, ?, NULL)",
         )
         .bind(id.as_str())
         .bind(&title)
@@ -136,6 +140,75 @@ impl ContentService {
             .map_err(database_error)?
             .ok_or_else(|| AppError::not_found("page", handle))?;
         Ok(row.into_page())
+    }
+
+    /// Loads a published page by handle for storefront rendering.
+    ///
+    /// Only live, published pages are returned. Routing uses the published
+    /// handle, falling back to the live handle only for legacy rows whose
+    /// published snapshot predates the column. The returned [`Page`] carries
+    /// the published title, handle, page type, body, SEO and metadata, falling
+    /// back per field to the draft value when that snapshot value is absent,
+    /// and always clears [`Page::published_body`] so the draft can never leak to
+    /// storefronts.
+    pub async fn get_published_page_by_handle(&self, handle: &str) -> Result<Page, AppError> {
+        let sql = format!(
+            "SELECT {PAGE_COLUMNS} FROM pages \
+             WHERE COALESCE(published_handle, handle) = ? AND status = 'published' \
+               AND deleted_at IS NULL"
+        );
+        let row = sqlx::query_as::<_, PageRow>(&sql)
+            .bind(handle)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("page", handle))?;
+        Ok(row.into_published_page())
+    }
+
+    /// Loads a published page by identifier for storefront data binding.
+    ///
+    /// The projection matches [`Self::get_published_page_by_handle`]: every
+    /// storefront-visible field comes from the published snapshot, with a
+    /// per-field fallback to the live value for legacy rows, and
+    /// [`Page::published_body`] is always cleared.
+    pub async fn get_published_page(&self, id: &PageId) -> Result<Page, AppError> {
+        let sql = format!(
+            "SELECT {PAGE_COLUMNS} FROM pages \
+             WHERE id = ? AND status = 'published' AND deleted_at IS NULL"
+        );
+        sqlx::query_as::<_, PageRow>(&sql)
+            .bind(id.as_str())
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("page", id))
+            .map(PageRow::into_published_page)
+    }
+
+    /// Loads the most recently published home page.
+    ///
+    /// A page whose published classifier is `home` or whose published handle is
+    /// `home` is returned, newest publication first. Legacy rows fall back to
+    /// the live classifier and handle. Because matching and ordering use the
+    /// published snapshot, draft-only edits cannot change which home page is
+    /// served. The projection matches [`Self::get_published_page_by_handle`], so
+    /// the returned body is the published body and [`Page::published_body`] is
+    /// cleared.
+    pub async fn get_home_page(&self) -> Result<Option<Page>, AppError> {
+        let sql = format!(
+            "SELECT {PAGE_COLUMNS} FROM pages \
+             WHERE status = 'published' AND deleted_at IS NULL \
+               AND (COALESCE(published_page_type, page_type) = 'home' \
+                    OR COALESCE(published_handle, handle) = 'home') \
+             ORDER BY published_at DESC, id ASC \
+             LIMIT 1"
+        );
+        let row = sqlx::query_as::<_, PageRow>(&sql)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        Ok(row.map(PageRow::into_published_page))
     }
 
     /// Lists pages with an optional status filter and pagination.
@@ -362,28 +435,12 @@ impl ContentService {
     }
 
     /// Soft-deletes a page and hides it from storefront reads.
-    pub async fn delete_page(&self, id: &PageId) -> Result<(), AppError> {
-        let now = now_timestamp();
-        let result = sqlx::query(
-            "UPDATE pages SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
-        )
-        .bind(now)
-        .bind(now)
-        .bind(id.as_str())
-        .execute(self.db.pool())
-        .await
-        .map_err(database_error)?;
-        if result.rows_affected() == 0 {
-            return Err(AppError::not_found("page", id));
-        }
-        Ok(())
-    }
-
-    /// Publishes a page and snapshots its current body as a new version.
     ///
-    /// The stored body is validated against the active theme editor manifest
-    /// before publishing, and the revision is bumped so stale writers conflict.
-    pub async fn publish_page(&self, id: &PageId) -> Result<Page, AppError> {
+    /// The page row is read and updated inside one transaction, and the
+    /// returned [`Page`] reflects the soft-deleted state with the revision and
+    /// status that were actually removed. Callers use it for audit records so
+    /// the logged revision cannot race a concurrent write.
+    pub async fn delete_page(&self, id: &PageId) -> Result<Page, AppError> {
         let mut tx = self.db.begin().await?;
         let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ? AND deleted_at IS NULL");
         let row = sqlx::query_as::<_, PageRow>(&sql)
@@ -393,13 +450,80 @@ impl ContentService {
             .map_err(database_error)?
             .ok_or_else(|| AppError::not_found("page", id))?;
 
+        let now = now_timestamp();
+        let result = sqlx::query(
+            "UPDATE pages SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("page", id));
+        }
+        tx.commit().await.map_err(database_error)?;
+
+        let mut page = row.into_page();
+        page.deleted_at = Some(now);
+        page.updated_at = now;
+        Ok(page)
+    }
+
+    /// Publishes a page and snapshots its current body as a new version.
+    ///
+    /// The stored body is validated against the active theme editor manifest
+    /// before publishing, and the live title, handle, page type, body, SEO and
+    /// metadata are copied into their `published_*` columns, so storefront
+    /// routing and presentation only change on publish. The revision is bumped
+    /// so stale writers conflict. Publishing an archived page is a conflict.
+    /// Re-publishing a page whose published snapshot already equals every live
+    /// field is idempotent and leaves both the revision and snapshots
+    /// untouched.
+    pub async fn publish_page(&self, id: &PageId) -> Result<Page, AppError> {
+        self.publish_page_as(id, None, PageRevisionOrigin::Manual)
+            .await
+    }
+
+    /// Publishes a page, recording the actor and revision origin.
+    ///
+    /// This is the attributed form of [`Self::publish_page`]. The `created_by`
+    /// value and `origin` are stored on the published snapshot.
+    pub async fn publish_page_as(
+        &self,
+        id: &PageId,
+        created_by: Option<&str>,
+        origin: PageRevisionOrigin,
+    ) -> Result<Page, AppError> {
+        let mut tx = self.db.begin().await?;
+        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ? AND deleted_at IS NULL");
+        let row = sqlx::query_as::<_, PageRow>(&sql)
+            .bind(id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("page", id))?;
+
+        if row.status == PageStatus::Archived.as_str() {
+            return Err(AppError::conflict("cannot publish an archived page"));
+        }
+
         self.validate_body(&parse_json(&row.body))?;
+
+        if row.status == PageStatus::Published.as_str() && row.published_matches_live() {
+            tx.commit().await.map_err(database_error)?;
+            return Ok(row.into_page());
+        }
 
         let now = now_timestamp();
         let next_version = next_page_version(&mut tx, id).await?;
 
         sqlx::query(
-            "UPDATE pages SET status = 'published', published_at = ?, updated_at = ?, \
+            "UPDATE pages SET status = 'published', published_body = body, \
+             published_title = title, published_handle = handle, \
+             published_page_type = page_type, published_seo = seo, \
+             published_metadata = metadata, published_at = ?, updated_at = ?, \
              revision = revision + 1 WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(now)
@@ -414,9 +538,9 @@ impl ContentService {
             id,
             next_version,
             &row.body,
-            None,
+            created_by,
             PageVersionKind::Published,
-            PageRevisionOrigin::Manual,
+            origin,
             now,
         )
         .await?;
@@ -426,8 +550,17 @@ impl ContentService {
     }
 
     /// Moves a published page back to draft.
+    ///
+    /// Drafts are returned unchanged, while archived pages are a conflict. The
+    /// last published body is retained for auditing and re-publication.
     pub async fn unpublish_page(&self, id: &PageId) -> Result<Page, AppError> {
-        self.fetch_page_row(id, false).await?;
+        let row = self.fetch_page_row(id, false).await?;
+        if row.status == PageStatus::Archived.as_str() {
+            return Err(AppError::conflict("cannot unpublish an archived page"));
+        }
+        if row.status != PageStatus::Published.as_str() {
+            return Ok(row.into_page());
+        }
         sqlx::query(
             "UPDATE pages SET status = 'draft', published_at = NULL, updated_at = ?, \
              revision = revision + 1 WHERE id = ? AND deleted_at IS NULL",
@@ -441,8 +574,14 @@ impl ContentService {
     }
 
     /// Archives a page, removing it from the storefront.
+    ///
+    /// Archiving an already archived page is idempotent and does not bump the
+    /// revision. The last published body is retained.
     pub async fn archive_page(&self, id: &PageId) -> Result<Page, AppError> {
-        self.fetch_page_row(id, false).await?;
+        let row = self.fetch_page_row(id, false).await?;
+        if row.status == PageStatus::Archived.as_str() {
+            return Ok(row.into_page());
+        }
         sqlx::query(
             "UPDATE pages SET status = 'archived', published_at = NULL, updated_at = ?, \
              revision = revision + 1 WHERE id = ? AND deleted_at IS NULL",
@@ -455,18 +594,30 @@ impl ContentService {
         self.get_page(id).await
     }
 
-    /// Lists a page's body snapshots in ascending version order.
-    pub async fn list_page_versions(&self, page_id: &PageId) -> Result<Vec<PageVersion>, AppError> {
+    /// Lists a page's body snapshots newest first with pagination.
+    pub async fn list_page_versions(
+        &self,
+        page_id: &PageId,
+        pagination: Pagination,
+    ) -> Result<PageResult<PageVersion>, AppError> {
         self.fetch_page_row(page_id, false).await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM page_versions WHERE page_id = ?")
+            .bind(page_id.as_str())
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
         let rows = sqlx::query_as::<_, PageVersionRow>(
             "SELECT id, page_id, version, body, created_by, kind, origin, created_at \
-             FROM page_versions WHERE page_id = ? ORDER BY version ASC",
+             FROM page_versions WHERE page_id = ? ORDER BY version DESC LIMIT ? OFFSET ?",
         )
         .bind(page_id.as_str())
+        .bind(pagination.limit)
+        .bind(pagination.offset)
         .fetch_all(self.db.pool())
         .await
         .map_err(database_error)?;
-        Ok(rows.into_iter().map(PageVersionRow::into_version).collect())
+        let data = rows.into_iter().map(PageVersionRow::into_version).collect();
+        Ok(PageResult::new(data, count, pagination))
     }
 
     /// Restores a page body from a stored version and snapshots the restore.
@@ -480,6 +631,29 @@ impl ContentService {
         page_id: &PageId,
         version: i64,
         base_revision: Option<i64>,
+    ) -> Result<Page, AppError> {
+        self.restore_version_as(
+            page_id,
+            version,
+            base_revision,
+            None,
+            PageRevisionOrigin::Manual,
+        )
+        .await
+    }
+
+    /// Restores a page body, recording the actor and revision origin.
+    ///
+    /// Only the draft body is replaced; `published_body` and the live
+    /// storefront content are never modified by a restore. The restored body is
+    /// snapshotted as a draft with the supplied attribution.
+    pub async fn restore_version_as(
+        &self,
+        page_id: &PageId,
+        version: i64,
+        base_revision: Option<i64>,
+        created_by: Option<&str>,
+        origin: PageRevisionOrigin,
     ) -> Result<Page, AppError> {
         let mut tx = self.db.begin().await?;
         let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ? AND deleted_at IS NULL");
@@ -526,9 +700,9 @@ impl ContentService {
             page_id,
             next_version,
             &version_row.body,
-            None,
+            created_by,
             PageVersionKind::Draft,
-            PageRevisionOrigin::Manual,
+            origin,
             now,
         )
         .await?;
@@ -591,13 +765,19 @@ impl ContentService {
     /// Loads a navigation by handle with items nested by parent.
     pub async fn get_navigation_tree(&self, handle: &str) -> Result<NavigationTree, AppError> {
         let navigation = self.get_navigation_by_handle(handle).await?;
-        Ok(NavigationTree {
-            id: navigation.id,
-            name: navigation.name,
-            handle: navigation.handle,
-            metadata: navigation.metadata,
-            items: build_navigation_tree(navigation.items),
-        })
+        Ok(navigation_tree_from(navigation))
+    }
+
+    /// Loads a navigation by identifier with items nested by parent.
+    ///
+    /// This performs a primary-key lookup before building the tree, avoiding a
+    /// second handle lookup when the identifier is already known.
+    pub async fn get_navigation_tree_by_id(
+        &self,
+        id: &NavigationId,
+    ) -> Result<NavigationTree, AppError> {
+        let navigation = self.get_navigation(id).await?;
+        Ok(navigation_tree_from(navigation))
     }
 
     /// Lists navigation menus with their items.
@@ -909,7 +1089,21 @@ impl ContentService {
         .await
         .map_err(database_error)?;
 
-        self.fetch_redirect(&id).await
+        self.get_redirect(&id).await
+    }
+
+    /// Loads a redirect by identifier.
+    pub async fn get_redirect(&self, id: &str) -> Result<Redirect, AppError> {
+        let row = sqlx::query_as::<_, RedirectRow>(
+            "SELECT id, from_path, to_path, status_code, created_at FROM redirects \
+             WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("redirect", id))?;
+        Ok(row.into_redirect())
     }
 
     /// Loads a redirect by its source path.
@@ -1150,19 +1344,6 @@ impl ContentService {
         }
         Ok(())
     }
-
-    async fn fetch_redirect(&self, id: &str) -> Result<Redirect, AppError> {
-        let row = sqlx::query_as::<_, RedirectRow>(
-            "SELECT id, from_path, to_path, status_code, created_at FROM redirects \
-             WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(database_error)?
-        .ok_or_else(|| AppError::not_found("redirect", id))?;
-        Ok(row.into_redirect())
-    }
 }
 
 fn validate_rank(rank: i64) -> Result<(), AppError> {
@@ -1186,9 +1367,10 @@ fn unique_conflict(error: sqlx::Error, message: &str) -> AppError {
 }
 
 fn revision_conflict(current: i64) -> AppError {
-    AppError::conflict(format!(
-        "page revision conflict: current revision is {current}"
-    ))
+    AppError::conflict_details(
+        format!("page revision conflict: current revision is {current}"),
+        serde_json::json!({ "current_revision": current }),
+    )
 }
 
 /// Builds a case-insensitive `LIKE` pattern, escaping wildcards.
@@ -1262,6 +1444,16 @@ fn parse_json(value: &str) -> Value {
     }
 }
 
+fn navigation_tree_from(navigation: Navigation) -> NavigationTree {
+    NavigationTree {
+        id: navigation.id,
+        name: navigation.name,
+        handle: navigation.handle,
+        metadata: navigation.metadata,
+        items: build_navigation_tree(navigation.items),
+    }
+}
+
 fn build_navigation_tree(items: Vec<NavigationItem>) -> Vec<NavigationTreeItem> {
     let mut children: HashMap<Option<String>, Vec<NavigationItem>> = HashMap::new();
     for item in items {
@@ -1316,6 +1508,12 @@ struct PageRow {
     status: String,
     page_type: String,
     body: String,
+    published_body: Option<String>,
+    published_title: Option<String>,
+    published_handle: Option<String>,
+    published_page_type: Option<String>,
+    published_seo: Option<String>,
+    published_metadata: Option<String>,
     seo: String,
     metadata: String,
     revision: i64,
@@ -1339,6 +1537,7 @@ impl PageRow {
             page_type: self.page_type,
             revision: self.revision,
             body: parse_json(&self.body),
+            published_body: self.published_body.as_deref().map(parse_json),
             seo: parse_json(&self.seo),
             metadata: Metadata::from_json_str(&self.metadata),
             published_at: self.published_at,
@@ -1346,6 +1545,62 @@ impl PageRow {
             updated_at: self.updated_at,
             deleted_at: self.deleted_at,
         }
+    }
+
+    /// Projects the published snapshot, falling back per field to the live
+    /// column for legacy rows that predate a snapshot column.
+    fn into_published_page(self) -> Page {
+        let status = match PageStatus::parse(&self.status) {
+            Some(status) => status,
+            None => PageStatus::Draft,
+        };
+        let body = self
+            .published_body
+            .as_deref()
+            .map_or_else(|| parse_json(&self.body), parse_json);
+        let seo = self
+            .published_seo
+            .as_deref()
+            .map_or_else(|| parse_json(&self.seo), parse_json);
+        let metadata = self.published_metadata.as_deref().map_or_else(
+            || Metadata::from_json_str(&self.metadata),
+            Metadata::from_json_str,
+        );
+        Page {
+            id: PageId::from_string(self.id),
+            title: self.published_title.unwrap_or(self.title),
+            handle: self.published_handle.unwrap_or(self.handle),
+            status,
+            page_type: self.published_page_type.unwrap_or(self.page_type),
+            revision: self.revision,
+            body,
+            published_body: None,
+            seo,
+            metadata,
+            published_at: self.published_at,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            deleted_at: self.deleted_at,
+        }
+    }
+
+    /// Returns true when every published snapshot field equals its live value.
+    fn published_matches_live(&self) -> bool {
+        self.published_title.as_deref() == Some(self.title.as_str())
+            && self.published_handle.as_deref() == Some(self.handle.as_str())
+            && self.published_page_type.as_deref() == Some(self.page_type.as_str())
+            && self
+                .published_body
+                .as_deref()
+                .is_some_and(|published| parse_json(published) == parse_json(&self.body))
+            && self
+                .published_seo
+                .as_deref()
+                .is_some_and(|published| parse_json(published) == parse_json(&self.seo))
+            && self
+                .published_metadata
+                .as_deref()
+                .is_some_and(|published| parse_json(published) == parse_json(&self.metadata))
     }
 }
 

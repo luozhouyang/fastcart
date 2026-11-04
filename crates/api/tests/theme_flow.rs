@@ -418,7 +418,7 @@ async fn theme_registry_admin_and_storefront_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{versions}");
-    assert_eq!(versions[0]["kind"], "draft");
+    assert_eq!(versions["data"][0]["kind"], "draft");
 
     let (status, picker) = request(
         &app,

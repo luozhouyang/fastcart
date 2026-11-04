@@ -129,8 +129,14 @@ pub struct Page {
     pub page_type: String,
     /// Optimistic concurrency token; incremented on every write.
     pub revision: i64,
-    /// Structured page body.
+    /// Structured page body holding the working draft.
     pub body: Value,
+    /// Body last published to storefronts, when the page has been published.
+    ///
+    /// Storefront reads project this value into [`Page::body`] and clear the
+    /// field, while admin reads expose both the draft and the live body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_body: Option<Value>,
     /// Structured SEO metadata.
     pub seo: Value,
     /// Free-form extension metadata.
