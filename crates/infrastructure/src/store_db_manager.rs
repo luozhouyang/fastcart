@@ -76,6 +76,21 @@ impl StoreDatabase {
     }
 }
 
+/// Migration state for one store database.
+///
+/// This is an additive operational health signal. It never changes how
+/// migrations are applied; it only reports what the embedded migrator expects
+/// against what has been recorded in `_sqlx_migrations`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MigrationHealth {
+    /// Number of successfully applied migrations.
+    pub applied: i64,
+    /// Highest embedded migration version.
+    pub latest: i64,
+    /// Number of embedded migrations that have not been applied yet.
+    pub pending: i64,
+}
+
 /// Metadata written alongside every backup.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BackupManifest {
@@ -219,6 +234,33 @@ impl StoreDatabaseManager {
     pub async fn verify_integrity(&self, store_id: &StoreId) -> Result<()> {
         let database = self.database(store_id).await?;
         verify_integrity(database.pool()).await
+    }
+
+    /// Reports the applied migration state for a store database.
+    ///
+    /// The store database is opened and migrated lazily first, so a healthy
+    /// store reports `pending = 0`.
+    pub async fn migration_health(&self, store_id: &StoreId) -> Result<MigrationHealth> {
+        let database = self.database(store_id).await?;
+        let applied_versions: Vec<i64> = sqlx::query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE success = 1 ORDER BY version",
+        )
+        .fetch_all(database.pool())
+        .await?;
+        let expected: Vec<i64> = STORE_MIGRATOR
+            .iter()
+            .map(|migration| migration.version)
+            .collect();
+        let pending = expected
+            .iter()
+            .filter(|version| !applied_versions.contains(version))
+            .count();
+        let latest = expected.iter().copied().max().unwrap_or(0);
+        Ok(MigrationHealth {
+            applied: i64::try_from(applied_versions.len()).unwrap_or(i64::MAX),
+            latest,
+            pending: i64::try_from(pending).unwrap_or(i64::MAX),
+        })
     }
 
     /// Creates a consistent SQLite backup without copying an active WAL file.

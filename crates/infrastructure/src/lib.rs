@@ -26,7 +26,7 @@ pub use event_bus::{
 };
 pub use jobs::{JobQueue, JobRecord, NewJob};
 pub use storage::{LocalStorage, Storage};
-pub use store_db_manager::{BackupManifest, StoreDatabase, StoreDatabaseManager};
+pub use store_db_manager::{BackupManifest, MigrationHealth, StoreDatabase, StoreDatabaseManager};
 
 /// Errors raised by infrastructure adapters.
 #[derive(Debug, thiserror::Error)]
