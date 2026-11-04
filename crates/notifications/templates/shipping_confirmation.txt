@@ -1,0 +1,12 @@
+Hi,
+
+Good news: your order{% if display_number %} #{{ display_number }}{% endif %} has shipped.
+{% if tracking_numbers %}
+Tracking details:
+{% for tracking in tracking_numbers %}- {{ tracking }}
+{% endfor %}
+{% endif %}
+{% if fulfillment_status %}
+Fulfillment status: {{ fulfillment_status }}
+{% endif %}
+Thank you for shopping with us.

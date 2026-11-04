@@ -1,0 +1,9 @@
+Hi,
+
+Your order{% if display_number %} #{{ display_number }}{% endif %} has been canceled.
+{% if reason %}
+Reason: {{ reason }}
+{% endif %}
+If a payment was captured, any eligible amount will be refunded to the original payment method.
+
+Thank you.

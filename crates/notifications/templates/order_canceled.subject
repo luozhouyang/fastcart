@@ -1,0 +1,1 @@
+{% if display_number %}Order #{{ display_number }} canceled{% else %}Your order was canceled{% endif %}

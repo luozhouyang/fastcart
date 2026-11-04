@@ -1,0 +1,12 @@
+Hi,
+
+We could not process your payment{% if display_number %} for order #{{ display_number }}{% endif %}.
+{% if amount %}
+Attempted amount: {{ amount }}
+{% endif %}
+{% if reason %}
+Detail: {{ reason }}
+{% endif %}
+Please review your payment details and try again. If you need help, contact our support team and reference the order number above.
+
+Thank you.

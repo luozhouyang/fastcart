@@ -11,6 +11,7 @@ use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::CheckoutService;
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_webhook::WebhookService;
+use fastcart_notifications::{NotificationOutcome, NotificationService};
 use fastcart_platform::{PlatformStore, StoreStatus};
 
 /// Counts produced by one maintenance sweep.
@@ -32,6 +33,14 @@ pub struct MaintenanceReport {
     pub webhooks_delivered: u64,
     /// Webhook deliveries that exhausted their retry budget.
     pub webhooks_failed: u64,
+    /// Notification emails enqueued.
+    pub notifications_sent: u64,
+    /// Outbox events already delivered for the same notification template.
+    pub notifications_duplicates: u64,
+    /// Events with no notification rule or no usable recipient.
+    pub notifications_skipped: u64,
+    /// Notification dispatch failures retained for a later retry.
+    pub notifications_failed: u64,
     /// Store-level failures encountered.
     pub failures: u64,
 }
@@ -61,6 +70,7 @@ pub async fn run_maintenance_with_options(
     allow_private_webhooks: bool,
 ) -> MaintenanceReport {
     let mut report = MaintenanceReport::default();
+    let notifications = NotificationService::new();
     let now = now_timestamp();
     let mut offset = 0_i64;
     loop {
@@ -186,6 +196,7 @@ pub async fn run_maintenance_with_options(
                         .with_private_networks_allowed(allow_private_webhooks);
                     for record in records {
                         let mut fan_out_failed = false;
+                        let mut notification_failed = false;
                         if let Some(event) = record.to_envelope(Some(store.id.clone())) {
                             // Fan out before publishing so a database failure
                             // keeps the outbox row retryable.
@@ -194,16 +205,51 @@ pub async fn run_maintenance_with_options(
                                 report.failures += 1;
                                 fan_out_failed = true;
                             } else {
-                                let _ = events.publish(event);
+                                let _ = events.publish(event.clone());
+                            }
+                            // Notifications are derived consumers: a failure is
+                            // retried with the outbox row but never aborts the
+                            // maintenance sweep.
+                            match notifications
+                                .dispatch(&database, email, &queue, &event)
+                                .await
+                            {
+                                Ok(NotificationOutcome::Sent { .. }) => {
+                                    report.notifications_sent += 1;
+                                }
+                                Ok(NotificationOutcome::Duplicate { .. }) => {
+                                    report.notifications_duplicates += 1;
+                                }
+                                Ok(
+                                    NotificationOutcome::Unsupported
+                                    | NotificationOutcome::MissingRecipient { .. },
+                                ) => {
+                                    report.notifications_skipped += 1;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        store_id = %store.id,
+                                        event_id = %event.id,
+                                        event_type = %event.event_type,
+                                        error = %error,
+                                        "notification dispatch failed"
+                                    );
+                                    report.failures += 1;
+                                    report.notifications_failed += 1;
+                                    notification_failed = true;
+                                }
                             }
                         }
-                        if fan_out_failed {
-                            if let Err(error) = mark_outbox_failed(
-                                database.pool(),
-                                &record.id,
-                                "webhook fan-out failed",
-                            )
-                            .await
+                        if fan_out_failed || notification_failed {
+                            let reason = if fan_out_failed && notification_failed {
+                                "webhook fan-out and notification dispatch failed"
+                            } else if fan_out_failed {
+                                "webhook fan-out failed"
+                            } else {
+                                "notification dispatch failed"
+                            };
+                            if let Err(error) =
+                                mark_outbox_failed(database.pool(), &record.id, reason).await
                             {
                                 tracing::warn!(store_id = %store.id, error = %error, "outbox failure recording failed");
                             }
@@ -255,4 +301,79 @@ pub async fn run_maintenance_with_options(
         }
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use fastcart_email::{EmailService, SEND_EMAIL_JOB_TYPE, SendEmailJob};
+    use fastcart_infrastructure::{
+        DatabaseOptions, EventBus, JobQueue, StoreDatabaseManager, append_outbox_event,
+    };
+    use fastcart_kernel::DomainEventEnvelope;
+    use fastcart_platform::{CreateStoreInput, PlatformStore, StoreProvisioningService};
+
+    use super::run_maintenance_with_options;
+
+    #[tokio::test]
+    async fn maintenance_enqueues_exactly_one_notification_email() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = PlatformStore::in_memory().await.unwrap();
+        let databases = Arc::new(StoreDatabaseManager::new(
+            dir.path().join("stores"),
+            DatabaseOptions::default().with_max_connections(2),
+        ));
+        let store = platform
+            .create_store(CreateStoreInput::new(
+                "Notification Store",
+                "notification-store",
+                "notify.example.com",
+            ))
+            .await
+            .unwrap();
+        StoreProvisioningService::new(platform.clone(), databases.clone())
+            .provision(&store.id, None)
+            .await
+            .unwrap();
+        let database = databases.database(&store.id).await.unwrap();
+
+        let event = DomainEventEnvelope::new(
+            "order.placed",
+            Some(store.id.clone()),
+            serde_json::json!({
+                "order_id": "order_missing",
+                "display_number": 7,
+                "email": "buyer@example.com",
+                "currency_code": "USD",
+                "total": 2500
+            }),
+        );
+        append_outbox_event(database.pool(), &event).await.unwrap();
+
+        let report = run_maintenance_with_options(
+            &platform,
+            &databases,
+            &EventBus::new(8),
+            &EmailService::with_default_registry(),
+            true,
+        )
+        .await;
+
+        assert_eq!(report.outbox_dispatched, 1);
+        assert_eq!(report.notifications_sent, 1);
+        assert_eq!(report.notifications_duplicates, 0);
+        assert_eq!(report.notifications_skipped, 0);
+        assert_eq!(report.notifications_failed, 0);
+        assert_eq!(report.failures, 0);
+
+        let queue = JobQueue::new(database.pool().clone());
+        let jobs = queue.claim("test", 10).await.unwrap();
+        assert_eq!(jobs.len(), 1, "a supported event must enqueue one job");
+        assert_eq!(jobs[0].job_type, SEND_EMAIL_JOB_TYPE);
+        let payload: SendEmailJob = serde_json::from_str(&jobs[0].payload).unwrap();
+        assert_eq!(payload.to, "buyer@example.com");
+        assert!(payload.html.as_deref().is_some_and(|html| !html.is_empty()));
+        assert!(queue.claim("test", 10).await.unwrap().is_empty());
+    }
 }

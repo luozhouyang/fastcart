@@ -1,0 +1,14 @@
+Hi,
+
+There is an update on your after-sales request{% if display_number %} for order #{{ display_number }}{% endif %}.
+
+{% if status %}
+Status: {{ status }}
+{% endif %}
+{% if refund_amount %}
+Refund amount: {{ refund_amount }}{% if currency_code %} ({{ currency_code }}){% endif %}
+{% endif %}
+{% if reason %}
+Detail: {{ reason }}
+{% endif %}
+Thank you for your patience while we resolve this for you.

@@ -1,0 +1,11 @@
+Hi,
+
+We received your payment{% if display_number %} for order #{{ display_number }}{% endif %}.
+
+Amount: {{ amount }}
+{% if provider_id %}
+Payment method: {{ provider_id }}
+{% endif %}
+This receipt confirms that the payment was captured successfully.
+
+Thank you.

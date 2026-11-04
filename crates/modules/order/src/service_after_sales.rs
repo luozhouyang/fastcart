@@ -6,11 +6,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fastcart_infrastructure::database_error;
+use fastcart_infrastructure::{append_outbox_event, database_error};
 use fastcart_kernel::{
-    AppError, ClaimId, EventId, ExchangeId, FulfillmentId, LineItemId, OrderEditId, OrderId,
-    ProductId, RefundId, ReturnId, Timestamp, VariantId, now_timestamp, validate_length,
-    validate_metadata, validate_quantity,
+    AppError, ClaimId, DomainEventEnvelope, EventId, ExchangeId, FulfillmentId, LineItemId,
+    OrderEditId, OrderId, ProductId, RefundId, ReturnId, StoreId, Timestamp, VariantId,
+    now_timestamp, validate_length, validate_metadata, validate_quantity,
 };
 use sqlx::SqliteConnection;
 
@@ -398,16 +398,18 @@ impl OrderService {
                 "return is already linked to a different refund",
             ));
         }
+        let now = now_timestamp();
+        let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let updated = sqlx::query(
             "UPDATE order_returns SET refund_id = ?, updated_at = ?
              WHERE id = ? AND order_id = ? AND (refund_id IS NULL OR refund_id = ?)",
         )
         .bind(refund_id.as_str())
-        .bind(now_timestamp())
+        .bind(now)
         .bind(return_id.as_str())
         .bind(order_id.as_str())
         .bind(refund_id.as_str())
-        .execute(self.database().pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
         if updated.rows_affected() == 0 {
@@ -415,6 +417,18 @@ impl OrderService {
                 "return refund link changed concurrently",
             ));
         }
+        append_after_sales_event(
+            &mut tx,
+            self.database().store_id(),
+            "order.return_refunded",
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "return_id": return_id.as_str(),
+                "refund_id": refund_id.as_str(),
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         self.load_return(order_id, return_id).await
     }
 
@@ -570,6 +584,17 @@ impl OrderService {
                 "return status changed concurrently".to_owned(),
             ));
         }
+        append_after_sales_event(
+            &mut tx,
+            self.database().store_id(),
+            "order.return_received",
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "return_id": return_id.as_str(),
+                "status": next.as_str(),
+            }),
+        )
+        .await?;
 
         tx.commit().await.map_err(database_error)?;
         self.load_return(order_id, return_id).await
@@ -903,21 +928,35 @@ impl OrderService {
                 "claim is already linked to a different refund",
             ));
         }
+        let now = now_timestamp();
+        let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let updated = sqlx::query(
             "UPDATE order_claims SET refund_id = ?, updated_at = ?
              WHERE id = ? AND order_id = ? AND (refund_id IS NULL OR refund_id = ?)",
         )
         .bind(refund_id.as_str())
-        .bind(now_timestamp())
+        .bind(now)
         .bind(claim_id.as_str())
         .bind(order_id.as_str())
         .bind(refund_id.as_str())
-        .execute(self.database().pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
         if updated.rows_affected() == 0 {
             return Err(AppError::conflict("claim refund link changed concurrently"));
         }
+        append_after_sales_event(
+            &mut tx,
+            self.database().store_id(),
+            "order.claim_refunded",
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "claim_id": claim_id.as_str(),
+                "refund_id": refund_id.as_str(),
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         self.load_claim(order_id, claim_id).await
     }
 
@@ -985,6 +1024,17 @@ impl OrderService {
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        append_after_sales_event(
+            &mut tx,
+            self.database().store_id(),
+            "order.claim_accepted",
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "claim_id": claim_id.as_str(),
+                "status": ClaimStatus::Accepted.as_str(),
+            }),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_claim(order_id, claim_id).await
     }
@@ -1272,6 +1322,17 @@ impl OrderService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        append_after_sales_event(
+            &mut tx,
+            self.database().store_id(),
+            "order.exchange_accepted",
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "exchange_id": exchange_id.as_str(),
+                "status": ExchangeStatus::Accepted.as_str(),
+            }),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_exchange(order_id, exchange_id).await
     }
@@ -1495,6 +1556,25 @@ impl OrderService {
             .await
             .map_err(database_error)?;
         }
+
+        let event_type = if input.claim_id.is_some() {
+            "order.claim_fulfilled"
+        } else {
+            "order.exchange_fulfilled"
+        };
+        append_after_sales_event(
+            &mut tx,
+            self.database().store_id(),
+            event_type,
+            serde_json::json!({
+                "order_id": input.order_id.as_str(),
+                "fulfillment_id": id.as_str(),
+                "claim_id": input.claim_id.as_ref().map(ClaimId::as_str),
+                "exchange_id": input.exchange_id.as_ref().map(ExchangeId::as_str),
+                "provider_id": provider_id,
+            }),
+        )
+        .await?;
 
         tx.commit().await.map_err(database_error)?;
         self.load_after_sales_fulfillment(&input.order_id, &id)
@@ -2379,6 +2459,18 @@ fn normalize_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+async fn append_after_sales_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    store_id: &StoreId,
+    event_type: &str,
+    payload: serde_json::Value,
+) -> Result<(), AppError> {
+    let event = DomainEventEnvelope::new(event_type, Some(store_id.clone()), payload);
+    append_outbox_event(&mut **tx, &event)
+        .await
+        .map_err(database_error)
 }
 
 #[cfg(test)]

@@ -1,0 +1,11 @@
+Hi,
+
+Thanks for your order{% if display_number %} #{{ display_number }}{% endif %}.
+
+{% if items %}{% for item in items %}- {{ item.quantity }} x {{ item.title }}{% if item.variant_title %} ({{ item.variant_title }}){% endif %}: {{ item.total }}
+{% endfor %}
+{% endif %}{% if total %}Total: {{ total }}
+{% endif %}
+We will send tracking details as soon as your order ships.
+
+Thank you for shopping with us.

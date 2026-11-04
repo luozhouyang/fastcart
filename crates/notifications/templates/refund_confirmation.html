@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <p>Hi,</p>
+    <p>A refund has been issued{% if display_number %} for order <strong>#{{ display_number }}</strong>{% endif %}.</p>
+    <p>Refund amount: <strong>{{ refund_amount }}</strong>{% if currency_code %} ({{ currency_code }}){% endif %}</p>
+    {% if reason %}<p>Reason: {{ reason }}</p>{% endif %}
+    <p>Refunds usually appear on the original payment method within a few business days, depending on your bank or card issuer.</p>
+    <p>Thank you.</p>
+  </body>
+</html>

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <p>Hi,</p>
+    <p>Thanks for your order{% if display_number %} <strong>#{{ display_number }}</strong>{% endif %}.</p>
+    {% if items %}
+    <table cellpadding="6" cellspacing="0" border="0">
+      <thead>
+        <tr>
+          <th align="left">Item</th>
+          <th align="right">Qty</th>
+          <th align="right">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+        <tr>
+          <td>
+            {{ item.title }}
+            {% if item.variant_title %}<br><small>{{ item.variant_title }}</small>{% endif %}
+          </td>
+          <td align="right">{{ item.quantity }}</td>
+          <td align="right">{{ item.total }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if total %}<p>Total: <strong>{{ total }}</strong></p>{% endif %}
+    <p>We will send tracking details as soon as your order ships.</p>
+    <p>Thank you for shopping with us.</p>
+  </body>
+</html>

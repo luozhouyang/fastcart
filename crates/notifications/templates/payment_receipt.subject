@@ -1,0 +1,1 @@
+{% if display_number %}Payment receipt for order #{{ display_number }}{% else %}Payment receipt{% endif %}

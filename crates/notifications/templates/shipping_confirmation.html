@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <p>Hi,</p>
+    <p>Good news: your order{% if display_number %} <strong>#{{ display_number }}</strong>{% endif %} has shipped.</p>
+    {% if tracking_numbers %}
+    <p>Tracking details:</p>
+    <ul>
+      {% for tracking in tracking_numbers %}<li>{{ tracking }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    {% if fulfillment_status %}<p>Fulfillment status: {{ fulfillment_status }}</p>{% endif %}
+    <p>Thank you for shopping with us.</p>
+  </body>
+</html>

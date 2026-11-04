@@ -1,0 +1,1 @@
+{% if display_number %}Refund issued for order #{{ display_number }}{% else %}Your refund has been issued{% endif %}

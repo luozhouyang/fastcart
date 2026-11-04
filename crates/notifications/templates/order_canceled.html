@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <p>Hi,</p>
+    <p>Your order{% if display_number %} <strong>#{{ display_number }}</strong>{% endif %} has been canceled.</p>
+    {% if reason %}<p>Reason: {{ reason }}</p>{% endif %}
+    <p>If a payment was captured, any eligible amount will be refunded to the original payment method.</p>
+    <p>Thank you.</p>
+  </body>
+</html>

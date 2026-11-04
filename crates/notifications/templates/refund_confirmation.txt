@@ -1,0 +1,11 @@
+Hi,
+
+A refund has been issued{% if display_number %} for order #{{ display_number }}{% endif %}.
+
+Refund amount: {{ refund_amount }}{% if currency_code %} ({{ currency_code }}){% endif %}
+{% if reason %}
+Reason: {{ reason }}
+{% endif %}
+Refunds usually appear on the original payment method within a few business days, depending on your bank or card issuer.
+
+Thank you.

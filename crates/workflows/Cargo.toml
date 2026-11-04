@@ -27,6 +27,7 @@ fastcart-module-promotion.workspace = true
 fastcart-module-shipping.workspace = true
 fastcart-module-tax.workspace = true
 fastcart-module-webhook.workspace = true
+fastcart-notifications.workspace = true
 fastcart-platform.workspace = true
 
 [dev-dependencies]

@@ -1,0 +1,1 @@
+{% if display_number %}Order #{{ display_number }} has shipped{% else %}Your order has shipped{% endif %}

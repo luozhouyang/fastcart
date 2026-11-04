@@ -1,0 +1,1 @@
+{% if display_number %}Payment failed for order #{{ display_number }}{% else %}Your payment could not be processed{% endif %}
