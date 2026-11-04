@@ -14,6 +14,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@fastcart/theme-sdk": "workspace:*"
+    "@fastcart/shared-types": "workspace:*",
+    "@fastcart/storefront-sdk": "workspace:*",
+    "@fastcart/theme-sdk": "workspace:*",
+    "react": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0"
   }
 }

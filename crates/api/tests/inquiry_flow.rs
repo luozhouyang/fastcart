@@ -123,6 +123,64 @@ fn draft_body() -> Value {
     })
 }
 
+fn draft_attachment_body() -> Value {
+    json!({
+        "fields": [
+            {
+                "key": "name",
+                "kind": "text",
+                "label": "Name",
+                "required": true,
+                "validation": { "max_length": 100 }
+            },
+            {
+                "key": "email",
+                "kind": "email",
+                "label": "Email",
+                "required": true
+            },
+            {
+                "key": "message",
+                "kind": "textarea",
+                "label": "Message",
+                "required": true,
+                "validation": { "max_length": 5000 }
+            },
+            {
+                "key": "attachments",
+                "kind": "file",
+                "label": "Attachments",
+                "required": false,
+                "file": {
+                    "max_files": 1,
+                    "max_bytes": 5242880,
+                    "accept": ["image/png"]
+                }
+            }
+        ],
+        "settings": {
+            "submit_label": "Send",
+            "success_message": "Thanks",
+            "consent_required": false,
+            "allow_attachments": true,
+            "notification_fields": []
+        }
+    })
+}
+
+fn multipart_png(size: usize) -> (String, Vec<u8>) {
+    const BOUNDARY: &str = "fastcart-test-boundary";
+    let mut file = b"\x89PNG\r\n\x1a\n".to_vec();
+    file.resize(size, 0);
+    let mut body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"large.png\"\r\nContent-Type: image/png\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&file);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={BOUNDARY}"), body)
+}
+
 #[tokio::test]
 async fn inquiry_form_publish_submit_and_notification_channel_flow() {
     let fixture = fixture().await;
@@ -354,4 +412,114 @@ async fn inquiry_form_publish_submit_and_notification_channel_flow() {
             .iter()
             .any(|entry| entry["type"] == "inquiry.created")
     );
+}
+
+#[tokio::test]
+async fn attachment_upload_route_uses_the_larger_body_limit() {
+    let fixture = fixture().await;
+    let app = fixture.app;
+
+    let setup = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/platform/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": "uploader@example.com",
+                        "password": "correct-horse-battery-staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(setup.status(), StatusCode::OK);
+    let cookies: Vec<String> = setup
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_owned))
+        .collect();
+    let session = cookie_value(&cookies, "fc_admin_session").unwrap();
+    let csrf = cookie_value(&cookies, "fc_csrf").unwrap();
+    let admin_auth = format!("fc_admin_session={session}; fc_csrf={csrf}");
+
+    let (status, store) = request(
+        &app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(json!({
+            "name": "Upload Store",
+            "slug": "upload-store",
+            "primary_domain": "upload.example.com"
+        })),
+        &[
+            ("cookie", admin_auth.as_str()),
+            ("x-csrf-token", csrf.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{store}");
+    let store_id = store["id"].as_str().unwrap().to_owned();
+    let store_headers = [
+        ("cookie", admin_auth.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+        ("x-store-id", store_id.as_str()),
+    ];
+
+    let (status, form) = request(
+        &app,
+        "POST",
+        "/api/v1/admin/inquiry-forms",
+        Some(json!({"name": "Upload", "handle": "upload"})),
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{form}");
+    let form_id = form["id"].as_str().unwrap().to_owned();
+
+    let (status, saved) = request(
+        &app,
+        "PUT",
+        &format!("/api/v1/admin/inquiry-forms/{form_id}/draft"),
+        Some(draft_attachment_body()),
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let (status, published) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/admin/inquiry-forms/{form_id}/publish"),
+        Some(json!({})),
+        &store_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+
+    let (content_type, body) = multipart_png(3 * 1024 * 1024);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/store/inquiry-files?form_handle=upload&field_key=attachments")
+                .header("host", "upload.example.com")
+                .header("content-type", content_type)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    assert!(value["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(value["expires_at"].as_i64().is_some());
 }

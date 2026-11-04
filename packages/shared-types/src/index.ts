@@ -2339,14 +2339,20 @@ export interface NotificationDeliveriesQuery {
 // Public storefront inquiry contracts
 // ---------------------------------------------------------------------------
 
+export interface StoreInquiryFormSettings {
+  submit_label: string;
+  success_message: string;
+  redirect_url?: string | null;
+  consent_text?: string | null;
+  consent_required: boolean;
+  allow_attachments: boolean;
+}
+
 export interface StoreInquiryForm {
-  id: string;
-  name: string;
   handle: string;
-  description?: string | null;
   version: number;
   fields: InquiryFormField[];
-  settings: InquiryFormSettings;
+  settings: StoreInquiryFormSettings;
 }
 
 export interface StoreInquiryFormResponse {

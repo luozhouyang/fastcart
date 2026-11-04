@@ -725,6 +725,40 @@ impl InquiryService {
             .map_err(database_error)
     }
 
+    /// Lists submissions older than `cutoff`, oldest first, for retention
+    /// cleanup.
+    pub async fn older_than(
+        &self,
+        cutoff: Timestamp,
+        limit: i64,
+    ) -> Result<Vec<Inquiry>, AppError> {
+        let sql = format!(
+            "SELECT {INQUIRY_COLUMNS} FROM inquiries WHERE created_at < ? \
+             ORDER BY created_at ASC, id ASC LIMIT ?"
+        );
+        let rows = sqlx::query_as::<_, InquiryRow>(&sql)
+            .bind(cutoff)
+            .bind(limit.clamp(1, 500))
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        rows.into_iter().map(InquiryRow::into_inquiry).collect()
+    }
+
+    /// Deletes one submission. Attachments are removed by the foreign-key
+    /// cascade; object storage is deleted by the caller first.
+    pub async fn delete(&self, id: &InquiryId) -> Result<(), AppError> {
+        let result = sqlx::query("DELETE FROM inquiries WHERE id = ?")
+            .bind(id.as_str())
+            .execute(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("inquiry", id));
+        }
+        Ok(())
+    }
+
     /// Lists the attachments claimed by a submission.
     pub async fn files_for(&self, inquiry_id: &InquiryId) -> Result<Vec<InquiryFile>, AppError> {
         let sql = format!(

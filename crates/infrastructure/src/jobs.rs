@@ -179,6 +179,43 @@ impl JobQueue {
         .await
     }
 
+    /// Atomically claims up to `limit` due jobs of the given types.
+    ///
+    /// This lets a fast notification worker take only notification jobs while a
+    /// slower maintenance worker owns the rest of the queue.
+    pub async fn claim_types(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        types: &[&str],
+    ) -> Result<Vec<JobRecord>, sqlx::Error> {
+        if types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = now_timestamp();
+        let placeholders = vec!["?"; types.len()].join(",");
+        let sql = format!(
+            "UPDATE jobs
+             SET status = 'running', locked_at = ?, locked_by = ?, updated_at = ?
+             WHERE id IN (
+                 SELECT id FROM jobs
+                 WHERE status = 'pending' AND available_at <= ? AND type IN ({placeholders})
+                 ORDER BY priority DESC, available_at ASC, created_at ASC
+                 LIMIT ?
+             )
+             RETURNING *"
+        );
+        let mut query = sqlx::query_as::<_, JobRecord>(&sql)
+            .bind(now)
+            .bind(worker_id)
+            .bind(now)
+            .bind(now);
+        for job_type in types {
+            query = query.bind(*job_type);
+        }
+        query.bind(limit.clamp(1, 500)).fetch_all(&self.pool).await
+    }
+
     /// Marks a job completed only when `worker_id` still holds its lease.
     pub async fn complete(&self, id: &str, worker_id: &str) -> Result<bool, sqlx::Error> {
         let now = now_timestamp();
@@ -324,6 +361,40 @@ mod tests {
         assert!(queue.claim("worker-b", 10).await.unwrap().is_empty());
         assert!(queue.complete(&first[0].id, "worker-a").await.unwrap());
         assert_eq!(queue.count_by_status(status::COMPLETED).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn claim_types_only_takes_selected_jobs() {
+        let queue = queue().await;
+        queue
+            .enqueue(NewJob::new("send_email", json!({})))
+            .await
+            .unwrap();
+        queue
+            .enqueue(NewJob::new("reindex_search", json!({})))
+            .await
+            .unwrap();
+        queue
+            .enqueue(NewJob::new("send_channel_notification", json!({})))
+            .await
+            .unwrap();
+
+        let claimed = queue
+            .claim_types(
+                "notifications",
+                10,
+                &["send_email", "send_channel_notification"],
+            )
+            .await
+            .unwrap();
+        let mut types: Vec<&str> = claimed.iter().map(|job| job.job_type.as_str()).collect();
+        types.sort_unstable();
+        assert_eq!(types, vec!["send_channel_notification", "send_email"]);
+
+        // The unselected job remains claimable by the maintenance worker.
+        let remaining = queue.claim("maintenance", 10).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].job_type, "reindex_search");
     }
 
     #[tokio::test]

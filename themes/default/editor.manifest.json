@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "categories": {
+    "forms": {
+      "title": "Forms",
+      "components": ["ContactForm"]
+    }
+  },
+  "components": {
+    "ContactForm": {
+      "title": "Contact Form",
+      "category": "forms",
+      "fields": {
+        "form": {
+          "type": "data_source",
+          "source": "inquiry_form",
+          "required": true
+        },
+        "title": {
+          "type": "text",
+          "default": "Contact us"
+        },
+        "description": {
+          "type": "textarea"
+        }
+      },
+      "defaultProps": {
+        "title": "Contact us"
+      },
+      "slots": []
+    }
+  }
+}

@@ -751,3 +751,35 @@ async fn inquiries_require_a_published_form() {
         .unwrap_err();
     assert!(error.is_not_found());
 }
+
+#[tokio::test]
+async fn retention_scan_and_delete_remove_old_inquiries() {
+    let db = test_db().await;
+    let published = published_default_form(&db).await;
+    let service = InquiryService::new(db.clone());
+    let inquiry = service
+        .create(inquiry_input(&published.form.handle))
+        .await
+        .unwrap();
+
+    // Keep a second inquiry inside the retention window.
+    let recent = service
+        .create(inquiry_input(&published.form.handle))
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE inquiries SET created_at = 0 WHERE id = ?")
+        .bind(inquiry.id.as_str())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let cutoff = now_timestamp() - 86_400;
+    let expired = service.older_than(cutoff, 100).await.unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].id, inquiry.id);
+
+    service.delete(&inquiry.id).await.unwrap();
+    assert!(service.get(&inquiry.id).await.is_err());
+    assert_eq!(service.get(&recent.id).await.unwrap().id, recent.id);
+}

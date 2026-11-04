@@ -5,5 +5,10 @@
   "runtime": "tanstack-start",
   "entry": "server.js",
   "settings_schema": "settings.schema.json",
-  "assets_manifest": "assets.json"
+  "assets_manifest": "assets.json",
+  "editor": {
+    "entry": "src/editor.ts",
+    "manifest": "editor.manifest.json",
+    "schema_version": 1
+  }
 }

@@ -213,9 +213,22 @@ importers:
 
   themes/default:
     dependencies:
+      '@fastcart/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      '@fastcart/storefront-sdk':
+        specifier: workspace:*
+        version: link:../../packages/storefront-sdk
       '@fastcart/theme-sdk':
         specifier: workspace:*
         version: link:../../packages/theme-sdk
+      react:
+        specifier: ^19.3.1
+        version: 19.3.1
+    devDependencies:
+      '@types/react':
+        specifier: ^19.3.0
+        version: 19.3.0
 
 packages:
 

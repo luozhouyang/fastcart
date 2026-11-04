@@ -484,6 +484,26 @@ impl NotificationChannelService {
         rows.into_iter().map(DeliveryRow::into_delivery).collect()
     }
 
+    /// Deletes terminal delivery records older than `cutoff`.
+    ///
+    /// Pending or queued rows are retained because they still describe work
+    /// that the job queue may retry.
+    pub async fn delete_deliveries_before(
+        &self,
+        db: &StoreDatabase,
+        cutoff: i64,
+    ) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            "DELETE FROM notification_channel_deliveries
+             WHERE created_at < ? AND status IN ('sent', 'failed', 'skipped')",
+        )
+        .bind(cutoff)
+        .execute(db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(result.rows_affected())
+    }
+
     /// Fans one domain event out to every subscribed channel.
     ///
     /// A unique `(channel_id, event_id)` delivery row makes replays
@@ -1774,5 +1794,48 @@ mod tests {
 
         let channel = service.get_channel(&db, &channel.id).await.unwrap();
         assert!(channel.last_success_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn retention_deletes_only_terminal_old_deliveries() {
+        let db = database().await;
+        let service = service();
+        let channel = create_channel(
+            &service,
+            &db,
+            "https://open.feishu.cn/open-apis/bot/v2/hook/token1234".to_owned(),
+            vec!["order.placed"],
+        )
+        .await;
+        let now = fastcart_kernel::now_timestamp();
+        for (id, event_id, status, created_at) in [
+            ("old-sent", "event-old-sent", "sent", 0),
+            ("old-queued", "event-old-queued", "queued", 0),
+            ("recent-sent", "event-recent-sent", "sent", now),
+        ] {
+            sqlx::query(
+                "INSERT INTO notification_channel_deliveries
+                 (id, channel_id, event_id, event_type, status, created_at, updated_at)
+                 VALUES (?, ?, ?, 'order.placed', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(channel.id.as_str())
+            .bind(event_id)
+            .bind(status)
+            .bind(created_at)
+            .bind(created_at)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let deleted = service
+            .delete_deliveries_before(&db, now - 1)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        let remaining = service.list_deliveries(&db, &channel.id, 10).await.unwrap();
+        let statuses: Vec<DeliveryStatus> = remaining.iter().map(|row| row.status).collect();
+        assert_eq!(statuses, vec![DeliveryStatus::Sent, DeliveryStatus::Queued]);
     }
 }
