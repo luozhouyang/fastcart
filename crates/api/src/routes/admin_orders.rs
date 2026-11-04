@@ -24,11 +24,12 @@ use fastcart_module_order::{
     ReceiveReturnItemInput, RefundInput, ReturnItemInput, WriteOffReturnInput,
     WriteOffReturnItemInput,
 };
-use fastcart_module_payment::PaymentService;
+use fastcart_module_payment::{PaymentService, Refund};
 use fastcart_module_shipping::{
     CreateFulfillmentRequest, FulfillmentItemRequest as ProviderFulfillmentItemRequest,
 };
-use serde::Deserialize;
+use fastcart_workflows::AfterSalesWorkflow;
+use serde::{Deserialize, Serialize};
 
 use super::{StoreDb, record_store_audit};
 use crate::dto::{
@@ -69,6 +70,10 @@ pub fn router() -> Router<Arc<AppContext>> {
             post(receive_return),
         )
         .route(
+            "/orders/{id}/returns/{return_id}/refund",
+            post(refund_return),
+        )
+        .route(
             "/orders/{id}/returns/{return_id}/write-off",
             post(write_off_return),
         )
@@ -79,6 +84,7 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/orders/{id}/claims", get(list_claims).post(create_claim))
         .route("/orders/{id}/claims/{claim_id}", get(get_claim))
         .route("/orders/{id}/claims/{claim_id}/accept", post(accept_claim))
+        .route("/orders/{id}/claims/{claim_id}/refund", post(refund_claim))
         .route("/orders/{id}/claims/{claim_id}/cancel", post(cancel_claim))
         .route(
             "/orders/{id}/exchanges",
@@ -153,6 +159,32 @@ pub struct RefundOrderRequest {
     currency: String,
     reason: Option<String>,
     idempotency_key: Option<String>,
+}
+
+/// Result of refunding a return.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ReturnRefundResponse {
+    /// Order after the refund was recorded.
+    pub order: Order,
+    /// Return with its refund link populated.
+    pub order_return: OrderReturn,
+    /// Local order refund row, when one was created.
+    pub order_refund: Option<OrderRefund>,
+    /// Provider-side refund, when one was attempted.
+    pub provider_refund: Option<Refund>,
+}
+
+/// Result of refunding an accepted claim.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ClaimRefundResponse {
+    /// Order after the refund was recorded.
+    pub order: Order,
+    /// Accepted claim with its refund link populated.
+    pub claim: OrderClaim,
+    /// Local order refund row, when one was created.
+    pub order_refund: Option<OrderRefund>,
+    /// Provider-side refund, when one was attempted.
+    pub provider_refund: Option<Refund>,
 }
 
 // -------------------------------------------------------------------------
@@ -788,9 +820,14 @@ async fn receive_return(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let return_id = ReturnId::from_string(return_id);
-    let order_return = OrderService::new(db)
+    let workflow = AfterSalesWorkflow::new(
+        db.clone(),
+        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+    );
+    let result = workflow
         .receive_return(&id, &return_id, map_receive_input(request))
         .await?;
+    let order_return = result.order_return;
     record_store_audit(
         &context,
         &actor,
@@ -800,10 +837,52 @@ async fn receive_return(
         serde_json::json!({
             "order_id": id.as_str(),
             "status": order_return.status.as_str(),
+            "restocked_units": result.restocked_units,
         }),
     )
     .await;
     Ok(Json(order_return))
+}
+
+async fn refund_return(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, return_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<CancelAfterSaleRequest>,
+) -> ApiResult<Json<ReturnRefundResponse>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let id = OrderId::from_string(id);
+    let return_id = ReturnId::from_string(return_id);
+    let workflow = AfterSalesWorkflow::new(
+        db.clone(),
+        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+    );
+    let result = workflow
+        .refund_return(&id, &return_id, request.reason)
+        .await?;
+    let refunded_amount = result.order_refund.as_ref().map(|refund| refund.amount);
+    record_store_audit(
+        &context,
+        &actor,
+        "order.return_refunded",
+        "order_return",
+        result.order_return.id.as_str(),
+        serde_json::json!({
+            "order_id": id.as_str(),
+            "refunded_amount": refunded_amount,
+            "currency_code": result.order.currency_code.clone(),
+        }),
+    )
+    .await;
+    Ok(Json(ReturnRefundResponse {
+        order: result.order,
+        order_return: result.order_return,
+        order_refund: result.order_refund,
+        provider_refund: result.provider_refund,
+    }))
 }
 
 async fn write_off_return(
@@ -940,6 +1019,47 @@ async fn accept_claim(
     )
     .await;
     Ok(Json(claim))
+}
+
+async fn refund_claim(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, claim_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<CancelAfterSaleRequest>,
+) -> ApiResult<Json<ClaimRefundResponse>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let id = OrderId::from_string(id);
+    let claim_id = ClaimId::from_string(claim_id);
+    let workflow = AfterSalesWorkflow::new(
+        db.clone(),
+        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+    );
+    let result = workflow
+        .refund_claim(&id, &claim_id, request.reason)
+        .await?;
+    let refunded_amount = result.order_refund.as_ref().map(|refund| refund.amount);
+    record_store_audit(
+        &context,
+        &actor,
+        "order.claim_refunded",
+        "order_claim",
+        result.claim.id.as_str(),
+        serde_json::json!({
+            "order_id": id.as_str(),
+            "refunded_amount": refunded_amount,
+            "currency_code": result.order.currency_code.clone(),
+        }),
+    )
+    .await;
+    Ok(Json(ClaimRefundResponse {
+        order: result.order,
+        claim: result.claim,
+        order_refund: result.order_refund,
+        provider_refund: result.provider_refund,
+    }))
 }
 
 async fn cancel_claim(

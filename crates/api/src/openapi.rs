@@ -272,9 +272,11 @@ use crate::state::AppContext;
     crate::routes::admin_inventory::TransferResponse,
     crate::routes::admin_inventory::UpdateLocationRequest,
     crate::routes::admin_orders::CancelOrderRequest,
+    crate::routes::admin_orders::ClaimRefundResponse,
     crate::routes::admin_orders::FulfillOrderRequest,
     crate::routes::admin_orders::FulfillmentItemRequest,
     crate::routes::admin_orders::RefundOrderRequest,
+    crate::routes::admin_orders::ReturnRefundResponse,
     crate::routes::admin_payments::CreateRefundRequest,
     crate::routes::admin_payments::FailSessionRequest,
     crate::routes::admin_payments::RefundDto,
@@ -1682,10 +1684,17 @@ fn admin_order_routes() -> Vec<Route> {
         ),
         post(
             "/api/v1/admin/orders/{id}/returns/{return_id}/receive",
-            "Receive an order return",
+            "Receive an order return and restock received items",
             Auth::Admin,
             Some("ReceiveReturnRequest"),
             ok(Schema::Ref("OrderReturn")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/returns/{return_id}/refund",
+            "Refund an order return",
+            Auth::Admin,
+            Some("CancelAfterSaleRequest"),
+            ok(Schema::Ref("ReturnRefundResponse")),
         ),
         post(
             "/api/v1/admin/orders/{id}/returns/{return_id}/write-off",
@@ -1728,6 +1737,13 @@ fn admin_order_routes() -> Vec<Route> {
             Auth::Admin,
             None,
             ok(Schema::Ref("OrderClaim")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/claims/{claim_id}/refund",
+            "Refund an accepted order claim",
+            Auth::Admin,
+            Some("CancelAfterSaleRequest"),
+            ok(Schema::Ref("ClaimRefundResponse")),
         ),
         post(
             "/api/v1/admin/orders/{id}/claims/{claim_id}/cancel",
@@ -3489,12 +3505,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 160);
+        assert_eq!(count("/api/v1/admin"), 162);
         assert_eq!(count("/api/v1/store"), 42);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/internal/storefront"), 42);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 269);
+        assert_eq!(paths.len(), 271);
 
         for key in [
             "/api/v1/platform/stores",
@@ -3602,7 +3618,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 372);
+        assert_eq!(operation_count, 374);
     }
 
     #[test]

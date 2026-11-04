@@ -6,9 +6,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use fastcart_api::{ApiConfig, AppContext, build_router};
-use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
-use fastcart_kernel::StoreId;
+use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabase, StoreDatabaseManager};
+use fastcart_kernel::{StoreId, VariantId};
+use fastcart_module_inventory::{CreateInventoryItemInput, InventoryService};
 use fastcart_module_order::{CreateOrderInput, CreateOrderItemInput, OrderService};
+use fastcart_module_payment::{CreatePaymentSessionInput, PaymentService};
 use fastcart_platform::PlatformStore;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -16,11 +18,13 @@ use tower::ServiceExt;
 
 struct Fixture {
     app: Router,
+    db: StoreDatabase,
     admin_auth: String,
     csrf: String,
     store_id: String,
     order_id: String,
     order_item_id: String,
+    variant_id: VariantId,
     _dir: tempfile::TempDir,
 }
 
@@ -83,7 +87,16 @@ async fn fixture() -> Fixture {
         .database(&StoreId::from_string(store_id.clone()))
         .await
         .unwrap();
-    let order = OrderService::new(db)
+    let variant_id = VariantId::new();
+    InventoryService::new(db.clone())
+        .create_item(CreateInventoryItemInput {
+            sku: None,
+            variant_id: Some(variant_id.clone()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let order = OrderService::new(db.clone())
         .create_order(CreateOrderInput {
             email: "buyer@example.com".to_owned(),
             currency_code: "USD".to_owned(),
@@ -91,6 +104,8 @@ async fn fixture() -> Fixture {
                 product_title: "Widget".to_owned(),
                 unit_price: 1_000,
                 quantity: 4,
+                variant_id: Some(variant_id.clone()),
+                requires_shipping: true,
                 ..CreateOrderItemInput::default()
             }],
             subtotal: 4_000,
@@ -101,14 +116,25 @@ async fn fixture() -> Fixture {
         })
         .await
         .unwrap();
+    let payments = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
+    let session = payments
+        .create_session(CreatePaymentSessionInput {
+            order_id: Some(order.id.clone()),
+            ..CreatePaymentSessionInput::new("manual", 4_000, "USD")
+        })
+        .await
+        .unwrap();
+    payments.capture(session.id.as_str()).await.unwrap();
 
     Fixture {
         app,
+        db,
         admin_auth,
         csrf,
         store_id,
         order_id: order.id.as_str().to_owned(),
         order_item_id: order.items[0].id.as_str().to_owned(),
+        variant_id,
         _dir: dir,
     }
 }
@@ -368,4 +394,111 @@ async fn admin_can_run_the_full_post_purchase_flow() {
     // The historical item snapshot is unchanged.
     assert_eq!(order["items"].as_array().unwrap().len(), 1);
     assert_eq!(order["items"][0]["quantity"], 4);
+}
+
+#[tokio::test]
+async fn receiving_restocks_once_and_refunds_are_idempotent() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let base = format!("/api/v1/admin/orders/{}/returns", fixture.order_id);
+    let (status, created, _) = send(
+        &fixture.app,
+        "POST",
+        &base,
+        Some(json!({
+            "reason": "damaged",
+            "items": [{"order_item_id": fixture.order_item_id, "quantity": 2}]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let return_id = created["id"].as_str().unwrap().to_owned();
+    let return_url = format!("{base}/{return_id}");
+    let (status, _, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{return_url}/request"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let inventory = InventoryService::new(fixture.db.clone());
+    assert_eq!(
+        inventory
+            .variant_availability(&fixture.variant_id)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let (status, received, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{return_url}/receive"),
+        Some(json!({})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{received}");
+    assert_eq!(received["status"], "received");
+    assert_eq!(
+        inventory
+            .variant_availability(&fixture.variant_id)
+            .await
+            .unwrap(),
+        2
+    );
+
+    let (status, _, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{return_url}/receive"),
+        Some(json!({})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        inventory
+            .variant_availability(&fixture.variant_id)
+            .await
+            .unwrap(),
+        2
+    );
+
+    let (status, refund, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{return_url}/refund"),
+        Some(json!({"reason": "approved"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refund}");
+    assert!(refund["order_return"]["refund_id"].as_str().is_some());
+    assert_eq!(refund["order_refund"]["amount"], 2_000);
+    let provider_refund_id = refund["provider_refund"]["provider_refund_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(refund["order"]["refunds"].as_array().unwrap().len(), 1);
+
+    let (status, replay, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{return_url}/refund"),
+        Some(json!({})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["order_refund"]["amount"], 2_000);
+    assert_eq!(
+        replay["provider_refund"]["provider_refund_id"],
+        provider_refund_id
+    );
+    assert_eq!(replay["order"]["refunds"].as_array().unwrap().len(), 1);
 }
