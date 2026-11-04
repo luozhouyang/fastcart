@@ -7,10 +7,10 @@ use axum::Router;
 use axum::extract::Path;
 use axum::routing::get;
 use fastcart_http::{ApiResult, PaginationQuery};
-use fastcart_module_store::{Region, RegionService};
+use fastcart_module_store::RegionService;
 
 use super::StoreDb;
-use crate::dto::{PageInfo, PageResponse};
+use crate::dto::{RegionListResponse, RegionResponse};
 use crate::state::AppContext;
 
 /// Builds the public region routes.
@@ -23,19 +23,16 @@ pub fn router() -> Router<Arc<AppContext>> {
 async fn list_regions(
     StoreDb(db): StoreDb,
     PaginationQuery { limit, offset }: PaginationQuery,
-) -> ApiResult<Json<PageResponse<Region>>> {
+) -> ApiResult<Json<RegionListResponse>> {
     let pagination = PaginationQuery { limit, offset }.pagination()?;
     let page = RegionService::new(db).list_regions(pagination).await?;
-    Ok(Json(PageResponse {
-        data: page.data,
-        pagination: PageInfo {
-            limit: page.pagination.limit,
-            offset: page.pagination.offset,
-            total: page.count,
-        },
-    }))
+    Ok(Json(RegionListResponse::from_page(page)))
 }
 
-async fn get_region(StoreDb(db): StoreDb, Path(id): Path<String>) -> ApiResult<Json<Region>> {
-    Ok(Json(RegionService::new(db).get_region(&id).await?))
+async fn get_region(
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<RegionResponse>> {
+    let region = RegionService::new(db).get_region(&id).await?;
+    Ok(Json(RegionResponse { region }))
 }

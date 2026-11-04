@@ -21,7 +21,10 @@ use fastcart_module_store::{RegionService, StoreService};
 use serde::{Deserialize, Serialize};
 
 use super::{PublishableKeyContext, StoreDb};
-use crate::dto::PageResponse;
+use crate::dto::{
+    CategoryListResponse, CollectionListResponse, ProductListResponse, ProductResponse,
+    ProductSearchResponse,
+};
 use crate::state::AppContext;
 
 /// Builds the public catalog routes.
@@ -103,7 +106,7 @@ async fn list_products(
     StoreDb(db): StoreDb,
     publishable_key: Option<Extension<PublishableKeyContext>>,
     ApiQuery(query): ApiQuery<ProductQuery>,
-) -> ApiResult<Json<PageResponse<StoreProduct>>> {
+) -> ApiResult<Json<ProductListResponse>> {
     let pagination = PaginationQuery {
         limit: query.limit,
         offset: query.offset,
@@ -118,7 +121,7 @@ async fn list_products(
         calculated_price: calculated.get(&product.id).cloned(),
         product,
     });
-    Ok(Json(PageResponse::from_page(page)))
+    Ok(Json(ProductListResponse::from_page(page)))
 }
 
 async fn get_product(
@@ -126,45 +129,47 @@ async fn get_product(
     publishable_key: Option<Extension<PublishableKeyContext>>,
     Path(handle): Path<String>,
     ApiQuery(query): ApiQuery<ProductQuery>,
-) -> ApiResult<Json<StoreProduct>> {
+) -> ApiResult<Json<ProductResponse>> {
     let channel_ids = key_sales_channel_ids(&publishable_key);
     let product = CatalogService::new(db.clone())
         .get_published_by_handle_in_channels(&handle, channel_ids)
         .await?;
     let calculated = calculate_product_prices(&db, std::slice::from_ref(&product), &query).await?;
-    Ok(Json(StoreProduct {
-        calculated_price: calculated.get(&product.id).cloned(),
-        product,
+    Ok(Json(ProductResponse {
+        product: StoreProduct {
+            calculated_price: calculated.get(&product.id).cloned(),
+            product,
+        },
     }))
 }
 
 async fn list_categories(
     StoreDb(db): StoreDb,
     PaginationQuery { limit, offset }: PaginationQuery,
-) -> ApiResult<Json<PageResponse<fastcart_module_catalog::Category>>> {
+) -> ApiResult<Json<CategoryListResponse>> {
     let pagination = PaginationQuery { limit, offset }.pagination()?;
     let page = CatalogService::new(db)
         .list_published_categories(None, pagination)
         .await?;
-    Ok(Json(PageResponse::from_page(page)))
+    Ok(Json(CategoryListResponse::from_page(page)))
 }
 
 async fn list_collections(
     StoreDb(db): StoreDb,
     PaginationQuery { limit, offset }: PaginationQuery,
-) -> ApiResult<Json<PageResponse<fastcart_module_catalog::Collection>>> {
+) -> ApiResult<Json<CollectionListResponse>> {
     let pagination = PaginationQuery { limit, offset }.pagination()?;
     let page = CatalogService::new(db)
         .list_published_collections(pagination)
         .await?;
-    Ok(Json(PageResponse::from_page(page)))
+    Ok(Json(CollectionListResponse::from_page(page)))
 }
 
 async fn search(
     StoreDb(db): StoreDb,
     publishable_key: Option<Extension<PublishableKeyContext>>,
     ApiQuery(query): ApiQuery<SearchQuery>,
-) -> ApiResult<Json<PageResponse<Product>>> {
+) -> ApiResult<Json<ProductSearchResponse>> {
     let pagination = PaginationQuery {
         limit: query.limit,
         offset: query.offset,
@@ -180,9 +185,14 @@ async fn search(
     let page = CatalogService::new(db)
         .search_products_with_filter(query.q.as_deref().unwrap_or_default(), filter, pagination)
         .await?;
-    Ok(Json(PageResponse::from_page(page)))
+    Ok(Json(ProductSearchResponse::from_page(page)))
 }
 
+/// Returns the public store settings as a raw key/value map.
+///
+/// Unlike the collection endpoints, settings have no Medusa envelope: the
+/// payload is an arbitrary map of public keys to string values, so wrapping it
+/// would add a layer without a stable resource name.
 async fn public_settings(StoreDb(db): StoreDb) -> ApiResult<Json<BTreeMap<String, String>>> {
     let settings = StoreService::new(db).get_all_settings().await?;
     let public = settings

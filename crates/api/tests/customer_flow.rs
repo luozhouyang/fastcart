@@ -397,7 +397,7 @@ async fn customers_register_login_and_manage_their_own_profile() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{me}");
-    assert_eq!(me["email"], "buyer@example.com");
+    assert_eq!(me["customer"]["email"], "buyer@example.com");
 
     // Cookie-auth mutation without CSRF is rejected.
     let (status, _, _) = send(
@@ -420,7 +420,7 @@ async fn customers_register_login_and_manage_their_own_profile() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
-    assert_eq!(updated["first_name"], "Grace");
+    assert_eq!(updated["customer"]["first_name"], "Grace");
 
     let (status, address, _) = send(
         &fixture.app,
@@ -438,7 +438,7 @@ async fn customers_register_login_and_manage_their_own_profile() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{address}");
-    assert_eq!(address["country_code"], "US");
+    assert_eq!(address["address"]["country_code"], "US");
 
     let (status, addresses, _) = send(
         &fixture.app,
@@ -449,7 +449,7 @@ async fn customers_register_login_and_manage_their_own_profile() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(addresses.as_array().unwrap().len(), 1);
+    assert_eq!(addresses["addresses"].as_array().unwrap().len(), 1);
 
     // Logout requires CSRF and revokes the session.
     let (status, _, _) = send(

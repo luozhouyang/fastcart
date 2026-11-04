@@ -870,11 +870,14 @@ export interface CompleteCheckoutRequest {
   province_code?: string | null;
 }
 
-export interface CompleteCheckoutResponse {
-  checkout: CheckoutSession;
+/** Medusa v2 completion envelope: the checkout produced an order. */
+export interface CheckoutCompleteResponse {
+  type: "order";
   order: Order;
-  payment: Payment;
 }
+
+/** @deprecated Use {@link CheckoutCompleteResponse}. */
+export type CompleteCheckoutResponse = CheckoutCompleteResponse;
 
 // ---------------------------------------------------------------------------
 // Orders
@@ -1951,4 +1954,129 @@ export type StoreSettings = Record<string, string>;
 
 export interface SettingsUpdateRequest {
   values: StoreSettings;
+}
+
+// ---------------------------------------------------------------------------
+// Storefront response envelopes (Medusa v2 compatible)
+//
+// Public `/api/v1/store` and `/internal/storefront` responses wrap resources and
+// lists in named envelopes. Admin responses still use `PageResult<T>`.
+// ---------------------------------------------------------------------------
+
+export interface ProductResponse<TProduct = Product> {
+  product: TProduct;
+}
+
+export interface ProductListResponse<TProduct = Product> {
+  products: TProduct[];
+  count: number;
+  offset: number;
+  limit: number;
+}
+
+export type ProductSearchResponse<TProduct = Product> = ProductListResponse<TProduct>;
+
+export interface CategoryResponse {
+  category: Category;
+}
+
+export interface CategoryListResponse {
+  product_categories: Category[];
+  count: number;
+  offset: number;
+  limit: number;
+}
+
+export interface CollectionResponse {
+  collection: Collection;
+}
+
+export interface CollectionListResponse {
+  collections: Collection[];
+  count: number;
+  offset: number;
+  limit: number;
+}
+
+export interface CartResponse {
+  cart: Cart;
+}
+
+export interface CheckoutResponse {
+  checkout: CheckoutSession;
+}
+
+export interface CheckoutHistoryResponse {
+  history: CheckoutStateHistory[];
+}
+
+export interface CustomerResponse {
+  customer: Customer;
+}
+
+export interface CustomerAddressResponse {
+  address: CustomerAddress;
+}
+
+export interface CustomerAddressListResponse {
+  addresses: CustomerAddress[];
+}
+
+export interface CustomerGroupsResponse {
+  customer_groups: CustomerGroup[];
+}
+
+export interface OrderResponse {
+  order: Order;
+}
+
+export interface OrderListResponse {
+  orders: Order[];
+  count: number;
+  offset: number;
+  limit: number;
+}
+
+export interface StorePageResponse {
+  page: Page;
+}
+
+export interface NavigationResponse {
+  navigation: NavigationTree;
+}
+
+export interface Region {
+  id: string;
+  name: string;
+  currency_code: CurrencyCode;
+  countries: CountryCode[];
+  tax_region_id: string | null;
+  payment_providers: string[];
+  is_default: boolean;
+  metadata: Metadata;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface RegionResponse {
+  region: Region;
+}
+
+export interface RegionListResponse {
+  regions: Region[];
+  count: number;
+  offset: number;
+  limit: number;
+}
+
+export interface StoreThemeResponse {
+  theme: StoreTheme;
+}
+
+export interface VariantAvailabilityResponse {
+  variants: VariantAvailability[];
+}
+
+export interface ShippingOptionsResponse {
+  shipping_options: ResolvedShippingOption[];
 }

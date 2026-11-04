@@ -225,6 +225,11 @@ async fn internal_http_surface_requires_a_secret() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(value["products"].as_array().is_some());
+    assert_eq!(value["count"], 0);
+    assert_eq!(value["offset"], 0);
+    assert!(value["limit"].as_i64().is_some());
 }
 
 #[tokio::test]

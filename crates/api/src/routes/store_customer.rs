@@ -25,11 +25,14 @@ use fastcart_module_customer::{
     Address, AddressInput, CreatedCustomerSession, CustomerService, RegisterCustomerInput,
     UpdateCustomerInput,
 };
-use fastcart_module_order::{Order, OrderFilter, OrderService};
+use fastcart_module_order::{OrderFilter, OrderService};
 use serde::{Deserialize, Serialize};
 
 use super::StoreDb;
-use crate::dto::{CustomerDto, CustomerGroupDto, PageResponse};
+use crate::dto::{
+    CustomerAddressListResponse, CustomerAddressResponse, CustomerDto, CustomerGroupsResponse,
+    CustomerResponse, OrderListResponse, OrderResponse,
+};
 use crate::state::AppContext;
 
 /// Builds the public customer routes.
@@ -266,17 +269,19 @@ async fn logout(
 async fn me(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
-) -> ApiResult<Json<CustomerDto>> {
+) -> ApiResult<Json<CustomerResponse>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let customer = CustomerService::new(db).get_customer(&customer_id).await?;
-    Ok(Json(customer.into()))
+    Ok(Json(CustomerResponse {
+        customer: customer.into(),
+    }))
 }
 
 async fn update_me(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
     ApiJson(request): ApiJson<UpdateProfileRequest>,
-) -> ApiResult<Json<CustomerDto>> {
+) -> ApiResult<Json<CustomerResponse>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let customer = CustomerService::new(db)
         .update_customer(
@@ -291,30 +296,39 @@ async fn update_me(
             },
         )
         .await?;
-    Ok(Json(customer.into()))
+    Ok(Json(CustomerResponse {
+        customer: customer.into(),
+    }))
 }
 
 async fn list_addresses(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
-) -> ApiResult<Json<Vec<Address>>> {
+) -> ApiResult<Json<CustomerAddressListResponse>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let addresses = CustomerService::new(db)
         .list_addresses(&customer_id)
         .await?;
-    Ok(Json(addresses))
+    Ok(Json(CustomerAddressListResponse {
+        addresses: addresses.into_iter().map(Into::into).collect(),
+    }))
 }
 
 async fn add_address(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
     ApiJson(request): ApiJson<AddressRequest>,
-) -> ApiResult<(StatusCode, Json<Address>)> {
+) -> ApiResult<(StatusCode, Json<CustomerAddressResponse>)> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let address = CustomerService::new(db)
         .add_address(&customer_id, address_input(request, None))
         .await?;
-    Ok((StatusCode::CREATED, Json(address)))
+    Ok((
+        StatusCode::CREATED,
+        Json(CustomerAddressResponse {
+            address: address.into(),
+        }),
+    ))
 }
 
 async fn update_address(
@@ -322,7 +336,7 @@ async fn update_address(
     CustomerActor(actor): CustomerActor,
     Path(address_id): Path<String>,
     ApiJson(request): ApiJson<AddressRequest>,
-) -> ApiResult<Json<Address>> {
+) -> ApiResult<Json<CustomerAddressResponse>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let service = CustomerService::new(db);
     let existing = service.get_address(&customer_id, &address_id).await?;
@@ -333,7 +347,9 @@ async fn update_address(
             address_input(request, Some(&existing)),
         )
         .await?;
-    Ok(Json(address))
+    Ok(Json(CustomerAddressResponse {
+        address: address.into(),
+    }))
 }
 
 async fn remove_address(
@@ -352,7 +368,7 @@ async fn list_orders(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
     PaginationQuery { limit, offset }: PaginationQuery,
-) -> ApiResult<Json<PageResponse<Order>>> {
+) -> ApiResult<Json<OrderListResponse>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let pagination = PaginationQuery { limit, offset }.pagination()?;
     let filter = OrderFilter {
@@ -360,18 +376,20 @@ async fn list_orders(
         ..OrderFilter::default()
     };
     let page = OrderService::new(db).list(filter, pagination).await?;
-    Ok(Json(PageResponse::from_page(page)))
+    Ok(Json(OrderListResponse::from_page(page)))
 }
 
 async fn list_groups(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
-) -> ApiResult<Json<Vec<CustomerGroupDto>>> {
+) -> ApiResult<Json<CustomerGroupsResponse>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let groups = CustomerService::new(db)
         .list_customer_groups(&customer_id)
         .await?;
-    Ok(Json(groups.into_iter().map(Into::into).collect()))
+    Ok(Json(CustomerGroupsResponse {
+        customer_groups: groups.into_iter().map(Into::into).collect(),
+    }))
 }
 
 async fn change_password(
@@ -619,7 +637,7 @@ async fn get_own_order(
     CustomerActor(actor): CustomerActor,
     StoreDb(db): StoreDb,
     Path(order_id): Path<String>,
-) -> ApiResult<Json<Order>> {
+) -> ApiResult<Json<OrderResponse>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?;
     let order = OrderService::new(db)
         .get(&OrderId::from_string(order_id))
@@ -627,7 +645,7 @@ async fn get_own_order(
     if order.customer_id.as_ref() != Some(customer_id) {
         return Err(ApiError::new(AppError::not_found("order", &order.id)));
     }
-    Ok(Json(order))
+    Ok(Json(OrderResponse { order }))
 }
 
 #[cfg(test)]

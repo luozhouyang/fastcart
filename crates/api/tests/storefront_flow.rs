@@ -250,13 +250,13 @@ async fn storefront_products_respect_publishable_key_channels_and_calculated_pri
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{products}");
-    assert_eq!(products["pagination"]["total"], 1);
-    assert_eq!(products["data"][0]["id"], linked.id);
+    assert_eq!(products["count"], 1);
+    assert_eq!(products["products"][0]["id"], linked.id);
     assert_eq!(
-        products["data"][0]["sales_channel_ids"],
+        products["products"][0]["sales_channel_ids"],
         serde_json::json!([channel.id])
     );
-    assert!(products["data"][0].get("calculated_price").is_none());
+    assert!(products["products"][0].get("calculated_price").is_none());
 
     let (status, products) = request(
         &fixture.app,
@@ -267,7 +267,7 @@ async fn storefront_products_respect_publishable_key_channels_and_calculated_pri
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{products}");
-    let calculated = &products["data"][0]["calculated_price"];
+    let calculated = &products["products"][0]["calculated_price"];
     assert_eq!(calculated["amount"], 2_500);
     assert_eq!(calculated["currency_code"], "USD");
     assert_eq!(calculated["price_list_id"], sale.id);
@@ -283,7 +283,7 @@ async fn storefront_products_respect_publishable_key_channels_and_calculated_pri
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{products}");
-    assert_eq!(products["data"][0]["calculated_price"]["amount"], 2_500);
+    assert_eq!(products["products"][0]["calculated_price"]["amount"], 2_500);
 
     // Products outside the key's channels are not addressable.
     let (status, _) = request(
@@ -305,7 +305,7 @@ async fn storefront_products_respect_publishable_key_channels_and_calculated_pri
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{product}");
-    assert_eq!(product["calculated_price"]["amount"], 2_500);
+    assert_eq!(product["product"]["calculated_price"]["amount"], 2_500);
 
     // Without a key the channel filter is not applied.
     let (status, products) = request(
@@ -317,7 +317,7 @@ async fn storefront_products_respect_publishable_key_channels_and_calculated_pri
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{products}");
-    assert_eq!(products["pagination"]["total"], 2);
+    assert_eq!(products["count"], 2);
 }
 
 #[tokio::test]
@@ -470,8 +470,8 @@ async fn storefront_cart_checkout_and_order_flow() {
     let (status, products) =
         request(&fixture.app, "GET", "/api/v1/store/products", None, &host).await;
     assert_eq!(status, StatusCode::OK, "{products}");
-    assert_eq!(products["pagination"]["total"], 1);
-    assert_eq!(products["data"][0]["title"], "Hoodie");
+    assert_eq!(products["count"], 1);
+    assert_eq!(products["products"][0]["title"], "Hoodie");
 
     let (status, product_response) = request(
         &fixture.app,
@@ -492,7 +492,7 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{availability}");
-    assert_eq!(availability[0]["available"], 5);
+    assert_eq!(availability["variants"][0]["available"], 5);
 
     let (status, shipping_options) = request(
         &fixture.app,
@@ -503,7 +503,13 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{shipping_options}");
-    assert_eq!(shipping_options.as_array().unwrap().len(), 1);
+    assert_eq!(
+        shipping_options["shipping_options"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 
     // Anonymous cart.
     let (status, cart) = request(
@@ -515,7 +521,7 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{cart}");
-    let cart_id = cart["id"].as_str().unwrap().to_owned();
+    let cart_id = cart["cart"]["id"].as_str().unwrap().to_owned();
 
     let (status, cart) = request(
         &fixture.app,
@@ -530,7 +536,7 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cart}");
-    assert_eq!(cart["totals"]["item_subtotal"], 3_000);
+    assert_eq!(cart["cart"]["totals"]["item_subtotal"], 3_000);
 
     let (status, cart) = request(
         &fixture.app,
@@ -544,8 +550,8 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cart}");
-    assert_eq!(cart["totals"]["tax_total"], 300);
-    assert_eq!(cart["totals"]["total"], 3_300);
+    assert_eq!(cart["cart"]["totals"]["tax_total"], 300);
+    assert_eq!(cart["cart"]["totals"]["total"], 3_300);
 
     let (status, checkout) = request(
         &fixture.app,
@@ -561,7 +567,7 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{checkout}");
-    let checkout_id = checkout["id"].as_str().unwrap().to_owned();
+    let checkout_id = checkout["checkout"]["id"].as_str().unwrap().to_owned();
 
     let (status, completed) = request(
         &fixture.app,
@@ -572,6 +578,7 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["type"], "order");
     assert_eq!(completed["order"]["total"], 3_300);
     assert_eq!(completed["order"]["status"], "confirmed");
     assert_eq!(completed["order"]["payment_status"], "captured");

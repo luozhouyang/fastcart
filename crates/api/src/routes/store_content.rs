@@ -10,9 +10,10 @@ use axum::extract::Path;
 use axum::routing::get;
 use fastcart_http::{ApiError, ApiResult};
 use fastcart_kernel::AppError;
-use fastcart_module_content::{ContentService, NavigationTree, Page, PageStatus};
+use fastcart_module_content::{ContentService, PageStatus};
 
 use super::StoreDb;
+use crate::dto::{NavigationResponse, StorePageResponse};
 use crate::state::AppContext;
 
 /// Builds the public content routes.
@@ -22,20 +23,23 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/navigation/{handle}", get(get_navigation))
 }
 
-async fn get_page(StoreDb(db): StoreDb, Path(handle): Path<String>) -> ApiResult<Json<Page>> {
+async fn get_page(
+    StoreDb(db): StoreDb,
+    Path(handle): Path<String>,
+) -> ApiResult<Json<StorePageResponse>> {
     let page = ContentService::new(db).get_page_by_handle(&handle).await?;
     if !is_public_page_status(page.status) {
         return Err(ApiError::new(AppError::not_found("page", handle)));
     }
-    Ok(Json(page))
+    Ok(Json(StorePageResponse { page }))
 }
 
 async fn get_navigation(
     StoreDb(db): StoreDb,
     Path(handle): Path<String>,
-) -> ApiResult<Json<NavigationTree>> {
+) -> ApiResult<Json<NavigationResponse>> {
     let tree = ContentService::new(db).get_navigation_tree(&handle).await?;
-    Ok(Json(tree))
+    Ok(Json(NavigationResponse { navigation: tree }))
 }
 
 /// Returns true when a page state is visible to storefronts.

@@ -19,7 +19,7 @@ use fastcart_kernel::{
     now_timestamp,
 };
 use fastcart_module_cart::{AddressInput, Cart, CreateCartInput, UpdateItemInput};
-use fastcart_module_checkout::{CheckoutService, CheckoutSession, CheckoutStatus};
+use fastcart_module_checkout::{CheckoutService, CheckoutStatus};
 use fastcart_module_customer::CustomerService;
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_payment::PaymentService;
@@ -27,6 +27,9 @@ use fastcart_module_store::StoreService;
 use fastcart_workflows::{CartContext, CartWorkflow, CheckoutWorkflow, CreateCheckoutRequest};
 
 use super::{StoreDb, ensure_cart_access};
+use crate::dto::{
+    CartResponse, CheckoutCompleteResponse, CheckoutHistoryResponse, CheckoutResponse,
+};
 use crate::state::AppContext;
 
 /// Builds cart and checkout routes.
@@ -178,23 +181,13 @@ pub struct CompleteCheckoutRequest {
     pub province_code: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
-pub struct CompleteCheckoutResponse {
-    /// Final checkout.
-    pub checkout: CheckoutSession,
-    /// Placed order.
-    pub order: fastcart_module_order::Order,
-    /// Captured payment.
-    pub payment: fastcart_module_payment::Payment,
-}
-
 async fn create_cart(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
     publishable_key: Option<Extension<super::PublishableKeyContext>>,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateCartRequest>,
-) -> ApiResult<(StatusCode, Json<Cart>)> {
+) -> ApiResult<(StatusCode, Json<CartResponse>)> {
     let mut sales_channel_id = request.sales_channel_id;
     if let Some(Extension(key)) = publishable_key {
         match sales_channel_id.as_deref() {
@@ -221,7 +214,7 @@ async fn create_cart(
     input.expires_in_seconds = request.expires_in_seconds;
     input.customer_id = actor.customer_id.clone();
     let cart = CartWorkflow::new(db).create_cart(input).await?;
-    Ok((StatusCode::CREATED, Json(cart)))
+    Ok((StatusCode::CREATED, Json(CartResponse { cart })))
 }
 
 async fn get_cart(
@@ -229,12 +222,12 @@ async fn get_cart(
     Extension(actor): Extension<ActorContext>,
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart = CartWorkflow::new(db)
         .get_cart(&parse_cart_id(&cart_id)?)
         .await?;
     ensure_cart_access(&cart, &actor)?;
-    Ok(Json(cart))
+    Ok(Json(CartResponse { cart }))
 }
 
 async fn add_item(
@@ -243,7 +236,7 @@ async fn add_item(
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
     ApiJson(request): ApiJson<AddItemRequest>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
@@ -264,7 +257,7 @@ async fn add_item(
             &context,
         )
         .await?;
-    Ok(Json(cart))
+    Ok(Json(CartResponse { cart }))
 }
 
 async fn update_item(
@@ -274,7 +267,7 @@ async fn update_item(
     Path((cart_id, item_id)): Path<(String, String)>,
     ApiQuery(query): ApiQuery<DestinationQuery>,
     ApiJson(request): ApiJson<UpdateItemRequest>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
@@ -290,7 +283,9 @@ async fn update_item(
         )
         .await?;
     let context = cart_context(&db, &actor, &cart, query.country_code, query.province_code).await?;
-    Ok(Json(workflow.recalculate(&cart_id, &context).await?))
+    Ok(Json(CartResponse {
+        cart: workflow.recalculate(&cart_id, &context).await?,
+    }))
 }
 
 async fn remove_item(
@@ -299,7 +294,7 @@ async fn remove_item(
     StoreDb(db): StoreDb,
     Path((cart_id, item_id)): Path<(String, String)>,
     ApiQuery(query): ApiQuery<DestinationQuery>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
@@ -309,7 +304,9 @@ async fn remove_item(
         .remove_item(&cart_id, &LineItemId::from_string(item_id))
         .await?;
     let context = cart_context(&db, &actor, &cart, query.country_code, query.province_code).await?;
-    Ok(Json(workflow.recalculate(&cart_id, &context).await?))
+    Ok(Json(CartResponse {
+        cart: workflow.recalculate(&cart_id, &context).await?,
+    }))
 }
 
 async fn clear_items(
@@ -318,14 +315,16 @@ async fn clear_items(
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
     ApiQuery(query): ApiQuery<DestinationQuery>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
     workflow.cart_service().clear_items(&cart_id).await?;
     let context = cart_context(&db, &actor, &cart, query.country_code, query.province_code).await?;
-    Ok(Json(workflow.recalculate(&cart_id, &context).await?))
+    Ok(Json(CartResponse {
+        cart: workflow.recalculate(&cart_id, &context).await?,
+    }))
 }
 
 async fn set_email(
@@ -334,17 +333,17 @@ async fn set_email(
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
     ApiJson(request): ApiJson<SetEmailRequest>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db);
     let cart = workflow.get_cart(&cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
-    Ok(Json(
-        workflow
+    Ok(Json(CartResponse {
+        cart: workflow
             .cart_service()
             .set_email(&cart_id, &request.email)
             .await?,
-    ))
+    }))
 }
 
 async fn attach_customer(
@@ -352,18 +351,18 @@ async fn attach_customer(
     CustomerActor(actor): CustomerActor,
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let workflow = CartWorkflow::new(db);
     let cart = workflow.get_cart(&cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
-    Ok(Json(
-        workflow
+    Ok(Json(CartResponse {
+        cart: workflow
             .cart_service()
             .attach_customer(&cart_id, &customer_id, None)
             .await?,
-    ))
+    }))
 }
 
 async fn set_address(
@@ -372,7 +371,7 @@ async fn set_address(
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
     ApiJson(request): ApiJson<SetAddressRequest>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
@@ -418,7 +417,9 @@ async fn set_address(
         request.province.clone(),
     )
     .await?;
-    Ok(Json(workflow.recalculate(&cart_id, &context).await?))
+    Ok(Json(CartResponse {
+        cart: workflow.recalculate(&cart_id, &context).await?,
+    }))
 }
 
 async fn set_shipping_method(
@@ -427,7 +428,7 @@ async fn set_shipping_method(
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
     ApiJson(request): ApiJson<SetShippingMethodRequest>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
@@ -447,7 +448,7 @@ async fn set_shipping_method(
             &context,
         )
         .await?;
-    Ok(Json(cart))
+    Ok(Json(CartResponse { cart }))
 }
 
 async fn apply_discount(
@@ -457,17 +458,17 @@ async fn apply_discount(
     Path(cart_id): Path<String>,
     ApiQuery(query): ApiQuery<DestinationQuery>,
     ApiJson(request): ApiJson<DiscountRequest>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
     let context = cart_context(&db, &actor, &cart, query.country_code, query.province_code).await?;
-    Ok(Json(
-        workflow
+    Ok(Json(CartResponse {
+        cart: workflow
             .apply_coupon(&cart_id, &request.code, &context)
             .await?,
-    ))
+    }))
 }
 
 async fn remove_discount(
@@ -476,15 +477,15 @@ async fn remove_discount(
     StoreDb(db): StoreDb,
     Path((cart_id, code)): Path<(String, String)>,
     ApiQuery(query): ApiQuery<DestinationQuery>,
-) -> ApiResult<Json<Cart>> {
+) -> ApiResult<Json<CartResponse>> {
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
     let context = cart_context(&db, &actor, &cart, query.country_code, query.province_code).await?;
-    Ok(Json(
-        workflow.remove_coupon(&cart_id, &code, &context).await?,
-    ))
+    Ok(Json(CartResponse {
+        cart: workflow.remove_coupon(&cart_id, &code, &context).await?,
+    }))
 }
 
 async fn create_checkout(
@@ -492,7 +493,7 @@ async fn create_checkout(
     Extension(actor): Extension<ActorContext>,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateCheckoutRequestDto>,
-) -> ApiResult<(StatusCode, Json<CheckoutSession>)> {
+) -> ApiResult<(StatusCode, Json<CheckoutResponse>)> {
     let cart_id = parse_cart_id(&request.cart_id)?;
     let carts = CartWorkflow::new(db.clone());
     let cart = carts.get_cart(&cart_id).await?;
@@ -515,7 +516,7 @@ async fn create_checkout(
         checkout_request.expires_in_seconds = expires;
     }
     let checkout = workflow.create(checkout_request).await?;
-    Ok((StatusCode::CREATED, Json(checkout)))
+    Ok((StatusCode::CREATED, Json(CheckoutResponse { checkout })))
 }
 
 async fn get_checkout(
@@ -523,14 +524,14 @@ async fn get_checkout(
     Extension(actor): Extension<ActorContext>,
     StoreDb(db): StoreDb,
     Path(checkout_id): Path<String>,
-) -> ApiResult<Json<CheckoutSession>> {
+) -> ApiResult<Json<CheckoutResponse>> {
     let service = checkout_service(db.clone());
     let checkout = service
         .get(&fastcart_kernel::CheckoutId::from_string(checkout_id))
         .await?;
     let cart = CartWorkflow::new(db).get_cart(&checkout.cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
-    Ok(Json(checkout))
+    Ok(Json(CheckoutResponse { checkout }))
 }
 
 async fn complete_checkout(
@@ -539,7 +540,7 @@ async fn complete_checkout(
     StoreDb(db): StoreDb,
     Path(checkout_id): Path<String>,
     ApiJson(request): ApiJson<CompleteCheckoutRequest>,
-) -> ApiResult<Json<CompleteCheckoutResponse>> {
+) -> ApiResult<Json<CheckoutCompleteResponse>> {
     let checkout_id = fastcart_kernel::CheckoutId::from_string(checkout_id);
     let payment = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
     let workflow = CheckoutWorkflow::new(db.clone(), payment);
@@ -572,11 +573,7 @@ async fn complete_checkout(
     {
         tracing::warn!(order_id = %result.order.id, error = %error, "failed to enqueue order confirmation email");
     }
-    Ok(Json(CompleteCheckoutResponse {
-        checkout: result.checkout,
-        order: result.order,
-        payment: result.payment,
-    }))
+    Ok(Json(CheckoutCompleteResponse::order(result.order)))
 }
 
 async fn cancel_checkout(
@@ -584,7 +581,7 @@ async fn cancel_checkout(
     Extension(actor): Extension<ActorContext>,
     StoreDb(db): StoreDb,
     Path(checkout_id): Path<String>,
-) -> ApiResult<Json<CheckoutSession>> {
+) -> ApiResult<Json<CheckoutResponse>> {
     let checkout_id = fastcart_kernel::CheckoutId::from_string(checkout_id);
     let service = checkout_service(db.clone());
     let checkout = service.get(&checkout_id).await?;
@@ -617,7 +614,7 @@ async fn cancel_checkout(
     {
         tracing::warn!(checkout_id = %checkout_id, error = %error, "failed to release checkout reservations");
     }
-    Ok(Json(checkout))
+    Ok(Json(CheckoutResponse { checkout }))
 }
 
 async fn checkout_history(
@@ -625,13 +622,15 @@ async fn checkout_history(
     Extension(actor): Extension<ActorContext>,
     StoreDb(db): StoreDb,
     Path(checkout_id): Path<String>,
-) -> ApiResult<Json<Vec<fastcart_module_checkout::CheckoutStateHistory>>> {
+) -> ApiResult<Json<CheckoutHistoryResponse>> {
     let checkout_id = fastcart_kernel::CheckoutId::from_string(checkout_id);
     let service = checkout_service(db.clone());
     let checkout = service.get(&checkout_id).await?;
     let cart = CartWorkflow::new(db).get_cart(&checkout.cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
-    Ok(Json(service.list_history(&checkout_id).await?))
+    Ok(Json(CheckoutHistoryResponse {
+        history: service.list_history(&checkout_id).await?,
+    }))
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]

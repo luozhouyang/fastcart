@@ -257,10 +257,10 @@ async fn theme_registry_admin_and_storefront_flow() {
 
     let (status, public) = request(&app, "GET", "/api/v1/store/theme", None, &host).await;
     assert_eq!(status, StatusCode::OK, "{public}");
-    assert_eq!(public["manifest"]["id"], "default");
-    assert_eq!(public["bundle_path"], "themes/default");
-    assert_eq!(public["settings"]["logo"], "/logo.svg");
-    assert!(public.get("settings_schema").is_none());
+    assert_eq!(public["theme"]["manifest"]["id"], "default");
+    assert_eq!(public["theme"]["bundle_path"], "themes/default");
+    assert_eq!(public["theme"]["settings"]["logo"], "/logo.svg");
+    assert!(public["theme"].get("settings_schema").is_none());
 
     let (status, admin_active) = request(
         &app,
@@ -296,7 +296,7 @@ async fn theme_registry_admin_and_storefront_flow() {
     assert_eq!(status, StatusCode::OK);
     let (status, public) = request(&app, "GET", "/api/v1/store/theme", None, &host).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(public["manifest"]["id"], "alternate");
+    assert_eq!(public["theme"]["manifest"]["id"], "alternate");
 
     let (status, rolled_back) = request(
         &app,

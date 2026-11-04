@@ -10,7 +10,7 @@ use fastcart_kernel::AppError;
 use fastcart_module_theme::ThemeService;
 
 use super::StoreDb;
-use crate::dto::StoreThemeDto;
+use crate::dto::{StoreThemeDto, StoreThemeResponse};
 use crate::state::AppContext;
 
 /// Builds the public theme routes.
@@ -18,10 +18,12 @@ pub fn router() -> Router<Arc<AppContext>> {
     Router::new().route("/theme", get(get_active_theme))
 }
 
-async fn get_active_theme(StoreDb(db): StoreDb) -> ApiResult<Json<StoreThemeDto>> {
+async fn get_active_theme(StoreDb(db): StoreDb) -> ApiResult<Json<StoreThemeResponse>> {
     let theme = ThemeService::new(db)
         .active()
         .await?
         .ok_or_else(|| ApiError::new(AppError::not_found("theme", "active")))?;
-    Ok(Json(StoreThemeDto::from(theme)))
+    Ok(Json(StoreThemeResponse {
+        theme: StoreThemeDto::from(theme),
+    }))
 }
