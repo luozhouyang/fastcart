@@ -652,12 +652,23 @@ async fn fulfill_order(
 
     // Create the provider-side fulfillment before touching the order. A failure
     // here must leave every local record unchanged.
+    let idempotency_key = Some(format!(
+        "order-fulfill:{}:{}:{}",
+        id.as_str(),
+        provider_items
+            .iter()
+            .map(|item| format!("{}x{}", item.variant_id, item.quantity))
+            .collect::<Vec<_>>()
+            .join(","),
+        request.tracking_numbers.join(",")
+    ));
     let receipt = provider
         .create_fulfillment(CreateFulfillmentRequest {
             order_id: id.as_str().to_owned(),
             items: provider_items,
             tracking_numbers: request.tracking_numbers.clone(),
             provider_data: request.provider_data.clone(),
+            idempotency_key,
             metadata: Metadata::empty(),
         })
         .await

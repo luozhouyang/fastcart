@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use fastcart_kernel::{AppError, CurrencyCode, Metadata};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::domain::ShippingOption;
@@ -34,6 +35,8 @@ pub struct CreateFulfillmentRequest {
     pub tracking_numbers: Vec<String>,
     /// Provider-specific configuration from the shipping option.
     pub provider_data: Value,
+    /// Stable key that providers should use to deduplicate retries.
+    pub idempotency_key: Option<String>,
     /// Extension metadata.
     pub metadata: Metadata,
 }
@@ -139,7 +142,13 @@ impl FulfillmentProvider for ManualFulfillmentProvider {
         }
         Ok(FulfillmentReceipt {
             provider_id: self.id.clone(),
-            provider_fulfillment_id: format!("ful_{}", Uuid::now_v7().simple()),
+            provider_fulfillment_id: match request.idempotency_key {
+                Some(key) => {
+                    let digest = Sha256::digest(key.as_bytes());
+                    format!("ful_{}", hex::encode(&digest[..16]))
+                }
+                None => format!("ful_{}", Uuid::now_v7().simple()),
+            },
             tracking_numbers: request.tracking_numbers,
             data: Value::Object(serde_json::Map::new()),
         })
@@ -242,6 +251,7 @@ mod tests {
                 }],
                 tracking_numbers: vec!["TRACK".to_owned()],
                 provider_data: serde_json::json!({}),
+                idempotency_key: Some("test-fulfillment".to_owned()),
                 metadata: Metadata::empty(),
             })
             .await
@@ -252,6 +262,28 @@ mod tests {
             .cancel_fulfillment(&receipt.provider_fulfillment_id)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_provider_deduplicates_by_idempotency_key() {
+        let provider = ManualFulfillmentProvider::default();
+        let request = || CreateFulfillmentRequest {
+            order_id: "order_1".to_owned(),
+            items: vec![FulfillmentItemRequest {
+                variant_id: "variant_1".to_owned(),
+                quantity: 1,
+            }],
+            tracking_numbers: Vec::new(),
+            provider_data: serde_json::json!({}),
+            idempotency_key: Some("stable-key".to_owned()),
+            metadata: Metadata::empty(),
+        };
+        let first = provider.create_fulfillment(request()).await.unwrap();
+        let replay = provider.create_fulfillment(request()).await.unwrap();
+        assert_eq!(
+            first.provider_fulfillment_id,
+            replay.provider_fulfillment_id
+        );
     }
 
     #[tokio::test]

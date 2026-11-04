@@ -512,6 +512,7 @@ impl AfterSalesWorkflow {
             .create_provider_fulfillment(
                 order_id,
                 provider_id,
+                Some(format!("claim-fulfill:{}", claim_id.as_str())),
                 tracking_numbers,
                 replacements
                     .iter()
@@ -686,6 +687,7 @@ impl AfterSalesWorkflow {
             .create_provider_fulfillment(
                 order_id,
                 provider_id,
+                Some(format!("exchange-fulfill:{}", exchange_id.as_str())),
                 tracking_numbers,
                 replacements
                     .iter()
@@ -746,6 +748,7 @@ impl AfterSalesWorkflow {
         &self,
         order_id: &OrderId,
         provider_id: &str,
+        idempotency_key: Option<String>,
         tracking_numbers: Vec<String>,
         items: impl Iterator<Item = FulfillmentItemRequest>,
     ) -> Result<fastcart_module_shipping::FulfillmentReceipt, AppError> {
@@ -759,6 +762,7 @@ impl AfterSalesWorkflow {
                 items: items.collect(),
                 tracking_numbers,
                 provider_data: serde_json::json!({}),
+                idempotency_key,
                 metadata: Metadata::empty(),
             })
             .await
