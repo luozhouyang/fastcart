@@ -29,6 +29,8 @@ pub struct Config {
     pub email: EmailConfig,
     /// Inquiry attachment settings.
     pub inquiries: InquiryConfig,
+    /// Notification delivery retention settings.
+    pub notifications: NotificationConfig,
 }
 
 /// HTTP listener settings.
@@ -50,7 +52,12 @@ pub struct ServerConfig {
     /// When absent, preview token issuance and the `/preview` render surface
     /// respond with `501 Not Implemented`.
     pub preview_secret: Option<String>,
-    /// Optional admin application origin used by notification deep links.
+    /// Origins permitted to embed `/preview` in an iframe.
+    ///
+    /// Empty leaves framing unrestricted for the token-bearing preview path.
+    /// Set this to the admin application origin in production.
+    pub preview_frame_ancestors: Vec<String>,
+    /// Optional admin application origin used for notification deep links.
     pub admin_base_url: Option<String>,
 }
 
@@ -63,6 +70,7 @@ impl Default for ServerConfig {
             cookie_secure: true,
             cors_origins: Vec::new(),
             preview_secret: None,
+            preview_frame_ancestors: Vec::new(),
             admin_base_url: None,
         }
     }
@@ -126,6 +134,8 @@ pub struct InquiryConfig {
     pub max_upload_bytes: usize,
     /// Lifetime of a pending upload before cleanup.
     pub upload_ttl_seconds: i64,
+    /// Days an inquiry and its attachments are retained.
+    pub retention_days: i64,
 }
 
 impl Default for InquiryConfig {
@@ -133,7 +143,22 @@ impl Default for InquiryConfig {
         Self {
             max_upload_bytes: 25 * 1024 * 1024,
             upload_ttl_seconds: 3_600,
+            retention_days: 365,
         }
+    }
+}
+
+/// Notification delivery retention settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationConfig {
+    /// Days terminal channel delivery records are retained.
+    pub retention_days: i64,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self { retention_days: 90 }
     }
 }
 
@@ -176,6 +201,8 @@ pub struct StorefrontConfig {
     pub node_secret: Option<String>,
     /// Optional shared secret enabling the internal storefront HTTP surface.
     pub internal_fetch_secret: Option<String>,
+    /// Directory containing trusted theme bundles.
+    pub themes_dir: PathBuf,
 }
 
 impl Default for StorefrontConfig {
@@ -189,6 +216,7 @@ impl Default for StorefrontConfig {
             node_url: None,
             node_secret: None,
             internal_fetch_secret: None,
+            themes_dir: PathBuf::from("./themes"),
         }
     }
 }
@@ -349,8 +377,19 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_INTERNAL_FETCH_SECRET") {
             self.storefront.internal_fetch_secret = Some(value);
         }
+        if let Ok(value) = env::var("FASTCART_THEMES_DIR") {
+            self.storefront.themes_dir = PathBuf::from(value);
+        }
         if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
             self.server.preview_secret = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_PREVIEW_FRAME_ANCESTORS") {
+            self.server.preview_frame_ancestors = value
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(str::to_owned)
+                .collect();
         }
         if let Ok(value) = env::var("FASTCART_ADMIN_BASE_URL") {
             self.server.admin_base_url = Some(value);
@@ -364,6 +403,16 @@ impl Config {
             self.inquiries.upload_ttl_seconds = value
                 .parse()
                 .context("FASTCART_INQUIRY_UPLOAD_TTL_SECONDS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_INQUIRY_RETENTION_DAYS") {
+            self.inquiries.retention_days = value
+                .parse()
+                .context("FASTCART_INQUIRY_RETENTION_DAYS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_NOTIFICATION_RETENTION_DAYS") {
+            self.notifications.retention_days = value
+                .parse()
+                .context("FASTCART_NOTIFICATION_RETENTION_DAYS must be a number")?;
         }
         if let Ok(value) = env::var("FASTCART_EMAIL_PROVIDER") {
             self.email.provider = value;
@@ -450,6 +499,13 @@ impl Config {
         {
             bail!("server.preview_secret must be at least 32 bytes when configured");
         }
+        for origin in &self.server.preview_frame_ancestors {
+            if !valid_origin(origin) {
+                bail!(
+                    "server.preview_frame_ancestors entries must be bare http(s) origins (found {origin:?})"
+                );
+            }
+        }
         if self.cache.ttl_seconds == 0 {
             bail!("cache.ttl_seconds must be greater than zero");
         }
@@ -458,6 +514,12 @@ impl Config {
         }
         if self.inquiries.upload_ttl_seconds <= 0 {
             bail!("inquiries.upload_ttl_seconds must be greater than zero");
+        }
+        if self.inquiries.retention_days <= 0 {
+            bail!("inquiries.retention_days must be greater than zero");
+        }
+        if self.notifications.retention_days <= 0 {
+            bail!("notifications.retention_days must be greater than zero");
         }
         if let Some(url) = self.server.admin_base_url.as_deref() {
             let url = url.trim();
@@ -505,6 +567,28 @@ impl Config {
     }
 }
 
+/// Returns true for a bare `http(s)://host[:port]` origin.
+///
+/// The value is placed verbatim in a CSP `frame-ancestors` directive, so
+/// paths, queries, whitespace and directive separators are rejected.
+fn valid_origin(origin: &str) -> bool {
+    let Some(rest) = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.contains('/')
+        && !rest.contains('?')
+        && !rest.contains('#')
+        && !rest.contains(';')
+        && !rest.contains(',')
+        && !rest.contains('"')
+        && !rest.contains('\'')
+        && !rest.chars().any(char::is_whitespace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
@@ -522,5 +606,23 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.server.port, 8080);
         assert_eq!(config.storefront.worker_count, 2);
+    }
+
+    #[test]
+    fn preview_frame_ancestors_must_be_bare_origins() {
+        let mut config = Config::default();
+        config.server.preview_frame_ancestors = vec!["https://admin.example.com".to_owned()];
+        config.validate().unwrap();
+
+        for invalid in [
+            "https://admin.example.com/app",
+            "admin.example.com",
+            "https://admin.example.com,https://other.example.com",
+            "https://admin.example.com; script-src *",
+            "ftp://admin.example.com",
+        ] {
+            config.server.preview_frame_ancestors = vec![invalid.to_owned()];
+            assert!(config.validate().is_err(), "{invalid:?} must be rejected");
+        }
     }
 }

@@ -89,6 +89,8 @@ impl AppState {
                 .preview_secret
                 .clone()
                 .filter(|secret| !secret.is_empty()),
+            preview_frame_ancestors: config.server.preview_frame_ancestors.clone(),
+            themes_root: config.storefront.themes_dir.clone(),
             admin_base_url: config
                 .server
                 .admin_base_url
@@ -97,6 +99,8 @@ impl AppState {
             storage_root: config.storage.root.clone(),
             max_upload_bytes: config.inquiries.max_upload_bytes,
             upload_ttl_seconds: config.inquiries.upload_ttl_seconds,
+            inquiry_retention_days: config.inquiries.retention_days,
+            notification_retention_days: config.notifications.retention_days,
         };
         let storefront_runtime = build_storefront_runtime(&config.storefront)?;
         let email = build_email_service(&config.email)?;

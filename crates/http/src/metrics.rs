@@ -32,6 +32,7 @@ pub struct Metrics {
     status_5xx: AtomicU64,
     bucket_counts: [AtomicU64; LATENCY_BUCKETS_SECONDS.len()],
     duration_micros_total: AtomicU64,
+    storefront_data_failures_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -54,7 +55,14 @@ impl Metrics {
             status_5xx: AtomicU64::new(0),
             bucket_counts: std::array::from_fn(|_| AtomicU64::new(0)),
             duration_micros_total: AtomicU64::new(0),
+            storefront_data_failures_total: AtomicU64::new(0),
         }
+    }
+
+    /// Records a storefront data resolution failure that degraded a render.
+    pub fn record_storefront_data_failure(&self) {
+        self.storefront_data_failures_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Marks a request as started.
@@ -117,6 +125,19 @@ impl Metrics {
         );
         let _ = writeln!(output, "# TYPE fastcart_http_requests_in_flight gauge");
         let _ = writeln!(output, "fastcart_http_requests_in_flight {in_flight}");
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_storefront_data_failures_total Storefront renders that degraded because binding resolution failed."
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE fastcart_storefront_data_failures_total counter"
+        );
+        let _ = writeln!(
+            output,
+            "fastcart_storefront_data_failures_total {}",
+            self.storefront_data_failures_total.load(Ordering::Relaxed)
+        );
         let _ = writeln!(
             output,
             "# HELP fastcart_http_response_status_total HTTP responses by status class."
@@ -202,9 +223,11 @@ mod tests {
         metrics.end_request(201, Duration::from_millis(60));
         metrics.end_request(404, Duration::from_millis(200));
         metrics.end_request(500, Duration::from_secs(40));
+        metrics.record_storefront_data_failure();
 
         let rendered = metrics.render();
         assert!(rendered.contains("fastcart_http_requests_total 4"));
+        assert!(rendered.contains("fastcart_storefront_data_failures_total 1"));
         assert!(rendered.contains("fastcart_http_errors_total 2"));
         assert!(rendered.contains("fastcart_http_response_status_total{class=\"2xx\"} 2"));
         assert!(rendered.contains("fastcart_http_response_status_total{class=\"4xx\"} 1"));

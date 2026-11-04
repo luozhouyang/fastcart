@@ -9,6 +9,8 @@ cors_origins = ["http://localhost:5173", "http://localhost:5174"]
 # Optional signing secret enabling draft page preview. When absent, preview
 # token issuance and GET /preview/{path} respond with 501 Not Implemented.
 # preview_secret = "long-random-preview-secret"
+# Origins allowed to embed the preview in an iframe. Use the admin app origin.
+# preview_frame_ancestors = ["https://admin.example.com"]
 # Admin application origin used in Feishu notification deep links.
 # admin_base_url = "https://admin.example.com"
 
@@ -29,6 +31,12 @@ root = "./data/assets"
 max_upload_bytes = 26214400
 # Pending attachment lifetime before cleanup.
 upload_ttl_seconds = 3600
+# Inquiries and their attachments older than this are deleted by maintenance.
+retention_days = 365
+
+[notifications]
+# Terminal channel delivery records older than this are deleted by maintenance.
+retention_days = 90
 
 [cache]
 max_capacity = 10000

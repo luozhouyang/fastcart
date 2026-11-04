@@ -50,6 +50,16 @@ pub struct ApiConfig {
     /// disabled and respond with `501 Not Implemented`. The secret must be
     /// supplied out of band and must never be logged.
     pub preview_secret: Option<String>,
+    /// Origins permitted to embed the preview surface in an iframe.
+    ///
+    /// Empty leaves framing unrestricted (the token remains the credential).
+    /// Deployments should list the admin application origin.
+    pub preview_frame_ancestors: Vec<String>,
+    /// Root directory containing trusted theme bundles.
+    ///
+    /// Used to load `editor.manifest.json` at registration and to keep bundle
+    /// paths confined to deployed theme code.
+    pub themes_root: PathBuf,
     /// Optional admin application origin used for notification deep links.
     pub admin_base_url: Option<String>,
     /// Root directory backing the default local object storage adapter.
@@ -58,6 +68,10 @@ pub struct ApiConfig {
     pub max_upload_bytes: usize,
     /// Lifetime of a pending inquiry attachment upload.
     pub upload_ttl_seconds: i64,
+    /// Days an inquiry and its attachments are retained.
+    pub inquiry_retention_days: i64,
+    /// Days terminal notification channel deliveries are retained.
+    pub notification_retention_days: i64,
 }
 
 impl Default for ApiConfig {
@@ -75,21 +89,26 @@ impl Default for ApiConfig {
             storefront_timeout_ms: 10_000,
             internal_fetch_secret: None,
             preview_secret: None,
+            preview_frame_ancestors: Vec::new(),
+            themes_root: PathBuf::from("./themes"),
             admin_base_url: None,
             storage_root: PathBuf::from("./data/assets"),
             max_upload_bytes: 25 * 1024 * 1024,
             upload_ttl_seconds: 3_600,
+            inquiry_retention_days: 365,
+            notification_retention_days: 90,
         }
     }
 }
 
 /// Maximum number of parsed theme editor manifests retained per process.
 const STOREFRONT_EDITOR_CACHE_CAPACITY: u64 = 1024;
-/// Maximum number of compiled pages retained per process.
+/// Maximum weighted bytes retained by the compiled page cache.
 ///
-/// Page bodies are capped at 1 MiB, so this is the effective worst-case
-/// memory bound in addition to the TTL.
-const STOREFRONT_PAGE_CACHE_CAPACITY: u64 = 256;
+/// The cache weighs each entry by its serialized page body plus bindings, so
+/// many large pages cannot exhaust memory even though each body is capped at
+/// 1 MiB.
+const STOREFRONT_PAGE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 /// Lifetime of compiled storefront entries.
 const STOREFRONT_CACHE_TTL: Duration = Duration::from_secs(300);
 
@@ -104,6 +123,21 @@ pub struct CompiledPage {
     pub page: fastcart_runtime_api::PageContext,
     /// Bindings extracted from the validated body.
     pub bindings: Vec<fastcart_storefront::BindingRequest>,
+}
+
+impl CompiledPage {
+    /// Estimates the memory retained by this cached entry.
+    ///
+    /// The estimate is intentionally cheap and slightly conservative: the
+    /// serialized body dominates, while bindings are small fixed-shape values.
+    #[must_use]
+    pub fn cache_weight(&self) -> u32 {
+        let body = serde_json::to_string(&self.page.body)
+            .map(|body| body.len())
+            .unwrap_or(0);
+        let bindings = self.bindings.len().saturating_mul(256);
+        u32::try_from(body.saturating_add(bindings)).unwrap_or(u32::MAX)
+    }
 }
 
 /// Process-wide services used by the HTTP layer.
@@ -209,7 +243,8 @@ impl AppContext {
                 .time_to_live(STOREFRONT_CACHE_TTL)
                 .build(),
             storefront_page_cache: moka::future::Cache::builder()
-                .max_capacity(STOREFRONT_PAGE_CACHE_CAPACITY)
+                .max_capacity(STOREFRONT_PAGE_CACHE_BYTES)
+                .weigher(|_key: &String, value: &Arc<CompiledPage>| value.cache_weight())
                 .time_to_live(STOREFRONT_CACHE_TTL)
                 .build(),
             email: EmailService::with_default_registry(),

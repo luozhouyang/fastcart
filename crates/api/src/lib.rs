@@ -67,16 +67,17 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
     let router = router
         .fallback(routes::storefront::render)
         .with_state(context.clone());
+    let upload = routes::store::upload_router(&context).with_state(context.clone());
 
-    // Attachment uploads are multipart and can exceed the JSON body limit. The
-    // upload handler enforces the per-file and per-field caps; this outer limit
-    // is the hard ceiling for the whole request. A finer per-route limit is a
-    // follow-up once the upload route is mounted on its own sub-router.
-    let body_limit = context
-        .config
-        .max_body_bytes
-        .max(context.config.max_upload_bytes);
+    // JSON endpoints keep the small limit; attachment uploads are merged as a
+    // separate router carrying the larger multipart limit.
+    let router = with_common_layers(router, &context, context.config.max_body_bytes);
+    let upload = with_common_layers(upload, &context, context.config.max_upload_bytes);
+    router.merge(upload)
+}
 
+/// Applies the middleware shared by the main and upload routers.
+fn with_common_layers(router: Router, context: &AppContext, body_limit: usize) -> Router {
     router
         .layer(cors_layer(&context.config.allowed_origins))
         .layer(RequestBodyLimitLayer::new(body_limit))
@@ -97,7 +98,10 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
             },
         ))
         .layer(axum::middleware::from_fn_with_state(
-            context.config.cookie_secure,
+            fastcart_http::SecurityHeadersConfig {
+                cookie_secure: context.config.cookie_secure,
+                preview_frame_ancestors: context.config.preview_frame_ancestors.clone(),
+            },
             fastcart_http::security_headers_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(

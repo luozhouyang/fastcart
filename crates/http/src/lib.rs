@@ -18,7 +18,7 @@ pub use middleware::{
     request_id_middleware, store_resolution_middleware,
 };
 pub use rate_limit::RateLimiter;
-pub use security::security_headers_middleware;
+pub use security::{SecurityHeadersConfig, security_headers_middleware};
 
 /// Cookie name carrying the admin session token.
 pub const ADMIN_SESSION_COOKIE: &str = "fc_admin_session";
@@ -26,6 +26,12 @@ pub const ADMIN_SESSION_COOKIE: &str = "fc_admin_session";
 pub const ADMIN_CSRF_COOKIE: &str = "fc_csrf";
 /// Cookie name carrying the storefront customer session token.
 pub const CUSTOMER_SESSION_COOKIE: &str = "fc_customer_session";
+/// Cookie carrying the storefront's active cart identifier.
+///
+/// The storefront client sets this after creating a cart; the SSR layer only
+/// reads it to build the request context and validates that it belongs to the
+/// current customer (or is a guest cart).
+pub const CART_ID_COOKIE: &str = "fc_cart_id";
 /// Cookie name carrying the storefront customer CSRF token.
 pub const CUSTOMER_CSRF_COOKIE: &str = "fc_customer_csrf";
 /// Header carrying the admin store selection.
