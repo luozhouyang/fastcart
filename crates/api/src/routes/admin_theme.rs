@@ -130,7 +130,26 @@ async fn register_theme(
     ApiJson(input): ApiJson<RegisterThemeRequest>,
 ) -> ApiResult<(StatusCode, Json<ThemeDto>)> {
     authorize(&actor, "themes.write")?;
-    let theme = ThemeService::new(db).register(input.into()).await?;
+    let mut input: RegisterThemeInput = input.into();
+    // Prefer an explicit manifest (compatibility and tests), otherwise load
+    // the trusted bundle's `editor.manifest.json` so operators do not have to
+    // paste it into the request.
+    if input.editor_manifest.is_none()
+        && let Some(editor) = input.manifest.editor.as_ref()
+    {
+        let loaded = fastcart_module_theme::load_editor_manifest(
+            &context.config.themes_root,
+            &input.bundle_path,
+            &editor.manifest,
+        )
+        .await?;
+        input.editor_manifest = Some(serde_json::to_value(&loaded).map_err(|error| {
+            ApiError::new(AppError::internal(format!(
+                "could not serialize editor manifest: {error}"
+            )))
+        })?);
+    }
+    let theme = ThemeService::new(db).register(input).await?;
     record_store_audit(
         &context,
         &actor,
