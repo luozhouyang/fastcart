@@ -1,9 +1,7 @@
 //! Tax service and calculator tests.
 
 use fastcart_infrastructure::StoreDatabase;
-use fastcart_kernel::{
-    AppError, CountryCode, Pagination, StoreId, TaxCategoryId, TaxRegionId, now_timestamp,
-};
+use fastcart_kernel::{AppError, CountryCode, Pagination, StoreId, TaxCategoryId, TaxRegionId};
 
 use crate::domain::{
     CreateTaxCategoryInput, CreateTaxRateInput, CreateTaxRegionInput, TaxBreakdown,
@@ -515,8 +513,10 @@ async fn calculate_for_line_returns_zero_when_no_rate_matches() {
 async fn resolve_rate_honours_the_effective_timestamp() {
     let (_db, service) = setup().await;
     let region_id = region(&service, "US", None).await;
-    rate(&service, &region_id, None, 1000, false, true).await;
-    let now = now_timestamp();
+    let created = rate(&service, &region_id, None, 1000, false, true).await;
+    // Use the stored creation timestamp instead of a second `now_timestamp`
+    // call, which can advance by a second between creation and assertion.
+    let now = created.created_at;
 
     assert!(
         service
