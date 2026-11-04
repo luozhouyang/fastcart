@@ -15,6 +15,7 @@ tracing.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-kernel.workspace = true
 fastcart-module-catalog.workspace = true
+fastcart-module-asset.workspace = true
 fastcart-module-content.workspace = true
 fastcart-module-inquiry.workspace = true
 fastcart-module-inventory.workspace = true

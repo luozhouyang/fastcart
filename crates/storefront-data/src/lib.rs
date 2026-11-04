@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{AppError, CurrencyCode, NavigationId, PageId, Pagination};
+use fastcart_module_asset::AssetService;
 use fastcart_module_catalog::{CatalogService, ProductFilter, ProductSort, ProductStatus};
 use fastcart_module_content::{ContentService, PageStatus};
 use fastcart_module_inquiry::InquiryFormService;
@@ -237,7 +238,7 @@ async fn resolve_fragment(
         }
         DataBinding::Page { id } => resolve_page(db, id, context).await,
         DataBinding::Navigation { id } => resolve_navigation(db, id).await,
-        DataBinding::Asset { .. } => Ok(json!({ "asset": null })),
+        DataBinding::Asset { id } => resolve_asset(db, id).await,
         DataBinding::Search { query, limit } => resolve_search(db, query, *limit, context).await,
         DataBinding::InquiryForm { handle } => resolve_inquiry_form(db, handle, context).await,
     }
@@ -433,6 +434,29 @@ async fn resolve_inquiry_form(
             "version": published.form.published_version.unwrap_or(published.revision.version),
             "fields": published.revision.fields,
             "settings": settings,
+        }
+    }))
+}
+
+/// Resolves one media asset to its public URL and presentation metadata.
+///
+/// Asset visibility is not publication-gated: assets are library records that
+/// become visible only through a published page binding. A deleted or unknown
+/// asset degrades to `null`.
+async fn resolve_asset(db: &StoreDatabase, id: &str) -> Result<Value, AppError> {
+    let asset = match AssetService::new(db.clone()).get_asset(id).await {
+        Ok(asset) => asset,
+        Err(error) if error.is_not_found() => return Ok(json!({ "asset": null })),
+        Err(error) => return Err(error),
+    };
+    Ok(json!({
+        "asset": {
+            "id": asset.id,
+            "url": fastcart_module_asset::public_url(&asset.id),
+            "alt": asset.alt,
+            "width": asset.width,
+            "height": asset.height,
+            "content_type": asset.content_type,
         }
     }))
 }

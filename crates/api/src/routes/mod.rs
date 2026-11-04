@@ -1,6 +1,7 @@
 //! Shared route helpers and store-database middleware.
 
 pub mod admin;
+pub mod admin_assets;
 pub mod admin_campaigns;
 pub mod admin_catalog;
 pub mod admin_content;
@@ -24,6 +25,7 @@ pub mod health;
 pub mod platform;
 pub mod preview;
 pub mod store;
+pub mod store_assets;
 pub mod store_cart;
 pub mod store_catalog;
 pub mod store_content;

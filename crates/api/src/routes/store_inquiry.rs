@@ -27,11 +27,13 @@ use super::StoreDb;
 use crate::state::AppContext;
 
 /// Builds the public inquiry routes.
+///
+/// The attachment upload route is mounted separately so it can carry a larger
+/// request body limit without raising the limit for JSON endpoints.
 pub fn router() -> Router<Arc<AppContext>> {
     Router::new()
         .route("/inquiry-forms/{handle}", get(get_form))
         .route("/inquiries", post(create_inquiry))
-        .route("/inquiry-files", post(upload_file))
 }
 
 /// Builds the documented public inquiry routes.
@@ -256,7 +258,7 @@ async fn create_inquiry(
     params(UploadQuery),
     responses((status = 201, body = UploadFileResponse))
 )]
-async fn upload_file(
+pub(crate) async fn upload_file(
     State(context): State<Arc<AppContext>>,
     StoreCtx(store): StoreCtx,
     StoreDb(db): StoreDb,
@@ -413,7 +415,8 @@ fn hash_client_address(store_id: &fastcart_kernel::StoreId, address: &str) -> St
     hex::encode(Sha256::digest(format!("{store_id}:{address}").as_bytes()))
 }
 
-fn sanitize_file_name(name: &str) -> String {
+/// Strips directory components and control characters from an upload name.
+pub(crate) fn sanitize_file_name(name: &str) -> String {
     name.rsplit(['/', '\\'])
         .next()
         .unwrap_or(name)
@@ -423,7 +426,12 @@ fn sanitize_file_name(name: &str) -> String {
         .collect()
 }
 
-fn sniff_content_type(bytes: &[u8]) -> Option<&'static str> {
+/// Detects a supported media type from magic bytes.
+///
+/// Client-provided content types are never trusted: uploaded bytes must match
+/// one of the signatures below, and the detected type is what gets stored and
+/// served back.
+pub(crate) fn sniff_content_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some("image/jpeg");
     }
@@ -432,6 +440,12 @@ fn sniff_content_type(bytes: &[u8]) -> Option<&'static str> {
     }
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return Some("image/webp");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Some("video/mp4");
     }
     if bytes.starts_with(b"%PDF-") {
         return Some("application/pdf");

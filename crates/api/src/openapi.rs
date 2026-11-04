@@ -29,6 +29,7 @@ use crate::state::AppContext;
     fastcart_kernel::Metadata,
     fastcart_kernel::Money,
     fastcart_kernel::Pagination,
+    fastcart_module_asset::Asset,
     fastcart_module_catalog::Category,
     fastcart_module_catalog::Collection,
     fastcart_module_catalog::Dimensions,
@@ -231,6 +232,7 @@ use crate::state::AppContext;
     crate::routes::admin_content::CreateRedirectRequest,
     crate::routes::admin_content::NavigationItemRequest,
     crate::routes::admin_content::PreviewTokenResponse,
+    crate::routes::admin_content::RevokePreviewTokenRequest,
     crate::routes::admin_content::UpdateNavigationRequest,
     crate::routes::admin_content::UpdatePageRequest,
     crate::routes::admin_customers::AdminAddressRequest,
@@ -553,6 +555,7 @@ fn generated_api() -> utoipa::openapi::OpenApi {
     let admin = OpenApiRouter::new()
         .merge(crate::routes::admin::openapi_router())
         .merge(crate::routes::auth::openapi_router())
+        .merge(crate::routes::admin_assets::openapi_router())
         .merge(crate::routes::admin_campaigns::openapi_router())
         .merge(crate::routes::admin_catalog::openapi_router())
         .merge(crate::routes::admin_content::openapi_router())
@@ -573,6 +576,7 @@ fn generated_api() -> utoipa::openapi::OpenApi {
         .merge(crate::routes::admin_workflows::openapi_router());
 
     let store = OpenApiRouter::new()
+        .merge(crate::routes::store_assets::openapi_router())
         .merge(crate::routes::store_cart::openapi_router())
         .merge(crate::routes::store_catalog::openapi_router())
         .merge(crate::routes::store_content::openapi_router())
@@ -972,12 +976,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 182);
-        assert_eq!(count("/api/v1/store"), 44);
+        assert_eq!(count("/api/v1/admin"), 185);
+        assert_eq!(count("/api/v1/store"), 45);
         assert_eq!(count("/api/v1/webhooks"), 1);
-        assert_eq!(count("/internal/storefront"), 44);
+        assert_eq!(count("/internal/storefront"), 45);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 295);
+        assert_eq!(paths.len(), 300);
 
         for key in [
             "/api/v1/platform/stores",
@@ -1091,7 +1095,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 405);
+        assert_eq!(operation_count, 412);
     }
 
     #[test]

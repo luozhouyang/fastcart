@@ -2,6 +2,7 @@
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{CurrencyCode, StoreId, VariantId};
+use fastcart_module_asset::{AssetService, CreateAssetInput};
 use fastcart_module_catalog::{
     CatalogService, CreateCollectionInput, CreateProductInput, CreateVariantInput,
 };
@@ -461,6 +462,47 @@ async fn missing_inquiry_form_handle_is_not_found_and_skipped() {
         .await
         .expect("a missing reference is skipped rather than failing the page");
     assert!(bag.is_empty());
+}
+
+#[tokio::test]
+async fn asset_binding_resolves_public_metadata() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("database");
+    let asset = AssetService::new(db.clone())
+        .create_asset(CreateAssetInput {
+            filename: "hero.png".to_owned(),
+            content_type: "image/png".to_owned(),
+            size_bytes: 128,
+            storage_key: "assets/store/hero.png".to_owned(),
+            alt: Some("Hero image".to_owned()),
+            width: Some(1200),
+            height: Some(600),
+            created_by: None,
+        })
+        .await
+        .expect("asset");
+    let binding = BindingRequest {
+        block_id: "hero".to_owned(),
+        field: "image".to_owned(),
+        binding: DataBinding::Asset {
+            id: asset.id.clone(),
+        },
+    };
+
+    let bag = StorefrontDataResolver::new()
+        .resolve(&db, &[binding], &context(DataMode::Production))
+        .await
+        .expect("resolution");
+
+    assert_eq!(bag["hero"]["asset"]["id"], asset.id);
+    assert_eq!(
+        bag["hero"]["asset"]["url"],
+        format!("/api/v1/store/assets/{}", asset.id)
+    );
+    assert_eq!(bag["hero"]["asset"]["alt"], "Hero image");
+    assert_eq!(bag["hero"]["asset"]["width"], 1200);
+    assert_eq!(bag["hero"]["asset"]["height"], 600);
 }
 
 #[tokio::test]

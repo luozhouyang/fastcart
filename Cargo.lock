@@ -835,6 +835,7 @@ dependencies = [
  "fastcart-http",
  "fastcart-infrastructure",
  "fastcart-kernel",
+ "fastcart-module-asset",
  "fastcart-module-cart",
  "fastcart-module-catalog",
  "fastcart-module-checkout",
@@ -865,6 +866,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "subtle",
  "tempfile",
  "tokio",
@@ -965,6 +967,23 @@ dependencies = [
  "slug",
  "thiserror 2.0.21",
  "unic-langid",
+ "utoipa",
+ "uuid 1.29.0",
+]
+
+[[package]]
+name = "fastcart-module-asset"
+version = "0.1.0"
+dependencies = [
+ "fastcart-infrastructure",
+ "fastcart-kernel",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
  "utoipa",
  "uuid 1.29.0",
 ]
@@ -1412,6 +1431,7 @@ version = "0.1.0"
 dependencies = [
  "fastcart-infrastructure",
  "fastcart-kernel",
+ "fastcart-module-asset",
  "fastcart-module-catalog",
  "fastcart-module-content",
  "fastcart-module-inquiry",

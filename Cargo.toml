@@ -33,6 +33,7 @@ members = [
     "crates/modules/tax",
     "crates/modules/content",
     "crates/modules/inquiry",
+    "crates/modules/asset",
     "crates/modules/webhook",
     "crates/modules/theme",
     "crates/email",
@@ -100,6 +101,7 @@ fastcart-module-catalog = { path = "crates/modules/catalog" }
 fastcart-module-checkout = { path = "crates/modules/checkout" }
 fastcart-module-content = { path = "crates/modules/content" }
 fastcart-module-inquiry = { path = "crates/modules/inquiry" }
+fastcart-module-asset = { path = "crates/modules/asset" }
 fastcart-module-customer = { path = "crates/modules/customer" }
 fastcart-module-inventory = { path = "crates/modules/inventory" }
 fastcart-module-order = { path = "crates/modules/order" }

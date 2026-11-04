@@ -176,8 +176,27 @@ async fn list_data_source(
                 .collect();
             Ok(Json(picker_response(page.count, pagination, items)))
         }
-        // Media assets are not backed by a module yet.
-        "asset" => Err(ApiError::new(AppError::not_found("data source", "asset"))),
+        "asset" => {
+            authorize(&actor, "themes.read")?;
+            let page = fastcart_module_asset::AssetService::new(db)
+                .list_assets(
+                    fastcart_module_asset::AssetFilter {
+                        search: query.search,
+                    },
+                    pagination,
+                )
+                .await?;
+            let items = page
+                .data
+                .into_iter()
+                .map(|asset| DataPickerItem {
+                    id: asset.id,
+                    handle: String::new(),
+                    label: asset.alt.unwrap_or(asset.filename),
+                })
+                .collect();
+            Ok(Json(picker_response(page.count, pagination, items)))
+        }
         _ => Err(ApiError::new(AppError::not_found("data source", &source))),
     }
 }

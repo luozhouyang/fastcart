@@ -33,6 +33,7 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         ));
 
     let scoped = Router::new()
+        .merge(super::admin_assets::router())
         .merge(super::admin_campaigns::router())
         .merge(super::admin_catalog::router())
         .merge(super::admin_content::router())
