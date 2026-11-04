@@ -7,10 +7,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
+use fastcart_kernel::Metadata;
+use fastcart_module_content::{ContentService, CreatePageInput};
 use fastcart_module_theme::{RegisterThemeInput, ThemeService};
 use fastcart_platform::{CreateStoreInput, PlatformStore, StoreProvisioningService};
-use fastcart_runtime_api::{RuntimeError, RuntimeRequest, RuntimeResponse, StorefrontRuntime};
-use fastcart_storefront::ThemeManifest;
+use fastcart_runtime_api::{
+    RuntimeError, RuntimeMode, RuntimeRequest, RuntimeResponse, StorefrontRuntime,
+};
+use fastcart_storefront::{ThemeEditorRef, ThemeManifest};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -70,6 +74,7 @@ impl StorefrontRuntime for TimeoutRuntime {
 
 struct Fixture {
     app: Router,
+    database: fastcart_infrastructure::StoreDatabase,
     _dir: tempfile::TempDir,
 }
 
@@ -93,7 +98,7 @@ async fn fixture(
         .unwrap();
 
     let database = databases.database(&store.id).await.unwrap();
-    let themes = ThemeService::new(database);
+    let themes = ThemeService::new(database.clone());
     let theme = themes
         .register(RegisterThemeInput {
             manifest: ThemeManifest {
@@ -104,10 +109,38 @@ async fn fixture(
                 entry: "dist/server.js".to_owned(),
                 settings_schema: None,
                 assets_manifest: None,
+                editor: Some(ThemeEditorRef {
+                    entry: "editor.js".to_owned(),
+                    manifest: "editor.manifest.json".to_owned(),
+                    schema_version: 1,
+                }),
+                requires: None,
             },
             bundle_path: "themes/default".to_owned(),
             settings_schema: None,
             settings: Some(serde_json::json!({"brand_color": "#111111"})),
+            editor_manifest: Some(serde_json::json!({
+                "schema_version": 1,
+                "categories": {
+                    "product": { "title": "Product", "components": ["ProductGrid"] }
+                },
+                "components": {
+                    "ProductGrid": {
+                        "title": "Product Grid",
+                        "category": "product",
+                        "fields": {
+                            "collection": {
+                                "type": "data_source",
+                                "source": "collection",
+                                "required": true
+                            },
+                            "limit": { "type": "number", "min": 1, "max": 24, "default": 4 }
+                        },
+                        "defaultProps": { "limit": 4 },
+                        "slots": []
+                    }
+                }
+            })),
         })
         .await
         .unwrap();
@@ -129,6 +162,7 @@ async fn fixture(
     );
     Fixture {
         app: build_router(context),
+        database: database.clone(),
         _dir: dir,
     }
 }
@@ -178,6 +212,62 @@ async fn renders_with_the_active_theme_through_the_runtime() {
     assert_eq!(theme.id, "default");
     assert_eq!(theme.entry, "dist/server.js");
     assert_eq!(theme.settings["brand_color"], "#111111");
+}
+
+#[tokio::test]
+async fn injects_the_published_page_and_resolved_data() {
+    let (runtime, requests) = RecordingRuntime::new();
+    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let page = ContentService::new(fixture.database.clone())
+        .create_page(CreatePageInput {
+            title: "Home".to_owned(),
+            handle: Some("home".to_owned()),
+            page_type: Some("home".to_owned()),
+            body: serde_json::json!({
+                "schema_version": 1,
+                "content": [{
+                    "type": "ProductGrid",
+                    "props": {
+                        "id": "grid-1",
+                        "collection": {
+                            "id": "col_missing",
+                            "handle": "featured",
+                            "label": "Featured"
+                        },
+                        "limit": 4
+                    }
+                }],
+                "root": { "props": {} },
+                "zones": {}
+            }),
+            seo: serde_json::json!({}),
+            metadata: Metadata::empty(),
+        })
+        .await
+        .unwrap();
+    ContentService::new(fixture.database.clone())
+        .publish_page(&page.id)
+        .await
+        .unwrap();
+
+    let (status, body) = send(&fixture.app, "/", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let requests = requests.lock().unwrap();
+    let request = &requests[0];
+    assert_eq!(request.mode, RuntimeMode::Production);
+    assert!(request.capabilities.is_empty());
+    let page = request.page.as_ref().expect("page context");
+    assert_eq!(page.handle, "home");
+    assert_eq!(page.status, "published");
+    let grid = request
+        .data
+        .as_ref()
+        .and_then(|data| data.get("grid-1"))
+        .expect("resolved block data");
+    // A deleted or missing reference degrades to null instead of failing.
+    assert!(grid["collection"].is_null());
+    assert_eq!(grid["products"], serde_json::json!([]));
 }
 
 #[tokio::test]

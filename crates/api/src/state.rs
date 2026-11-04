@@ -96,6 +96,8 @@ pub struct AppContext {
     pub metrics: Arc<Metrics>,
     /// Optional storefront SSR runtime shared by all stores.
     pub storefront_runtime: Option<Arc<dyn StorefrontRuntime>>,
+    /// Server-side resolver for theme data bindings.
+    pub storefront_data: fastcart_storefront_data::StorefrontDataResolver,
     /// Provider-independent transactional email delivery.
     pub email: EmailService,
 }
@@ -144,6 +146,7 @@ impl AppContext {
                 fastcart_module_shipping::FulfillmentProviderRegistry::with_defaults(),
             metrics: Arc::new(Metrics::new()),
             storefront_runtime: None,
+            storefront_data: fastcart_storefront_data::StorefrontDataResolver::new(),
             email: EmailService::with_default_registry(),
         }
     }

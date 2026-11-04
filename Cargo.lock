@@ -851,6 +851,7 @@ dependencies = [
  "fastcart-platform",
  "fastcart-runtime-api",
  "fastcart-storefront",
+ "fastcart-storefront-data",
  "fastcart-workflows",
  "http-body-util",
  "serde",
@@ -1016,6 +1017,7 @@ dependencies = [
  "async-trait",
  "fastcart-infrastructure",
  "fastcart-kernel",
+ "fastcart-storefront",
  "serde",
  "serde_json",
  "sqlx",
@@ -1368,6 +1370,26 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "fastcart-storefront-data"
+version = "0.1.0"
+dependencies = [
+ "fastcart-infrastructure",
+ "fastcart-kernel",
+ "fastcart-module-catalog",
+ "fastcart-module-content",
+ "fastcart-module-inventory",
+ "fastcart-module-pricing",
+ "fastcart-storefront",
+ "futures",
+ "moka",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

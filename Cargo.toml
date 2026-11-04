@@ -10,6 +10,7 @@ members = [
     "crates/workflows",
     "crates/api",
     "crates/storefront",
+    "crates/storefront-data",
     "crates/storefront-runtime/runtime-api",
     "crates/storefront-runtime/runtime-v8",
     "crates/storefront-runtime/runtime-pool",
@@ -118,6 +119,7 @@ fastcart-runtime-pool = { path = "crates/storefront-runtime/runtime-pool" }
 fastcart-runtime-v8 = { path = "crates/storefront-runtime/runtime-v8" }
 fastcart-server = { path = "apps/server" }
 fastcart-storefront = { path = "crates/storefront" }
+fastcart-storefront-data = { path = "crates/storefront-data" }
 fastcart-workflows = { path = "crates/workflows" }
 
 [workspace.lints.rust]

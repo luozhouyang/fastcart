@@ -1078,6 +1078,60 @@ impl CatalogService {
         Ok(PageResult::new(collections, count, pagination))
     }
 
+    /// Searches non-deleted collections by title or handle.
+    ///
+    /// The match is a case-insensitive substring search. LIKE wildcards in the
+    /// caller's query are escaped so a literal `%` or `_` is not treated as a
+    /// pattern. An absent or blank query returns all non-deleted collections.
+    pub async fn search_collections(
+        &self,
+        query: Option<&str>,
+        pagination: Pagination,
+    ) -> Result<PageResult<Collection>, AppError> {
+        let pagination = checked_pagination(pagination)?;
+        let pattern = query
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(|query| format!("%{}%", escape_like(query)));
+        let condition = match pattern {
+            Some(_) => {
+                "deleted_at IS NULL AND (LOWER(title) LIKE LOWER(?) ESCAPE '\\' \
+                 OR LOWER(handle) LIKE LOWER(?) ESCAPE '\\')"
+            }
+            None => "deleted_at IS NULL",
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM collections WHERE {condition}");
+        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        if let Some(pattern) = pattern.as_deref() {
+            count_query = count_query.bind(pattern).bind(pattern);
+        }
+        let count = count_query
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let list_sql = format!(
+            "SELECT * FROM collections WHERE {condition} \
+             ORDER BY rank ASC, created_at ASC, id ASC LIMIT ? OFFSET ?"
+        );
+        let mut list_query = sqlx::query(&list_sql);
+        if let Some(pattern) = pattern.as_deref() {
+            list_query = list_query.bind(pattern).bind(pattern);
+        }
+        let rows = list_query
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let mut collections = Vec::with_capacity(rows.len());
+        for row in &rows {
+            collections.push(collection_from_row(row)?);
+        }
+        Ok(PageResult::new(collections, count, pagination))
+    }
+
     /// Lists published collections for storefronts.
     pub async fn list_published_collections(
         &self,
@@ -2708,6 +2762,14 @@ fn checked_pagination(pagination: Pagination) -> Result<Pagination, AppError> {
 
 fn sql_markers(count: usize) -> String {
     vec!["?"; count].join(", ")
+}
+
+/// Escapes LIKE metacharacters so user input matches literally.
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn unique_or_database(error: sqlx::Error, conflict_message: &str) -> AppError {

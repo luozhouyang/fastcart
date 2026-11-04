@@ -723,6 +723,47 @@ impl InventoryService {
         Ok(total)
     }
 
+    /// Returns total available quantities for many variants in one query.
+    ///
+    /// Variants without an inventory item are absent from the result; callers
+    /// should treat missing entries as zero. This is the batch counterpart of
+    /// [`Self::variant_availability`] used by storefront product listings.
+    pub async fn variant_availability_many(
+        &self,
+        variant_ids: &[VariantId],
+    ) -> Result<std::collections::HashMap<String, i64>, AppError> {
+        if variant_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = std::iter::repeat_n("?", variant_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT ii.variant_id, il.stocked_quantity, il.reserved_quantity \
+             FROM inventory_items ii \
+             JOIN inventory_levels il ON il.inventory_item_id = ii.id \
+             WHERE ii.variant_id IN ({placeholders})"
+        );
+        let mut query = sqlx::query(&sql);
+        for variant_id in variant_ids {
+            query = query.bind(variant_id.as_str());
+        }
+        let rows = query
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let mut totals = std::collections::HashMap::new();
+        for row in &rows {
+            let variant_id: String = row.try_get("variant_id").map_err(database_error)?;
+            let stocked: i64 = row.try_get("stocked_quantity").map_err(database_error)?;
+            let reserved: i64 = row.try_get("reserved_quantity").map_err(database_error)?;
+            let total = totals.entry(variant_id).or_insert(0_i64);
+            *total = total.saturating_add(available_quantity_from(stocked, reserved));
+        }
+        Ok(totals)
+    }
+
     // Stock changes
 
     /// Applies a signed stock adjustment and records a movement.

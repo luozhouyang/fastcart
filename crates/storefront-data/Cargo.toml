@@ -1,0 +1,27 @@
+[package]
+name = "fastcart-storefront-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futures.workspace = true
+moka.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+fastcart-infrastructure.workspace = true
+fastcart-kernel.workspace = true
+fastcart-module-catalog.workspace = true
+fastcart-module-content.workspace = true
+fastcart-module-inventory.workspace = true
+fastcart-module-pricing.workspace = true
+fastcart-storefront.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

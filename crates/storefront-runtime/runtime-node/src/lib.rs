@@ -11,13 +11,15 @@
 //! Rendering is bounded by the request timeout, and sidecar failures are
 //! reported as runtime errors instead of leaking into the host.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use fastcart_kernel::StoreContext;
 use fastcart_runtime_api::{
-    RuntimeBody, RuntimeError, RuntimeRequest, RuntimeResponse, RuntimeTheme, StorefrontRuntime,
+    CapabilityGrant, PageContext, RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest,
+    RuntimeResponse, RuntimeTheme, StorefrontRuntime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +131,10 @@ impl StorefrontRuntime for NodeRuntime {
             headers: request.headers,
             body: request.body.as_ref().map(|body| STANDARD.encode(body)),
             theme: request.theme,
+            page: request.page,
+            data: request.data,
+            capabilities: request.capabilities,
+            mode: request.mode,
             timeout_ms,
         };
 
@@ -199,6 +205,10 @@ struct RenderPayload {
     headers: Vec<(String, String)>,
     body: Option<String>,
     theme: Option<RuntimeTheme>,
+    page: Option<PageContext>,
+    data: Option<serde_json::Value>,
+    capabilities: BTreeMap<String, CapabilityGrant>,
+    mode: RuntimeMode,
     timeout_ms: u64,
 }
 
@@ -234,6 +244,7 @@ struct RenderResult {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -246,7 +257,8 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use fastcart_kernel::{CurrencyCode, StoreContext, StoreId};
     use fastcart_runtime_api::{
-        RuntimeBody, RuntimeError, RuntimeRequest, RuntimeTheme, StorefrontRuntime,
+        PageContext, RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest, RuntimeTheme,
+        StorefrontRuntime,
     };
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
@@ -286,6 +298,15 @@ mod tests {
                 entry: "dist/server.js".to_owned(),
                 settings: json!({"brand_color": "#111111"}),
             }),
+            page: Some(PageContext {
+                id: "page_1".to_owned(),
+                handle: "home".to_owned(),
+                status: "published".to_owned(),
+                body: json!({"schema_version": 1, "content": []}),
+            }),
+            data: Some(json!({"grid-1": {"products": []}})),
+            capabilities: BTreeMap::new(),
+            mode: RuntimeMode::Production,
             timeout_ms,
         }
     }

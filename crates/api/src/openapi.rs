@@ -233,6 +233,8 @@ use crate::state::AppContext;
     crate::routes::admin_content::UpdateNavigationRequest,
     crate::routes::admin_content::UpdatePageRequest,
     crate::routes::admin_customers::AdminAddressRequest,
+    crate::routes::admin_data_sources::DataPickerItem,
+    crate::routes::admin_data_sources::DataPickerResponse,
     crate::routes::admin_theme::RegisterThemeRequest,
     crate::routes::admin_theme::UpdateThemeSettingsRequest,
     crate::routes::health::HealthStatus,
@@ -522,6 +524,7 @@ fn generated_api() -> utoipa::openapi::OpenApi {
         .merge(crate::routes::admin_catalog::openapi_router())
         .merge(crate::routes::admin_content::openapi_router())
         .merge(crate::routes::admin_customers::openapi_router())
+        .merge(crate::routes::admin_data_sources::openapi_router())
         .merge(crate::routes::admin_inventory::openapi_router())
         .merge(crate::routes::admin_orders::openapi_router())
         .merge(crate::routes::admin_payments::openapi_router())
@@ -933,12 +936,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 164);
+        assert_eq!(count("/api/v1/admin"), 166);
         assert_eq!(count("/api/v1/store"), 42);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/internal/storefront"), 42);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 273);
+        assert_eq!(paths.len(), 275);
 
         for key in [
             "/api/v1/platform/stores",
@@ -1046,7 +1049,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 376);
+        assert_eq!(operation_count, 378);
     }
 
     #[test]

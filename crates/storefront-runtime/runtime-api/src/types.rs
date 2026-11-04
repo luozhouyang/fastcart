@@ -1,10 +1,52 @@
 //! Runtime request and response models.
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use fastcart_kernel::StoreContext;
 use futures::stream::BoxStream;
+use serde_json::Value;
 
 use crate::error::RuntimeError;
+
+/// How the storefront request should treat draft content and capabilities.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMode {
+    /// Published content only.
+    #[default]
+    Production,
+    /// Draft content rendered for an authenticated preview.
+    Preview,
+    /// Editor fixtures rather than live commerce data.
+    Editor,
+}
+
+/// The content page selected for this request.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PageContext {
+    /// Page identifier.
+    pub id: String,
+    /// URL handle.
+    pub handle: String,
+    /// Publication status at render time.
+    pub status: String,
+    /// Validated page body.
+    pub body: Value,
+}
+
+/// One plugin capability granted to this request.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CapabilityGrant {
+    /// Granted capability version.
+    pub version: u32,
+    /// Namespaced platform endpoint.
+    pub endpoint: String,
+    /// Short-lived, scoped token.
+    pub token: String,
+    /// Store-level capability configuration.
+    pub config: Value,
+}
 
 /// Active theme bundle context supplied to the runtime.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -40,6 +82,14 @@ pub struct RuntimeRequest {
     pub body: Option<Bytes>,
     /// Active theme bundle, if the request is a storefront render.
     pub theme: Option<RuntimeTheme>,
+    /// Selected content page, when the request resolved one.
+    pub page: Option<PageContext>,
+    /// Server-resolved data bag keyed by block identifier.
+    pub data: Option<Value>,
+    /// Plugin capabilities granted to this request.
+    pub capabilities: BTreeMap<String, CapabilityGrant>,
+    /// Rendering mode.
+    pub mode: RuntimeMode,
     /// Execution timeout in milliseconds.
     pub timeout_ms: u64,
 }

@@ -37,6 +37,7 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         .merge(super::admin_catalog::router())
         .merge(super::admin_content::router())
         .merge(super::admin_customers::router())
+        .merge(super::admin_data_sources::router())
         .merge(super::admin_inventory::router())
         .merge(super::admin_orders::router())
         .merge(super::admin_payments::router())

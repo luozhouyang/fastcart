@@ -5,6 +5,7 @@
 //! storefront host are rendered by the theme bundle. API, health, metrics and
 //! internal namespaces are explicitly excluded.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -17,11 +18,15 @@ use axum::http::header::{
 };
 use axum::response::{IntoResponse, Response};
 use fastcart_http::{ApiError, RequestId};
-use fastcart_kernel::{AppError, CurrencyCode, StoreContext};
+use fastcart_kernel::{AppError, CurrencyCode, StoreContext, now_timestamp};
+use fastcart_module_content::{ContentService, Page, PageStatus};
 use fastcart_module_theme::ThemeService;
 use fastcart_runtime_api::{
-    RuntimeBody, RuntimeError, RuntimeRequest, RuntimeResponse, RuntimeTheme,
+    PageContext, RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest, RuntimeResponse,
+    RuntimeTheme,
 };
+use fastcart_storefront::{PageBody, ThemeEditorManifest};
+use fastcart_storefront_data::{DataMode, DataResolutionContext};
 use http_body_util::BodyExt;
 use serde_json::json;
 
@@ -52,11 +57,78 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
         Ok(database) => database,
         Err(error) => return ApiError::new(AppError::from(error)).into_response(),
     };
-    let theme = match ThemeService::new(database).active().await {
+    let currency = match CurrencyCode::new(store.currency_code.clone()) {
+        Ok(currency) => currency,
+        Err(error) => return ApiError::new(AppError::from(error)).into_response(),
+    };
+    let theme = match ThemeService::new(database.clone()).active().await {
         Ok(Some(theme)) => theme,
         Ok(None) => return ApiError::not_found("active theme").into_response(),
         Err(error) => return ApiError::new(error).into_response(),
     };
+    let editor = theme
+        .editor_manifest
+        .as_ref()
+        .and_then(|value| match ThemeEditorManifest::parse(value) {
+            Ok(manifest) => Some(manifest),
+            Err(error) => {
+                tracing::warn!(error = %error, "stored theme editor manifest is invalid");
+                None
+            }
+        });
+    let content = ContentService::with_editor_manifest(database.clone(), editor.clone());
+    let page = load_storefront_page(&content, path).await;
+    let parsed_page = page.as_ref().and_then(|page| {
+        let body = match PageBody::parse(&page.body) {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!(page_id = %page.id, error = %error, "stored page body is invalid");
+                return None;
+            }
+        };
+        if let Some(editor) = editor.as_ref()
+            && let Err(error) = body.validate_with_editor(editor)
+        {
+            tracing::warn!(page_id = %page.id, error = %error, "page does not match the active theme");
+            return None;
+        }
+        Some((page.clone(), body))
+    });
+    let bindings = match (parsed_page.as_ref(), editor.as_ref()) {
+        (Some((_, body)), Some(editor)) => body.collect_bindings(editor).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let data = if bindings.is_empty() {
+        None
+    } else {
+        let resolution = DataResolutionContext {
+            currency: currency.clone(),
+            sales_channel_id: None,
+            customer_group_id: None,
+            mode: DataMode::Production,
+            now: now_timestamp(),
+        };
+        match context
+            .storefront_data
+            .resolve(&database, &bindings, &resolution)
+            .await
+        {
+            Ok(bag) if !bag.is_empty() => {
+                Some(serde_json::to_value(bag).unwrap_or(serde_json::Value::Null))
+            }
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(error = %error, "storefront data resolution failed");
+                None
+            }
+        }
+    };
+    let page_context = parsed_page.as_ref().map(|(page, body)| PageContext {
+        id: page.id.as_str().to_owned(),
+        handle: page.handle.clone(),
+        status: page.status.as_str().to_owned(),
+        body: serde_json::to_value(body).unwrap_or(serde_json::Value::Null),
+    });
 
     let request_id = request
         .extensions()
@@ -89,10 +161,6 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
             .into_response();
         }
     };
-    let currency = match CurrencyCode::new(store.currency_code.clone()) {
-        Ok(currency) => currency,
-        Err(error) => return ApiError::new(AppError::from(error)).into_response(),
-    };
     let runtime_request = RuntimeRequest {
         request_id: request_id.clone(),
         store: StoreContext {
@@ -114,6 +182,10 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
             entry: theme.manifest.entry.clone(),
             settings: theme.settings.clone(),
         }),
+        page: page_context,
+        data,
+        capabilities: BTreeMap::new(),
+        mode: RuntimeMode::Production,
         timeout_ms: context.config.storefront_timeout_ms.max(1),
     };
 
@@ -135,6 +207,43 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
             )
         }
     }
+}
+
+async fn load_storefront_page(content: &ContentService, path: &str) -> Option<Page> {
+    let handle = path.trim_matches('/');
+    match content
+        .get_page_by_handle(if handle.is_empty() { "home" } else { handle })
+        .await
+    {
+        Ok(page) if is_published_page(&page) => return Some(page),
+        Ok(_) => {}
+        Err(error) if error.is_not_found() => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "storefront page lookup failed");
+        }
+    }
+    // A home page may use any handle; fall back to the page type when the
+    // conventional `home` handle is not present.
+    if handle.is_empty() {
+        let pagination = fastcart_kernel::Pagination {
+            limit: 100,
+            offset: 0,
+        };
+        if let Ok(page) = content
+            .list_pages(Some(PageStatus::Published), false, pagination)
+            .await
+        {
+            return page
+                .data
+                .into_iter()
+                .find(|page| page.page_type == "home" && is_published_page(page));
+        }
+    }
+    None
+}
+
+fn is_published_page(page: &Page) -> bool {
+    page.status == PageStatus::Published && page.deleted_at.is_none()
 }
 
 fn runtime_response(response: RuntimeResponse) -> Response {

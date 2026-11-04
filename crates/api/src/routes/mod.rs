@@ -5,6 +5,7 @@ pub mod admin_campaigns;
 pub mod admin_catalog;
 pub mod admin_content;
 pub mod admin_customers;
+pub mod admin_data_sources;
 pub mod admin_inventory;
 pub mod admin_orders;
 pub mod admin_payments;

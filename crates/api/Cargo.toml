@@ -37,6 +37,7 @@ fastcart-module-tax.workspace = true
 fastcart-module-theme.workspace = true
 fastcart-module-webhook.workspace = true
 fastcart-storefront.workspace = true
+fastcart-storefront-data.workspace = true
 fastcart-runtime-api.workspace = true
 fastcart-platform.workspace = true
 fastcart-workflows.workspace = true

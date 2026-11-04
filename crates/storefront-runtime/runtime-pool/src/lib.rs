@@ -118,7 +118,7 @@ mod tests {
     use bytes::Bytes;
     use fastcart_kernel::{CurrencyCode, StoreContext, StoreId};
     use fastcart_runtime_api::{
-        RuntimeBody, RuntimeError, RuntimeRequest, RuntimeResponse, StorefrontRuntime,
+        RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest, RuntimeResponse, StorefrontRuntime,
     };
     use tokio::sync::Notify;
 
@@ -210,6 +210,10 @@ mod tests {
             headers: Vec::new(),
             body: None,
             theme: None,
+            page: None,
+            data: None,
+            capabilities: std::collections::BTreeMap::new(),
+            mode: RuntimeMode::Production,
             timeout_ms,
         }
     }
