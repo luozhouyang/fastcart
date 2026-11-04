@@ -18,19 +18,19 @@ use axum::http::header::{
 };
 use axum::response::{IntoResponse, Response};
 use fastcart_http::{ApiError, RequestId};
-use fastcart_kernel::{AppError, CurrencyCode, StoreContext, now_timestamp};
+use fastcart_kernel::{AppError, CurrencyCode, StoreContext, StoreId, now_timestamp};
 use fastcart_module_content::{ContentService, Page, PageStatus};
 use fastcart_module_theme::ThemeService;
 use fastcart_runtime_api::{
     PageContext, RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest, RuntimeResponse,
     RuntimeTheme,
 };
-use fastcart_storefront::{PageBody, ThemeEditorManifest};
+use fastcart_storefront::{PageBody, StorefrontError, ThemeEditorManifest};
 use fastcart_storefront_data::{DataMode, DataResolutionContext};
 use http_body_util::BodyExt;
 use serde_json::json;
 
-use crate::state::AppContext;
+use crate::state::{AppContext, CompiledPage};
 
 /// Renders unmatched storefront requests through the configured runtime.
 pub async fn render(State(context): State<Arc<AppContext>>, request: Request) -> Response {
@@ -66,41 +66,50 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
         Ok(None) => return ApiError::not_found("active theme").into_response(),
         Err(error) => return ApiError::new(error).into_response(),
     };
-    let editor = theme
-        .editor_manifest
-        .as_ref()
-        .and_then(|value| match ThemeEditorManifest::parse(value) {
-            Ok(manifest) => Some(manifest),
-            Err(error) => {
-                tracing::warn!(error = %error, "stored theme editor manifest is invalid");
-                None
-            }
-        });
-    let content = ContentService::with_editor_manifest(database.clone(), editor.clone());
+    let editor = resolve_active_editor(&context, &store.id, &theme).await;
+    let content = ContentService::new(database.clone());
     let page = load_storefront_page(&content, path).await;
-    let parsed_page = page.as_ref().and_then(|page| {
-        let body = match PageBody::parse(&page.body) {
-            Ok(body) => body,
-            Err(error) => {
-                tracing::warn!(page_id = %page.id, error = %error, "stored page body is invalid");
-                return None;
+    let compiled = match page {
+        Some(page) => {
+            let page_key = format!(
+                "{}:{}:{}:{}",
+                store.id.as_str(),
+                page.id.as_str(),
+                page.revision,
+                editor.key
+            );
+            match context.storefront_page_cache.get(&page_key).await {
+                Some(compiled) => Some(compiled),
+                None => match compile_page(&page, editor.manifest.as_deref()) {
+                    Ok(compiled) => {
+                        let compiled = Arc::new(compiled);
+                        context
+                            .storefront_page_cache
+                            .insert(page_key, compiled.clone())
+                            .await;
+                        Some(compiled)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            page_id = %page.id,
+                            error = %error,
+                            "stored page body is invalid"
+                        );
+                        None
+                    }
+                },
             }
-        };
-        if let Some(editor) = editor.as_ref()
-            && let Err(error) = body.validate_with_editor(editor)
-        {
-            tracing::warn!(page_id = %page.id, error = %error, "page does not match the active theme");
-            return None;
         }
-        Some((page.clone(), body))
-    });
-    let bindings = match (parsed_page.as_ref(), editor.as_ref()) {
-        (Some((_, body)), Some(editor)) => body.collect_bindings(editor).unwrap_or_default(),
-        _ => Vec::new(),
+        None => None,
     };
-    let data = if bindings.is_empty() {
-        None
-    } else {
+    let mut data = BTreeMap::new();
+    data.insert(
+        fastcart_storefront::page::RESERVED_CONTEXT_KEY.to_owned(),
+        build_context_data(&store, &host, &currency, &theme, DataMode::Production),
+    );
+    if let Some(compiled) = compiled.as_ref()
+        && !compiled.bindings.is_empty()
+    {
         let resolution = DataResolutionContext {
             currency: currency.clone(),
             sales_channel_id: None,
@@ -110,25 +119,17 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
         };
         match context
             .storefront_data
-            .resolve(&database, &bindings, &resolution)
+            .resolve(&database, &compiled.bindings, &resolution)
             .await
         {
-            Ok(bag) if !bag.is_empty() => {
-                Some(serde_json::to_value(bag).unwrap_or(serde_json::Value::Null))
-            }
-            Ok(_) => None,
+            Ok(bag) => data.extend(bag),
             Err(error) => {
                 tracing::warn!(error = %error, "storefront data resolution failed");
-                None
             }
         }
-    };
-    let page_context = parsed_page.as_ref().map(|(page, body)| PageContext {
-        id: page.id.as_str().to_owned(),
-        handle: page.handle.clone(),
-        status: page.status.as_str().to_owned(),
-        body: serde_json::to_value(body).unwrap_or(serde_json::Value::Null),
-    });
+    }
+    let data = Some(serde_json::to_value(data).unwrap_or(serde_json::Value::Null));
+    let page_context = compiled.as_ref().map(|compiled| compiled.page.clone());
 
     let request_id = request
         .extensions()
@@ -211,42 +212,128 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
 
 async fn load_storefront_page(content: &ContentService, path: &str) -> Option<Page> {
     let handle = path.trim_matches('/');
-    match content
-        .get_page_by_handle(if handle.is_empty() { "home" } else { handle })
-        .await
-    {
-        Ok(page) if is_published_page(&page) => return Some(page),
-        Ok(_) => {}
-        Err(error) if error.is_not_found() => {}
+    // Storefront paths are flat: nested paths have no page handle and are
+    // treated as an ordinary miss rather than being scanned for a match.
+    let result = if handle.is_empty() {
+        content.get_home_page().await
+    } else {
+        content.get_published_page_by_handle(handle).await.map(Some)
+    };
+    match result {
+        Ok(Some(page)) if is_published_page(&page) => Some(page),
+        Ok(_) => None,
+        Err(error) if error.is_not_found() => None,
         Err(error) => {
             tracing::warn!(error = %error, "storefront page lookup failed");
+            None
         }
     }
-    // A home page may use any handle; fall back to the page type when the
-    // conventional `home` handle is not present.
-    if handle.is_empty() {
-        let pagination = fastcart_kernel::Pagination {
-            limit: 100,
-            offset: 0,
-        };
-        if let Ok(page) = content
-            .list_pages(Some(PageStatus::Published), false, pagination)
-            .await
-        {
-            return page
-                .data
-                .into_iter()
-                .find(|page| page.page_type == "home" && is_published_page(page));
+}
+
+/// A parsed active theme editor manifest and the cache key it was stored under.
+///
+/// The manifest is `None` when the stored value is absent or invalid, so an
+/// invalid manifest is not re-parsed on every render.
+pub(crate) struct ActiveEditor {
+    /// Cache key derived from the store, theme identifier and revision.
+    pub(crate) key: String,
+    /// Parsed editor manifest, when the theme provides a valid one.
+    pub(crate) manifest: Option<Arc<ThemeEditorManifest>>,
+}
+
+/// Loads and caches the active theme's editor manifest.
+pub(crate) async fn resolve_active_editor(
+    context: &AppContext,
+    store_id: &StoreId,
+    theme: &fastcart_module_theme::Theme,
+) -> ActiveEditor {
+    // The internal theme record id is unique per registration; `manifest.id`
+    // can stay the same across re-registrations while the stored manifest
+    // changes, so it must not be the cache identity.
+    let key = format!(
+        "{}:{}:{}",
+        store_id.as_str(),
+        theme.id.as_str(),
+        theme.updated_at
+    );
+    let manifest = context
+        .storefront_editor_cache
+        .get_with(key.clone(), async {
+            theme.editor_manifest.as_ref().and_then(|value| {
+                match ThemeEditorManifest::parse(value) {
+                    Ok(manifest) => Some(Arc::new(manifest)),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "stored theme editor manifest is invalid");
+                        None
+                    }
+                }
+            })
+        })
+        .await;
+    ActiveEditor { key, manifest }
+}
+
+/// Parses and validates a page, then extracts its bindings in the same pass.
+pub(crate) fn compile_page(
+    page: &Page,
+    editor: Option<&ThemeEditorManifest>,
+) -> Result<CompiledPage, StorefrontError> {
+    let body = PageBody::parse(&page.body)?;
+    let bindings = match editor {
+        Some(editor) => {
+            body.validate_with_editor(editor)?;
+            body.collect_bindings_after_validation(editor)?
         }
-    }
-    None
+        None => Vec::new(),
+    };
+    Ok(CompiledPage {
+        page: PageContext {
+            id: page.id.as_str().to_owned(),
+            handle: page.handle.clone(),
+            status: page.status.as_str().to_owned(),
+            body: serde_json::to_value(&body).unwrap_or(serde_json::Value::Null),
+        },
+        bindings,
+    })
+}
+
+/// Builds the reserved `context` entry injected into every data bag.
+///
+/// Cart and customer data stay `null` until preview and customer context work
+/// supplies a request-scoped identity; the shape is fixed now so themes can
+/// depend on it.
+pub(crate) fn build_context_data(
+    store: &fastcart_platform::Store,
+    host: &str,
+    currency: &CurrencyCode,
+    theme: &fastcart_module_theme::Theme,
+    mode: DataMode,
+) -> serde_json::Value {
+    json!({
+        "store": {
+            "id": store.id.as_str(),
+            "name": store.name,
+            "domain": host,
+            "locale": store.locale,
+            "currency": currency.as_str(),
+            "timezone": store.timezone,
+        },
+        "theme": {
+            "id": theme.manifest.id,
+            "version": theme.manifest.version,
+            "settings": theme.settings,
+        },
+        "cart": serde_json::Value::Null,
+        "customer": serde_json::Value::Null,
+        "mode": mode.as_str(),
+    })
 }
 
 fn is_published_page(page: &Page) -> bool {
     page.status == PageStatus::Published && page.deleted_at.is_none()
 }
 
-fn runtime_response(response: RuntimeResponse) -> Response {
+pub(crate) fn runtime_response(response: RuntimeResponse) -> Response {
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut builder = Response::builder().status(status);
     for (name, value) in response.headers {
@@ -275,7 +362,7 @@ fn runtime_response(response: RuntimeResponse) -> Response {
     })
 }
 
-fn runtime_error(
+pub(crate) fn runtime_error(
     status: StatusCode,
     code: &'static str,
     message: &str,
@@ -303,7 +390,7 @@ fn is_reserved_path(path: &str) -> bool {
         || path.starts_with("/health")
 }
 
-fn is_hop_by_hop(name: &str) -> bool {
+pub(crate) fn is_hop_by_hop(name: &str) -> bool {
     [
         CONNECTION.as_str(),
         "keep-alive",
