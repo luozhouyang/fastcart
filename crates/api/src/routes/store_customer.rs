@@ -20,16 +20,16 @@ use fastcart_http::{
     PaginationQuery, csrf_cookie, parse_cookies, session_cookie, session_cookie_clear,
 };
 use fastcart_infrastructure::{JobQueue, StoreDatabase};
-use fastcart_kernel::{AppError, OrderId, normalize_email, now_timestamp};
+use fastcart_kernel::{AppError, Metadata, OrderId, normalize_email, now_timestamp};
 use fastcart_module_customer::{
-    Address, AddressInput, CreatedCustomerSession, Customer, CustomerGroup, CustomerService,
-    RegisterCustomerInput, UpdateCustomerInput,
+    Address, AddressInput, CreatedCustomerSession, CustomerService, RegisterCustomerInput,
+    UpdateCustomerInput,
 };
 use fastcart_module_order::{Order, OrderFilter, OrderService};
 use serde::{Deserialize, Serialize};
 
 use super::StoreDb;
-use crate::dto::PageResponse;
+use crate::dto::{CustomerDto, CustomerGroupDto, PageResponse};
 use crate::state::AppContext;
 
 /// Builds the public customer routes.
@@ -108,9 +108,9 @@ pub struct UpdateProfileRequest {
 
 /// Address create/update request body. Missing fields fall back to the existing
 /// address values when updating.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(default)]
-struct AddressRequest {
+pub struct AddressRequest {
     /// Default shipping flag.
     is_default_shipping: Option<bool>,
     /// Default billing flag.
@@ -135,6 +135,8 @@ struct AddressRequest {
     country_code: Option<String>,
     /// Contact phone number.
     phone: Option<String>,
+    /// Free-form extension metadata.
+    metadata: Metadata,
 }
 
 /// Password change request body.
@@ -149,6 +151,16 @@ pub struct ChangePasswordRequest {
 /// Email-only request body used by the verification and reset request routes.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct EmailRequest {
+    /// Account email address.
+    email: String,
+}
+
+/// password-reset request body.
+///
+/// Shares the wire shape of [`EmailRequest`] but carries its own documented
+/// schema name.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct PasswordResetRequest {
     /// Account email address.
     email: String,
 }
@@ -186,10 +198,10 @@ pub struct EmailVerifiedResponse {
 }
 
 /// Session response body. Tokens are delivered as cookies.
-#[derive(Clone, Debug, Serialize)]
-struct CustomerSessionResponse {
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct CustomerSessionResponse {
     /// Authenticated customer.
-    customer: Customer,
+    customer: CustomerDto,
     /// Double-submit CSRF token.
     csrf_token: String,
     /// Session expiry timestamp.
@@ -254,17 +266,17 @@ async fn logout(
 async fn me(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
-) -> ApiResult<Json<Customer>> {
+) -> ApiResult<Json<CustomerDto>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let customer = CustomerService::new(db).get_customer(&customer_id).await?;
-    Ok(Json(customer))
+    Ok(Json(customer.into()))
 }
 
 async fn update_me(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
     ApiJson(request): ApiJson<UpdateProfileRequest>,
-) -> ApiResult<Json<Customer>> {
+) -> ApiResult<Json<CustomerDto>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let customer = CustomerService::new(db)
         .update_customer(
@@ -279,7 +291,7 @@ async fn update_me(
             },
         )
         .await?;
-    Ok(Json(customer))
+    Ok(Json(customer.into()))
 }
 
 async fn list_addresses(
@@ -354,12 +366,12 @@ async fn list_orders(
 async fn list_groups(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
-) -> ApiResult<Json<Vec<CustomerGroup>>> {
+) -> ApiResult<Json<Vec<CustomerGroupDto>>> {
     let customer_id = actor.require_customer().map_err(ApiError::new)?.clone();
     let groups = CustomerService::new(db)
         .list_customer_groups(&customer_id)
         .await?;
-    Ok(Json(groups))
+    Ok(Json(groups.into_iter().map(Into::into).collect()))
 }
 
 async fn change_password(
@@ -446,7 +458,7 @@ async fn confirm_email_verification(
 async fn request_password_reset(
     State(context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,
-    ApiJson(request): ApiJson<EmailRequest>,
+    ApiJson(request): ApiJson<PasswordResetRequest>,
 ) -> ApiResult<(StatusCode, Json<AcceptedResponse>)> {
     let email = normalize_email(&request.email);
     let key = format!("password-reset:{email}");
@@ -506,7 +518,7 @@ async fn enqueue_auth_email(
 fn session_response(context: &AppContext, session: CreatedCustomerSession) -> ApiResult<Response> {
     let max_age = session.expires_at.saturating_sub(now_timestamp());
     let body = Json(CustomerSessionResponse {
-        customer: session.customer,
+        customer: session.customer.into(),
         csrf_token: session.csrf_token.clone(),
         expires_at: session.expires_at,
     });

@@ -21,16 +21,16 @@ use fastcart_kernel::{
 use fastcart_module_catalog::{
     CatalogService, Category, Collection, CreateCategoryInput, CreateCollectionInput,
     CreateImageInput, CreateOptionInput, CreateProductInput, CreateVariantInput, Dimensions,
-    Product, ProductFilter, ProductImage, ProductStatus, ProductVariant, Tag, UpdateCategoryInput,
+    Product, ProductFilter, ProductImage, ProductStatus, Tag, UpdateCategoryInput,
     UpdateCollectionInput, UpdateProductInput, UpdateVariantInput, VariantOptionInput,
 };
 use fastcart_module_store::{
     CreateSalesChannelInput, SalesChannel, StoreService, UpdateSalesChannelInput,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{StoreDb, record_store_audit};
-use crate::dto::PageResponse;
+use crate::dto::{PageResponse, VariantDto};
 use crate::state::AppContext;
 
 /// Builds the routes for this namespace.
@@ -158,7 +158,7 @@ struct SearchQuery {
 }
 
 /// A product option to create alongside a product.
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CreateOptionRequest {
     title: String,
     #[serde(default)]
@@ -435,6 +435,169 @@ impl From<CreateSalesChannelRequest> for CreateSalesChannelInput {
     }
 }
 
+/// Partial product update body.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(default)]
+pub struct UpdateProductRequest {
+    title: Option<String>,
+    handle: Option<String>,
+    subtitle: Option<String>,
+    description: Option<String>,
+    thumbnail: Option<String>,
+    status: Option<ProductStatus>,
+    weight: Option<f64>,
+    dimensions: Option<Dimensions>,
+    metadata: Option<Metadata>,
+    variants: Option<Vec<UpdateVariantRequest>>,
+    options: Option<Vec<CreateOptionRequest>>,
+    category_ids: Option<Vec<String>>,
+    collection_ids: Option<Vec<String>>,
+    tag_values: Option<Vec<String>>,
+    images: Option<Vec<String>>,
+}
+
+impl From<UpdateProductRequest> for UpdateProductInput {
+    fn from(request: UpdateProductRequest) -> Self {
+        Self {
+            title: request.title,
+            handle: request.handle,
+            subtitle: request.subtitle,
+            description: request.description,
+            thumbnail: request.thumbnail,
+            status: request.status,
+            weight: request.weight,
+            dimensions: request.dimensions,
+            metadata: request.metadata,
+            variants: request
+                .variants
+                .map(|variants| variants.into_iter().map(Into::into).collect()),
+            options: request
+                .options
+                .map(|options| options.into_iter().map(Into::into).collect()),
+            category_ids: request.category_ids,
+            collection_ids: request.collection_ids,
+            tag_values: request.tag_values,
+            images: request.images,
+        }
+    }
+}
+
+/// Partial variant update body.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(default)]
+pub struct UpdateVariantRequest {
+    id: Option<String>,
+    title: Option<String>,
+    sku: Option<String>,
+    barcode: Option<String>,
+    status: Option<ProductStatus>,
+    weight: Option<f64>,
+    dimensions: Option<Dimensions>,
+    manage_inventory: Option<bool>,
+    allow_backorder: Option<bool>,
+    tax_category_id: Option<String>,
+    metadata: Option<Metadata>,
+    option_value_ids: Option<Vec<String>>,
+}
+
+impl From<UpdateVariantRequest> for UpdateVariantInput {
+    fn from(request: UpdateVariantRequest) -> Self {
+        Self {
+            id: request.id,
+            title: request.title,
+            sku: request.sku,
+            barcode: request.barcode,
+            status: request.status,
+            weight: request.weight,
+            dimensions: request.dimensions,
+            manage_inventory: request.manage_inventory,
+            allow_backorder: request.allow_backorder,
+            tax_category_id: request.tax_category_id,
+            metadata: request.metadata,
+            option_value_ids: request.option_value_ids,
+        }
+    }
+}
+
+/// Partial category update body.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(default)]
+pub struct UpdateCategoryRequest {
+    title: Option<String>,
+    handle: Option<String>,
+    parent_id: Option<String>,
+    description: Option<String>,
+    is_active: Option<bool>,
+    is_internal: Option<bool>,
+    rank: Option<i64>,
+    metadata: Option<Metadata>,
+}
+
+impl From<UpdateCategoryRequest> for UpdateCategoryInput {
+    fn from(request: UpdateCategoryRequest) -> Self {
+        Self {
+            title: request.title,
+            handle: request.handle,
+            parent_id: request.parent_id,
+            description: request.description,
+            is_active: request.is_active,
+            is_internal: request.is_internal,
+            rank: request.rank,
+            metadata: request.metadata,
+        }
+    }
+}
+
+/// Partial collection update body.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(default)]
+pub struct UpdateCollectionRequest {
+    title: Option<String>,
+    handle: Option<String>,
+    description: Option<String>,
+    is_published: Option<bool>,
+    rank: Option<i64>,
+    metadata: Option<Metadata>,
+}
+
+impl From<UpdateCollectionRequest> for UpdateCollectionInput {
+    fn from(request: UpdateCollectionRequest) -> Self {
+        Self {
+            title: request.title,
+            handle: request.handle,
+            description: request.description,
+            is_published: request.is_published,
+            rank: request.rank,
+            metadata: request.metadata,
+        }
+    }
+}
+
+/// Partial sales-channel update body.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(default)]
+pub struct UpdateSalesChannelRequest {
+    name: Option<String>,
+    description: Option<String>,
+    metadata: Option<Metadata>,
+}
+
+impl From<UpdateSalesChannelRequest> for UpdateSalesChannelInput {
+    fn from(request: UpdateSalesChannelRequest) -> Self {
+        Self {
+            name: request.name,
+            description: request.description,
+            metadata: request.metadata,
+        }
+    }
+}
+
+/// Result of rebuilding the catalog search index.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ReindexResponse {
+    indexed: bool,
+}
+
 // -------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------
@@ -533,12 +696,12 @@ async fn update_product(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(request): ApiJson<UpdateProductInput>,
+    ApiJson(request): ApiJson<UpdateProductRequest>,
 ) -> ApiResult<Json<Product>> {
     authorize(&actor, "products.write")?;
     let product_id = ProductId::from_string(id);
     let product = CatalogService::new(db)
-        .update_product(product_id.as_str(), request)
+        .update_product(product_id.as_str(), request.into())
         .await?;
     Ok(Json(product))
 }
@@ -638,40 +801,40 @@ async fn create_variant(
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
     ApiJson(request): ApiJson<CreateVariantRequest>,
-) -> ApiResult<(StatusCode, Json<ProductVariant>)> {
+) -> ApiResult<(StatusCode, Json<VariantDto>)> {
     authorize(&actor, "products.write")?;
     let product_id = ProductId::from_string(id);
     let variant = CatalogService::new(db)
         .create_variant(product_id.as_str(), CreateVariantInput::from(request))
         .await?;
-    Ok((StatusCode::CREATED, Json(variant)))
+    Ok((StatusCode::CREATED, Json(variant.into())))
 }
 
 async fn get_variant(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-) -> ApiResult<Json<ProductVariant>> {
+) -> ApiResult<Json<VariantDto>> {
     authorize(&actor, "products.read")?;
     let variant_id = VariantId::from_string(id);
     let variant = CatalogService::new(db)
         .get_variant(variant_id.as_str())
         .await?;
-    Ok(Json(variant))
+    Ok(Json(variant.into()))
 }
 
 async fn update_variant(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(request): ApiJson<UpdateVariantInput>,
-) -> ApiResult<Json<ProductVariant>> {
+    ApiJson(request): ApiJson<UpdateVariantRequest>,
+) -> ApiResult<Json<VariantDto>> {
     authorize(&actor, "products.write")?;
     let variant_id = VariantId::from_string(id);
     let variant = CatalogService::new(db)
-        .update_variant(variant_id.as_str(), request)
+        .update_variant(variant_id.as_str(), request.into())
         .await?;
-    Ok(Json(variant))
+    Ok(Json(variant.into()))
 }
 
 async fn delete_variant(
@@ -792,12 +955,12 @@ async fn update_category(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(request): ApiJson<UpdateCategoryInput>,
+    ApiJson(request): ApiJson<UpdateCategoryRequest>,
 ) -> ApiResult<Json<Category>> {
     authorize(&actor, "products.write")?;
     let category_id = CategoryId::from_string(id);
     let category = CatalogService::new(db)
-        .update_category(category_id.as_str(), request)
+        .update_category(category_id.as_str(), request.into())
         .await?;
     Ok(Json(category))
 }
@@ -859,12 +1022,12 @@ async fn update_collection(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(request): ApiJson<UpdateCollectionInput>,
+    ApiJson(request): ApiJson<UpdateCollectionRequest>,
 ) -> ApiResult<Json<Collection>> {
     authorize(&actor, "products.write")?;
     let collection_id = CollectionId::from_string(id);
     let collection = CatalogService::new(db)
-        .update_collection(collection_id.as_str(), request)
+        .update_collection(collection_id.as_str(), request.into())
         .await?;
     Ok(Json(collection))
 }
@@ -1011,10 +1174,10 @@ async fn search_products(
 async fn reindex(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<ReindexResponse>> {
     authorize(&actor, "products.write")?;
     CatalogService::new(db).reindex_search().await?;
-    Ok(Json(serde_json::json!({ "indexed": true })))
+    Ok(Json(ReindexResponse { indexed: true }))
 }
 
 // -------------------------------------------------------------------------
@@ -1126,11 +1289,11 @@ async fn update_sales_channel(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(request): ApiJson<UpdateSalesChannelInput>,
+    ApiJson(request): ApiJson<UpdateSalesChannelRequest>,
 ) -> ApiResult<Json<SalesChannel>> {
     authorize(&actor, "settings.write")?;
     let channel = StoreService::new(db)
-        .update_sales_channel(&id, request)
+        .update_sales_channel(&id, request.into())
         .await?;
     Ok(Json(channel))
 }

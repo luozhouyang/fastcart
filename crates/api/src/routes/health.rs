@@ -8,7 +8,7 @@ use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use serde_json::{Value, json};
+use serde::Serialize;
 
 use crate::state::AppContext;
 
@@ -21,6 +21,39 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/metrics", get(metrics))
 }
 
+/// Service health summary.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct HealthStatus {
+    /// Health state.
+    pub status: String,
+    /// Service name.
+    #[schema(required = false)]
+    pub service: String,
+    /// Service version.
+    #[schema(required = false)]
+    pub version: String,
+}
+
+/// Liveness result.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct LivenessStatus {
+    /// Health state.
+    pub status: String,
+}
+
+/// Readiness result.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ReadinessStatus {
+    /// Health state.
+    pub status: String,
+    /// Service name, absent when the check fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Service version, absent when the check fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
 async fn metrics(State(context): State<Arc<AppContext>>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
@@ -28,33 +61,39 @@ async fn metrics(State(context): State<Arc<AppContext>>) -> impl IntoResponse {
     )
 }
 
-async fn health(State(context): State<Arc<AppContext>>) -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "service": context.config.service_name,
-        "version": context.config.version,
-    }))
+async fn health(State(context): State<Arc<AppContext>>) -> Json<HealthStatus> {
+    Json(HealthStatus {
+        status: "ok".to_owned(),
+        service: context.config.service_name.clone(),
+        version: context.config.version.clone(),
+    })
 }
 
-async fn liveness() -> Json<Value> {
-    Json(json!({"status": "ok"}))
+async fn liveness() -> Json<LivenessStatus> {
+    Json(LivenessStatus {
+        status: "ok".to_owned(),
+    })
 }
 
-async fn readiness(State(context): State<Arc<AppContext>>) -> (StatusCode, Json<Value>) {
+async fn readiness(State(context): State<Arc<AppContext>>) -> (StatusCode, Json<ReadinessStatus>) {
     match context.platform.ping().await {
         Ok(()) => (
             StatusCode::OK,
-            Json(json!({
-                "status": "ok",
-                "service": context.config.service_name,
-                "version": context.config.version,
-            })),
+            Json(ReadinessStatus {
+                status: "ok".to_owned(),
+                service: Some(context.config.service_name.clone()),
+                version: Some(context.config.version.clone()),
+            }),
         ),
         Err(error) => {
             tracing::error!(error = %error, "readiness check failed");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"status": "degraded"})),
+                Json(ReadinessStatus {
+                    status: "degraded".to_owned(),
+                    service: None,
+                    version: None,
+                }),
             )
         }
     }

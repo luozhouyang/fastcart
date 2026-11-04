@@ -12,13 +12,12 @@ use axum::{Json, Router};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiQuery, ApiResult, PaginationQuery};
 use fastcart_kernel::{CustomerId, Metadata};
 use fastcart_module_customer::{
-    Address, AddressInput, Customer, CustomerGroup, CustomerService, CustomerStatus,
-    UpdateCustomerInput,
+    Address, AddressInput, CustomerService, CustomerStatus, UpdateCustomerInput,
 };
 use serde::Deserialize;
 
 use super::StoreDb;
-use crate::dto::PageResponse;
+use crate::dto::{CustomerDto, CustomerGroupDto, PageResponse};
 use crate::state::AppContext;
 
 /// Builds the routes for this namespace.
@@ -71,9 +70,9 @@ pub struct UpdateCustomerRequest {
     metadata: Option<Metadata>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(default)]
-struct AddressRequest {
+pub struct AdminAddressRequest {
     is_default_shipping: bool,
     is_default_billing: bool,
     first_name: Option<String>,
@@ -115,7 +114,7 @@ fn map_update_customer(request: UpdateCustomerRequest) -> UpdateCustomerInput {
     }
 }
 
-fn map_address_input(request: AddressRequest) -> AddressInput {
+fn map_address_input(request: AdminAddressRequest) -> AddressInput {
     AddressInput {
         is_default_shipping: request.is_default_shipping,
         is_default_billing: request.is_default_billing,
@@ -143,7 +142,7 @@ async fn list_customers(
     StoreDb(db): StoreDb,
     PaginationQuery { limit, offset }: PaginationQuery,
     ApiQuery(query): ApiQuery<CustomerListQuery>,
-) -> ApiResult<Json<PageResponse<Customer>>> {
+) -> ApiResult<Json<PageResponse<CustomerDto>>> {
     actor
         .require_permission("customers.read")
         .map_err(ApiError::new)?;
@@ -151,7 +150,7 @@ async fn list_customers(
     let page = CustomerService::new(db)
         .list_customers(pagination, query.query.as_deref())
         .await?;
-    Ok(Json(PageResponse::from_page(page)))
+    Ok(Json(PageResponse::from_page(page).map(CustomerDto::from)))
 }
 
 async fn get_customer(
@@ -159,12 +158,13 @@ async fn get_customer(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-) -> ApiResult<Json<Customer>> {
+) -> ApiResult<Json<CustomerDto>> {
     actor
         .require_permission("customers.read")
         .map_err(ApiError::new)?;
     let id = CustomerId::from_string(id);
-    Ok(Json(CustomerService::new(db).get_customer(&id).await?))
+    let customer = CustomerService::new(db).get_customer(&id).await?;
+    Ok(Json(customer.into()))
 }
 
 async fn update_customer(
@@ -173,7 +173,7 @@ async fn update_customer(
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
     ApiJson(request): ApiJson<UpdateCustomerRequest>,
-) -> ApiResult<Json<Customer>> {
+) -> ApiResult<Json<CustomerDto>> {
     actor
         .require_permission("customers.write")
         .map_err(ApiError::new)?;
@@ -181,7 +181,7 @@ async fn update_customer(
     let customer = CustomerService::new(db)
         .update_customer(&id, map_update_customer(request))
         .await?;
-    Ok(Json(customer))
+    Ok(Json(customer.into()))
 }
 
 async fn delete_customer(
@@ -220,7 +220,7 @@ async fn create_address(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(request): ApiJson<AddressRequest>,
+    ApiJson(request): ApiJson<AdminAddressRequest>,
 ) -> ApiResult<(StatusCode, Json<Address>)> {
     actor
         .require_permission("customers.write")
@@ -237,7 +237,7 @@ async fn update_address(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, address_id)): Path<(String, String)>,
-    ApiJson(request): ApiJson<AddressRequest>,
+    ApiJson(request): ApiJson<AdminAddressRequest>,
 ) -> ApiResult<Json<Address>> {
     actor
         .require_permission("customers.write")
@@ -273,11 +273,12 @@ async fn list_groups(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
-) -> ApiResult<Json<Vec<CustomerGroup>>> {
+) -> ApiResult<Json<Vec<CustomerGroupDto>>> {
     actor
         .require_permission("customers.read")
         .map_err(ApiError::new)?;
-    Ok(Json(CustomerService::new(db).list_groups().await?))
+    let groups = CustomerService::new(db).list_groups().await?;
+    Ok(Json(groups.into_iter().map(Into::into).collect()))
 }
 
 async fn create_group(
@@ -285,14 +286,14 @@ async fn create_group(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateGroupRequest>,
-) -> ApiResult<(StatusCode, Json<CustomerGroup>)> {
+) -> ApiResult<(StatusCode, Json<CustomerGroupDto>)> {
     actor
         .require_permission("customers.write")
         .map_err(ApiError::new)?;
     let group = CustomerService::new(db)
         .create_group(&request.name, request.metadata.unwrap_or_default())
         .await?;
-    Ok((StatusCode::CREATED, Json(group)))
+    Ok((StatusCode::CREATED, Json(group.into())))
 }
 
 async fn add_group_customer(
@@ -332,14 +333,13 @@ async fn list_customer_groups(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-) -> ApiResult<Json<Vec<CustomerGroup>>> {
+) -> ApiResult<Json<Vec<CustomerGroupDto>>> {
     actor
         .require_permission("customers.read")
         .map_err(ApiError::new)?;
     let id = CustomerId::from_string(id);
-    Ok(Json(
-        CustomerService::new(db).list_customer_groups(&id).await?,
-    ))
+    let groups = CustomerService::new(db).list_customer_groups(&id).await?;
+    Ok(Json(groups.into_iter().map(Into::into).collect()))
 }
 
 #[cfg(test)]
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn maps_address_input() {
-        let input = map_address_input(AddressRequest {
+        let input = map_address_input(AdminAddressRequest {
             is_default_shipping: true,
             is_default_billing: false,
             address_1: Some("1 Main St".to_owned()),
@@ -374,7 +374,7 @@ mod tests {
             postal_code: Some("12345".to_owned()),
             country_code: Some("US".to_owned()),
             metadata: Metadata::empty(),
-            ..AddressRequest::default()
+            ..AdminAddressRequest::default()
         });
 
         assert!(input.is_default_shipping);

@@ -13,9 +13,11 @@ use axum::routing::{get, patch, post};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
 use fastcart_kernel::{ActorContext, AppError, ThemeId};
 use fastcart_module_theme::{RegisterThemeInput, ThemeService, UpdateThemeSettingsInput};
+use serde::Deserialize;
+use serde_json::Value;
 
 use super::{StoreDb, record_store_audit};
-use crate::dto::{PageResponse, ThemeDto};
+use crate::dto::{PageResponse, ThemeDto, ThemeManifestDto};
 use crate::state::AppContext;
 
 /// Builds the routes for this namespace.
@@ -34,6 +36,42 @@ fn authorize(actor: &ActorContext, permission: &str) -> ApiResult<()> {
     actor.require_permission(permission).map_err(ApiError::new)
 }
 
+/// Theme registration body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct RegisterThemeRequest {
+    manifest: ThemeManifestDto,
+    bundle_path: String,
+    #[serde(default)]
+    settings_schema: Option<Value>,
+    #[serde(default)]
+    settings: Option<Value>,
+}
+
+impl From<RegisterThemeRequest> for RegisterThemeInput {
+    fn from(request: RegisterThemeRequest) -> Self {
+        Self {
+            manifest: request.manifest.into(),
+            bundle_path: request.bundle_path,
+            settings_schema: request.settings_schema,
+            settings: request.settings,
+        }
+    }
+}
+
+/// Theme settings replacement body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateThemeSettingsRequest {
+    settings: Value,
+}
+
+impl From<UpdateThemeSettingsRequest> for UpdateThemeSettingsInput {
+    fn from(request: UpdateThemeSettingsRequest) -> Self {
+        Self {
+            settings: request.settings,
+        }
+    }
+}
+
 async fn list_themes(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -49,10 +87,10 @@ async fn register_theme(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
-    ApiJson(input): ApiJson<RegisterThemeInput>,
+    ApiJson(input): ApiJson<RegisterThemeRequest>,
 ) -> ApiResult<(StatusCode, Json<ThemeDto>)> {
     authorize(&actor, "themes.write")?;
-    let theme = ThemeService::new(db).register(input).await?;
+    let theme = ThemeService::new(db).register(input.into()).await?;
     record_store_audit(
         &context,
         &actor,
@@ -96,11 +134,11 @@ async fn update_theme_settings(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(input): ApiJson<UpdateThemeSettingsInput>,
+    ApiJson(input): ApiJson<UpdateThemeSettingsRequest>,
 ) -> ApiResult<Json<ThemeDto>> {
     authorize(&actor, "themes.write")?;
     let theme = ThemeService::new(db)
-        .update_settings(&ThemeId::from_string(id), input)
+        .update_settings(&ThemeId::from_string(id), input.into())
         .await?;
     record_store_audit(
         &context,

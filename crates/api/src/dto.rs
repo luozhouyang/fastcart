@@ -5,6 +5,8 @@
 //! leaking.
 
 use fastcart_kernel::{Metadata, PageResult, Pagination};
+use fastcart_module_catalog::{Dimensions, ProductStatus, ProductVariant};
+use fastcart_module_customer::{Customer, CustomerGroup, CustomerStatus};
 use fastcart_module_order::{ClaimItemType, OrderEditAction};
 use fastcart_module_theme::Theme;
 use fastcart_platform::{Membership, Store, StoreDomain, User};
@@ -44,6 +46,15 @@ impl<T> PageResponse<T> {
                 offset,
                 total: page.count,
             },
+        }
+    }
+
+    /// Maps every record in the page while preserving pagination metadata.
+    #[must_use]
+    pub fn map<U>(self, map: impl FnMut(T) -> U) -> PageResponse<U> {
+        PageResponse {
+            data: self.data.into_iter().map(map).collect(),
+            pagination: self.pagination,
         }
     }
 }
@@ -408,13 +419,373 @@ pub struct CreatedApiTokenResponse {
     pub record: ApiTokenDto,
 }
 
+/// A purchasable product variant.
+///
+/// This mirrors the catalog domain `ProductVariant` on the wire; the API DTO
+/// exists so the documented contract is derived from a type owned by this
+/// crate rather than the catalog module.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Variant)]
+pub struct VariantDto {
+    /// Variant identifier.
+    pub id: String,
+    /// Owning product identifier.
+    pub product_id: String,
+    /// Display title.
+    pub title: String,
+    /// Optional unique stock-keeping unit.
+    pub sku: Option<String>,
+    /// Optional barcode.
+    pub barcode: Option<String>,
+    /// Publication state.
+    #[schema(required = false)]
+    pub status: ProductStatus,
+    /// Optional shipping weight.
+    pub weight: Option<f64>,
+    /// Optional physical dimensions.
+    pub dimensions: Option<Dimensions>,
+    /// Whether inventory is tracked for this variant.
+    #[schema(required = false)]
+    pub manage_inventory: bool,
+    /// Whether orders may exceed available stock.
+    #[schema(required = false)]
+    pub allow_backorder: bool,
+    /// Optional tax category reference.
+    pub tax_category_id: Option<String>,
+    /// Free-form metadata.
+    #[schema(required = false)]
+    pub metadata: Metadata,
+    /// Option values selected for this variant.
+    #[schema(required = false)]
+    pub option_value_ids: Vec<String>,
+    /// Creation timestamp in Unix seconds.
+    #[schema(required = false)]
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    #[schema(required = false)]
+    pub updated_at: i64,
+    /// Soft-deletion timestamp, present when retained for history.
+    pub deleted_at: Option<i64>,
+}
+
+impl From<ProductVariant> for VariantDto {
+    fn from(variant: ProductVariant) -> Self {
+        Self {
+            id: variant.id,
+            product_id: variant.product_id,
+            title: variant.title,
+            sku: variant.sku,
+            barcode: variant.barcode,
+            status: variant.status,
+            weight: variant.weight,
+            dimensions: Some(variant.dimensions),
+            manage_inventory: variant.manage_inventory,
+            allow_backorder: variant.allow_backorder,
+            tax_category_id: variant.tax_category_id,
+            metadata: variant.metadata,
+            option_value_ids: variant.option_value_ids,
+            created_at: variant.created_at,
+            updated_at: variant.updated_at,
+            deleted_at: variant.deleted_at,
+        }
+    }
+}
+
+/// A cart line item as described by the public contract.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = LineItem)]
+pub struct LineItemDto {
+    /// Line item identifier.
+    pub id: String,
+    /// Owning cart, when the line belongs to one.
+    pub cart_id: Option<String>,
+    /// Referenced variant.
+    pub variant_id: String,
+    /// Product title snapshot.
+    #[schema(required = false)]
+    pub title: String,
+    /// Quantity of units.
+    pub quantity: i64,
+    /// Unit price in minor units.
+    #[schema(required = false)]
+    pub unit_price: i64,
+    /// Total price in minor units.
+    #[schema(required = false)]
+    pub total_price: i64,
+    /// Free-form metadata.
+    #[schema(required = false)]
+    pub metadata: Metadata,
+}
+
+/// Commercial totals summary reported by a checkout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Totals)]
+pub struct TotalsDto {
+    /// Currency of every amount.
+    pub currency_code: String,
+    /// Subtotal before discounts.
+    pub subtotal: i64,
+    /// Total discounts applied.
+    #[schema(required = false)]
+    pub discount_total: i64,
+    /// Total shipping charges.
+    #[schema(required = false)]
+    pub shipping_total: i64,
+    /// Total tax.
+    #[schema(required = false)]
+    pub tax_total: i64,
+    /// Payable total.
+    pub grand_total: i64,
+}
+
+/// Lifecycle state of the checkout summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutSummaryStatus {
+    /// Created but not completed.
+    Pending,
+    /// Fully processed.
+    Completed,
+    /// Canceled before completion.
+    Canceled,
+    /// Expired before completion.
+    Expired,
+}
+
+/// A checkout summary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Checkout)]
+pub struct CheckoutDto {
+    /// Checkout identifier.
+    pub id: String,
+    /// Cart being checked out.
+    pub cart_id: String,
+    /// Current lifecycle state.
+    pub status: CheckoutSummaryStatus,
+    /// Optional contact email.
+    pub email: Option<String>,
+    /// Payment provider handling the checkout.
+    #[schema(required = false)]
+    pub payment_provider: String,
+    /// Payment session attached to the checkout, if any.
+    pub payment_session_id: Option<String>,
+    /// Commercial totals snapshot.
+    #[schema(required = false)]
+    pub totals: TotalsDto,
+    /// Creation timestamp in Unix seconds.
+    #[schema(required = false)]
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    #[schema(required = false)]
+    pub updated_at: i64,
+    /// Expiry timestamp in Unix seconds.
+    pub expires_at: Option<i64>,
+}
+
+/// Lifecycle status of a customer account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[schema(as = CustomerStatus)]
+pub enum CustomerStatusDto {
+    /// The customer may authenticate and place orders.
+    Active,
+    /// The customer is disabled and cannot authenticate.
+    Disabled,
+}
+
+impl From<CustomerStatus> for CustomerStatusDto {
+    fn from(status: CustomerStatus) -> Self {
+        match status {
+            CustomerStatus::Active => Self::Active,
+            CustomerStatus::Disabled => Self::Disabled,
+        }
+    }
+}
+
+/// A store-scoped customer profile.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Customer)]
+pub struct CustomerDto {
+    /// Customer identifier.
+    pub id: String,
+    /// Normalized email address.
+    pub email: String,
+    /// Given name.
+    pub first_name: Option<String>,
+    /// Family name.
+    pub last_name: Option<String>,
+    /// Contact phone number.
+    pub phone: Option<String>,
+    /// Whether the profile has registered credentials.
+    #[schema(required = false)]
+    pub has_account: bool,
+    /// Lifecycle status.
+    pub status: CustomerStatusDto,
+    /// Email verification timestamp, absent until verified.
+    pub email_verified_at: Option<i64>,
+    /// Free-form extension metadata.
+    #[schema(required = false)]
+    pub metadata: Metadata,
+    /// Creation timestamp in Unix seconds.
+    #[schema(required = false)]
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    #[schema(required = false)]
+    pub updated_at: i64,
+    /// Soft-deletion timestamp, present when retained for history.
+    pub deleted_at: Option<i64>,
+}
+
+impl From<Customer> for CustomerDto {
+    fn from(customer: Customer) -> Self {
+        Self {
+            id: customer.id.to_string(),
+            email: customer.email,
+            first_name: customer.first_name,
+            last_name: customer.last_name,
+            phone: customer.phone,
+            has_account: customer.has_account,
+            status: customer.status.into(),
+            email_verified_at: customer.email_verified_at,
+            metadata: customer.metadata,
+            created_at: customer.created_at,
+            updated_at: customer.updated_at,
+            deleted_at: customer.deleted_at,
+        }
+    }
+}
+
+/// A customer segment used for pricing and promotions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = CustomerGroup)]
+pub struct CustomerGroupDto {
+    /// Group identifier.
+    pub id: String,
+    /// Unique human-readable name.
+    pub name: String,
+    /// Free-form extension metadata.
+    #[schema(required = false)]
+    pub metadata: Metadata,
+    /// Creation timestamp in Unix seconds.
+    #[schema(required = false)]
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    #[schema(required = false)]
+    pub updated_at: i64,
+}
+
+impl From<CustomerGroup> for CustomerGroupDto {
+    fn from(group: CustomerGroup) -> Self {
+        Self {
+            id: group.id,
+            name: group.name,
+            metadata: group.metadata,
+            created_at: group.created_at,
+            updated_at: group.updated_at,
+        }
+    }
+}
+
+/// A validated theme manifest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = ThemeManifest)]
+pub struct ThemeManifestDto {
+    /// Stable theme identifier.
+    pub id: String,
+    /// Human-readable theme name.
+    pub name: String,
+    /// Theme version.
+    pub version: String,
+    /// Rendering runtime expected by the theme.
+    pub runtime: String,
+    /// Entry file inside the theme bundle.
+    pub entry: String,
+    /// Optional JSON Schema for theme settings.
+    pub settings_schema: Option<String>,
+    /// Optional asset manifest file.
+    pub assets_manifest: Option<String>,
+}
+
+impl From<ThemeManifest> for ThemeManifestDto {
+    fn from(manifest: ThemeManifest) -> Self {
+        Self {
+            id: manifest.id,
+            name: manifest.name,
+            version: manifest.version,
+            runtime: manifest.runtime,
+            entry: manifest.entry,
+            settings_schema: manifest.settings_schema,
+            assets_manifest: manifest.assets_manifest,
+        }
+    }
+}
+
+impl From<ThemeManifestDto> for ThemeManifest {
+    fn from(manifest: ThemeManifestDto) -> Self {
+        Self {
+            id: manifest.id,
+            name: manifest.name,
+            version: manifest.version,
+            runtime: manifest.runtime,
+            entry: manifest.entry,
+            settings_schema: manifest.settings_schema,
+            assets_manifest: manifest.assets_manifest,
+        }
+    }
+}
+
+/// A signature attached to a webhook payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WebhookSignature {
+    /// Signature value.
+    pub signature: String,
+    /// Signature timestamp in Unix seconds.
+    pub timestamp: i64,
+    /// Signature algorithm.
+    pub algorithm: String,
+}
+
+/// An outbound webhook envelope.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WebhookEnvelope {
+    /// Delivery identifier.
+    pub id: String,
+    /// Event type.
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+    /// Store the event belongs to.
+    pub store_id: String,
+    /// Event payload.
+    pub data: Value,
+    /// Optional payload signature.
+    pub signature: Option<WebhookSignature>,
+}
+
+/// An inbound payment-provider webhook.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PaymentWebhook {
+    /// Payment provider name.
+    pub provider: String,
+    /// Provider-side event identifier.
+    pub provider_event_id: String,
+    /// Provider event type.
+    pub event_type: String,
+    /// Provider payload.
+    pub payload: Value,
+    /// Optional payload signature.
+    pub signature: Option<WebhookSignature>,
+}
+
 /// A registered storefront theme as exposed to administrators.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = Theme)]
 pub struct ThemeDto {
     /// Theme identifier.
     pub id: String,
     /// Parsed theme manifest.
-    pub manifest: ThemeManifest,
+    pub manifest: ThemeManifestDto,
     /// Bundle-relative asset root.
     pub bundle_path: String,
     /// JSON Schema used to validate settings.
@@ -424,8 +795,10 @@ pub struct ThemeDto {
     /// Whether this is the active theme.
     pub is_active: bool,
     /// Creation timestamp.
+    #[schema(required = false)]
     pub created_at: i64,
     /// Last update timestamp.
+    #[schema(required = false)]
     pub updated_at: i64,
 }
 
@@ -433,7 +806,7 @@ impl From<Theme> for ThemeDto {
     fn from(theme: Theme) -> Self {
         Self {
             id: theme.id.to_string(),
-            manifest: theme.manifest,
+            manifest: theme.manifest.into(),
             bundle_path: theme.bundle_path,
             settings_schema: theme.settings_schema,
             settings: theme.settings,
@@ -445,12 +818,13 @@ impl From<Theme> for ThemeDto {
 }
 
 /// The active storefront theme exposed to public storefronts.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = StoreTheme)]
 pub struct StoreThemeDto {
     /// Theme identifier.
     pub id: String,
     /// Parsed theme manifest.
-    pub manifest: ThemeManifest,
+    pub manifest: ThemeManifestDto,
     /// Bundle-relative asset root.
     pub bundle_path: String,
     /// Current theme settings.
@@ -461,7 +835,7 @@ impl From<Theme> for StoreThemeDto {
     fn from(theme: Theme) -> Self {
         Self {
             id: theme.id.to_string(),
-            manifest: theme.manifest,
+            manifest: theme.manifest.into(),
             bundle_path: theme.bundle_path,
             settings: theme.settings,
         }

@@ -12,13 +12,14 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use fastcart_http::extractors::ApiQuery;
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
-use fastcart_kernel::{ActorContext, AppError, NavigationId, PageId, Pagination};
+use fastcart_kernel::{ActorContext, AppError, Metadata, NavigationId, PageId, Pagination};
 use fastcart_module_content::{
     ContentService, CreateNavigationInput, CreatePageInput, CreateRedirectInput, Navigation,
     NavigationItem, NavigationItemInput, NavigationTree, Page, PageStatus, PageVersion, Redirect,
     UpdateNavigationInput, UpdatePageInput,
 };
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::StoreDb;
 use crate::dto::PageResponse;
@@ -85,6 +86,150 @@ pub struct NavigationItemReorderRequest {
     item_ids: Vec<String>,
 }
 
+/// Page creation body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreatePageRequest {
+    title: String,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default)]
+    page_type: Option<String>,
+    #[serde(default)]
+    body: Value,
+    #[serde(default)]
+    seo: Value,
+    #[serde(default)]
+    metadata: Metadata,
+}
+
+impl From<CreatePageRequest> for CreatePageInput {
+    fn from(request: CreatePageRequest) -> Self {
+        Self {
+            title: request.title,
+            handle: request.handle,
+            page_type: request.page_type,
+            body: request.body,
+            seo: request.seo,
+            metadata: request.metadata,
+        }
+    }
+}
+
+/// Partial page update body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdatePageRequest {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default)]
+    page_type: Option<String>,
+    #[serde(default)]
+    body: Option<Value>,
+    #[serde(default)]
+    seo: Option<Value>,
+    #[serde(default)]
+    metadata: Option<Metadata>,
+}
+
+impl From<UpdatePageRequest> for UpdatePageInput {
+    fn from(request: UpdatePageRequest) -> Self {
+        Self {
+            title: request.title,
+            handle: request.handle,
+            page_type: request.page_type,
+            body: request.body,
+            seo: request.seo,
+            metadata: request.metadata,
+        }
+    }
+}
+
+/// Navigation creation body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateNavigationRequest {
+    name: String,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default)]
+    metadata: Metadata,
+}
+
+impl From<CreateNavigationRequest> for CreateNavigationInput {
+    fn from(request: CreateNavigationRequest) -> Self {
+        Self {
+            name: request.name,
+            handle: request.handle,
+            metadata: request.metadata,
+        }
+    }
+}
+
+/// Partial navigation update body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateNavigationRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default)]
+    metadata: Option<Metadata>,
+}
+
+impl From<UpdateNavigationRequest> for UpdateNavigationInput {
+    fn from(request: UpdateNavigationRequest) -> Self {
+        Self {
+            name: request.name,
+            handle: request.handle,
+            metadata: request.metadata,
+        }
+    }
+}
+
+/// Navigation item create/update body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct NavigationItemRequest {
+    #[serde(default)]
+    parent_id: Option<String>,
+    title: String,
+    url: String,
+    #[serde(default)]
+    rank: Option<i64>,
+    #[serde(default)]
+    metadata: Metadata,
+}
+
+impl From<NavigationItemRequest> for NavigationItemInput {
+    fn from(request: NavigationItemRequest) -> Self {
+        Self {
+            parent_id: request.parent_id,
+            title: request.title,
+            url: request.url,
+            rank: request.rank,
+            metadata: request.metadata,
+        }
+    }
+}
+
+/// Redirect creation body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateRedirectRequest {
+    from_path: String,
+    to_path: String,
+    #[serde(default)]
+    status_code: Option<i64>,
+}
+
+impl From<CreateRedirectRequest> for CreateRedirectInput {
+    fn from(request: CreateRedirectRequest) -> Self {
+        Self {
+            from_path: request.from_path,
+            to_path: request.to_path,
+            status_code: request.status_code,
+        }
+    }
+}
+
 /// Parses a page status filter strictly.
 fn parse_page_status(value: &str) -> ApiResult<PageStatus> {
     PageStatus::parse(value).ok_or_else(|| ApiError::validation("invalid page status"))
@@ -137,10 +282,10 @@ async fn list_pages(
 async fn create_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
-    ApiJson(input): ApiJson<CreatePageInput>,
+    ApiJson(input): ApiJson<CreatePageRequest>,
 ) -> ApiResult<(StatusCode, Json<Page>)> {
     authorize(&actor, "themes.write")?;
-    let page = ContentService::new(db).create_page(input).await?;
+    let page = ContentService::new(db).create_page(input.into()).await?;
     Ok((StatusCode::CREATED, Json(page)))
 }
 
@@ -159,11 +304,13 @@ async fn update_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(input): ApiJson<UpdatePageInput>,
+    ApiJson(input): ApiJson<UpdatePageRequest>,
 ) -> ApiResult<Json<Page>> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    let page = ContentService::new(db).update_page(&page_id, input).await?;
+    let page = ContentService::new(db)
+        .update_page(&page_id, input.into())
+        .await?;
     Ok(Json(page))
 }
 
@@ -253,10 +400,12 @@ async fn list_navigations(
 async fn create_navigation(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
-    ApiJson(input): ApiJson<CreateNavigationInput>,
+    ApiJson(input): ApiJson<CreateNavigationRequest>,
 ) -> ApiResult<(StatusCode, Json<Navigation>)> {
     authorize(&actor, "themes.write")?;
-    let navigation = ContentService::new(db).create_navigation(input).await?;
+    let navigation = ContentService::new(db)
+        .create_navigation(input.into())
+        .await?;
     Ok((StatusCode::CREATED, Json(navigation)))
 }
 
@@ -277,12 +426,12 @@ async fn update_navigation(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(input): ApiJson<UpdateNavigationInput>,
+    ApiJson(input): ApiJson<UpdateNavigationRequest>,
 ) -> ApiResult<Json<Navigation>> {
     authorize(&actor, "themes.write")?;
     let navigation_id = NavigationId::from_string(id);
     let navigation = ContentService::new(db)
-        .update_navigation(&navigation_id, input)
+        .update_navigation(&navigation_id, input.into())
         .await?;
     Ok(Json(navigation))
 }
@@ -317,12 +466,12 @@ async fn add_navigation_item(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-    ApiJson(input): ApiJson<NavigationItemInput>,
+    ApiJson(input): ApiJson<NavigationItemRequest>,
 ) -> ApiResult<(StatusCode, Json<NavigationItem>)> {
     authorize(&actor, "themes.write")?;
     let navigation_id = NavigationId::from_string(id);
     let item = ContentService::new(db)
-        .add_navigation_item(&navigation_id, input)
+        .add_navigation_item(&navigation_id, input.into())
         .await?;
     Ok((StatusCode::CREATED, Json(item)))
 }
@@ -331,11 +480,11 @@ async fn update_navigation_item(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(item_id): Path<String>,
-    ApiJson(input): ApiJson<NavigationItemInput>,
+    ApiJson(input): ApiJson<NavigationItemRequest>,
 ) -> ApiResult<Json<NavigationItem>> {
     authorize(&actor, "themes.write")?;
     let item = ContentService::new(db)
-        .update_navigation_item(&item_id, input)
+        .update_navigation_item(&item_id, input.into())
         .await?;
     Ok(Json(item))
 }
@@ -384,10 +533,12 @@ async fn list_redirects(
 async fn create_redirect(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
-    ApiJson(input): ApiJson<CreateRedirectInput>,
+    ApiJson(input): ApiJson<CreateRedirectRequest>,
 ) -> ApiResult<(StatusCode, Json<Redirect>)> {
     authorize(&actor, "themes.write")?;
-    let redirect = ContentService::new(db).create_redirect(input).await?;
+    let redirect = ContentService::new(db)
+        .create_redirect(input.into())
+        .await?;
     Ok((StatusCode::CREATED, Json(redirect)))
 }
 
