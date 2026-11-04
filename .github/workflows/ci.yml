@@ -5,6 +5,18 @@ on:
   pull_request:
 
 jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tracked docs files
+        run: |
+          if git ls-files 'docs/**' | grep -q .; then
+            echo '::error::docs/ is local-only and must not be committed'
+            git ls-files 'docs/**'
+            exit 1
+          fi
+
   rust:
     runs-on: ubuntu-latest
     steps:

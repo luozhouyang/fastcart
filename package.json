@@ -8,6 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
     "dev:admin": "pnpm --filter @fastcart/admin dev",
     "dev:storefront": "pnpm --filter @fastcart/storefront dev",
     "build": "pnpm -r --if-present build",

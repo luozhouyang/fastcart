@@ -1,0 +1,11 @@
+#!/bin/sh
+# docs/ is local-only reference material (see .gitignore). Git only ignores
+# untracked files, so force-added or previously tracked docs would slip
+# through; reject any staged docs path explicitly.
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if printf '%s\n' "$staged" | grep -q '^docs/'; then
+    echo 'pre-commit: docs/ is local-only and must not be committed.' >&2
+    printf '%s\n' "$staged" | grep '^docs/' >&2
+    exit 1
+fi
+exit 0
