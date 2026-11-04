@@ -11,15 +11,18 @@ use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
 use crate::domain::{
-    CreateInventoryItemInput, CreateLocationInput, InventoryItem, InventoryLevel,
-    InventoryLocation, InventoryMovement, InventoryReservation, ReservationLine,
-    ReservationReference, ReservationStatus, ReturnRestockLine, UpdateLocationInput,
-    available_quantity_from, return_restock_reference, validate_name, validate_positive_quantity,
-    validate_reason, validate_ttl,
+    CreateInventoryItemInput, CreateLocationInput, ExchangeRestockLine, InventoryItem,
+    InventoryLevel, InventoryLocation, InventoryMovement, InventoryReservation, ReservationLine,
+    ReservationReference, ReservationStatus, ReturnRestockLine, StockConsumption,
+    UpdateLocationInput, available_quantity_from, exchange_restock_reference,
+    return_restock_reference, validate_name, validate_positive_quantity, validate_reason,
+    validate_ttl,
 };
 
 const DEFAULT_LOCATION_ID: &str = "loc_default";
 const RETURN_RESTOCK_REASON: &str = "return_restock";
+const EXCHANGE_RESTOCK_REASON: &str = "exchange_restock";
+const AFTER_SALES_CONSUME_REASON: &str = "after_sales_consume";
 
 fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7().simple())
@@ -150,6 +153,12 @@ struct ReservedRow {
     inventory_item_id: InventoryItemId,
     location_id: InventoryLocationId,
     quantity: i64,
+}
+
+struct RestockEntry<'a> {
+    variant_id: &'a VariantId,
+    quantity: i64,
+    reference: String,
 }
 
 fn row_to_reserved(row: &SqliteRow) -> Result<ReservedRow, AppError> {
@@ -1260,7 +1269,168 @@ impl InventoryService {
         for line in lines {
             validate_positive_quantity(line.quantity, "quantity")?;
         }
+        let entries = lines
+            .iter()
+            .map(|line| RestockEntry {
+                variant_id: &line.variant_id,
+                quantity: line.quantity,
+                reference: return_restock_reference(
+                    return_id,
+                    &line.order_item_id,
+                    line.received_quantity,
+                ),
+            })
+            .collect::<Vec<_>>();
+        self.restock_variant_lines(order_id, RETURN_RESTOCK_REASON, &entries)
+            .await
+    }
 
+    /// Restocks quantities received on an accepted exchange.
+    ///
+    /// The movement reference is derived from the exchange and its line, so
+    /// accepting the same exchange again never increases stock twice. Unknown
+    /// variants are ignored, mirroring [`Self::restock_return`].
+    pub async fn restock_exchange(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &str,
+        lines: &[ExchangeRestockLine],
+    ) -> Result<i64, AppError> {
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        for line in lines {
+            validate_positive_quantity(line.quantity, "quantity")?;
+        }
+        let entries = lines
+            .iter()
+            .map(|line| RestockEntry {
+                variant_id: &line.variant_id,
+                quantity: line.quantity,
+                reference: exchange_restock_reference(exchange_id, &line.exchange_item_id),
+            })
+            .collect::<Vec<_>>();
+        self.restock_variant_lines(order_id, EXCHANGE_RESTOCK_REASON, &entries)
+            .await
+    }
+
+    /// Consumes stock for after-sales replacement variants.
+    ///
+    /// The location follows the order's committed reservation for the variant
+    /// when one exists, otherwise `loc_default`. Each line carries a unique
+    /// reference; replaying the same reference is a no-op. A line whose variant
+    /// has no inventory item or whose location does not have enough available
+    /// stock fails the whole batch atomically. Returns the number of units
+    /// consumed by this call.
+    pub async fn consume_stock(
+        &self,
+        order_id: &OrderId,
+        lines: &[StockConsumption],
+    ) -> Result<i64, AppError> {
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        for line in lines {
+            validate_positive_quantity(line.quantity, "quantity")?;
+            validate_reason(&line.reference)?;
+        }
+
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
+        let mut consumed = 0_i64;
+        for line in lines {
+            let item_id: Option<String> =
+                sqlx::query_scalar("SELECT id FROM inventory_items WHERE variant_id = ?")
+                    .bind(line.variant_id.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            let Some(item_id) = item_id else {
+                return Err(AppError::conflict(format!(
+                    "insufficient stock for variant {}",
+                    line.variant_id
+                )));
+            };
+            let item_id = InventoryItemId::from_string(item_id);
+
+            let location_id: Option<String> = sqlx::query_scalar(
+                "SELECT location_id FROM inventory_reservations \
+                 WHERE order_id = ? AND inventory_item_id = ? AND status = 'committed' \
+                 ORDER BY CASE WHEN location_id = ? THEN 0 ELSE 1 END, created_at, rowid \
+                 LIMIT 1",
+            )
+            .bind(order_id.as_str())
+            .bind(item_id.as_str())
+            .bind(DEFAULT_LOCATION_ID)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            let location_id = match location_id {
+                Some(location_id) => InventoryLocationId::from_string(location_id),
+                None => {
+                    ensure_default_location_in_tx(&mut tx, now).await?;
+                    InventoryLocationId::from_string(DEFAULT_LOCATION_ID)
+                }
+            };
+            ensure_level_in_tx(&mut tx, &item_id, &location_id, now).await?;
+
+            let inserted = sqlx::query(
+                "INSERT OR IGNORE INTO inventory_movements \
+                 (id, inventory_item_id, location_id, quantity_delta, reason, reference, \
+                  actor_id, metadata, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, NULL, '{}', ?)",
+            )
+            .bind(new_id("imvt"))
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .bind(-line.quantity)
+            .bind(AFTER_SALES_CONSUME_REASON)
+            .bind(&line.reference)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if inserted.rows_affected() == 0 {
+                // This replacement has already consumed its stock.
+                continue;
+            }
+
+            let affected = sqlx::query(
+                "UPDATE inventory_levels \
+                 SET stocked_quantity = stocked_quantity - ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ? \
+                   AND stocked_quantity - reserved_quantity >= ?",
+            )
+            .bind(line.quantity)
+            .bind(now)
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .bind(line.quantity)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if affected.rows_affected() != 1 {
+                return Err(AppError::conflict(format!(
+                    "insufficient stock for variant {}",
+                    line.variant_id
+                )));
+            }
+            consumed = consumed
+                .checked_add(line.quantity)
+                .ok_or_else(|| AppError::conflict("consumed quantity overflow"))?;
+        }
+
+        tx.commit().await.map_err(database_error)?;
+        Ok(consumed)
+    }
+
+    /// Shared implementation for return and exchange restocking.
+    async fn restock_variant_lines(
+        &self,
+        order_id: &OrderId,
+        reason: &str,
+        lines: &[RestockEntry<'_>],
+    ) -> Result<i64, AppError> {
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
         let mut restocked = 0_i64;
@@ -1297,8 +1467,6 @@ impl InventoryService {
             };
             ensure_level_in_tx(&mut tx, &item_id, &location_id, now).await?;
 
-            let reference =
-                return_restock_reference(return_id, &line.order_item_id, line.received_quantity);
             let inserted = sqlx::query(
                 "INSERT OR IGNORE INTO inventory_movements \
                  (id, inventory_item_id, location_id, quantity_delta, reason, reference, \
@@ -1309,14 +1477,14 @@ impl InventoryService {
             .bind(item_id.as_str())
             .bind(location_id.as_str())
             .bind(line.quantity)
-            .bind(RETURN_RESTOCK_REASON)
-            .bind(&reference)
+            .bind(reason)
+            .bind(&line.reference)
             .bind(now)
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
             if inserted.rows_affected() == 0 {
-                // This receive has already been restocked.
+                // This restock has already been applied.
                 continue;
             }
 

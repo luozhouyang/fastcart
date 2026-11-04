@@ -11,10 +11,10 @@ use fastcart_module_inventory::{
     ReservationReference,
 };
 use fastcart_module_order::{
-    ClaimItemInput, ClaimItemType, ClaimStatus, CreateClaimInput, CreateOrderInput,
-    CreateOrderItemInput, CreateReturnInput, Order, OrderReturn, OrderService, ReceiveReturnInput,
-    ReceiveReturnItemInput, RefundInput, RefundStatus as OrderRefundStatus, ReturnItemInput,
-    ReturnStatus,
+    ClaimItemInput, ClaimItemType, ClaimStatus, CreateClaimInput, CreateExchangeInput,
+    CreateOrderInput, CreateOrderItemInput, CreateReturnInput, ExchangeItemInput, Order,
+    OrderReturn, OrderService, ReceiveReturnInput, ReceiveReturnItemInput, RefundInput,
+    RefundStatus as OrderRefundStatus, ReturnItemInput, ReturnStatus,
 };
 use fastcart_module_payment::{
     CreatePaymentSessionInput, ManualProvider, Payment, PaymentService, ProviderRegistry,
@@ -166,6 +166,11 @@ async fn return_refunds_move_money_once_and_link_the_order_refund() {
     let order = create_order(&fixture.orders, 2, None, true).await;
     let payment = capture_payment(&fixture.payments, &order).await;
     let order_return = requested_return(&fixture.orders, &order, 2).await;
+    fixture
+        .orders
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
 
     let first = fixture
         .workflow
@@ -220,6 +225,11 @@ async fn retry_after_a_partial_failure_relinks_without_refunding() {
     let order = create_order(&fixture.orders, 2, None, true).await;
     let payment = capture_payment(&fixture.payments, &order).await;
     let order_return = requested_return(&fixture.orders, &order, 2).await;
+    fixture
+        .orders
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
 
     // Simulate a crash after the provider and order refunds were written but
     // before the return link was attached.
@@ -284,6 +294,11 @@ async fn partial_return_refunds_the_proportional_line_total() {
     let order = create_order(&fixture.orders, 2, None, true).await;
     let payment = capture_payment(&fixture.payments, &order).await;
     let order_return = requested_return(&fixture.orders, &order, 1).await;
+    fixture
+        .orders
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
 
     let result = fixture
         .workflow
@@ -535,6 +550,11 @@ async fn missing_captured_payment_is_a_conflict() {
     let fixture = fixture().await;
     let order = create_order(&fixture.orders, 1, None, true).await;
     let order_return = requested_return(&fixture.orders, &order, 1).await;
+    fixture
+        .orders
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
 
     let error = fixture
         .workflow
@@ -542,4 +562,443 @@ async fn missing_captured_payment_is_a_conflict() {
         .await
         .unwrap_err();
     assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+}
+
+async fn create_two_line_order(orders: &OrderService) -> Order {
+    orders
+        .create_order(CreateOrderInput {
+            email: "buyer@example.com".to_owned(),
+            currency_code: "USD".to_owned(),
+            items: vec![
+                CreateOrderItemInput {
+                    product_title: "Widget A".to_owned(),
+                    unit_price: 1_000,
+                    quantity: 1,
+                    ..CreateOrderItemInput::default()
+                },
+                CreateOrderItemInput {
+                    product_title: "Widget B".to_owned(),
+                    unit_price: 1_000,
+                    quantity: 1,
+                    ..CreateOrderItemInput::default()
+                },
+            ],
+            subtotal: 2_000,
+            total: 2_000,
+            shipping_address: json!({}),
+            billing_address: json!({}),
+            ..CreateOrderInput::default()
+        })
+        .await
+        .unwrap()
+}
+
+/// Stocks a replacement variant at the order's committed location so the
+/// consumption flow finds it there.
+async fn stock_replacement_variant(
+    inventory: &InventoryService,
+    order_id: &fastcart_kernel::OrderId,
+    variant: &VariantId,
+    location: &InventoryLocationId,
+    stocked: i64,
+) -> InventoryItemId {
+    let item = inventory
+        .create_item(CreateInventoryItemInput {
+            sku: None,
+            variant_id: Some(variant.clone()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    inventory
+        .adjust_stock(&item.id, location, stocked, "receiving", None)
+        .await
+        .unwrap();
+    let checkout = CheckoutId::new();
+    inventory
+        .reserve(
+            vec![ReservationLine::new(variant.clone(), 1)],
+            ReservationReference::new(checkout.clone()),
+            60,
+        )
+        .await
+        .unwrap();
+    inventory.commit(&checkout, order_id).await.unwrap();
+    item.id
+}
+
+#[tokio::test]
+async fn refunding_an_unreceived_return_is_rejected() {
+    let fixture = fixture().await;
+    let order = create_order(&fixture.orders, 1, None, true).await;
+    capture_payment(&fixture.payments, &order).await;
+    let order_return = requested_return(&fixture.orders, &order, 1).await;
+
+    let error = fixture
+        .workflow
+        .refund_return(&order.id, &order_return.id, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+    assert!(
+        fixture
+            .orders
+            .get_return(&order.id, &order_return.id)
+            .await
+            .unwrap()
+            .refund_id
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn written_off_units_are_excluded_from_the_refund() {
+    let fixture = fixture().await;
+    let order = create_order(&fixture.orders, 2, None, true).await;
+    capture_payment(&fixture.payments, &order).await;
+    let order_return = requested_return(&fixture.orders, &order, 2).await;
+    fixture
+        .orders
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
+    let written_off = fixture
+        .orders
+        .write_off_return(
+            &order.id,
+            &order_return.id,
+            fastcart_module_order::WriteOffReturnInput {
+                items: vec![fastcart_module_order::WriteOffReturnItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(written_off.status, ReturnStatus::Received);
+    assert_eq!(written_off.items[0].received_quantity, 2);
+    assert_eq!(written_off.items[0].written_off_quantity, 1);
+
+    let result = fixture
+        .workflow
+        .refund_return(&order.id, &order_return.id, None)
+        .await
+        .unwrap();
+    // One of the two received units was written off, so only one is refunded.
+    assert_eq!(result.provider_refund.as_ref().unwrap().amount, 1_000);
+    assert_eq!(result.order_refund.as_ref().unwrap().amount, 1_000);
+
+    let replay = fixture
+        .workflow
+        .refund_return(&order.id, &order_return.id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.order_refund.as_ref().unwrap().id,
+        result.order_refund.as_ref().unwrap().id
+    );
+}
+
+#[tokio::test]
+async fn claim_replacements_are_fulfilled_and_consume_stock_once() {
+    let fixture = fixture().await;
+    let original = VariantId::new();
+    let replacement = VariantId::new();
+    let order = create_order(&fixture.orders, 1, Some(original.clone()), true).await;
+    let (inventory, _, location) = stock_order(&fixture.db, &order, &original, 10, 1).await;
+    let replacement_item =
+        stock_replacement_variant(&inventory, &order.id, &replacement, &location, 5).await;
+    assert_eq!(
+        inventory
+            .available_quantity(&replacement_item, &location)
+            .await
+            .unwrap(),
+        4
+    );
+
+    let claim = fixture
+        .orders
+        .create_claim(
+            &order.id,
+            CreateClaimInput {
+                reason: Some("wrong size".to_owned()),
+                metadata: Metadata::empty(),
+                items: vec![ClaimItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                    item_type: ClaimItemType::Replace,
+                    replacement_variant_id: Some(replacement.clone()),
+                    reason: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let first = fixture
+        .workflow
+        .fulfill_claim(&order.id, &claim.id, "manual", vec!["TRACK-1".to_owned()])
+        .await
+        .unwrap();
+    assert_eq!(first.claim.status, ClaimStatus::Accepted);
+    assert_eq!(first.consumed_units, 1);
+    let fulfillment = first.fulfillment.as_ref().unwrap();
+    assert_eq!(fulfillment.provider_id, "manual");
+    assert_eq!(fulfillment.tracking_numbers, vec!["TRACK-1".to_owned()]);
+    assert_eq!(fulfillment.items.len(), 1);
+    assert_eq!(fulfillment.items[0].variant_id, replacement);
+    assert_eq!(fulfillment.items[0].quantity, 1);
+    assert_eq!(
+        inventory
+            .available_quantity(&replacement_item, &location)
+            .await
+            .unwrap(),
+        3
+    );
+
+    let replay = fixture
+        .workflow
+        .fulfill_claim(&order.id, &claim.id, "manual", Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(replay.consumed_units, 0);
+    assert_eq!(replay.fulfillment.as_ref().unwrap().id, fulfillment.id);
+    assert_eq!(
+        inventory
+            .available_quantity(&replacement_item, &location)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        inventory
+            .list_movements(&replacement_item)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|movement| movement.reason == "after_sales_consume")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn accepting_an_exchange_restocks_inbound_items_once() {
+    let fixture = fixture().await;
+    let original = VariantId::new();
+    let replacement = VariantId::new();
+    let order = create_order(&fixture.orders, 2, Some(original.clone()), true).await;
+    let (inventory, original_item, location) =
+        stock_order(&fixture.db, &order, &original, 10, 2).await;
+    assert_eq!(
+        inventory
+            .available_quantity(&original_item, &location)
+            .await
+            .unwrap(),
+        8
+    );
+
+    let exchange = fixture
+        .orders
+        .create_exchange(
+            &order.id,
+            CreateExchangeInput {
+                reason: None,
+                metadata: Metadata::empty(),
+                inbound_items: vec![ExchangeItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                    replacement_variant_id: None,
+                    reason: None,
+                }],
+                outbound_items: vec![ExchangeItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                    replacement_variant_id: Some(replacement.clone()),
+                    reason: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let first = fixture
+        .workflow
+        .accept_exchange(&order.id, &exchange.id)
+        .await
+        .unwrap();
+    assert_eq!(first.restocked_units, 1);
+    assert_eq!(
+        inventory
+            .available_quantity(&original_item, &location)
+            .await
+            .unwrap(),
+        9
+    );
+
+    let replay = fixture
+        .workflow
+        .accept_exchange(&order.id, &exchange.id)
+        .await
+        .unwrap();
+    assert_eq!(replay.restocked_units, 0);
+    assert_eq!(
+        inventory
+            .available_quantity(&original_item, &location)
+            .await
+            .unwrap(),
+        9
+    );
+    let movements = inventory.list_movements(&original_item).await.unwrap();
+    assert_eq!(
+        movements
+            .iter()
+            .filter(|movement| movement.reason == "exchange_restock")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn exchange_outbound_fulfillment_is_idempotent() {
+    let fixture = fixture().await;
+    let original = VariantId::new();
+    let replacement = VariantId::new();
+    let order = create_order(&fixture.orders, 2, Some(original.clone()), true).await;
+    let (inventory, _, location) = stock_order(&fixture.db, &order, &original, 10, 2).await;
+    let replacement_item =
+        stock_replacement_variant(&inventory, &order.id, &replacement, &location, 5).await;
+
+    let exchange = fixture
+        .orders
+        .create_exchange(
+            &order.id,
+            CreateExchangeInput {
+                reason: None,
+                metadata: Metadata::empty(),
+                inbound_items: vec![ExchangeItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                    replacement_variant_id: None,
+                    reason: None,
+                }],
+                outbound_items: vec![ExchangeItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                    replacement_variant_id: Some(replacement.clone()),
+                    reason: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let first = fixture
+        .workflow
+        .fulfill_exchange(&order.id, &exchange.id, "manual", vec!["OUT-1".to_owned()])
+        .await
+        .unwrap();
+    assert_eq!(first.consumed_units, 1);
+    let fulfillment = first.fulfillment.as_ref().unwrap();
+    assert_eq!(fulfillment.items[0].variant_id, replacement);
+    assert_eq!(
+        inventory
+            .available_quantity(&replacement_item, &location)
+            .await
+            .unwrap(),
+        3
+    );
+
+    let replay = fixture
+        .workflow
+        .fulfill_exchange(&order.id, &exchange.id, "manual", Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(replay.consumed_units, 0);
+    assert_eq!(replay.fulfillment.as_ref().unwrap().id, fulfillment.id);
+    assert_eq!(
+        inventory
+            .list_movements(&replacement_item)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|movement| movement.reason == "after_sales_consume")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn refund_and_replacement_claim_lines_compose() {
+    let fixture = fixture().await;
+    let original = VariantId::new();
+    let replacement = VariantId::new();
+    let order = create_two_line_order(&fixture.orders).await;
+    let payment = capture_payment(&fixture.payments, &order).await;
+    let (inventory, _, location) = stock_order(&fixture.db, &order, &original, 10, 1).await;
+    let replacement_item =
+        stock_replacement_variant(&inventory, &order.id, &replacement, &location, 5).await;
+
+    let claim = fixture
+        .orders
+        .create_claim(
+            &order.id,
+            CreateClaimInput {
+                reason: None,
+                metadata: Metadata::empty(),
+                items: vec![
+                    ClaimItemInput {
+                        order_item_id: order.items[0].id.clone(),
+                        quantity: 1,
+                        item_type: ClaimItemType::Refund,
+                        replacement_variant_id: None,
+                        reason: None,
+                    },
+                    ClaimItemInput {
+                        order_item_id: order.items[1].id.clone(),
+                        quantity: 1,
+                        item_type: ClaimItemType::Replace,
+                        replacement_variant_id: Some(replacement.clone()),
+                        reason: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+    let refund = fixture
+        .workflow
+        .refund_claim(&order.id, &claim.id, None)
+        .await
+        .unwrap();
+    // Only the refund line is paid out.
+    assert_eq!(refund.provider_refund.as_ref().unwrap().amount, 1_000);
+    assert!(refund.claim.refund_id.is_some());
+
+    let fulfillment = fixture
+        .workflow
+        .fulfill_claim(&order.id, &claim.id, "manual", Vec::new())
+        .await
+        .unwrap();
+    // Only the replace line is shipped.
+    assert_eq!(fulfillment.consumed_units, 1);
+    assert_eq!(fulfillment.fulfillment.as_ref().unwrap().items.len(), 1);
+    assert_eq!(
+        inventory
+            .available_quantity(&replacement_item, &location)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        fixture
+            .payments
+            .list_refunds(payment.id.as_str())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }

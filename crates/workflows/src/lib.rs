@@ -10,7 +10,8 @@ pub mod engine;
 pub mod maintenance;
 
 pub use after_sales::{
-    AfterSalesWorkflow, ClaimRefundResult, ReceiveReturnResult, ReturnRefundResult,
+    AfterSalesWorkflow, ClaimFulfillmentResult, ClaimRefundResult, ExchangeAcceptResult,
+    ExchangeFulfillmentResult, ReceiveReturnResult, ReturnRefundResult,
 };
 pub use cart::{CartContext, CartWorkflow};
 pub use checkout::{CheckoutWorkflow, CompleteCheckoutResult, CreateCheckoutRequest};

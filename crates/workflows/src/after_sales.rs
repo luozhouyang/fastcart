@@ -7,13 +7,22 @@
 //! reference. Replaying any step therefore never moves money or stock twice.
 
 use fastcart_infrastructure::StoreDatabase;
-use fastcart_kernel::{AppError, ClaimId, LineItemId, OrderId, Pagination, ReturnId};
-use fastcart_module_inventory::{InventoryService, ReturnRestockLine};
+use fastcart_kernel::{
+    AppError, ClaimId, ExchangeId, LineItemId, Metadata, OrderId, Pagination, ReturnId,
+};
+use fastcart_module_inventory::{
+    ExchangeRestockLine, InventoryService, ReturnRestockLine, StockConsumption,
+};
 use fastcart_module_order::{
-    ClaimItemType, ClaimStatus, Order, OrderClaim, OrderRefund, OrderReturn, OrderService,
-    ReceiveReturnInput, RefundInput, ReturnStatus,
+    AfterSalesFulfillment, AfterSalesFulfillmentItemInput, ClaimItemType, ClaimStatus,
+    CreateAfterSalesFulfillmentInput, ExchangeItemDirection, ExchangeItemStatus, ExchangeStatus,
+    Order, OrderClaim, OrderExchange, OrderRefund, OrderReturn, OrderService, ReceiveReturnInput,
+    RefundInput, ReturnStatus,
 };
 use fastcart_module_payment::{ListPaymentsFilter, Payment, PaymentService, PaymentStatus, Refund};
+use fastcart_module_shipping::{
+    CreateFulfillmentRequest, FulfillmentItemRequest, FulfillmentProviderRegistry,
+};
 
 /// Prefix for provider and local idempotency keys of return refunds.
 const RETURN_REFUND_PREFIX: &str = "return-refund";
@@ -55,24 +64,74 @@ pub struct ReceiveReturnResult {
     pub restocked_units: i64,
 }
 
+/// Result of fulfilling the replacement lines of a claim.
+#[derive(Clone, Debug)]
+pub struct ClaimFulfillmentResult {
+    /// Order aggregate after the fulfillment.
+    pub order: Order,
+    /// Accepted claim the fulfillment belongs to.
+    pub claim: OrderClaim,
+    /// Persisted after-sales fulfillment, when the claim had replacement lines.
+    pub fulfillment: Option<AfterSalesFulfillment>,
+    /// Replacement units consumed from inventory by this call.
+    pub consumed_units: i64,
+}
+
+/// Result of accepting an exchange and restocking its inbound goods.
+#[derive(Clone, Debug)]
+pub struct ExchangeAcceptResult {
+    /// Order aggregate after the transition.
+    pub order: Order,
+    /// Accepted exchange.
+    pub exchange: OrderExchange,
+    /// Inbound units placed back into inventory by this call.
+    pub restocked_units: i64,
+}
+
+/// Result of fulfilling the outbound lines of an exchange.
+#[derive(Clone, Debug)]
+pub struct ExchangeFulfillmentResult {
+    /// Order aggregate after the fulfillment.
+    pub order: Order,
+    /// Accepted exchange the fulfillment belongs to.
+    pub exchange: OrderExchange,
+    /// Persisted after-sales fulfillment, when the exchange had outbound lines.
+    pub fulfillment: Option<AfterSalesFulfillment>,
+    /// Replacement units consumed from inventory by this call.
+    pub consumed_units: i64,
+}
+
 /// Orchestrates order, payment and inventory services for after-sales flows.
 pub struct AfterSalesWorkflow {
     order: OrderService,
     payment: PaymentService,
     inventory: InventoryService,
+    shipping: FulfillmentProviderRegistry,
 }
 
 impl AfterSalesWorkflow {
-    /// Creates a workflow bound to one store.
+    /// Creates a workflow bound to one store using the default fulfillment
+    /// providers.
     ///
     /// The payment service must be constructed with the provider registry used
     /// by the process, exactly like [`crate::CheckoutWorkflow`].
     #[must_use]
     pub fn new(db: StoreDatabase, payment: PaymentService) -> Self {
+        Self::with_shipping_providers(db, payment, FulfillmentProviderRegistry::with_defaults())
+    }
+
+    /// Creates a workflow with an explicit fulfillment provider registry.
+    #[must_use]
+    pub fn with_shipping_providers(
+        db: StoreDatabase,
+        payment: PaymentService,
+        shipping: FulfillmentProviderRegistry,
+    ) -> Self {
         Self {
             order: OrderService::new(db.clone()),
             payment,
             inventory: InventoryService::new(db),
+            shipping,
         }
     }
 
@@ -135,10 +194,24 @@ impl AfterSalesWorkflow {
             });
         }
 
-        let requested = order_return
-            .items
-            .iter()
-            .map(|item| (item.order_item_id.clone(), item.quantity));
+        // Only goods that actually arrived can be refunded. A written-off unit
+        // is received but was not resold, so it never contributes to a refund.
+        if !matches!(
+            order_return.status,
+            ReturnStatus::Received | ReturnStatus::PartiallyReceived
+        ) {
+            return Err(AppError::conflict(format!(
+                "return in state {} cannot be refunded before goods are received",
+                order_return.status.as_str()
+            )));
+        }
+        let requested = order_return.items.iter().filter_map(|item| {
+            let refundable = item
+                .received_quantity
+                .saturating_sub(item.written_off_quantity)
+                .max(0);
+            (refundable > 0).then(|| (item.order_item_id.clone(), refundable))
+        });
         let refundable = refundable_amount(&order, requested)?;
         let amount = cap_refund(&order, refundable);
         if amount <= 0 {
@@ -375,6 +448,320 @@ impl AfterSalesWorkflow {
             order_return,
             restocked_units,
         })
+    }
+
+    /// Fulfills the replacement lines of an accepted claim.
+    ///
+    /// Only [`ClaimItemType::Replace`] lines with a replacement variant are
+    /// shipped; refund lines are handled by [`Self::refund_claim`]. The
+    /// provider is called before any local write. Replaying the call returns
+    /// the existing fulfillment without creating another provider fulfillment
+    /// or stock movement.
+    pub async fn fulfill_claim(
+        &self,
+        order_id: &OrderId,
+        claim_id: &ClaimId,
+        provider_id: &str,
+        tracking_numbers: Vec<String>,
+    ) -> Result<ClaimFulfillmentResult, AppError> {
+        let mut claim = self.order.get_claim(order_id, claim_id).await?;
+        if claim.status == ClaimStatus::Canceled {
+            return Err(AppError::conflict(
+                "cannot fulfill a canceled claim".to_owned(),
+            ));
+        }
+        if claim.status == ClaimStatus::Requested {
+            claim = self.order.accept_claim(order_id, claim_id).await?;
+        }
+
+        if let Some(existing) = self.order.claim_fulfillment(order_id, claim_id).await? {
+            let order = self.order.get(order_id).await?;
+            return Ok(ClaimFulfillmentResult {
+                order,
+                claim,
+                fulfillment: Some(existing),
+                consumed_units: 0,
+            });
+        }
+
+        let mut replacements = Vec::new();
+        for item in &claim.items {
+            if item.item_type != ClaimItemType::Replace {
+                continue;
+            }
+            let variant_id = item.replacement_variant_id.clone().ok_or_else(|| {
+                AppError::validation(format!(
+                    "replace claim line {} has no replacement_variant_id",
+                    item.id
+                ))
+            })?;
+            replacements.push((item.id.as_str().to_owned(), variant_id, item.quantity));
+        }
+
+        if replacements.is_empty() {
+            let order = self.order.get(order_id).await?;
+            return Ok(ClaimFulfillmentResult {
+                order,
+                claim,
+                fulfillment: None,
+                consumed_units: 0,
+            });
+        }
+
+        let receipt = self
+            .create_provider_fulfillment(
+                order_id,
+                provider_id,
+                tracking_numbers,
+                replacements
+                    .iter()
+                    .map(|(_, variant_id, quantity)| FulfillmentItemRequest {
+                        variant_id: variant_id.as_str().to_owned(),
+                        quantity: *quantity,
+                    }),
+            )
+            .await?;
+
+        let consumptions = replacements
+            .iter()
+            .map(|(line_id, variant_id, quantity)| {
+                StockConsumption::new(
+                    variant_id.clone(),
+                    *quantity,
+                    format!("claim-fulfill:{}:{}", claim_id.as_str(), line_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        let consumed_units = self
+            .inventory
+            .consume_stock(order_id, &consumptions)
+            .await?;
+
+        let fulfillment = self
+            .order
+            .create_after_sales_fulfillment(CreateAfterSalesFulfillmentInput {
+                order_id: order_id.clone(),
+                claim_id: Some(claim_id.clone()),
+                exchange_id: None,
+                provider_id: receipt.provider_id.clone(),
+                provider_fulfillment_id: Some(receipt.provider_fulfillment_id.clone()),
+                provider_data: receipt.data.clone(),
+                tracking_numbers: receipt.tracking_numbers.clone(),
+                metadata: Metadata::empty(),
+                items: replacements
+                    .iter()
+                    .map(|(_, variant_id, quantity)| AfterSalesFulfillmentItemInput {
+                        variant_id: variant_id.clone(),
+                        quantity: *quantity,
+                    })
+                    .collect(),
+            })
+            .await?;
+
+        let order = self.order.get(order_id).await?;
+        let claim = self.order.get_claim(order_id, claim_id).await?;
+        Ok(ClaimFulfillmentResult {
+            order,
+            claim,
+            fulfillment: Some(fulfillment),
+            consumed_units,
+        })
+    }
+
+    /// Accepts an exchange and restocks its inbound items exactly once.
+    ///
+    /// Accepting an already accepted exchange is safe: the movement references
+    /// are stable, so a retry restocks zero additional units.
+    pub async fn accept_exchange(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &ExchangeId,
+    ) -> Result<ExchangeAcceptResult, AppError> {
+        let order = self.order.get(order_id).await?;
+        let mut exchange = self.order.get_exchange(order_id, exchange_id).await?;
+        if exchange.status == ExchangeStatus::Canceled {
+            return Err(AppError::conflict(
+                "cannot accept a canceled exchange".to_owned(),
+            ));
+        }
+        if exchange.status == ExchangeStatus::Requested {
+            exchange = self.order.accept_exchange(order_id, exchange_id).await?;
+        }
+
+        let mut lines = Vec::new();
+        for item in &exchange.inbound_items {
+            if item.status != ExchangeItemStatus::Accepted {
+                continue;
+            }
+            let Some(order_item) = order
+                .items
+                .iter()
+                .find(|order_item| order_item.id == item.order_item_id)
+            else {
+                continue;
+            };
+            if !order_item.requires_shipping {
+                continue;
+            }
+            let Some(variant_id) = order_item.variant_id.clone() else {
+                continue;
+            };
+            lines.push(ExchangeRestockLine::new(
+                item.id.as_str(),
+                variant_id,
+                item.quantity,
+            ));
+        }
+
+        let restocked_units = if lines.is_empty() {
+            0
+        } else {
+            self.inventory
+                .restock_exchange(order_id, exchange_id.as_str(), &lines)
+                .await?
+        };
+        let order = self.order.get(order_id).await?;
+        Ok(ExchangeAcceptResult {
+            order,
+            exchange,
+            restocked_units,
+        })
+    }
+
+    /// Fulfills the outbound lines of an accepted exchange.
+    ///
+    /// Mirrors [`Self::fulfill_claim`]: the provider is called before local
+    /// writes, replacement stock is consumed idempotently, and replaying the
+    /// call returns the existing fulfillment.
+    pub async fn fulfill_exchange(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &ExchangeId,
+        provider_id: &str,
+        tracking_numbers: Vec<String>,
+    ) -> Result<ExchangeFulfillmentResult, AppError> {
+        let exchange = self.accept_exchange(order_id, exchange_id).await?.exchange;
+
+        if let Some(existing) = self
+            .order
+            .exchange_fulfillment(order_id, exchange_id)
+            .await?
+        {
+            let order = self.order.get(order_id).await?;
+            return Ok(ExchangeFulfillmentResult {
+                order,
+                exchange,
+                fulfillment: Some(existing),
+                consumed_units: 0,
+            });
+        }
+
+        let mut replacements = Vec::new();
+        for item in &exchange.outbound_items {
+            if item.direction != ExchangeItemDirection::Outbound
+                || item.status != ExchangeItemStatus::Accepted
+            {
+                continue;
+            }
+            let variant_id = item.replacement_variant_id.clone().ok_or_else(|| {
+                AppError::validation(format!(
+                    "outbound exchange line {} has no replacement_variant_id",
+                    item.id
+                ))
+            })?;
+            replacements.push((item.id.as_str().to_owned(), variant_id, item.quantity));
+        }
+
+        if replacements.is_empty() {
+            let order = self.order.get(order_id).await?;
+            return Ok(ExchangeFulfillmentResult {
+                order,
+                exchange,
+                fulfillment: None,
+                consumed_units: 0,
+            });
+        }
+
+        let receipt = self
+            .create_provider_fulfillment(
+                order_id,
+                provider_id,
+                tracking_numbers,
+                replacements
+                    .iter()
+                    .map(|(_, variant_id, quantity)| FulfillmentItemRequest {
+                        variant_id: variant_id.as_str().to_owned(),
+                        quantity: *quantity,
+                    }),
+            )
+            .await?;
+
+        let consumptions = replacements
+            .iter()
+            .map(|(line_id, variant_id, quantity)| {
+                StockConsumption::new(
+                    variant_id.clone(),
+                    *quantity,
+                    format!("exchange-fulfill:{}:{}", exchange_id.as_str(), line_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        let consumed_units = self
+            .inventory
+            .consume_stock(order_id, &consumptions)
+            .await?;
+
+        let fulfillment = self
+            .order
+            .create_after_sales_fulfillment(CreateAfterSalesFulfillmentInput {
+                order_id: order_id.clone(),
+                claim_id: None,
+                exchange_id: Some(exchange_id.clone()),
+                provider_id: receipt.provider_id.clone(),
+                provider_fulfillment_id: Some(receipt.provider_fulfillment_id.clone()),
+                provider_data: receipt.data.clone(),
+                tracking_numbers: receipt.tracking_numbers.clone(),
+                metadata: Metadata::empty(),
+                items: replacements
+                    .iter()
+                    .map(|(_, variant_id, quantity)| AfterSalesFulfillmentItemInput {
+                        variant_id: variant_id.clone(),
+                        quantity: *quantity,
+                    })
+                    .collect(),
+            })
+            .await?;
+
+        let order = self.order.get(order_id).await?;
+        let exchange = self.order.get_exchange(order_id, exchange_id).await?;
+        Ok(ExchangeFulfillmentResult {
+            order,
+            exchange,
+            fulfillment: Some(fulfillment),
+            consumed_units,
+        })
+    }
+
+    async fn create_provider_fulfillment(
+        &self,
+        order_id: &OrderId,
+        provider_id: &str,
+        tracking_numbers: Vec<String>,
+        items: impl Iterator<Item = FulfillmentItemRequest>,
+    ) -> Result<fastcart_module_shipping::FulfillmentReceipt, AppError> {
+        let provider = self
+            .shipping
+            .get(provider_id)
+            .ok_or_else(|| AppError::not_found("fulfillment provider", provider_id))?;
+        provider
+            .create_fulfillment(CreateFulfillmentRequest {
+                order_id: order_id.as_str().to_owned(),
+                items: items.collect(),
+                tracking_numbers,
+                provider_data: serde_json::json!({}),
+                metadata: Metadata::empty(),
+            })
+            .await
     }
 
     async fn captured_payment(&self, order_id: &OrderId) -> Result<Payment, AppError> {

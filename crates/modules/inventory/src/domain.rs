@@ -261,6 +261,64 @@ pub fn return_restock_reference(
     )
 }
 
+/// One inbound exchange quantity to place back into stock.
+///
+/// `exchange_item_id` identifies the exchange line, which makes the movement
+/// reference stable across retries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExchangeRestockLine {
+    /// Exchange line whose inbound goods arrived.
+    pub exchange_item_id: String,
+    /// Catalog variant whose inventory item receives the stock.
+    pub variant_id: VariantId,
+    /// Quantity received in this transition.
+    pub quantity: i64,
+}
+
+impl ExchangeRestockLine {
+    /// Creates a restock line for an accepted inbound exchange item.
+    #[must_use]
+    pub fn new(exchange_item_id: impl Into<String>, variant_id: VariantId, quantity: i64) -> Self {
+        Self {
+            exchange_item_id: exchange_item_id.into(),
+            variant_id,
+            quantity,
+        }
+    }
+}
+
+/// Builds the deterministic movement reference used by [`ExchangeRestockLine`].
+#[must_use]
+pub fn exchange_restock_reference(exchange_id: &str, exchange_item_id: &str) -> String {
+    format!("exchange-restock:{exchange_id}:{exchange_item_id}")
+}
+
+/// One variant quantity consumed from stock by an after-sales replacement.
+///
+/// The caller supplies a unique `reference` per consumed line; replaying the
+/// same reference never removes stock twice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StockConsumption {
+    /// Catalog variant whose inventory item is consumed.
+    pub variant_id: VariantId,
+    /// Positive quantity to consume.
+    pub quantity: i64,
+    /// Deterministic idempotency reference for this consumption.
+    pub reference: String,
+}
+
+impl StockConsumption {
+    /// Creates a stock consumption line.
+    #[must_use]
+    pub fn new(variant_id: VariantId, quantity: i64, reference: impl Into<String>) -> Self {
+        Self {
+            variant_id,
+            quantity,
+            reference: reference.into(),
+        }
+    }
+}
+
 /// Alias used by callers that model the owning checkout as a reference.
 pub type Reference = ReservationReference;
 

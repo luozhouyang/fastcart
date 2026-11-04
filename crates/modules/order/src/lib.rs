@@ -10,13 +10,14 @@ pub mod service;
 pub mod service_after_sales;
 
 pub use after_sales::{
-    ClaimItemInput, ClaimItemStatus, ClaimItemType, ClaimStatus, CreateClaimInput,
-    CreateExchangeInput, CreateOrderEditInput, CreateReturnInput, ExchangeItemDirection,
-    ExchangeItemInput, ExchangeItemStatus, ExchangeStatus, OrderClaim, OrderClaimItem, OrderEdit,
-    OrderEditAction, OrderEditItem, OrderEditItemInput, OrderEditItemStatus, OrderEditStatus,
-    OrderExchange, OrderExchangeItem, OrderReturn, OrderReturnItem, ReceiveReturnInput,
-    ReceiveReturnItemInput, ReturnItemInput, ReturnItemStatus, ReturnStatus, WriteOffReturnInput,
-    WriteOffReturnItemInput,
+    AfterSalesFulfillment, AfterSalesFulfillmentItem, AfterSalesFulfillmentItemInput,
+    ClaimItemInput, ClaimItemStatus, ClaimItemType, ClaimStatus, CreateAfterSalesFulfillmentInput,
+    CreateClaimInput, CreateExchangeInput, CreateOrderEditInput, CreateReturnInput,
+    ExchangeItemDirection, ExchangeItemInput, ExchangeItemStatus, ExchangeStatus, OrderClaim,
+    OrderClaimItem, OrderEdit, OrderEditAction, OrderEditItem, OrderEditItemInput,
+    OrderEditItemStatus, OrderEditStatus, OrderExchange, OrderExchangeItem, OrderReturn,
+    OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput, ReturnItemInput, ReturnItemStatus,
+    ReturnStatus, WriteOffReturnInput, WriteOffReturnItemInput,
 };
 pub use domain::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, FulfillmentInput,

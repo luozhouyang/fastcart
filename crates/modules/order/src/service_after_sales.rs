@@ -8,13 +8,15 @@ use std::collections::{HashMap, HashSet};
 
 use fastcart_infrastructure::database_error;
 use fastcart_kernel::{
-    AppError, ClaimId, EventId, ExchangeId, LineItemId, OrderEditId, OrderId, ProductId, RefundId,
-    ReturnId, Timestamp, VariantId, now_timestamp, validate_metadata, validate_quantity,
+    AppError, ClaimId, EventId, ExchangeId, FulfillmentId, LineItemId, OrderEditId, OrderId,
+    ProductId, RefundId, ReturnId, Timestamp, VariantId, now_timestamp, validate_length,
+    validate_metadata, validate_quantity,
 };
 use sqlx::SqliteConnection;
 
 use crate::after_sales::{
-    ClaimItemStatus, ClaimStatus, CreateClaimInput, CreateExchangeInput, CreateOrderEditInput,
+    AfterSalesFulfillment, AfterSalesFulfillmentItem, ClaimItemStatus, ClaimStatus,
+    CreateAfterSalesFulfillmentInput, CreateClaimInput, CreateExchangeInput, CreateOrderEditInput,
     CreateReturnInput, ExchangeItemDirection, ExchangeItemStatus, ExchangeStatus, OrderClaim,
     OrderClaimItem, OrderEdit, OrderEditAction, OrderEditItem, OrderEditItemStatus,
     OrderEditStatus, OrderExchange, OrderExchangeItem, OrderReturn, OrderReturnItem,
@@ -160,6 +162,43 @@ impl ExchangeItemRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct AfterSalesFulfillmentRow {
+    id: String,
+    order_id: String,
+    claim_id: Option<String>,
+    exchange_id: Option<String>,
+    status: String,
+    provider_id: String,
+    provider_fulfillment_id: Option<String>,
+    provider_data: String,
+    tracking_numbers: String,
+    metadata: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct AfterSalesFulfillmentItemRow {
+    id: String,
+    fulfillment_id: String,
+    variant_id: String,
+    quantity: i64,
+    created_at: i64,
+}
+
+impl AfterSalesFulfillmentItemRow {
+    fn into_domain(self) -> AfterSalesFulfillmentItem {
+        AfterSalesFulfillmentItem {
+            id: EventId::from_string(self.id),
+            fulfillment_id: FulfillmentId::from_string(self.fulfillment_id),
+            variant_id: VariantId::from_string(self.variant_id),
+            quantity: self.quantity,
+            created_at: self.created_at,
+        }
     }
 }
 
@@ -1342,6 +1381,264 @@ impl OrderService {
 }
 
 // -------------------------------------------------------------------------
+// After-sales fulfillments (claim replacements and exchange outbound)
+// -------------------------------------------------------------------------
+
+impl OrderService {
+    /// Persists a provider-backed replacement fulfillment for a claim or
+    /// exchange.
+    ///
+    /// Exactly one of `claim_id` and `exchange_id` must be set, and the
+    /// referenced record must belong to `order_id`. Calling this again for the
+    /// same after-sales record returns the existing fulfillment instead of
+    /// writing another row.
+    pub async fn create_after_sales_fulfillment(
+        &self,
+        input: CreateAfterSalesFulfillmentInput,
+    ) -> Result<AfterSalesFulfillment, AppError> {
+        match (&input.claim_id, &input.exchange_id) {
+            (Some(_), None) | (None, Some(_)) => {}
+            _ => {
+                return Err(AppError::validation(
+                    "an after-sales fulfillment must reference exactly one claim or exchange",
+                ));
+            }
+        }
+        if input.items.is_empty() {
+            return Err(AppError::validation(
+                "an after-sales fulfillment must contain at least one item",
+            ));
+        }
+        for item in &input.items {
+            validate_quantity(item.quantity, false)?;
+        }
+        validate_metadata(&input.metadata)?;
+        let provider_id = input.provider_id.trim();
+        if provider_id.is_empty() {
+            return Err(AppError::validation(
+                "provider_id must not be empty".to_owned(),
+            ));
+        }
+        validate_length(provider_id, "provider_id", 64)?;
+        let provider_data = if input.provider_data.is_null() {
+            serde_json::json!({})
+        } else {
+            input.provider_data
+        };
+        if !provider_data.is_object() {
+            return Err(AppError::validation(
+                "after-sales fulfillment provider_data must be a JSON object",
+            ));
+        }
+
+        self.get(&input.order_id).await?;
+        if let Some(claim_id) = input.claim_id.as_ref() {
+            self.load_claim(&input.order_id, claim_id).await?;
+            if let Some(existing) = self.claim_fulfillment(&input.order_id, claim_id).await? {
+                return Ok(existing);
+            }
+        }
+        if let Some(exchange_id) = input.exchange_id.as_ref() {
+            self.load_exchange(&input.order_id, exchange_id).await?;
+            if let Some(existing) = self
+                .exchange_fulfillment(&input.order_id, exchange_id)
+                .await?
+            {
+                return Ok(existing);
+            }
+        }
+
+        let id = FulfillmentId::new();
+        let now = now_timestamp();
+        let mut tx = self.database().begin().await.map_err(AppError::from)?;
+        sqlx::query(
+            "INSERT INTO after_sales_fulfillments
+                (id, order_id, claim_id, exchange_id, status, provider_id,
+                 provider_fulfillment_id, provider_data, tracking_numbers, metadata,
+                 created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'fulfilled', ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id.as_str())
+        .bind(input.order_id.as_str())
+        .bind(input.claim_id.as_ref().map(ClaimId::as_str))
+        .bind(input.exchange_id.as_ref().map(ExchangeId::as_str))
+        .bind(provider_id)
+        .bind(input.provider_fulfillment_id.as_deref())
+        .bind(
+            serde_json::to_string(&provider_data)
+                .map_err(|error| AppError::validation(format!("invalid provider_data: {error}")))?,
+        )
+        .bind(
+            serde_json::to_string(&input.tracking_numbers).map_err(|error| {
+                AppError::validation(format!("invalid tracking numbers: {error}"))
+            })?,
+        )
+        .bind(input.metadata.to_json_string())
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+
+        for item in &input.items {
+            sqlx::query(
+                "INSERT INTO after_sales_fulfillment_items
+                    (id, fulfillment_id, variant_id, quantity, created_at)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(EventId::new().as_str())
+            .bind(id.as_str())
+            .bind(item.variant_id.as_str())
+            .bind(item.quantity)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
+
+        tx.commit().await.map_err(database_error)?;
+        self.load_after_sales_fulfillment(&input.order_id, &id)
+            .await
+    }
+
+    /// Loads one after-sales fulfillment.
+    pub async fn get_after_sales_fulfillment(
+        &self,
+        order_id: &OrderId,
+        fulfillment_id: &FulfillmentId,
+    ) -> Result<AfterSalesFulfillment, AppError> {
+        self.load_after_sales_fulfillment(order_id, fulfillment_id)
+            .await
+    }
+
+    /// Returns the single fulfillment recorded for a claim, when present.
+    pub async fn claim_fulfillment(
+        &self,
+        order_id: &OrderId,
+        claim_id: &ClaimId,
+    ) -> Result<Option<AfterSalesFulfillment>, AppError> {
+        self.find_after_sales_fulfillment(order_id, "claim_id", claim_id.as_str())
+            .await
+    }
+
+    /// Returns the single fulfillment recorded for an exchange, when present.
+    pub async fn exchange_fulfillment(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &ExchangeId,
+    ) -> Result<Option<AfterSalesFulfillment>, AppError> {
+        self.find_after_sales_fulfillment(order_id, "exchange_id", exchange_id.as_str())
+            .await
+    }
+
+    /// Lists every after-sales fulfillment for an order, oldest first.
+    pub async fn list_after_sales_fulfillments(
+        &self,
+        order_id: &OrderId,
+    ) -> Result<Vec<AfterSalesFulfillment>, AppError> {
+        self.get(order_id).await?;
+        let rows = sqlx::query_as::<_, AfterSalesFulfillmentRow>(
+            "SELECT id, order_id, claim_id, exchange_id, status, provider_id,
+                    provider_fulfillment_id, provider_data, tracking_numbers, metadata,
+                    created_at, updated_at
+             FROM after_sales_fulfillments WHERE order_id = ?
+             ORDER BY created_at ASC, rowid ASC",
+        )
+        .bind(order_id.as_str())
+        .fetch_all(self.database().pool())
+        .await
+        .map_err(database_error)?;
+        let mut fulfillments = Vec::with_capacity(rows.len());
+        for row in rows {
+            fulfillments.push(self.after_sales_fulfillment_from_row(row).await?);
+        }
+        Ok(fulfillments)
+    }
+
+    async fn find_after_sales_fulfillment(
+        &self,
+        order_id: &OrderId,
+        column: &str,
+        value: &str,
+    ) -> Result<Option<AfterSalesFulfillment>, AppError> {
+        // `column` is a private constant chosen by the caller, never user input.
+        let sql = format!(
+            "SELECT id, order_id, claim_id, exchange_id, status, provider_id,
+                    provider_fulfillment_id, provider_data, tracking_numbers, metadata,
+                    created_at, updated_at
+             FROM after_sales_fulfillments
+             WHERE order_id = ? AND {column} = ?
+             ORDER BY created_at ASC, rowid ASC LIMIT 1"
+        );
+        let row = sqlx::query_as::<_, AfterSalesFulfillmentRow>(&sql)
+            .bind(order_id.as_str())
+            .bind(value)
+            .fetch_optional(self.database().pool())
+            .await
+            .map_err(database_error)?;
+        match row {
+            Some(row) => self.after_sales_fulfillment_from_row(row).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn load_after_sales_fulfillment(
+        &self,
+        order_id: &OrderId,
+        fulfillment_id: &FulfillmentId,
+    ) -> Result<AfterSalesFulfillment, AppError> {
+        let row = sqlx::query_as::<_, AfterSalesFulfillmentRow>(
+            "SELECT id, order_id, claim_id, exchange_id, status, provider_id,
+                    provider_fulfillment_id, provider_data, tracking_numbers, metadata,
+                    created_at, updated_at
+             FROM after_sales_fulfillments WHERE id = ? AND order_id = ?",
+        )
+        .bind(fulfillment_id.as_str())
+        .bind(order_id.as_str())
+        .fetch_optional(self.database().pool())
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("after-sales fulfillment", fulfillment_id))?;
+        self.after_sales_fulfillment_from_row(row).await
+    }
+
+    async fn after_sales_fulfillment_from_row(
+        &self,
+        row: AfterSalesFulfillmentRow,
+    ) -> Result<AfterSalesFulfillment, AppError> {
+        let item_rows = sqlx::query_as::<_, AfterSalesFulfillmentItemRow>(
+            "SELECT id, fulfillment_id, variant_id, quantity, created_at
+             FROM after_sales_fulfillment_items WHERE fulfillment_id = ?
+             ORDER BY rowid ASC",
+        )
+        .bind(&row.id)
+        .fetch_all(self.database().pool())
+        .await
+        .map_err(database_error)?;
+        let items = item_rows
+            .into_iter()
+            .map(AfterSalesFulfillmentItemRow::into_domain)
+            .collect();
+        Ok(AfterSalesFulfillment {
+            id: FulfillmentId::from_string(row.id),
+            order_id: OrderId::from_string(row.order_id),
+            claim_id: row.claim_id.map(ClaimId::from_string),
+            exchange_id: row.exchange_id.map(ExchangeId::from_string),
+            status: row.status,
+            provider_id: row.provider_id,
+            provider_fulfillment_id: row.provider_fulfillment_id,
+            provider_data: serde_json::from_str(&row.provider_data)
+                .unwrap_or(serde_json::Value::Null),
+            tracking_numbers: serde_json::from_str(&row.tracking_numbers).unwrap_or_default(),
+            metadata: fastcart_kernel::Metadata::from_json_str(&row.metadata),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            items,
+        })
+    }
+}
+
+// -------------------------------------------------------------------------
 // Order edits
 // -------------------------------------------------------------------------
 
@@ -1483,8 +1780,25 @@ impl OrderService {
 
     /// Applies a draft edit and recalculates the order totals.
     ///
-    /// Only the `orders` totals change; immutable `order_items` snapshots are
-    /// left untouched.
+    /// Only the `orders` totals and order-level adjustment rows change;
+    /// immutable `order_items` snapshots are left untouched.
+    ///
+    /// Allocation semantics:
+    ///
+    /// * Removals shrink the base that the original order-level discount, tax
+    ///   and adjustments covered. Those amounts are scaled by
+    ///   `retained_subtotal / order.subtotal` (floored), so a removal keeps the
+    ///   same effective rate.
+    /// * Added (and quantity-increasing) lines keep their explicit edit amount
+    ///   and do not inherit any existing order-level allocation.
+    /// * Shipping is preserved.
+    /// * `total` is persisted as
+    ///   `subtotal - discount_total + shipping_total + tax_total + adjustments`
+    ///   which is the same formula used when the order was created.
+    ///
+    /// Order-level adjustment rows are scaled too, distributing the flooring
+    /// remainder to the last row so their sum always equals the persisted
+    /// `discount`, `tax` and adjustment totals.
     pub async fn confirm_order_edit(
         &self,
         order_id: &OrderId,
@@ -1513,17 +1827,36 @@ impl OrderService {
             .checked_add(delta_subtotal)
             .ok_or_else(|| AppError::validation("order subtotal overflow"))?;
 
-        // Edit lines carry a price delta only: they do not introduce any new
-        // discount, shipping or tax allocation. Preserve the existing
-        // allocations and recompute the total from them using the same sign
-        // conventions as order creation. Order-level adjustments are part of
-        // the persisted total and therefore preserved too.
+        // Sum only negative line deltas: additions are explicitly priced in
+        // `next_subtotal` and must not dilute the existing allocation rate.
+        let mut removed_amount = 0_i64;
+        for item in &edit.items {
+            let delta_quantity = item
+                .after_quantity
+                .checked_sub(item.before_quantity)
+                .ok_or_else(|| AppError::validation("edit quantity overflow"))?;
+            if delta_quantity >= 0 {
+                continue;
+            }
+            let removed = item
+                .unit_price
+                .checked_mul(delta_quantity)
+                .ok_or_else(|| AppError::validation("edit amount overflow"))?;
+            removed_amount = removed_amount
+                .checked_add(removed)
+                .ok_or_else(|| AppError::validation("edit amount overflow"))?;
+        }
+        let retained_subtotal = order.subtotal.saturating_add(removed_amount).max(0);
         let adjustment_total = checked_sum(order.adjustments.iter().map(|value| value.amount))?;
+        let next_discount = scale_amount(order.discount_total, retained_subtotal, order.subtotal)?;
+        let next_tax = scale_amount(order.tax_total, retained_subtotal, order.subtotal)?;
+        let next_adjustment_total =
+            scale_amount(adjustment_total, retained_subtotal, order.subtotal)?;
         let next_total = next_subtotal
-            .checked_sub(order.discount_total)
+            .checked_sub(next_discount)
             .and_then(|value| value.checked_add(order.shipping_total))
-            .and_then(|value| value.checked_add(order.tax_total))
-            .and_then(|value| value.checked_add(adjustment_total))
+            .and_then(|value| value.checked_add(next_tax))
+            .and_then(|value| value.checked_add(next_adjustment_total))
             .ok_or_else(|| AppError::validation("order total overflow"))?;
         if next_subtotal < 0 || next_total < 0 {
             return Err(AppError::conflict(
@@ -1534,10 +1867,15 @@ impl OrderService {
         let now = now_timestamp();
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let updated_order = sqlx::query(
-            "UPDATE orders SET subtotal = ?, total = ?, updated_at = ?
+            "UPDATE orders
+             SET subtotal = ?, discount_total = ?, shipping_total = ?, tax_total = ?,
+                 total = ?, updated_at = ?
              WHERE id = ? AND status = ?",
         )
         .bind(next_subtotal)
+        .bind(next_discount)
+        .bind(order.shipping_total)
+        .bind(next_tax)
         .bind(next_total)
         .bind(now)
         .bind(order_id.as_str())
@@ -1548,6 +1886,35 @@ impl OrderService {
         if updated_order.rows_affected() == 0 {
             return Err(AppError::conflict("order status changed concurrently"));
         }
+
+        if retained_subtotal != order.subtotal && !order.adjustments.is_empty() {
+            // Give the last adjustment the flooring remainder so the rows add
+            // up to the scaled order-level total exactly.
+            let last_index = order.adjustments.len() - 1;
+            let mut allocated = 0_i64;
+            for (index, adjustment) in order.adjustments.iter().enumerate() {
+                let amount = if index == last_index {
+                    next_adjustment_total
+                        .checked_sub(allocated)
+                        .ok_or_else(|| AppError::validation("adjustment overflow"))?
+                } else {
+                    scale_amount(adjustment.amount, retained_subtotal, order.subtotal)?
+                };
+                allocated = allocated
+                    .checked_add(amount)
+                    .ok_or_else(|| AppError::validation("adjustment overflow"))?;
+                sqlx::query(
+                    "UPDATE order_adjustments SET amount = ? WHERE id = ? AND order_id = ?",
+                )
+                .bind(amount)
+                .bind(&adjustment.id)
+                .bind(order_id.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+            }
+        }
+
         let updated_edit = sqlx::query(
             "UPDATE order_edits
              SET status = ?, after_subtotal = ?, after_total = ?, confirmed_at = ?, updated_at = ?
@@ -1990,6 +2357,22 @@ fn checked_sum(values: impl Iterator<Item = i64>) -> Result<i64, AppError> {
             .ok_or_else(|| AppError::validation("amount overflow"))?;
     }
     Ok(total)
+}
+
+/// Scales an order-level amount by `retained / original`, flooring toward
+/// negative infinity so the result is deterministic for signed adjustments.
+///
+/// When the base is unchanged or unknown, the amount is returned untouched.
+fn scale_amount(amount: i64, retained: i64, original: i64) -> Result<i64, AppError> {
+    if original <= 0 || retained >= original {
+        return Ok(amount);
+    }
+    let retained = retained.max(0);
+    let numerator = i128::from(amount)
+        .checked_mul(i128::from(retained))
+        .ok_or_else(|| AppError::validation("allocation overflow"))?;
+    let scaled = numerator.div_euclid(i128::from(original));
+    i64::try_from(scaled).map_err(|_| AppError::validation("allocation overflow"))
 }
 
 fn normalize_text(value: Option<String>) -> Option<String> {
@@ -2668,5 +3051,176 @@ mod tests {
             .await
             .unwrap_err();
         assert!(missing_line.is_not_found());
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use fastcart_infrastructure::StoreDatabase;
+    use fastcart_kernel::StoreId;
+    use serde_json::json;
+
+    use super::OrderService;
+    use crate::after_sales::{CreateOrderEditInput, OrderEditAction, OrderEditItemInput};
+    use crate::domain::{CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput};
+
+    #[tokio::test]
+    async fn confirming_a_removal_scales_order_level_allocations_proportionally() {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = OrderService::new(db);
+        let order = service
+            .create_order(CreateOrderInput {
+                email: "buyer@example.com".to_owned(),
+                currency_code: "USD".to_owned(),
+                items: vec![CreateOrderItemInput {
+                    product_title: "Widget".to_owned(),
+                    unit_price: 1_000,
+                    quantity: 2,
+                    subtotal: Some(2_000),
+                    discount_total: Some(201),
+                    tax_total: Some(179),
+                    total: Some(1_978),
+                    requires_shipping: true,
+                    ..CreateOrderItemInput::default()
+                }],
+                adjustments: vec![CreateAdjustmentInput {
+                    code: Some("handling".to_owned()),
+                    amount: -101,
+                    ..CreateAdjustmentInput::default()
+                }],
+                subtotal: 2_000,
+                discount_total: 201,
+                shipping_total: 500,
+                tax_total: 179,
+                total: 2_377,
+                shipping_address: json!({}),
+                billing_address: json!({}),
+                ..CreateOrderInput::default()
+            })
+            .await
+            .unwrap();
+
+        let edit = service
+            .create_order_edit(
+                &order.id,
+                CreateOrderEditInput {
+                    reason: Some("remove one".to_owned()),
+                    metadata: fastcart_kernel::Metadata::default(),
+                    items: vec![OrderEditItemInput {
+                        order_item_id: Some(order.items[0].id.clone()),
+                        action: OrderEditAction::Update,
+                        product_id: None,
+                        variant_id: None,
+                        product_title: None,
+                        variant_title: None,
+                        sku: None,
+                        unit_price: None,
+                        before_quantity: Some(2),
+                        after_quantity: 1,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(edit.after_subtotal, 1_000);
+        assert_eq!(edit.after_total, 1_377);
+
+        let confirmed = service
+            .confirm_order_edit(&order.id, &edit.id)
+            .await
+            .unwrap();
+        let reloaded = service.get(&order.id).await.unwrap();
+
+        // Retained subtotal is 1000/2000 of the original base.
+        assert_eq!(reloaded.subtotal, 1_000);
+        assert_eq!(reloaded.discount_total, 100);
+        assert_eq!(reloaded.tax_total, 89);
+        assert_eq!(reloaded.shipping_total, 500);
+        assert_eq!(reloaded.adjustments.len(), 1);
+        // floor(-101 * 1000 / 2000) = -51
+        assert_eq!(reloaded.adjustments[0].amount, -51);
+        assert_eq!(reloaded.total, 1_438);
+        assert_eq!(confirmed.after_subtotal, 1_000);
+        assert_eq!(confirmed.after_total, 1_438);
+        assert_eq!(
+            reloaded.total,
+            reloaded.subtotal - reloaded.discount_total
+                + reloaded.shipping_total
+                + reloaded.tax_total
+                + reloaded
+                    .adjustments
+                    .iter()
+                    .map(|value| value.amount)
+                    .sum::<i64>()
+        );
+        // Historical line snapshots are never mutated.
+        assert_eq!(reloaded.items[0].quantity, 2);
+        assert_eq!(reloaded.items[0].subtotal, 2_000);
+        assert_eq!(reloaded.items[0].discount_total, 201);
+    }
+
+    #[tokio::test]
+    async fn additions_keep_explicit_amounts_and_do_not_scale_allocations() {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = OrderService::new(db);
+        let order = service
+            .create_order(CreateOrderInput {
+                email: "buyer@example.com".to_owned(),
+                currency_code: "USD".to_owned(),
+                items: vec![CreateOrderItemInput {
+                    product_title: "Widget".to_owned(),
+                    unit_price: 1_000,
+                    quantity: 2,
+                    subtotal: Some(2_000),
+                    discount_total: Some(200),
+                    tax_total: Some(180),
+                    total: Some(1_980),
+                    requires_shipping: true,
+                    ..CreateOrderItemInput::default()
+                }],
+                subtotal: 2_000,
+                discount_total: 200,
+                shipping_total: 500,
+                tax_total: 180,
+                total: 2_480,
+                shipping_address: json!({}),
+                billing_address: json!({}),
+                ..CreateOrderInput::default()
+            })
+            .await
+            .unwrap();
+
+        let edit = service
+            .create_order_edit(
+                &order.id,
+                CreateOrderEditInput {
+                    reason: None,
+                    metadata: fastcart_kernel::Metadata::default(),
+                    items: vec![OrderEditItemInput {
+                        order_item_id: None,
+                        action: OrderEditAction::Add,
+                        product_id: None,
+                        variant_id: None,
+                        product_title: Some("Gift card".to_owned()),
+                        variant_title: None,
+                        sku: None,
+                        unit_price: Some(500),
+                        before_quantity: None,
+                        after_quantity: 1,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let confirmed = service
+            .confirm_order_edit(&order.id, &edit.id)
+            .await
+            .unwrap();
+        let reloaded = service.get(&order.id).await.unwrap();
+        assert_eq!(reloaded.subtotal, 2_500);
+        assert_eq!(reloaded.discount_total, 200);
+        assert_eq!(reloaded.tax_total, 180);
+        assert_eq!(reloaded.total, 2_980);
+        assert_eq!(confirmed.after_total, 2_980);
     }
 }
