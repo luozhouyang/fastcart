@@ -230,6 +230,7 @@ use crate::state::AppContext;
     crate::routes::admin_content::CreatePageRequest,
     crate::routes::admin_content::CreateRedirectRequest,
     crate::routes::admin_content::NavigationItemRequest,
+    crate::routes::admin_content::PreviewTokenResponse,
     crate::routes::admin_content::UpdateNavigationRequest,
     crate::routes::admin_content::UpdatePageRequest,
     crate::routes::admin_customers::AdminAddressRequest,
@@ -323,6 +324,38 @@ use crate::state::AppContext;
     crate::routes::admin_webhooks::RotatedSecretDto,
     crate::routes::admin_webhooks::UpdateWebhookRequest,
     crate::routes::admin_webhooks::WebhookEndpointDto,
+    crate::routes::admin_inquiry::CreateInquiryFormRequest,
+    crate::routes::admin_inquiry::InquiryDetail,
+    crate::routes::admin_inquiry::InquiryFormDetail,
+    crate::routes::admin_inquiry::PublishInquiryFormRequest,
+    crate::routes::admin_inquiry::SaveInquiryDraftRequest,
+    crate::routes::admin_inquiry::UnreadCountResponse,
+    crate::routes::admin_inquiry::UpdateInquiryFormRequest,
+    crate::routes::admin_inquiry::UpdateInquiryStatusRequest,
+    crate::routes::admin_notifications::CreateNotificationChannelRequest,
+    crate::routes::admin_notifications::NotificationChannelDto,
+    crate::routes::admin_notifications::NotificationDeliveryDto,
+    crate::routes::admin_notifications::NotificationEventDto,
+    crate::routes::admin_notifications::TestChannelResponse,
+    crate::routes::admin_notifications::UpdateNotificationChannelRequest,
+    crate::routes::store_inquiry::CreateInquiryRequest,
+    crate::routes::store_inquiry::CreateInquiryResponse,
+    crate::routes::store_inquiry::PublicInquiryForm,
+    crate::routes::store_inquiry::PublicInquiryFormResponse,
+    crate::routes::store_inquiry::PublicInquiryFormSettings,
+    crate::routes::store_inquiry::UploadFileResponse,
+    fastcart_module_inquiry::FieldKind,
+    fastcart_module_inquiry::FieldOption,
+    fastcart_module_inquiry::FieldValidation,
+    fastcart_module_inquiry::FileFieldConfig,
+    fastcart_module_inquiry::Inquiry,
+    fastcart_module_inquiry::InquiryFile,
+    fastcart_module_inquiry::InquiryForm,
+    fastcart_module_inquiry::InquiryFormField,
+    fastcart_module_inquiry::InquiryFormRevision,
+    fastcart_module_inquiry::InquiryFormSettings,
+    fastcart_module_inquiry::InquiryFormStatus,
+    fastcart_module_inquiry::InquiryStatus,
     crate::routes::store_cart::AddItemRequest,
     crate::routes::store_cart::CartAddressType,
     crate::routes::store_cart::CompleteCheckoutRequest,
@@ -535,6 +568,8 @@ fn generated_api() -> utoipa::openapi::OpenApi {
         .merge(crate::routes::admin_tax::openapi_router())
         .merge(crate::routes::admin_theme::openapi_router())
         .merge(crate::routes::admin_webhooks::openapi_router())
+        .merge(crate::routes::admin_inquiry::openapi_router())
+        .merge(crate::routes::admin_notifications::openapi_router())
         .merge(crate::routes::admin_workflows::openapi_router());
 
     let store = OpenApiRouter::new()
@@ -542,6 +577,7 @@ fn generated_api() -> utoipa::openapi::OpenApi {
         .merge(crate::routes::store_catalog::openapi_router())
         .merge(crate::routes::store_content::openapi_router())
         .merge(crate::routes::store_customer::openapi_router())
+        .merge(crate::routes::store_inquiry::openapi_router())
         .merge(crate::routes::store_inventory::openapi_router())
         .merge(crate::routes::store_regions::openapi_router())
         .merge(crate::routes::store_theme::openapi_router());
@@ -936,20 +972,26 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 166);
-        assert_eq!(count("/api/v1/store"), 42);
+        assert_eq!(count("/api/v1/admin"), 182);
+        assert_eq!(count("/api/v1/store"), 44);
         assert_eq!(count("/api/v1/webhooks"), 1);
-        assert_eq!(count("/internal/storefront"), 42);
+        assert_eq!(count("/internal/storefront"), 44);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 275);
+        assert_eq!(paths.len(), 295);
 
         for key in [
             "/api/v1/platform/stores",
             "/api/v1/platform/stores/{store_id}/domains",
             "/api/v1/admin/catalog/products",
             "/api/v1/admin/orders/{id}/refunds",
+            "/api/v1/admin/content/pages/{id}/preview-token",
+            "/api/v1/admin/inquiry-forms",
+            "/api/v1/admin/inquiries",
+            "/api/v1/admin/notification-channels",
             "/api/v1/admin/themes",
             "/api/v1/store/checkouts/{checkout_id}/complete",
+            "/api/v1/store/inquiries",
+            "/api/v1/store/inquiry-forms/{handle}",
             "/api/v1/store/theme",
             "/api/v1/webhooks/payments/{provider}",
             "/internal/storefront/carts/{cart_id}",
@@ -1049,7 +1091,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 378);
+        assert_eq!(operation_count, 405);
     }
 
     #[test]

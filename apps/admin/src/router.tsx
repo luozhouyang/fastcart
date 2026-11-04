@@ -1,60 +1,80 @@
-import { Button } from "@fastcart/ui";
-import { Link, Outlet, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { Link, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
-const rootRoute = createRootRoute({
-  component: RootLayout,
-});
+import { AppShell } from "@/components/app-shell";
+import { ThemeProvider, useTheme } from "@/components/theme-provider";
+import { Toaster } from "@/components/ui/sonner";
+import { AuthProvider, useAuth } from "@/lib/auth";
+import { CustomersPage } from "@/pages/customers";
+import { FormEditorPage } from "@/pages/form-editor";
+import { FormsPage } from "@/pages/forms";
+import { InboxPage } from "@/pages/inbox";
+import { InventoryPage } from "@/pages/inventory";
+import { LoginPage, NoStorePage, SplashScreen } from "@/pages/login";
+import { NotificationsPage } from "@/pages/notifications";
+import { OrdersPage } from "@/pages/orders";
+import { OverviewPage } from "@/pages/overview";
+import { ProductsPage } from "@/pages/products";
+import { SettingsPage } from "@/pages/settings";
+
+function AppGate() {
+  const { status } = useAuth();
+  const { theme } = useTheme();
+
+  return (
+    <>
+      {status === "loading" ? (
+        <SplashScreen />
+      ) : status === "anonymous" ? (
+        <LoginPage />
+      ) : status === "no-store" ? (
+        <NoStorePage />
+      ) : (
+        <AppShell />
+      )}
+      <Toaster theme={theme} />
+    </>
+  );
+}
 
 function RootLayout() {
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <header className="border-b border-white/10">
-        <div className="mx-auto flex max-w-5xl items-center gap-6 px-6 py-4">
-          <span className="font-semibold tracking-tight">Fastcart Admin</span>
-          <nav className="flex gap-4 text-sm text-slate-400">
-            <Link to="/" activeProps={{ className: "text-emerald-400" }}>
-              Dashboard
-            </Link>
-            <Link to="/products" activeProps={{ className: "text-emerald-400" }}>
-              Products
-            </Link>
-          </nav>
-        </div>
-      </header>
-      <main className="mx-auto max-w-5xl px-6 py-8">
-        <Outlet />
-      </main>
+    <ThemeProvider>
+      <AuthProvider>
+        <AppGate />
+      </AuthProvider>
+    </ThemeProvider>
+  );
+}
+
+function NotFoundPage() {
+  return (
+    <div className="flex min-h-[50vh] flex-col items-center justify-center text-center">
+      <p className="font-mono text-[10.5px] tracking-[0.14em] text-faint">404</p>
+      <h1 className="mt-3 font-display text-[40px] leading-none text-foreground">
+        This page does not exist
+      </h1>
+      <Link to="/" className="mt-5 text-[12.5px] text-brand-ink underline-offset-4 hover:underline">
+        Back to the overview
+      </Link>
     </div>
   );
 }
 
-function DashboardPage() {
-  return (
-    <section className="space-y-4">
-      <h1 className="text-2xl font-semibold">Dashboard</h1>
-      <p className="text-sm text-slate-400">
-        Phase 0 shell. Store metrics and order summaries arrive with the admin API.
-      </p>
-      <Button>Create product</Button>
-    </section>
-  );
-}
+const rootRoute = createRootRoute({
+  component: RootLayout,
+  notFoundComponent: NotFoundPage,
+});
 
-function ProductsPage() {
-  return (
-    <section className="space-y-4">
-      <h1 className="text-2xl font-semibold">Products</h1>
-      <div className="rounded-lg border border-white/10 p-6 text-sm text-slate-400">
-        Product management UI is wired to the admin SDK in a later phase.
-      </div>
-    </section>
-  );
-}
-
-const dashboardRoute = createRoute({
+const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: DashboardPage,
+  component: OverviewPage,
+});
+
+const ordersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/orders",
+  component: OrdersPage,
 });
 
 const productsRoute = createRoute({
@@ -63,11 +83,65 @@ const productsRoute = createRoute({
   component: ProductsPage,
 });
 
-const routeTree = rootRoute.addChildren([dashboardRoute, productsRoute]);
+const inventoryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/inventory",
+  component: InventoryPage,
+});
+
+const customersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/customers",
+  component: CustomersPage,
+});
+
+const formsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/forms",
+  component: FormsPage,
+});
+
+const formEditorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/forms/$formId",
+  component: FormEditorPage,
+});
+
+const inboxRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/inbox",
+  component: InboxPage,
+});
+
+const notificationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/notifications",
+  component: NotificationsPage,
+});
+
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  component: SettingsPage,
+});
+
+const routeTree = rootRoute.addChildren([
+  overviewRoute,
+  ordersRoute,
+  productsRoute,
+  inventoryRoute,
+  customersRoute,
+  formsRoute,
+  formEditorRoute,
+  inboxRoute,
+  notificationsRoute,
+  settingsRoute,
+]);
 
 export const router = createRouter({
   routeTree,
   defaultPreload: "intent",
+  defaultNotFoundComponent: NotFoundPage,
 });
 
 declare module "@tanstack/react-router" {

@@ -229,6 +229,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -829,6 +830,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "fastcart-email",
  "fastcart-http",
  "fastcart-infrastructure",
@@ -838,6 +840,7 @@ dependencies = [
  "fastcart-module-checkout",
  "fastcart-module-content",
  "fastcart-module-customer",
+ "fastcart-module-inquiry",
  "fastcart-module-inventory",
  "fastcart-module-order",
  "fastcart-module-payment",
@@ -848,14 +851,20 @@ dependencies = [
  "fastcart-module-tax",
  "fastcart-module-theme",
  "fastcart-module-webhook",
+ "fastcart-notifications",
  "fastcart-platform",
  "fastcart-runtime-api",
  "fastcart-storefront",
  "fastcart-storefront-data",
  "fastcart-workflows",
+ "form_urlencoded",
+ "hex",
+ "hmac",
  "http-body-util",
+ "moka",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tempfile",
  "tokio",
@@ -864,6 +873,7 @@ dependencies = [
  "tracing",
  "utoipa",
  "utoipa-axum",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -1044,6 +1054,24 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fastcart-module-inquiry"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fastcart-infrastructure",
+ "fastcart-kernel",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -1237,17 +1265,23 @@ name = "fastcart-notifications"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "base64 0.22.1",
  "fastcart-email",
  "fastcart-infrastructure",
  "fastcart-kernel",
  "fastcart-module-order",
+ "hmac",
  "minijinja",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -1380,6 +1414,7 @@ dependencies = [
  "fastcart-kernel",
  "fastcart-module-catalog",
  "fastcart-module-content",
+ "fastcart-module-inquiry",
  "fastcart-module-inventory",
  "fastcart-module-pricing",
  "fastcart-storefront",
@@ -1387,6 +1422,7 @@ dependencies = [
  "moka",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -1405,6 +1441,7 @@ dependencies = [
  "fastcart-module-catalog",
  "fastcart-module-checkout",
  "fastcart-module-customer",
+ "fastcart-module-inquiry",
  "fastcart-module-inventory",
  "fastcart-module-order",
  "fastcart-module-payment",
@@ -2537,6 +2574,23 @@ dependencies = [
  "smallvec",
  "tagptr",
  "uuid 1.29.0",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.5.0",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
 ]
 
 [[package]]

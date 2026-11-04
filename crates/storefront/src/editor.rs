@@ -20,7 +20,7 @@ pub const MAX_EDITOR_COMPONENTS: usize = 500;
 pub const MAX_COMPONENT_FIELDS: usize = 100;
 
 /// Data source identifiers fixed by the platform vocabulary.
-pub const DATA_SOURCE_KINDS: [&str; 7] = [
+pub const DATA_SOURCE_KINDS: [&str; 8] = [
     "collection",
     "product",
     "product_list",
@@ -28,6 +28,7 @@ pub const DATA_SOURCE_KINDS: [&str; 7] = [
     "navigation",
     "asset",
     "search",
+    "inquiry_form",
 ];
 
 /// Field types accepted by the editor contract.

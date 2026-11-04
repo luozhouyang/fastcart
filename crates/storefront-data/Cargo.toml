@@ -16,11 +16,13 @@ fastcart-infrastructure.workspace = true
 fastcart-kernel.workspace = true
 fastcart-module-catalog.workspace = true
 fastcart-module-content.workspace = true
+fastcart-module-inquiry.workspace = true
 fastcart-module-inventory.workspace = true
 fastcart-module-pricing.workspace = true
 fastcart-storefront.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 tokio.workspace = true
 
 [lints]

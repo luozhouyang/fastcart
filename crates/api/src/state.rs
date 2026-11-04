@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use fastcart_email::EmailService;
 use fastcart_http::{Metrics, RateLimiter};
-use fastcart_infrastructure::{EventBus, StoreCache, StoreDatabaseManager};
+use fastcart_infrastructure::{EventBus, LocalStorage, Storage, StoreCache, StoreDatabaseManager};
 use fastcart_module_payment::{ManualProvider, ProviderRegistry, StripeProvider};
 use fastcart_platform::{AuthService, PlatformStore, StoreProvisioningService, StoreResolver};
 use fastcart_runtime_api::StorefrontRuntime;
@@ -44,6 +44,20 @@ pub struct ApiConfig {
     /// When absent, internal routes are not mounted over HTTP; the in-process
     /// bridge remains the only way to reach them.
     pub internal_fetch_secret: Option<String>,
+    /// Optional signing secret for draft page preview tokens.
+    ///
+    /// When absent, preview token issuance and the preview render surface are
+    /// disabled and respond with `501 Not Implemented`. The secret must be
+    /// supplied out of band and must never be logged.
+    pub preview_secret: Option<String>,
+    /// Optional admin application origin used for notification deep links.
+    pub admin_base_url: Option<String>,
+    /// Root directory backing the default local object storage adapter.
+    pub storage_root: PathBuf,
+    /// Hard cap for one inquiry attachment upload.
+    pub max_upload_bytes: usize,
+    /// Lifetime of a pending inquiry attachment upload.
+    pub upload_ttl_seconds: i64,
 }
 
 impl Default for ApiConfig {
@@ -60,8 +74,36 @@ impl Default for ApiConfig {
             stripe_webhook_secret: None,
             storefront_timeout_ms: 10_000,
             internal_fetch_secret: None,
+            preview_secret: None,
+            admin_base_url: None,
+            storage_root: PathBuf::from("./data/assets"),
+            max_upload_bytes: 25 * 1024 * 1024,
+            upload_ttl_seconds: 3_600,
         }
     }
+}
+
+/// Maximum number of parsed theme editor manifests retained per process.
+const STOREFRONT_EDITOR_CACHE_CAPACITY: u64 = 1024;
+/// Maximum number of compiled pages retained per process.
+///
+/// Page bodies are capped at 1 MiB, so this is the effective worst-case
+/// memory bound in addition to the TTL.
+const STOREFRONT_PAGE_CACHE_CAPACITY: u64 = 256;
+/// Lifetime of compiled storefront entries.
+const STOREFRONT_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// A validated page and the data bindings extracted in the same pass.
+///
+/// The compiled form is cached per store, page revision and active theme so a
+/// render neither re-parses nor re-validates an unchanged page. Cached values
+/// never carry live commerce data.
+#[derive(Clone, Debug)]
+pub struct CompiledPage {
+    /// Page metadata and validated body handed to the runtime.
+    pub page: fastcart_runtime_api::PageContext,
+    /// Bindings extracted from the validated body.
+    pub bindings: Vec<fastcart_storefront::BindingRequest>,
 }
 
 /// Process-wide services used by the HTTP layer.
@@ -98,8 +140,22 @@ pub struct AppContext {
     pub storefront_runtime: Option<Arc<dyn StorefrontRuntime>>,
     /// Server-side resolver for theme data bindings.
     pub storefront_data: fastcart_storefront_data::StorefrontDataResolver,
+    /// Parsed active theme editor manifests keyed by store, theme and revision.
+    ///
+    /// The value is `None` when the stored manifest is absent or invalid, so
+    /// invalid manifests are not re-parsed on every render.
+    pub storefront_editor_cache:
+        moka::future::Cache<String, Option<Arc<fastcart_storefront::ThemeEditorManifest>>>,
+    /// Compiled storefront pages keyed by store, page revision and theme.
+    pub storefront_page_cache: moka::future::Cache<String, Arc<CompiledPage>>,
     /// Provider-independent transactional email delivery.
     pub email: EmailService,
+    /// Private object storage used for inquiry attachments.
+    pub storage: Arc<dyn Storage>,
+    /// Public inquiry submission limiter, keyed by store and client address.
+    pub inquiry_limiter: RateLimiter,
+    /// Attachment upload limiter, keyed by store and client address.
+    pub upload_limiter: RateLimiter,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -129,6 +185,7 @@ impl AppContext {
             tracing::warn!(error = %error, "failed to register the manual payment provider");
         }
         register_stripe_provider(&payment_providers, &config);
+        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(config.storage_root.clone()));
         Self {
             config,
             platform,
@@ -147,7 +204,18 @@ impl AppContext {
             metrics: Arc::new(Metrics::new()),
             storefront_runtime: None,
             storefront_data: fastcart_storefront_data::StorefrontDataResolver::new(),
+            storefront_editor_cache: moka::future::Cache::builder()
+                .max_capacity(STOREFRONT_EDITOR_CACHE_CAPACITY)
+                .time_to_live(STOREFRONT_CACHE_TTL)
+                .build(),
+            storefront_page_cache: moka::future::Cache::builder()
+                .max_capacity(STOREFRONT_PAGE_CACHE_CAPACITY)
+                .time_to_live(STOREFRONT_CACHE_TTL)
+                .build(),
             email: EmailService::with_default_registry(),
+            storage,
+            inquiry_limiter: RateLimiter::new(5, Duration::from_secs(10 * 60)),
+            upload_limiter: RateLimiter::new(10, Duration::from_secs(60 * 60)),
         }
     }
 
@@ -162,6 +230,13 @@ impl AppContext {
     #[must_use]
     pub fn with_email(mut self, email: EmailService) -> Self {
         self.email = email;
+        self
+    }
+
+    /// Replaces the attachment storage adapter.
+    #[must_use]
+    pub fn with_storage(mut self, storage: Arc<dyn Storage>) -> Self {
+        self.storage = storage;
         self
     }
 }

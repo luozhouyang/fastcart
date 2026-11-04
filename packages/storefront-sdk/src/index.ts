@@ -19,6 +19,8 @@ import type {
   CompleteCheckoutRequest,
   CreateCartRequest,
   CreateCheckoutRequest,
+  CreateInquiryRequest,
+  CreateInquiryResponse,
   CustomerAddressInput,
   CustomerAddressListResponse,
   CustomerAddressResponse,
@@ -43,6 +45,8 @@ import type {
   SetShippingMethodRequest,
   ShippingOptionsQuery,
   ShippingOptionsResponse,
+  StoreInquiryFormResponse,
+  UploadInquiryFileResponse,
   StorePageResponse,
   StoreProductListQuery,
   StoreSearchQuery,
@@ -241,6 +245,26 @@ export interface StorefrontClient {
       checkoutId: string,
       options?: StorefrontRequestOptions,
     ): Promise<CheckoutHistoryResponse>;
+  };
+
+  inquiryForms: {
+    get(handle: string, options?: StorefrontRequestOptions): Promise<StoreInquiryFormResponse>;
+  };
+
+  inquiries: {
+    create(
+      body: CreateInquiryRequest,
+      options?: StorefrontRequestOptions,
+    ): Promise<CreateInquiryResponse>;
+  };
+
+  inquiryFiles: {
+    upload(
+      file: File,
+      formHandle: string,
+      fieldKey: string,
+      options?: StorefrontRequestOptions,
+    ): Promise<UploadInquiryFileResponse>;
   };
 
   settings: {
@@ -547,6 +571,36 @@ export function createStorefrontClient(options: StorefrontClientOptions = {}): S
           `/api/v1/store/checkouts/${id(checkoutId)}/history`,
           requestOptions,
         ),
+    },
+
+    inquiryForms: {
+      get: (handle, requestOptions) =>
+        request<StoreInquiryFormResponse>(
+          `/api/v1/store/inquiry-forms/${id(handle)}`,
+          requestOptions,
+        ),
+    },
+
+    inquiries: {
+      create: (body, requestOptions) =>
+        request<CreateInquiryResponse>("/api/v1/store/inquiries", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+    },
+
+    inquiryFiles: {
+      upload: (file, formHandle, fieldKey, requestOptions) => {
+        const body = new FormData();
+        body.append("file", file);
+        return request<UploadInquiryFileResponse>("/api/v1/store/inquiry-files", {
+          ...requestOptions,
+          method: "POST",
+          query: { form_handle: formHandle, field_key: fieldKey },
+          body,
+        });
+      },
     },
 
     settings: {

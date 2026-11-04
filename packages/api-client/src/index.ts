@@ -40,10 +40,13 @@ export interface ApiClientOptions {
 export type QueryValue =
   string | number | boolean | null | undefined | readonly (string | number | boolean)[];
 
+/** A request body: JSON-serializable data or multipart form data. */
+export type RequestBody = unknown | FormData;
+
 export interface RequestOptions {
   method?: string;
   query?: Record<string, QueryValue>;
-  body?: unknown;
+  body?: RequestBody;
   headers?: HeadersInit;
   signal?: AbortSignal;
   credentials?: RequestCredentials;
@@ -141,10 +144,15 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       headers.set(key, value);
     }
 
-    let body: string | undefined;
+    let body: BodyInit | undefined;
     if (requestOptions.body !== undefined) {
-      headers.set("content-type", "application/json");
-      body = JSON.stringify(requestOptions.body);
+      if (typeof FormData !== "undefined" && requestOptions.body instanceof FormData) {
+        // Let the runtime set the multipart boundary in the content-type header.
+        body = requestOptions.body;
+      } else {
+        headers.set("content-type", "application/json");
+        body = JSON.stringify(requestOptions.body);
+      }
     }
 
     const credentials = requestOptions.credentials ?? options.credentials;

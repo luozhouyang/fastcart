@@ -2080,3 +2080,296 @@ export interface VariantAvailabilityResponse {
 export interface ShippingOptionsResponse {
   shipping_options: ResolvedShippingOption[];
 }
+
+// ---------------------------------------------------------------------------
+// Inquiry forms, inquiries and notification channels
+// ---------------------------------------------------------------------------
+
+export type InquiryFieldKind =
+  | "text"
+  | "textarea"
+  | "email"
+  | "phone"
+  | "number"
+  | "select"
+  | "radio"
+  | "checkbox"
+  | "date"
+  | "file"
+  | "hidden"
+  | "consent";
+
+export interface InquiryFieldOption {
+  value: string;
+  label: string;
+}
+
+export interface InquiryFieldValidation {
+  min_length?: number | null;
+  max_length?: number | null;
+  min?: number | null;
+  max?: number | null;
+}
+
+export interface InquiryFileFieldConfig {
+  max_files: number;
+  max_bytes: number;
+  accept: string[];
+}
+
+export interface InquiryFormField {
+  key: string;
+  kind: InquiryFieldKind;
+  label: string;
+  required: boolean;
+  placeholder?: string | null;
+  help?: string | null;
+  default?: unknown;
+  options: InquiryFieldOption[];
+  validation: InquiryFieldValidation;
+  file?: InquiryFileFieldConfig | null;
+}
+
+export interface InquiryFormSettings {
+  submit_label: string;
+  success_message: string;
+  redirect_url?: string | null;
+  consent_text?: string | null;
+  consent_required: boolean;
+  allow_attachments: boolean;
+  notification_fields: string[];
+}
+
+export type InquiryFormStatus = "draft" | "published" | "archived";
+
+export interface InquiryForm {
+  id: string;
+  name: string;
+  handle: string;
+  description?: string | null;
+  status: InquiryFormStatus;
+  current_version: number;
+  published_version?: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface InquiryFormRevision {
+  id: string;
+  form_id: string;
+  version: number;
+  fields: InquiryFormField[];
+  settings: InquiryFormSettings;
+  created_by?: string | null;
+  created_at: number;
+  published_at?: number | null;
+}
+
+export interface InquiryFormDetail {
+  form: InquiryForm;
+  draft?: InquiryFormRevision | null;
+  published_revision?: InquiryFormRevision | null;
+}
+
+export type InquiryStatus = "new" | "read" | "replied" | "closed" | "spam";
+
+export interface Inquiry {
+  id: string;
+  event_id: string;
+  form_id: string;
+  form_revision_id: string;
+  form_version: number;
+  status: InquiryStatus;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  subject?: string | null;
+  message?: string | null;
+  data: Record<string, unknown>;
+  source: string;
+  page_url?: string | null;
+  locale?: string | null;
+  idempotency_key?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface InquiryFile {
+  id: string;
+  inquiry_id?: string | null;
+  field_key: string;
+  original_name?: string | null;
+  content_type: string;
+  size_bytes: number;
+  checksum_sha256: string;
+  status: "pending" | "claimed" | "expired";
+  created_at: number;
+}
+
+export interface UploadInquiryFileResponse {
+  id: string;
+  expires_at: number;
+}
+
+export type NotificationChannelKind = "feishu";
+
+export interface NotificationChannel {
+  id: string;
+  kind: NotificationChannelKind;
+  name: string;
+  events: string[];
+  is_active: boolean;
+  config: Record<string, unknown>;
+  endpoint_url_masked: string;
+  signing_secret_configured: boolean;
+  last_error?: string | null;
+  last_success_at?: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NotificationChannelEvent {
+  type: string;
+  label: string;
+  group: string;
+  description: string;
+}
+
+export type NotificationDeliveryStatus = "pending" | "queued" | "sent" | "failed" | "skipped";
+
+export interface NotificationChannelDelivery {
+  id: string;
+  channel_id: string;
+  event_id: string;
+  event_type: string;
+  status: NotificationDeliveryStatus;
+  job_id?: string | null;
+  attempts: number;
+  response_status?: number | null;
+  response_body?: string | null;
+  last_error?: string | null;
+  created_at: number;
+  updated_at: number;
+  sent_at?: number | null;
+}
+
+export interface InquiryListResponse {
+  data: Inquiry[];
+  pagination: Pagination;
+}
+
+export interface CreateInquiryFormRequest {
+  name: string;
+  handle?: string;
+  description?: string | null;
+}
+
+export interface UpdateInquiryFormRequest {
+  name?: string;
+  description?: string | null;
+}
+
+export interface SaveInquiryFormDraftRequest {
+  fields: InquiryFormField[];
+  settings: InquiryFormSettings;
+}
+
+export interface PublishInquiryFormRequest {
+  version?: number;
+}
+
+export interface InquiryFormListQuery extends PaginationQuery {
+  status?: InquiryFormStatus;
+}
+
+export interface InquiryListQuery extends PaginationQuery {
+  status?: InquiryStatus;
+  form_id?: string;
+  query?: string;
+  from?: number;
+  to?: number;
+}
+
+export interface UpdateInquiryStatusRequest {
+  status: InquiryStatus;
+}
+
+export interface InquiryUnreadCountResponse {
+  count: number;
+}
+
+/** The detail endpoint may include the revision schema and claimed files. */
+export interface InquiryDetail extends Inquiry {
+  revision?: InquiryFormRevision | null;
+  files?: InquiryFile[];
+}
+
+export interface CreateNotificationChannelRequest {
+  kind: NotificationChannelKind;
+  name: string;
+  endpoint_url: string;
+  signing_secret?: string | null;
+  events: string[];
+  is_active: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface UpdateNotificationChannelRequest {
+  name?: string;
+  endpoint_url?: string;
+  signing_secret?: string | null;
+  events?: string[];
+  is_active?: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface NotificationChannelTestResponse {
+  ok: boolean;
+  status?: number | null;
+  message?: string | null;
+  error?: string | null;
+}
+
+export interface NotificationDeliveriesQuery {
+  limit?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Public storefront inquiry contracts
+// ---------------------------------------------------------------------------
+
+export interface StoreInquiryForm {
+  id: string;
+  name: string;
+  handle: string;
+  description?: string | null;
+  version: number;
+  fields: InquiryFormField[];
+  settings: InquiryFormSettings;
+}
+
+export interface StoreInquiryFormResponse {
+  form: StoreInquiryForm;
+}
+
+export interface CreateInquiryRequest {
+  form_handle: string;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  subject?: string | null;
+  message?: string | null;
+  data?: Record<string, unknown>;
+  files?: Record<string, string[]>;
+  page_url?: string | null;
+  locale?: string | null;
+  consent?: boolean;
+}
+
+export interface CreateInquiryResponse {
+  id: string;
+  status?: InquiryStatus;
+  event_id?: string;
+  idempotency_key?: string | null;
+}

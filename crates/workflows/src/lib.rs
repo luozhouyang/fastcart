@@ -19,4 +19,7 @@ pub use engine::{
     EngineConfig, StepContext, StepError, WorkflowDefinition, WorkflowEngine, WorkflowExecution,
     WorkflowExecutionDetail, WorkflowExecutionFilter, WorkflowStep, WorkflowStepRecord, status,
 };
-pub use maintenance::{MaintenanceReport, run_maintenance, run_maintenance_with_options};
+pub use maintenance::{
+    MaintenanceReport, cleanup_inquiry_files, run_maintenance, run_maintenance_with_notifications,
+    run_maintenance_with_options,
+};

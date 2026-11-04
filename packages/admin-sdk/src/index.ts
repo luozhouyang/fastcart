@@ -130,6 +130,28 @@ import type {
   WebhookDeliveriesQuery,
   WebhookDelivery,
   WebhookEndpoint,
+  CreateInquiryFormRequest,
+  CreateNotificationChannelRequest,
+  Inquiry,
+  InquiryDetail,
+  InquiryFile,
+  InquiryForm,
+  InquiryFormListQuery,
+  InquiryFormRevision,
+  InquiryFormDetail,
+  InquiryListQuery,
+  InquiryListResponse,
+  InquiryUnreadCountResponse,
+  NotificationChannel,
+  NotificationChannelDelivery,
+  NotificationChannelEvent,
+  NotificationChannelTestResponse,
+  NotificationDeliveriesQuery,
+  PublishInquiryFormRequest,
+  SaveInquiryFormDraftRequest,
+  UpdateInquiryFormRequest,
+  UpdateInquiryStatusRequest,
+  UpdateNotificationChannelRequest,
 } from "@fastcart/shared-types";
 
 /** Options accepted by {@link createAdminClient}. */
@@ -630,6 +652,72 @@ export interface AdminClient {
     enable(id: string, options?: AdminRequestOptions): Promise<SalesChannel>;
   };
 
+  inquiryForms: {
+    list(
+      query?: InquiryFormListQuery,
+      options?: AdminRequestOptions,
+    ): Promise<PageResult<InquiryForm>>;
+    create(body: CreateInquiryFormRequest, options?: AdminRequestOptions): Promise<InquiryForm>;
+    get(id: string, options?: AdminRequestOptions): Promise<InquiryFormDetail>;
+    update(
+      id: string,
+      body: UpdateInquiryFormRequest,
+      options?: AdminRequestOptions,
+    ): Promise<InquiryForm>;
+    delete(id: string, options?: AdminRequestOptions): Promise<void>;
+    saveDraft(
+      id: string,
+      body: SaveInquiryFormDraftRequest,
+      options?: AdminRequestOptions,
+    ): Promise<InquiryFormRevision>;
+    publish(
+      id: string,
+      body?: PublishInquiryFormRequest,
+      options?: AdminRequestOptions,
+    ): Promise<InquiryForm>;
+    listRevisions(id: string, options?: AdminRequestOptions): Promise<InquiryFormRevision[]>;
+    publishVersion(
+      id: string,
+      version: number,
+      options?: AdminRequestOptions,
+    ): Promise<InquiryForm>;
+  };
+
+  inquiries: {
+    list(query?: InquiryListQuery, options?: AdminRequestOptions): Promise<InquiryListResponse>;
+    get(id: string, options?: AdminRequestOptions): Promise<InquiryDetail>;
+    updateStatus(
+      id: string,
+      body: UpdateInquiryStatusRequest,
+      options?: AdminRequestOptions,
+    ): Promise<Inquiry>;
+    unreadCount(options?: AdminRequestOptions): Promise<InquiryUnreadCountResponse>;
+    /** Returns the admin file path for an inquiry attachment. */
+    fileUrl(inquiryId: string, fileId: string): string;
+  };
+
+  notificationChannels: {
+    list(options?: AdminRequestOptions): Promise<NotificationChannel[]>;
+    create(
+      body: CreateNotificationChannelRequest,
+      options?: AdminRequestOptions,
+    ): Promise<NotificationChannel>;
+    get(id: string, options?: AdminRequestOptions): Promise<NotificationChannel>;
+    update(
+      id: string,
+      body: UpdateNotificationChannelRequest,
+      options?: AdminRequestOptions,
+    ): Promise<NotificationChannel>;
+    remove(id: string, options?: AdminRequestOptions): Promise<void>;
+    test(id: string, options?: AdminRequestOptions): Promise<NotificationChannelTestResponse>;
+    deliveries(
+      id: string,
+      query?: NotificationDeliveriesQuery,
+      options?: AdminRequestOptions,
+    ): Promise<NotificationChannelDelivery[]>;
+    events(options?: AdminRequestOptions): Promise<NotificationChannelEvent[]>;
+  };
+
   settings: {
     get(options?: AdminRequestOptions): Promise<StoreSettings>;
     update(body: SettingsUpdateRequest, options?: AdminRequestOptions): Promise<StoreSettings>;
@@ -651,6 +739,75 @@ type AdminInit = CallOptions & {
 };
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/** Masks the path of a full endpoint URL when the backend returns the raw form. */
+function maskChannelEndpoint(value: string): string {
+  if (value.length === 0) return "";
+  try {
+    const parsed = new URL(value);
+    return `${parsed.origin}/••••`;
+  } catch {
+    return "••••";
+  }
+}
+
+/**
+ * The channel DTO is expected to expose `endpoint_url_masked` and
+ * `signing_secret_configured`. Older/alternate backends may use
+ * `masked_endpoint_url`, `has_signing_secret`, or return the raw URL, so
+ * normalize here instead of leaking secrets into the admin UI.
+ */
+function normalizeChannel(raw: NotificationChannel): NotificationChannel {
+  const record = raw as unknown as Record<string, unknown>;
+  const masked = record.endpoint_url_masked;
+  const maskedAlt = record.masked_endpoint_url;
+  const full = record.endpoint_url;
+  const endpoint =
+    typeof masked === "string" && masked.length > 0
+      ? masked
+      : typeof maskedAlt === "string" && maskedAlt.length > 0
+        ? maskedAlt
+        : typeof full === "string"
+          ? maskChannelEndpoint(full)
+          : "";
+
+  const configured =
+    typeof record.signing_secret_configured === "boolean"
+      ? record.signing_secret_configured
+      : typeof record.has_signing_secret === "boolean"
+        ? record.has_signing_secret
+        : typeof record.signing_secret === "string"
+          ? record.signing_secret.length > 0
+          : false;
+
+  return { ...raw, endpoint_url_masked: endpoint, signing_secret_configured: configured };
+}
+
+function normalizeChannelTest(
+  raw: NotificationChannelTestResponse,
+): NotificationChannelTestResponse {
+  const record = raw as unknown as Record<string, unknown>;
+  const ok =
+    typeof record.ok === "boolean"
+      ? record.ok
+      : typeof record.success === "boolean"
+        ? record.success
+        : false;
+  const status =
+    typeof record.status === "number"
+      ? record.status
+      : typeof record.response_status === "number"
+        ? record.response_status
+        : null;
+  const message = typeof record.message === "string" ? record.message : null;
+  const error = typeof record.error === "string" ? record.error : null;
+  return {
+    ok,
+    ...(status === null ? {} : { status }),
+    ...(message === null ? {} : { message }),
+    ...(error === null ? {} : { error }),
+  };
+}
 
 /**
  * Creates a typed administration client.
@@ -1681,6 +1838,146 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
           ...requestOptions,
           method: "POST",
         }),
+    },
+
+    inquiryForms: {
+      list: (query, requestOptions) =>
+        request<PageResult<InquiryForm>>("/api/v1/admin/inquiry-forms", {
+          ...requestOptions,
+          query,
+        }),
+      create: (body, requestOptions) =>
+        request<InquiryForm>("/api/v1/admin/inquiry-forms", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      get: (formId, requestOptions) =>
+        request<InquiryFormDetail>(`/api/v1/admin/inquiry-forms/${id(formId)}`, requestOptions),
+      update: (formId, body, requestOptions) =>
+        request<InquiryForm>(`/api/v1/admin/inquiry-forms/${id(formId)}`, {
+          ...requestOptions,
+          method: "PATCH",
+          body,
+        }),
+      delete: (formId, requestOptions) =>
+        request<void>(`/api/v1/admin/inquiry-forms/${id(formId)}`, {
+          ...requestOptions,
+          method: "DELETE",
+        }),
+      saveDraft: (formId, body, requestOptions) =>
+        request<InquiryFormRevision>(`/api/v1/admin/inquiry-forms/${id(formId)}/draft`, {
+          ...requestOptions,
+          method: "PUT",
+          body,
+        }),
+      publish: (formId, body, requestOptions) =>
+        request<InquiryForm>(`/api/v1/admin/inquiry-forms/${id(formId)}/publish`, {
+          ...requestOptions,
+          method: "POST",
+          body: body ?? {},
+        }),
+      listRevisions: (formId, requestOptions) =>
+        request<InquiryFormRevision[]>(
+          `/api/v1/admin/inquiry-forms/${id(formId)}/revisions`,
+          requestOptions,
+        ),
+      publishVersion: (formId, version, requestOptions) =>
+        request<InquiryForm>(
+          `/api/v1/admin/inquiry-forms/${id(formId)}/publish/${version}`,
+          {
+            ...requestOptions,
+            method: "POST",
+          },
+        ),
+    },
+
+    inquiries: {
+      list: (query, requestOptions) =>
+        request<InquiryListResponse>("/api/v1/admin/inquiries", {
+          ...requestOptions,
+          query,
+        }),
+      get: (inquiryId, requestOptions) =>
+        request<InquiryDetail>(`/api/v1/admin/inquiries/${id(inquiryId)}`, requestOptions),
+      updateStatus: (inquiryId, body, requestOptions) =>
+        request<Inquiry>(`/api/v1/admin/inquiries/${id(inquiryId)}`, {
+          ...requestOptions,
+          method: "PATCH",
+          body,
+        }),
+      unreadCount: (requestOptions) =>
+        request<InquiryUnreadCountResponse>(
+          "/api/v1/admin/inquiries/unread-count",
+          requestOptions,
+        ),
+      fileUrl: (inquiryId, fileId) =>
+        `/api/v1/admin/inquiries/${id(inquiryId)}/files/${id(fileId)}`,
+    },
+
+    notificationChannels: {
+      list: async (requestOptions) => {
+        const response = await request<NotificationChannel[] | { data: NotificationChannel[] }>(
+          "/api/v1/admin/notification-channels",
+          requestOptions,
+        );
+        const channels = Array.isArray(response) ? response : response.data;
+        return channels.map(normalizeChannel);
+      },
+      create: async (body, requestOptions) =>
+        normalizeChannel(
+          await request<NotificationChannel>("/api/v1/admin/notification-channels", {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        ),
+      get: async (channelId, requestOptions) =>
+        normalizeChannel(
+          await request<NotificationChannel>(
+            `/api/v1/admin/notification-channels/${id(channelId)}`,
+            requestOptions,
+          ),
+        ),
+      update: async (channelId, body, requestOptions) =>
+        normalizeChannel(
+          await request<NotificationChannel>(
+            `/api/v1/admin/notification-channels/${id(channelId)}`,
+            {
+              ...requestOptions,
+              method: "PATCH",
+              body,
+            },
+          ),
+        ),
+      remove: (channelId, requestOptions) =>
+        request<void>(`/api/v1/admin/notification-channels/${id(channelId)}`, {
+          ...requestOptions,
+          method: "DELETE",
+        }),
+      test: async (channelId, requestOptions) =>
+        normalizeChannelTest(
+          await request<NotificationChannelTestResponse>(
+            `/api/v1/admin/notification-channels/${id(channelId)}/test`,
+            {
+              ...requestOptions,
+              method: "POST",
+            },
+          ),
+        ),
+      deliveries: (channelId, query, requestOptions) =>
+        request<NotificationChannelDelivery[]>(
+          `/api/v1/admin/notification-channels/${id(channelId)}/deliveries`,
+          {
+            ...requestOptions,
+            query,
+          },
+        ),
+      events: (requestOptions) =>
+        request<NotificationChannelEvent[]>(
+          "/api/v1/admin/notification-events",
+          requestOptions,
+        ),
     },
 
     settings: {

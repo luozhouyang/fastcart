@@ -27,6 +27,8 @@ pub struct Config {
     pub payments: PaymentsConfig,
     /// Transactional email settings.
     pub email: EmailConfig,
+    /// Inquiry attachment settings.
+    pub inquiries: InquiryConfig,
 }
 
 /// HTTP listener settings.
@@ -43,6 +45,13 @@ pub struct ServerConfig {
     pub cookie_secure: bool,
     /// Exact browser origins permitted to call the API with credentials.
     pub cors_origins: Vec<String>,
+    /// Optional signing secret enabling draft page preview.
+    ///
+    /// When absent, preview token issuance and the `/preview` render surface
+    /// respond with `501 Not Implemented`.
+    pub preview_secret: Option<String>,
+    /// Optional admin application origin used by notification deep links.
+    pub admin_base_url: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -53,6 +62,8 @@ impl Default for ServerConfig {
             log_level: "info".to_owned(),
             cookie_secure: true,
             cors_origins: Vec::new(),
+            preview_secret: None,
+            admin_base_url: None,
         }
     }
 }
@@ -103,6 +114,25 @@ impl Default for StorageConfig {
         Self {
             provider: "local".to_owned(),
             root: PathBuf::from("./data/assets"),
+        }
+    }
+}
+
+/// Inquiry attachment settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InquiryConfig {
+    /// Hard cap for one uploaded attachment.
+    pub max_upload_bytes: usize,
+    /// Lifetime of a pending upload before cleanup.
+    pub upload_ttl_seconds: i64,
+}
+
+impl Default for InquiryConfig {
+    fn default() -> Self {
+        Self {
+            max_upload_bytes: 25 * 1024 * 1024,
+            upload_ttl_seconds: 3_600,
         }
     }
 }
@@ -319,6 +349,22 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_INTERNAL_FETCH_SECRET") {
             self.storefront.internal_fetch_secret = Some(value);
         }
+        if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
+            self.server.preview_secret = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_ADMIN_BASE_URL") {
+            self.server.admin_base_url = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_INQUIRY_MAX_UPLOAD_BYTES") {
+            self.inquiries.max_upload_bytes = value
+                .parse()
+                .context("FASTCART_INQUIRY_MAX_UPLOAD_BYTES must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_INQUIRY_UPLOAD_TTL_SECONDS") {
+            self.inquiries.upload_ttl_seconds = value
+                .parse()
+                .context("FASTCART_INQUIRY_UPLOAD_TTL_SECONDS must be a number")?;
+        }
         if let Ok(value) = env::var("FASTCART_EMAIL_PROVIDER") {
             self.email.provider = value;
         }
@@ -399,8 +445,25 @@ impl Config {
         if self.database.max_connections == 0 {
             bail!("database.max_connections must be greater than zero");
         }
+        if let Some(secret) = self.server.preview_secret.as_deref()
+            && secret.trim().len() < 32
+        {
+            bail!("server.preview_secret must be at least 32 bytes when configured");
+        }
         if self.cache.ttl_seconds == 0 {
             bail!("cache.ttl_seconds must be greater than zero");
+        }
+        if self.inquiries.max_upload_bytes == 0 {
+            bail!("inquiries.max_upload_bytes must be greater than zero");
+        }
+        if self.inquiries.upload_ttl_seconds <= 0 {
+            bail!("inquiries.upload_ttl_seconds must be greater than zero");
+        }
+        if let Some(url) = self.server.admin_base_url.as_deref() {
+            let url = url.trim();
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                bail!("server.admin_base_url must be an absolute http(s) URL");
+            }
         }
         match self.email.provider.as_str() {
             "log" => {}

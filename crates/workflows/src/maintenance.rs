@@ -2,16 +2,20 @@
 
 use fastcart_email::EmailService;
 use fastcart_infrastructure::{
-    EventBus, JobQueue, StoreDatabaseManager, fetch_pending_outbox, mark_outbox_failed,
+    EventBus, JobQueue, Storage, StoreDatabaseManager, fetch_pending_outbox, mark_outbox_failed,
     mark_outbox_processed,
 };
 use fastcart_kernel::{Pagination, now_timestamp};
 use fastcart_module_cart::CartService;
 use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::CheckoutService;
+use fastcart_module_inquiry::InquiryFileService;
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_webhook::WebhookService;
-use fastcart_notifications::{NotificationOutcome, NotificationService};
+use fastcart_notifications::{
+    NotificationChannelService, NotificationOutcome, NotificationService, RenderContext,
+    SEND_CHANNEL_NOTIFICATION_JOB_TYPE,
+};
 use fastcart_platform::{PlatformStore, StoreStatus};
 
 /// Counts produced by one maintenance sweep.
@@ -41,6 +45,14 @@ pub struct MaintenanceReport {
     pub notifications_skipped: u64,
     /// Notification dispatch failures retained for a later retry.
     pub notifications_failed: u64,
+    /// Channel notifications durably queued.
+    pub channel_notifications_queued: u64,
+    /// Channel deliveries already queued or sent.
+    pub channel_notifications_duplicates: u64,
+    /// Channel deliveries that failed while rendering or enqueueing.
+    pub channel_notifications_failed: u64,
+    /// Expired inquiry uploads removed from storage.
+    pub inquiry_files_expired: u64,
     /// Store-level failures encountered.
     pub failures: u64,
 }
@@ -69,8 +81,34 @@ pub async fn run_maintenance_with_options(
     email: &EmailService,
     allow_private_webhooks: bool,
 ) -> MaintenanceReport {
+    run_maintenance_with_notifications(
+        platform,
+        databases,
+        events,
+        email,
+        allow_private_webhooks,
+        None,
+    )
+    .await
+}
+
+/// Runs one maintenance sweep with notification deep-link configuration.
+pub async fn run_maintenance_with_notifications(
+    platform: &PlatformStore,
+    databases: &StoreDatabaseManager,
+    events: &EventBus,
+    email: &EmailService,
+    allow_private_webhooks: bool,
+    admin_base_url: Option<String>,
+) -> MaintenanceReport {
     let mut report = MaintenanceReport::default();
     let notifications = NotificationService::new();
+    let channels =
+        NotificationChannelService::new().with_local_endpoints_allowed(allow_private_webhooks);
+    let render_context = RenderContext {
+        admin_base_url,
+        locale: "zh-CN".to_owned(),
+    };
     let now = now_timestamp();
     let mut offset = 0_i64;
     loop {
@@ -156,6 +194,35 @@ pub async fn run_maintenance_with_options(
                                     "invalid send_email payload: {error}"
                                 ))),
                             },
+                            SEND_CHANNEL_NOTIFICATION_JOB_TYPE => {
+                                match serde_json::from_str(&job.payload) {
+                                    Ok(payload) => match channels
+                                        .process_job(&database, &payload)
+                                        .await
+                                    {
+                                        Ok(_) => Ok(()),
+                                        Err(fastcart_notifications::ChannelError::Retryable(
+                                            error,
+                                        )) => {
+                                            Err(fastcart_kernel::AppError::ExternalService(error))
+                                        }
+                                        Err(fastcart_notifications::ChannelError::Permanent(
+                                            error,
+                                        )) => {
+                                            tracing::warn!(
+                                                store_id = %store.id,
+                                                job_id = %job.id,
+                                                error = %error,
+                                                "channel notification failed permanently"
+                                            );
+                                            Ok(())
+                                        }
+                                    },
+                                    Err(error) => Err(fastcart_kernel::AppError::validation(
+                                        format!("invalid channel notification payload: {error}"),
+                                    )),
+                                }
+                            }
                             other => Err(fastcart_kernel::AppError::validation(format!(
                                 "no handler for job type {other}"
                             ))),
@@ -197,6 +264,7 @@ pub async fn run_maintenance_with_options(
                     for record in records {
                         let mut fan_out_failed = false;
                         let mut notification_failed = false;
+                        let mut channel_failed = false;
                         if let Some(event) = record.to_envelope(Some(store.id.clone())) {
                             // Fan out before publishing so a database failure
                             // keeps the outbox row retryable.
@@ -239,14 +307,44 @@ pub async fn run_maintenance_with_options(
                                     notification_failed = true;
                                 }
                             }
+                            // Channel notifications are independent of email:
+                            // rendering or transport failures are isolated to
+                            // one channel and never block other consumers.
+                            match channels
+                                .dispatch(&database, &queue, &event, &render_context)
+                                .await
+                            {
+                                Ok(channel_report) => {
+                                    report.channel_notifications_queued += channel_report.queued;
+                                    report.channel_notifications_duplicates +=
+                                        channel_report.duplicates;
+                                    report.channel_notifications_failed += channel_report.failed;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        store_id = %store.id,
+                                        event_id = %event.id,
+                                        event_type = %event.event_type,
+                                        error = %error,
+                                        "channel notification dispatch failed"
+                                    );
+                                    report.failures += 1;
+                                    report.channel_notifications_failed += 1;
+                                    channel_failed = true;
+                                }
+                            }
                         }
-                        if fan_out_failed || notification_failed {
+                        if fan_out_failed || notification_failed || channel_failed {
                             let reason = if fan_out_failed && notification_failed {
                                 "webhook fan-out and notification dispatch failed"
                             } else if fan_out_failed {
                                 "webhook fan-out failed"
-                            } else {
+                            } else if notification_failed && channel_failed {
+                                "email and channel notification dispatch failed"
+                            } else if notification_failed {
                                 "notification dispatch failed"
+                            } else {
+                                "channel notification dispatch failed"
                             };
                             if let Err(error) =
                                 mark_outbox_failed(database.pool(), &record.id, reason).await
@@ -301,6 +399,71 @@ pub async fn run_maintenance_with_options(
         }
     }
     report
+}
+
+/// Removes expired pending inquiry uploads from object storage and marks them.
+///
+/// Storage deletion is best-effort: a failure keeps the row pending so the next
+/// sweep can retry instead of leaking the object silently.
+pub async fn cleanup_inquiry_files(
+    platform: &PlatformStore,
+    databases: &StoreDatabaseManager,
+    storage: &dyn Storage,
+) -> u64 {
+    let mut removed = 0_u64;
+    let mut offset = 0_i64;
+    loop {
+        let page = match platform
+            .list_stores(Pagination { limit: 100, offset })
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(error = %error, "inquiry cleanup could not list stores");
+                break;
+            }
+        };
+        for store in &page.data {
+            if store.status != StoreStatus::Active {
+                continue;
+            }
+            let database = match databases.database(&store.id).await {
+                Ok(database) => database,
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "inquiry cleanup could not open store database");
+                    continue;
+                }
+            };
+            let service = InquiryFileService::new(database);
+            let files = match service.expired_pending(100).await {
+                Ok(files) => files,
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "expired inquiry upload scan failed");
+                    continue;
+                }
+            };
+            for file in files {
+                match storage.delete(&file.storage_key).await {
+                    Ok(()) => {}
+                    Err(error) => {
+                        tracing::warn!(store_id = %store.id, file_id = %file.id, error = %error, "inquiry upload cleanup failed");
+                        continue;
+                    }
+                }
+                match service.mark_expired(&file.id).await {
+                    Ok(()) => removed += 1,
+                    Err(error) => {
+                        tracing::warn!(store_id = %store.id, file_id = %file.id, error = %error, "inquiry upload state update failed");
+                    }
+                }
+            }
+        }
+        offset += page.data.len() as i64;
+        if offset >= page.count || page.data.is_empty() {
+            break;
+        }
+    }
+    removed
 }
 
 #[cfg(test)]

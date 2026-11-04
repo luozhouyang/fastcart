@@ -20,6 +20,7 @@ fastcart-module-catalog.workspace = true
 fastcart-module-checkout.workspace = true
 fastcart-module-customer.workspace = true
 fastcart-module-inventory.workspace = true
+fastcart-module-inquiry.workspace = true
 fastcart-module-order.workspace = true
 fastcart-module-payment.workspace = true
 fastcart-module-pricing.workspace = true

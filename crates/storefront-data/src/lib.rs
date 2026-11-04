@@ -7,8 +7,13 @@
 //! cross stores.
 //!
 //! Resolution degrades rather than fails for references that are missing,
-//! unpublished in production mode, or deleted. Storage and service failures
-//! other than "not found" are propagated as [`AppError`].
+//! unpublished in production mode, or deleted. A binding that fails with any
+//! other error is logged and skipped so the remaining fragments still reach
+//! the runtime; the bag as a whole never fails because of one bad reference.
+//! The exception is a page where every binding failed with a real error:
+//! that points at an unavailable data layer, so the error is surfaced instead
+//! of silently rendering an empty page.
+//! Concurrency is bounded so one page cannot fan out unbounded database work.
 
 mod card;
 
@@ -17,11 +22,13 @@ use std::time::Duration;
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{AppError, CurrencyCode, NavigationId, PageId, Pagination};
-use fastcart_module_catalog::{CatalogService, ProductFilter, ProductStatus};
+use fastcart_module_catalog::{CatalogService, ProductFilter, ProductSort, ProductStatus};
 use fastcart_module_content::{ContentService, PageStatus};
+use fastcart_module_inquiry::InquiryFormService;
 use fastcart_storefront::page::MAX_BINDING_LIMIT;
 use fastcart_storefront::{BindingRequest, DataBag, DataBinding};
-use futures::future::try_join_all;
+use futures::StreamExt;
+use futures::stream;
 use moka::future::Cache;
 use serde_json::{Map, Value, json};
 
@@ -33,8 +40,11 @@ pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
 /// Number of products used when a binding does not specify a limit.
 pub const DEFAULT_BINDING_LIMIT: u32 = 8;
 
+/// Maximum number of bindings resolved concurrently for one page.
+pub const MAX_CONCURRENT_BINDINGS: usize = 8;
+
 /// Maximum number of entries retained by one resolver cache.
-const CACHE_CAPACITY: u64 = 10_000;
+const CACHE_CAPACITY: u64 = 2_048;
 
 /// Publication mode used while resolving a page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,30 +112,57 @@ impl StorefrontDataResolver {
         self
     }
 
-    /// Resolves every binding concurrently and merges fragments by block id.
+    /// Resolves bindings with bounded concurrency and merges fragments by block
+    /// id.
     ///
     /// Bindings that target the same block are merged into one JSON object.
     /// Later bindings overwrite earlier ones when they produce the same
-    /// semantic key.
+    /// semantic key. A binding that fails for a reason other than "not found"
+    /// is logged and skipped so the remaining fragments are still returned.
+    /// If every binding fails with a real error the resolver returns it,
+    /// because that indicates an unavailable data layer rather than a handful
+    /// of dangling references.
     pub async fn resolve(
         &self,
         db: &StoreDatabase,
         bindings: &[BindingRequest],
         context: &DataResolutionContext,
     ) -> Result<DataBag, AppError> {
-        let fragments = try_join_all(
-            bindings
-                .iter()
-                .map(|request| self.resolve_binding(db, request, context)),
-        )
-        .await?;
+        // Own each request so the buffered futures do not borrow the input
+        // slice; borrowed async closures here fail higher-ranked lifetime
+        // inference when the resolver future is type-checked through the Axum
+        // handler.
+        let fragments = stream::iter(bindings.iter().cloned())
+            .map(|request| async move { self.resolve_binding(db, &request, context).await })
+            .buffered(MAX_CONCURRENT_BINDINGS)
+            .collect::<Vec<_>>()
+            .await;
 
         let mut merged: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
-        for (block_id, fragment) in fragments {
-            let entry = merged.entry(block_id).or_default();
-            if let Value::Object(object) = fragment {
-                entry.extend(object);
+        let mut first_error: Option<AppError> = None;
+        let mut failures = 0usize;
+        for result in fragments {
+            match result {
+                Ok((block_id, fragment)) => {
+                    let entry = merged.entry(block_id).or_default();
+                    if let Value::Object(object) = fragment {
+                        entry.extend(object);
+                    }
+                }
+                Err(error) if error.is_not_found() => {
+                    tracing::debug!(error = %error, "skipping missing storefront binding");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "skipping failed storefront binding");
+                    failures += 1;
+                    first_error.get_or_insert(error);
+                }
             }
+        }
+        if failures == bindings.len()
+            && let Some(error) = first_error
+        {
+            return Err(error);
         }
         Ok(merged
             .into_iter()
@@ -185,13 +222,14 @@ async fn resolve_fragment(
         DataBinding::ProductList {
             collection_id,
             tag,
+            sort,
             limit,
-            ..
         } => {
             resolve_product_list(
                 db,
                 collection_id.as_deref(),
                 tag.as_deref(),
+                sort.as_deref(),
                 *limit,
                 context,
             )
@@ -201,6 +239,7 @@ async fn resolve_fragment(
         DataBinding::Navigation { id } => resolve_navigation(db, id).await,
         DataBinding::Asset { .. } => Ok(json!({ "asset": null })),
         DataBinding::Search { query, limit } => resolve_search(db, query, *limit, context).await,
+        DataBinding::InquiryForm { handle } => resolve_inquiry_form(db, handle, context).await,
     }
 }
 
@@ -226,7 +265,7 @@ async fn resolve_collection(
     let products = catalog
         .list_products(
             ProductFilter {
-                status: Some(ProductStatus::Active),
+                status: (context.mode == DataMode::Production).then_some(ProductStatus::Active),
                 collection_id: Some(id.to_owned()),
                 sales_channel_ids: channel_filter(context),
                 include_deleted: false,
@@ -276,6 +315,7 @@ async fn resolve_product_list(
     db: &StoreDatabase,
     collection_id: Option<&str>,
     tag: Option<&str>,
+    sort: Option<&str>,
     limit: Option<u32>,
     context: &DataResolutionContext,
 ) -> Result<Value, AppError> {
@@ -291,18 +331,18 @@ async fn resolve_product_list(
             Err(error) => return Err(error),
         }
     }
-    // The catalog listing has no sort parameter; bindings that carry one are
-    // resolved in the catalog's stable default order.
+    let sort = sort.and_then(ProductSort::parse);
     let products = CatalogService::new(db.clone())
-        .list_products(
+        .list_products_sorted(
             ProductFilter {
-                status: Some(ProductStatus::Active),
+                status: (context.mode == DataMode::Production).then_some(ProductStatus::Active),
                 collection_id: collection_id.map(str::to_owned),
                 tag_value: tag.map(str::to_owned),
                 sales_channel_ids: channel_filter(context),
                 include_deleted: false,
                 ..ProductFilter::default()
             },
+            sort,
             Pagination {
                 limit: binding_limit(limit),
                 offset: 0,
@@ -322,7 +362,7 @@ async fn resolve_search(
     let products = CatalogService::new(db.clone())
         .list_products(
             ProductFilter {
-                status: Some(ProductStatus::Active),
+                status: (context.mode == DataMode::Production).then_some(ProductStatus::Active),
                 query: Some(query.to_owned()),
                 sales_channel_ids: channel_filter(context),
                 include_deleted: false,
@@ -365,14 +405,43 @@ async fn resolve_page(
     }))
 }
 
+/// Resolves a published inquiry form by handle.
+///
+/// Production mode only ever sees published forms because
+/// [`InquiryFormService::published_by_handle`] enforces publication. Preview
+/// and editor modes also return the published revision; there is no separate
+/// draft preview yet.
+async fn resolve_inquiry_form(
+    db: &StoreDatabase,
+    handle: &str,
+    _context: &DataResolutionContext,
+) -> Result<Value, AppError> {
+    let published = InquiryFormService::new(db.clone())
+        .published_by_handle(handle)
+        .await?;
+    let settings = json!({
+        "submit_label": published.revision.settings.submit_label,
+        "success_message": published.revision.settings.success_message,
+        "redirect_url": published.revision.settings.redirect_url,
+        "consent_text": published.revision.settings.consent_text,
+        "consent_required": published.revision.settings.consent_required,
+        "allow_attachments": published.revision.settings.allow_attachments,
+    });
+    Ok(json!({
+        "form": {
+            "handle": published.form.handle,
+            "version": published.form.published_version.unwrap_or(published.revision.version),
+            "fields": published.revision.fields,
+            "settings": settings,
+        }
+    }))
+}
+
 async fn resolve_navigation(db: &StoreDatabase, id: &str) -> Result<Value, AppError> {
-    let content = ContentService::new(db.clone());
-    let navigation = match content.get_navigation(&NavigationId::from_string(id)).await {
-        Ok(navigation) => navigation,
-        Err(error) if error.is_not_found() => return Ok(json!({ "navigation": null })),
-        Err(error) => return Err(error),
-    };
-    match content.get_navigation_tree(&navigation.handle).await {
+    match ContentService::new(db.clone())
+        .get_navigation_tree_by_id(&NavigationId::from_string(id))
+        .await
+    {
         Ok(tree) => Ok(json!({ "navigation": tree })),
         Err(error) if error.is_not_found() => Ok(json!({ "navigation": null })),
         Err(error) => Err(error),

@@ -5,11 +5,12 @@ use fastcart_kernel::{CurrencyCode, StoreId, VariantId};
 use fastcart_module_catalog::{
     CatalogService, CreateCollectionInput, CreateProductInput, CreateVariantInput,
 };
+use fastcart_module_inquiry::{CreateInquiryFormInput, InquiryFormService};
 use fastcart_module_inventory::{CreateInventoryItemInput, CreateLocationInput, InventoryService};
 use fastcart_module_pricing::{CreatePriceInput, PricingService};
 use fastcart_storefront::{BindingRequest, DataBinding};
 
-use super::{DataMode, DataResolutionContext, StorefrontDataResolver};
+use super::{DataMode, DataResolutionContext, StorefrontDataResolver, resolve_fragment};
 
 fn usd() -> CurrencyCode {
     CurrencyCode::new("USD").expect("USD is a valid currency")
@@ -219,6 +220,46 @@ async fn product_list_inherits_collection_visibility() {
 }
 
 #[tokio::test]
+async fn product_list_honours_declared_sort_order() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("database");
+    let catalog = CatalogService::new(db.clone());
+    for title in ["Beta", "Alpha", "Gamma"] {
+        let product = catalog
+            .create_product(CreateProductInput {
+                title: title.to_owned(),
+                ..CreateProductInput::default()
+            })
+            .await
+            .expect("product");
+        catalog.publish_product(&product.id).await.expect("publish");
+    }
+    let binding = BindingRequest {
+        block_id: "grid-3".to_owned(),
+        field: "products".to_owned(),
+        binding: DataBinding::ProductList {
+            collection_id: None,
+            tag: None,
+            sort: Some("title_desc".to_owned()),
+            limit: Some(10),
+        },
+    };
+
+    let bag = StorefrontDataResolver::new()
+        .resolve(&db, &[binding], &context(DataMode::Production))
+        .await
+        .expect("resolution");
+    let titles: Vec<&str> = bag["grid-3"]["products"]
+        .as_array()
+        .expect("products")
+        .iter()
+        .map(|product| product["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Gamma", "Beta", "Alpha"]);
+}
+
+#[tokio::test]
 async fn deleted_or_missing_references_return_null_fragments() {
     let db = StoreDatabase::in_memory(StoreId::new())
         .await
@@ -282,6 +323,144 @@ async fn deleted_or_missing_references_return_null_fragments() {
             .expect("products")
             .is_empty()
     );
+}
+
+#[test]
+fn binding_concurrency_is_bounded() {
+    assert_eq!(super::MAX_CONCURRENT_BINDINGS, 8);
+}
+
+#[tokio::test]
+async fn one_failed_binding_does_not_drop_other_fragments() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("database");
+    let (collection_id, _, _) = seed_collection(&db, true).await;
+    // Removing a table needed by the product listing makes the collection
+    // binding fail with a database error rather than a "not found" degradation.
+    sqlx::query("DROP TABLE products")
+        .execute(db.pool())
+        .await
+        .expect("drop products");
+
+    let broken = collection_binding(&collection_id);
+    let healthy = BindingRequest {
+        block_id: "asset-1".to_owned(),
+        field: "asset".to_owned(),
+        binding: DataBinding::Asset {
+            id: "asset-1".to_owned(),
+        },
+    };
+
+    let bag = StorefrontDataResolver::new()
+        .resolve(&db, &[broken, healthy], &context(DataMode::Production))
+        .await
+        .expect("one failed binding must not fail the bag");
+
+    assert!(!bag.contains_key("grid-1"), "the failed binding is skipped");
+    assert_eq!(bag["asset-1"]["asset"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn all_failed_bindings_surface_the_error() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("database");
+    let (collection_id, _, _) = seed_collection(&db, true).await;
+    sqlx::query("DROP TABLE products")
+        .execute(db.pool())
+        .await
+        .expect("drop products");
+
+    let first = collection_binding(&collection_id);
+    let mut second = collection_binding(&collection_id);
+    second.block_id = "grid-2".to_owned();
+
+    // A page whose every binding fails points at an unavailable data layer,
+    // so the resolver must not pretend the page resolved to empty data.
+    let result = StorefrontDataResolver::new()
+        .resolve(&db, &[first, second], &context(DataMode::Production))
+        .await;
+    assert!(result.is_err(), "all-failed resolution must not be silent");
+}
+
+async fn seed_inquiry_form(db: &StoreDatabase) -> fastcart_module_inquiry::InquiryForm {
+    let service = InquiryFormService::new(db.clone());
+    let form = service
+        .create_form(CreateInquiryFormInput {
+            name: "Contact".to_owned(),
+            handle: Some("contact".to_owned()),
+            description: None,
+        })
+        .await
+        .expect("form");
+    service.publish(&form.id, None).await.expect("publish")
+}
+
+fn inquiry_form_binding(handle: &str) -> BindingRequest {
+    BindingRequest {
+        block_id: "form-1".to_owned(),
+        field: "form".to_owned(),
+        binding: DataBinding::InquiryForm {
+            handle: handle.to_owned(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn inquiry_form_binding_resolves_fields_settings_and_version() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("database");
+    let form = seed_inquiry_form(&db).await;
+
+    let bag = StorefrontDataResolver::new()
+        .resolve(
+            &db,
+            &[inquiry_form_binding("contact")],
+            &context(DataMode::Production),
+        )
+        .await
+        .expect("resolution");
+
+    let resolved = &bag["form-1"]["form"];
+    assert_eq!(resolved["handle"], "contact");
+    assert_eq!(
+        resolved["version"],
+        form.published_version.expect("published version"),
+        "the resolver reports the published revision version"
+    );
+    let fields = resolved["fields"].as_array().expect("fields");
+    assert!(!fields.is_empty());
+    assert!(fields.iter().any(|field| field["key"] == "email"));
+    assert!(resolved["settings"]["submit_label"].is_string());
+    assert!(resolved["settings"]["success_message"].is_string());
+    assert_eq!(resolved["settings"]["allow_attachments"], true);
+
+    let serialized = serde_json::to_string(&bag).expect("serialized bag");
+    assert!(
+        !serialized.contains("notification_fields"),
+        "notification fields must never reach the storefront: {serialized}"
+    );
+}
+
+#[tokio::test]
+async fn missing_inquiry_form_handle_is_not_found_and_skipped() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("database");
+    let binding = inquiry_form_binding("missing");
+
+    let error = resolve_fragment(&db, &binding.binding, &context(DataMode::Production))
+        .await
+        .expect_err("missing handles must surface a not-found error");
+    assert!(error.is_not_found(), "unexpected error: {error}");
+
+    let bag = StorefrontDataResolver::new()
+        .resolve(&db, &[binding], &context(DataMode::Production))
+        .await
+        .expect("a missing reference is skipped rather than failing the page");
+    assert!(bag.is_empty());
 }
 
 #[tokio::test]

@@ -36,6 +36,7 @@ fn scoped(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         .merge(super::store_customer::router())
         .merge(super::store_content::router())
         .merge(super::store_inventory::router())
+        .merge(super::store_inquiry::router())
         .merge(super::store_theme::router())
         .merge(super::store_regions::router())
         .fallback(not_implemented)

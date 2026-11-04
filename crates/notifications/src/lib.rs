@@ -16,10 +16,18 @@
 //! duplicate rather than silently drop a notification.
 
 mod catalog;
+mod channel;
 mod context;
+mod feishu;
 mod service;
 
 pub use catalog::{NotificationRule, RULES, TemplateRegistry, rule_for};
+pub use channel::{
+    ChannelConfig, ChannelDelivery, ChannelDispatchReport, ChannelError, ChannelJobOutcome,
+    ChannelKind, ChannelTestResult, CreateChannelInput, DeliveryStatus, NotificationChannel,
+    NotificationChannelService, RenderContext, SEND_CHANNEL_NOTIFICATION_JOB_TYPE,
+    UpdateChannelInput, mask_endpoint_url, supported_channel_events,
+};
 pub use context::{TemplateContext, TemplateItem, format_amount};
 pub use service::{NotificationError, NotificationOutcome, NotificationService};
 

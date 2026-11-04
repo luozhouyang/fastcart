@@ -64,6 +64,11 @@ pub enum DataBinding {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
     },
+    /// A published storefront inquiry form reference.
+    InquiryForm {
+        /// Stable storefront form handle.
+        handle: String,
+    },
 }
 
 impl DataBinding {
@@ -78,6 +83,7 @@ impl DataBinding {
             Self::Navigation { .. } => "navigation",
             Self::Asset { .. } => "asset",
             Self::Search { .. } => "search",
+            Self::InquiryForm { .. } => "inquiry_form",
         }
     }
 }

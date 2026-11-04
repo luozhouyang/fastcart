@@ -28,6 +28,19 @@ pub const MAX_TEXT_LENGTH: usize = 10_000;
 pub const MAX_TEXTAREA_LENGTH: usize = 100_000;
 /// Maximum number of products a data binding may request.
 pub const MAX_BINDING_LIMIT: u32 = 100;
+/// Ordering values accepted by product list bindings.
+pub const PRODUCT_SORT_VALUES: [&str; 4] = [
+    "title_asc",
+    "title_desc",
+    "created_at_asc",
+    "created_at_desc",
+];
+
+/// Data bag key reserved for request context.
+///
+/// The server injects store, theme, cart and customer context under this key,
+/// so a page block may not reuse it as its block identifier.
+pub const RESERVED_CONTEXT_KEY: &str = "context";
 
 /// A versioned page definition compatible with the editor data model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -193,6 +206,19 @@ impl PageBody {
         editor: &ThemeEditorManifest,
     ) -> Result<Vec<BindingRequest>, StorefrontError> {
         self.validate_with_editor(editor)?;
+        self.collect_bindings_after_validation(editor)
+    }
+
+    /// Extracts data bindings from a body that already validates against
+    /// `editor`.
+    ///
+    /// Unlike [`Self::collect_bindings`], this performs only the binding walk
+    /// and does not validate the body again. Storefront renderers use it after
+    /// validating one page revision so validation cost is paid once.
+    pub fn collect_bindings_after_validation(
+        &self,
+        editor: &ThemeEditorManifest,
+    ) -> Result<Vec<BindingRequest>, StorefrontError> {
         let mut bindings = Vec::new();
         collect_block_bindings(&self.content, editor, &mut bindings)?;
         for blocks in self.zones.values() {
@@ -234,6 +260,11 @@ fn validate_blocks(
         };
         if !valid_name(id) {
             return Err(StorefrontError::Invalid(format!("invalid block id: {id}")));
+        }
+        if id == RESERVED_CONTEXT_KEY {
+            return Err(StorefrontError::Invalid(format!(
+                "block id {id:?} is reserved for request context data"
+            )));
         }
         if !ids.insert(id.to_owned()) {
             return Err(StorefrontError::Invalid(format!(
@@ -540,7 +571,7 @@ fn validate_binding_value(source: &str, name: &str, value: &Value) -> Result<(),
         }
         "product_list" => {
             for key in object.keys() {
-                if !["collection_id", "tag", "limit"].contains(&key.as_str()) {
+                if !["collection_id", "tag", "sort", "limit"].contains(&key.as_str()) {
                     return Err(StorefrontError::Invalid(format!(
                         "binding prop {name} declares unknown field: {key}"
                     )));
@@ -552,6 +583,15 @@ fn validate_binding_value(source: &str, name: &str, value: &Value) -> Result<(),
                 {
                     return Err(StorefrontError::Invalid(format!(
                         "binding prop {name}.{key} must be a string"
+                    )));
+                }
+            }
+            if let Some(sort) = object.get("sort") {
+                let sort = sort.as_str().unwrap_or("");
+                if !PRODUCT_SORT_VALUES.contains(&sort) {
+                    return Err(StorefrontError::Invalid(format!(
+                        "binding prop {name}.sort must be one of: {}",
+                        PRODUCT_SORT_VALUES.join(", ")
                     )));
                 }
             }
@@ -573,6 +613,30 @@ fn validate_binding_value(source: &str, name: &str, value: &Value) -> Result<(),
             }
             validate_binding_limit(object.get("limit"))?;
         }
+        "inquiry_form" => {
+            for key in object.keys() {
+                if !["id", "handle", "label"].contains(&key.as_str()) {
+                    return Err(StorefrontError::Invalid(format!(
+                        "binding prop {name} declares unknown field: {key}"
+                    )));
+                }
+            }
+            let handle = object.get("handle").and_then(Value::as_str).unwrap_or("");
+            if !valid_handle(handle) {
+                return Err(StorefrontError::Invalid(format!(
+                    "binding prop {name} must contain a valid handle"
+                )));
+            }
+            for key in ["id", "label"] {
+                if let Some(value) = object.get(key)
+                    && !value.is_string()
+                {
+                    return Err(StorefrontError::Invalid(format!(
+                        "binding prop {name}.{key} must be a string"
+                    )));
+                }
+            }
+        }
         other => {
             return Err(StorefrontError::Invalid(format!(
                 "unsupported data source: {other}"
@@ -580,6 +644,21 @@ fn validate_binding_value(source: &str, name: &str, value: &Value) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// Returns true for storefront handles accepted by inquiry form bindings.
+///
+/// Form handles are lowercased slugs stored in the database, so this mirrors
+/// the kernel handle contract rather than the looser editor identifier check.
+fn valid_handle(handle: &str) -> bool {
+    !handle.is_empty()
+        && handle.len() <= 120
+        && handle
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !handle.starts_with('-')
+        && !handle.ends_with('-')
+        && !handle.contains("--")
 }
 
 fn validate_binding_limit(limit: Option<&Value>) -> Result<(), StorefrontError> {
@@ -703,6 +782,13 @@ fn binding_from_value(
                 .to_owned(),
             limit,
         }),
+        "inquiry_form" => Ok(DataBinding::InquiryForm {
+            handle: object
+                .get("handle")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        }),
         other => Err(StorefrontError::Invalid(format!(
             "unsupported data source: {other}"
         ))),
@@ -814,6 +900,23 @@ mod tests {
     }
 
     #[test]
+    fn reserved_context_block_id_is_rejected() {
+        let mut value = body();
+        value["content"][0]["props"]["id"] = json!("context");
+        let error = PageBody::parse(&value).expect_err("context is reserved");
+        assert!(error.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn collecting_after_validation_matches_full_collection() {
+        let manifest = editor();
+        let parsed = PageBody::parse(&body()).unwrap();
+        let validated = parsed.collect_bindings(&manifest).unwrap();
+        let after_validation = parsed.collect_bindings_after_validation(&manifest).unwrap();
+        assert_eq!(validated, after_validation);
+    }
+
+    #[test]
     fn block_count_is_bounded() {
         let mut value = body();
         let content = (0..=MAX_PAGE_BLOCKS)
@@ -862,12 +965,51 @@ mod tests {
         assert!(
             validate_binding_value("product_list", "products", &json!({"sort": "price"})).is_err()
         );
+        assert!(
+            validate_binding_value(
+                "product_list",
+                "products",
+                &json!({"sort": "title_desc", "limit": 4})
+            )
+            .is_ok()
+        );
         assert!(validate_binding_value("search", "products", &json!({"query": "tee"})).is_ok());
         assert!(
             validate_binding_value(
                 "search",
                 "products",
                 &json!({"query": "tee", "sort": "asc"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn inquiry_form_binding_shape_is_strict() {
+        assert!(
+            validate_binding_value(
+                "inquiry_form",
+                "form",
+                &json!({"handle": "contact", "label": "Contact"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_binding_value("inquiry_form", "form", &json!({"handle": "contact"})).is_ok()
+        );
+        assert!(validate_binding_value("inquiry_form", "form", &json!({"id": "iform_1"})).is_err());
+        assert!(
+            validate_binding_value("inquiry_form", "form", &json!({"handle": "Contact"})).is_err()
+        );
+        assert!(
+            validate_binding_value("inquiry_form", "form", &json!({"handle": "contact-us"}))
+                .is_ok()
+        );
+        assert!(
+            validate_binding_value(
+                "inquiry_form",
+                "form",
+                &json!({"handle": "contact", "notification_fields": []})
             )
             .is_err()
         );

@@ -161,6 +161,28 @@ define_id!(
     "whdel",
     "Identifier of a webhook delivery attempt."
 );
+define_id!(InquiryFormId, "iform", "Identifier of an inquiry form.");
+define_id!(
+    InquiryRevisionId,
+    "ifrev",
+    "Identifier of an inquiry form revision."
+);
+define_id!(InquiryId, "inq", "Identifier of an inquiry submission.");
+define_id!(
+    InquiryFileId,
+    "ifile",
+    "Identifier of an inquiry attachment upload."
+);
+define_id!(
+    NotificationChannelId,
+    "nch",
+    "Identifier of a store notification channel."
+);
+define_id!(
+    NotificationDeliveryId,
+    "ndel",
+    "Identifier of a notification channel delivery."
+);
 
 #[cfg(test)]
 mod tests {

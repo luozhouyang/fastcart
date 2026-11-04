@@ -15,10 +15,11 @@ pub use context::{ActorContext, AuthenticationMethod, RequestContext, StoreConte
 pub use error::{AppError, KernelError};
 pub use ids::{
     ApiTokenId, CartId, CategoryId, CheckoutId, ClaimId, CollectionId, CouponId, CustomerId,
-    CustomerSessionId, EventId, ExchangeId, FulfillmentId, ImageId, InventoryItemId,
-    InventoryLocationId, JobId, LineItemId, NavigationId, OptionId, OptionValueId, OrderEditId,
-    OrderId, PageId, PaymentAttemptId, PaymentId, PaymentSessionId, PriceId, PriceListId,
-    PriceSetId, ProductId, PromotionId, RefundId, ReservationId, ReturnId, SessionId,
+    CustomerSessionId, EventId, ExchangeId, FulfillmentId, ImageId, InquiryFileId, InquiryFormId,
+    InquiryId, InquiryRevisionId, InventoryItemId, InventoryLocationId, JobId, LineItemId,
+    NavigationId, NotificationChannelId, NotificationDeliveryId, OptionId, OptionValueId,
+    OrderEditId, OrderId, PageId, PaymentAttemptId, PaymentId, PaymentSessionId, PriceId,
+    PriceListId, PriceSetId, ProductId, PromotionId, RefundId, ReservationId, ReturnId, SessionId,
     ShippingOptionId, ShippingProfileId, StoreId, TagId, TaxCategoryId, TaxRateId, TaxRegionId,
     ThemeActivationId, ThemeId, UserId, VariantId, WebhookDeliveryId, WebhookId,
 };
