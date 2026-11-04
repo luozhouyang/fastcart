@@ -409,7 +409,7 @@ impl ContentService {
         .bind(existing.revision)
         .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_conflict(error, "page handle already exists"))?;
         if result.rows_affected() == 0 {
             return Err(revision_conflict(existing.revision));
         }
@@ -531,7 +531,9 @@ impl ContentService {
         .bind(id.as_str())
         .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| {
+            unique_conflict(error, "published handle is already used by another page")
+        })?;
 
         insert_page_version(
             &mut tx,
