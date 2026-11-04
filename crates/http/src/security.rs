@@ -20,14 +20,25 @@ pub async fn security_headers_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    let path = request.uri().path();
+    let is_preview = path == "/preview" || path.starts_with("/preview/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    headers.insert(
-        REFERRER_POLICY,
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
+    if is_preview {
+        // The admin editor embeds the preview in an iframe on another origin,
+        // so framing cannot be denied here. The token itself is the access
+        // control. A stricter policy can be layered on with frame-ancestors
+        // once the admin origin is configured.
+        headers.remove(X_FRAME_OPTIONS);
+        headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    } else {
+        headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+        headers.insert(
+            REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        );
+    }
     headers.insert(
         PERMISSIONS_POLICY,
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
@@ -55,6 +66,7 @@ mod tests {
     async fn app(enable_hsts: bool) -> Router {
         Router::new()
             .route("/", get(|| async { StatusCode::OK }))
+            .route("/preview/page", get(|| async { StatusCode::OK }))
             .layer(middleware::from_fn_with_state(
                 enable_hsts,
                 security_headers_middleware,
@@ -80,6 +92,22 @@ mod tests {
                 .get("strict-transport-security")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn preview_responses_allow_framing_and_hide_the_referrer() {
+        let response = app(false)
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/preview/page?token=secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.headers().get("x-frame-options").is_none());
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
     }
 
     #[tokio::test]
