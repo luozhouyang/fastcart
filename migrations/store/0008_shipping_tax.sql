@@ -81,3 +81,14 @@ CREATE TABLE IF NOT EXISTS tax_rates (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tax_rates_region ON tax_rates (tax_region_id);
+
+-- SQLite treats NULLs as distinct in table-level UNIQUE constraints, so a
+-- country-wide region (NULL province) could be duplicated. The expression
+-- index folds NULL to '' and makes the pair genuinely unique.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tax_regions_country_province
+    ON tax_regions (country_code, IFNULL(province_code, ''));
+
+-- Exactly one rate per region and category. The empty string folds the
+-- uncategorized (NULL) bucket so it is constrained as well.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tax_rates_region_category
+    ON tax_rates (tax_region_id, IFNULL(tax_category_id, ''));

@@ -21,8 +21,8 @@ use crate::domain::{
     PaymentStatus, PaymentWebhookRecord, Refund, RefundStatus, WebhookStatus,
 };
 use crate::provider::{
-    CaptureRequest, CreateProviderSession, PaymentProvider, ProviderRegistry, RefundRequest,
-    VerifiedWebhook,
+    CaptureRequest, CreateProviderSession, PaymentError, PaymentProvider, ProviderRegistry,
+    RefundRequest, VerifiedWebhook,
 };
 
 /// Payment application service bound to one store database.
@@ -230,7 +230,17 @@ impl PaymentService {
             Ok(result) => result,
             Err(error) => {
                 let message = error.to_string();
-                self.record_session_failure(&session, &message).await?;
+                // A provider/transport error is ambiguous: the capture may have
+                // reached the provider even though the response was lost. Keep
+                // the session retryable and release the claim so a retry can
+                // reuse the same deterministic idempotency key. Only a
+                // structurally invalid request is a definitive failure.
+                if matches!(error, PaymentError::InvalidRequest(_)) {
+                    self.record_session_failure(&session, &message).await?;
+                } else {
+                    self.record_ambiguous_capture_failure(&session, &capture_key, &message)
+                        .await?;
+                }
                 return Err(error.into());
             }
         };
@@ -431,18 +441,16 @@ impl PaymentService {
             return Err(AppError::validation("refund amount must be positive"));
         }
         let payment = self.get_payment(payment_id).await?;
-        if !matches!(
-            payment.status,
-            PaymentStatus::Captured | PaymentStatus::PartiallyRefunded
-        ) {
-            return Err(AppError::conflict(format!(
-                "cannot refund a payment in status {}",
-                payment.status
-            )));
-        }
         let idempotency_key = idempotency_key
             .map(|key| key.trim().to_owned())
             .filter(|key| !key.is_empty());
+
+        // The existing-key lookup, the claim and the amount cap share one
+        // BEGIN IMMEDIATE transaction. Concurrent callers with the same key
+        // therefore observe the winning row instead of a unique violation.
+        // The lookup happens before state validation so a duplicate request
+        // still returns the winning refund after a full refund.
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let existing = if let Some(key) = idempotency_key.as_deref() {
             sqlx::query_as::<_, RefundRow>(
                 "SELECT id, payment_id, order_id, amount, currency_code, status,
@@ -451,18 +459,29 @@ impl PaymentService {
             )
             .bind(payment.id.as_str())
             .bind(key)
-            .fetch_optional(self.db.pool())
+            .fetch_optional(&mut *tx)
             .await
             .map_err(database_error)?
         } else {
             None
         };
         if let Some(existing) = existing.as_ref()
-            && RefundStatus::parse(&existing.status) != Some(RefundStatus::Failed)
+            && RefundStatus::parse(&existing.status) == Some(RefundStatus::Succeeded)
         {
-            return Ok(refund_from_row(existing.clone()));
+            let refund = refund_from_row(existing.clone());
+            tx.commit().await.map_err(database_error)?;
+            return Ok(refund);
         }
-
+        if !matches!(
+            payment.status,
+            PaymentStatus::Captured | PaymentStatus::PartiallyRefunded
+        ) {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict(format!(
+                "cannot refund a payment in status {}",
+                payment.status
+            )));
+        }
         let provider = self
             .providers
             .get(&payment.provider)
@@ -471,6 +490,7 @@ impl PaymentService {
             .provider_payment_id
             .clone()
             .ok_or_else(|| AppError::conflict("payment is missing a provider payment id"))?;
+
         let refund_id = existing
             .as_ref()
             .map_or_else(RefundId::new, |row| RefundId::from_string(row.id.clone()));
@@ -479,7 +499,6 @@ impl PaymentService {
             .unwrap_or_else(|| format!("refund:{}", refund_id.as_str()));
         let now = now_timestamp();
 
-        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let current_total: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount), 0) FROM refunds
              WHERE payment_id = ? AND status != 'failed' AND id != ?",
@@ -520,10 +539,13 @@ impl PaymentService {
             provider_refund_id: None,
             idempotency_key: Some(provider_key.clone()),
             reason: reason.clone(),
-            created_at: now,
+            created_at: existing.as_ref().map_or(now, |row| row.created_at),
             updated_at: now,
         };
         if existing.is_some() {
+            // A retry of a pending or failed row replaces the claim while
+            // keeping the caller's idempotency key and provider reference
+            // space free for the new attempt.
             sqlx::query(
                 "UPDATE refunds SET amount = ?, status = 'pending', provider_refund_id = NULL,
                  reason = ?, updated_at = ? WHERE id = ?",
@@ -538,8 +560,21 @@ impl PaymentService {
         } else {
             insert_refund(&mut tx, &pending).await?;
         }
+        // The claim is durable and separate from the provider result so a
+        // crashed caller can be observed and a retry re-invoked.
+        record_refund_claim(
+            &mut tx,
+            payment.id.as_str(),
+            &provider_key,
+            refund_id.as_str(),
+            now,
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
 
+        // Provider calls always happen outside the transaction. The provider
+        // key is deterministic, so re-invoking after a crash reconciles the
+        // same provider-side refund.
         let result = provider
             .refund(RefundRequest {
                 provider_payment_id,
@@ -553,12 +588,15 @@ impl PaymentService {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                sqlx::query("UPDATE refunds SET status = 'failed', updated_at = ? WHERE id = ?")
-                    .bind(now_timestamp())
-                    .bind(refund_id.as_str())
-                    .execute(self.db.pool())
-                    .await
-                    .map_err(database_error)?;
+                sqlx::query(
+                    "UPDATE refunds SET status = 'failed', updated_at = ?
+                     WHERE id = ? AND status IN ('pending', 'failed')",
+                )
+                .bind(now_timestamp())
+                .bind(refund_id.as_str())
+                .execute(self.db.pool())
+                .await
+                .map_err(database_error)?;
                 return Err(error.into());
             }
         };
@@ -578,9 +616,9 @@ impl PaymentService {
             updated_at: now,
         };
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE refunds SET status = ?, provider_refund_id = ?, updated_at = ?
-             WHERE id = ? AND status = 'pending'",
+             WHERE id = ? AND status IN ('pending', 'failed')",
         )
         .bind(refund.status.as_str())
         .bind(refund.provider_refund_id.as_deref())
@@ -589,15 +627,56 @@ impl PaymentService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
-        sqlx::query("UPDATE payments SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(next_payment_status.as_str())
-            .bind(now)
-            .bind(payment.id.as_str())
-            .execute(&mut *tx)
+        if updated.rows_affected() == 0 {
+            // A concurrent caller or a verified webhook already reconciled
+            // this refund; return the persisted result.
+            let row = sqlx::query_as::<_, RefundRow>(
+                "SELECT id, payment_id, order_id, amount, currency_code, status,
+                        provider_refund_id, idempotency_key, reason, created_at, updated_at
+                 FROM refunds WHERE id = ?",
+            )
+            .bind(refund.id.as_str())
+            .fetch_optional(&mut *tx)
             .await
             .map_err(database_error)?;
+            tx.commit().await.map_err(database_error)?;
+            return row
+                .map(refund_from_row)
+                .ok_or_else(|| AppError::not_found("refund", refund.id.as_str()));
+        }
+        // Recompute the payment status from the persisted refunds so a
+        // provider-reported failure cannot leave the payment over-refunded.
+        let refunded: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount), 0) FROM refunds
+             WHERE payment_id = ? AND status != 'failed'",
+        )
+        .bind(payment.id.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let reconciled_payment_status = if refunded >= payment.amount {
+            PaymentStatus::Refunded
+        } else if refunded > 0 {
+            PaymentStatus::PartiallyRefunded
+        } else {
+            PaymentStatus::Captured
+        };
+        sqlx::query(
+            "UPDATE payments SET status = ?, updated_at = ? WHERE id = ?
+             AND status IN ('captured', 'partially_refunded', 'refunded')",
+        )
+        .bind(reconciled_payment_status.as_str())
+        .bind(now)
+        .bind(payment.id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
         let event = DomainEventEnvelope::new(
-            "payment.refunded",
+            if refund.status == RefundStatus::Failed {
+                "payment.refund_failed"
+            } else {
+                "payment.refunded"
+            },
             Some(self.db.store_id().clone()),
             serde_json::json!({
                 "payment_id": payment.id.as_str(),
@@ -612,14 +691,20 @@ impl PaymentService {
             .await
             .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
+        if refund.status == RefundStatus::Failed {
+            return Err(AppError::ExternalService(
+                "payment provider rejected the refund".to_owned(),
+            ));
+        }
         Ok(refund)
     }
 
     /// Verifies and persists a webhook event, applying known event types.
     ///
     /// Duplicate `(provider, provider_event_id)` deliveries return the existing
-    /// record without reprocessing. Processing failures are stored on the
-    /// record, and the webhook is still acknowledged.
+    /// processed record without reprocessing. Processing failures are stored on
+    /// the record and returned as a retryable error so the provider redelivers
+    /// the event instead of it being silently dropped.
     pub async fn process_webhook(
         &self,
         provider_id: &str,
@@ -636,7 +721,8 @@ impl PaymentService {
             if existing.status == WebhookStatus::Processed {
                 return Ok(existing);
             }
-            let (status, last_error) = match self.apply_webhook_event(provider_id, &event).await {
+            let applied = self.apply_webhook_event(provider_id, &event).await;
+            let (status, last_error) = match &applied {
                 Ok(()) => (WebhookStatus::Processed, None),
                 Err(error) => (WebhookStatus::Failed, Some(error.to_string())),
             };
@@ -656,6 +742,9 @@ impl PaymentService {
             .execute(self.db.pool())
             .await
             .map_err(database_error)?;
+            if let Err(error) = applied {
+                return Err(retryable_webhook_error(&error));
+            }
             return self.get_webhook(existing.id.as_str()).await;
         }
 
@@ -687,7 +776,8 @@ impl PaymentService {
             return Err(database_error(error));
         }
 
-        let (status, last_error) = match self.apply_webhook_event(provider_id, &event).await {
+        let applied = self.apply_webhook_event(provider_id, &event).await;
+        let (status, last_error) = match &applied {
             Ok(()) => (WebhookStatus::Processed, None),
             Err(error) => (WebhookStatus::Failed, Some(error.to_string())),
         };
@@ -697,12 +787,19 @@ impl PaymentService {
              WHERE id = ?",
         )
         .bind(status.as_str())
-        .bind(now_timestamp())
+        .bind(if status == WebhookStatus::Processed {
+            Some(now_timestamp())
+        } else {
+            None
+        })
         .bind(last_error)
         .bind(id.as_str())
         .execute(self.db.pool())
         .await
         .map_err(database_error)?;
+        if let Err(error) = applied {
+            return Err(retryable_webhook_error(&error));
+        }
         self.get_webhook(id.as_str()).await
     }
 
@@ -1000,6 +1097,52 @@ impl PaymentService {
         Ok(())
     }
 
+    /// Records an ambiguous capture failure without making the session
+    /// terminal.
+    ///
+    /// The provider may have captured the payment even though the response was
+    /// lost, so the session stays retryable and the claim is released. A retry
+    /// reuses the deterministic capture key, and a verified webhook can also
+    /// reconcile the capture.
+    async fn record_ambiguous_capture_failure(
+        &self,
+        session: &PaymentSession,
+        capture_key: &str,
+        message: &str,
+    ) -> Result<(), AppError> {
+        let now = now_timestamp();
+        let mut data = session.data.clone();
+        data.insert("last_error", Value::String(message.to_owned()));
+        data.remove("capture_claim");
+        data.remove("capture_claim_at");
+        let attempt = PaymentAttempt {
+            id: PaymentAttemptId::new(),
+            payment_session_id: session.id.clone(),
+            amount: session.amount,
+            currency_code: session.currency_code.clone(),
+            status: PaymentStatus::Failed,
+            provider_reference: session.provider_session_id.clone(),
+            error: Some(message.to_owned()),
+            created_at: now,
+        };
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        sqlx::query(
+            "UPDATE payment_sessions SET data = ?, updated_at = ? \
+             WHERE id = ? AND status IN ('pending', 'requires_action', 'authorized') \
+               AND json_extract(data, '$.capture_claim') = ?",
+        )
+        .bind(data.to_json_string())
+        .bind(now)
+        .bind(session.id.as_str())
+        .bind(capture_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        insert_attempt(&mut tx, &attempt).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(())
+    }
+
     async fn find_webhook(
         &self,
         provider: &str,
@@ -1032,7 +1175,8 @@ impl PaymentService {
                 self.apply_payment_canceled_event(provider, &event.data)
                     .await
             }
-            "refund.succeeded" => self.apply_refund_event(provider, &event.data).await,
+            "refund.succeeded" => self.apply_refund_event(provider, &event.data, true).await,
+            "refund.failed" => self.apply_refund_event(provider, &event.data, false).await,
             _ => Ok(()),
         }
     }
@@ -1048,23 +1192,104 @@ impl PaymentService {
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let mut transitioned = false;
+
+        // Provider webhooks are the only capture path for asynchronous payment
+        // methods. Read the local session first so a successful event can
+        // create the payment row that a synchronous capture would have written.
+        let session = if let Some(provider_session_id) = provider_session_id.as_deref() {
+            sqlx::query_as::<_, PaymentSessionRow>(
+                "SELECT id, cart_id, checkout_id, order_id, provider, provider_session_id, \
+                 amount, currency_code, status, data, created_at, updated_at \
+                 FROM payment_sessions WHERE provider = ? AND provider_session_id = ? LIMIT 1",
+            )
+            .bind(provider)
+            .bind(provider_session_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .map(session_from_row)
+        } else {
+            None
+        };
+        let mut payment_id = session
+            .as_ref()
+            .and_then(|session| session.data.get("payment_id").and_then(Value::as_str))
+            .map(str::to_owned);
+
         if let Some(provider_payment_id) = provider_payment_id.as_deref() {
-            let updated = if succeeded {
-                sqlx::query(
-                    "UPDATE payments SET status = 'captured', \
-                     captured_at = COALESCE(captured_at, ?), updated_at = ? \
-                     WHERE provider = ? AND provider_payment_id = ? \
-                     AND status IN ('pending', 'requires_action', 'authorized', 'captured')",
-                )
-                .bind(now)
-                .bind(now)
-                .bind(provider)
-                .bind(provider_payment_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(database_error)?
+            let existing = sqlx::query_as::<_, PaymentRow>(
+                "SELECT id, order_id, provider, provider_payment_id, amount, currency_code, \
+                 status, captured_at, metadata, created_at, updated_at \
+                 FROM payments WHERE provider = ? AND provider_payment_id = ? LIMIT 1",
+            )
+            .bind(provider)
+            .bind(provider_payment_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if succeeded {
+                if let Some(existing) = existing {
+                    let was_captured =
+                        PaymentStatus::parse(&existing.status).is_some_and(|status| {
+                            matches!(
+                                status,
+                                PaymentStatus::Captured
+                                    | PaymentStatus::PartiallyRefunded
+                                    | PaymentStatus::Refunded
+                            )
+                        });
+                    if !was_captured {
+                        transitioned = true;
+                    }
+                    payment_id = Some(existing.id.clone());
+                    sqlx::query(
+                        "UPDATE payments SET status = 'captured', \
+                         captured_at = COALESCE(captured_at, ?), updated_at = ? \
+                         WHERE id = ? \
+                         AND status IN ('pending', 'requires_action', 'authorized', 'failed')",
+                    )
+                    .bind(now)
+                    .bind(now)
+                    .bind(&existing.id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+                } else if let Some(session) = session.as_ref() {
+                    // Insert once and let the unique provider identifier make
+                    // replays a no-op.
+                    let payment = Payment {
+                        id: PaymentId::new(),
+                        order_id: session.order_id.clone(),
+                        provider: provider.to_owned(),
+                        provider_payment_id: Some(provider_payment_id.to_owned()),
+                        amount: session.amount,
+                        currency_code: session.currency_code.clone(),
+                        status: PaymentStatus::Captured,
+                        captured_at: Some(now),
+                        metadata: session.data.clone(),
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    insert_payment(&mut tx, &payment).await?;
+                    insert_attempt(
+                        &mut tx,
+                        &PaymentAttempt {
+                            id: PaymentAttemptId::new(),
+                            payment_session_id: session.id.clone(),
+                            amount: payment.amount,
+                            currency_code: payment.currency_code.clone(),
+                            status: PaymentStatus::Captured,
+                            provider_reference: Some(provider_payment_id.to_owned()),
+                            error: None,
+                            created_at: now,
+                        },
+                    )
+                    .await?;
+                    payment_id = Some(payment.id.as_str().to_owned());
+                    transitioned = true;
+                }
             } else {
-                sqlx::query(
+                let updated = sqlx::query(
                     "UPDATE payments SET status = 'failed', updated_at = ? \
                      WHERE provider = ? AND provider_payment_id = ? \
                      AND status IN ('pending', 'requires_action', 'authorized')",
@@ -1074,41 +1299,61 @@ impl PaymentService {
                 .bind(provider_payment_id)
                 .execute(&mut *tx)
                 .await
-                .map_err(database_error)?
-            };
-            transitioned |= updated.rows_affected() > 0;
+                .map_err(database_error)?;
+                transitioned |= updated.rows_affected() > 0;
+            }
         }
-        if let Some(provider_session_id) = provider_session_id.as_deref() {
-            let updated = if succeeded {
-                sqlx::query(
-                    "UPDATE payment_sessions SET status = 'captured', updated_at = ? \
-                     WHERE provider = ? AND provider_session_id = ? \
-                     AND status IN ('pending', 'requires_action', 'authorized')",
+        if let Some(session) = session.as_ref() {
+            if succeeded {
+                let mut new_data = session.data.clone();
+                if let Some(payment_id) = payment_id.as_deref() {
+                    new_data.insert("payment_id", Value::String(payment_id.to_owned()));
+                }
+                new_data.remove("capture_claim");
+                new_data.remove("capture_claim_at");
+                let updated = sqlx::query(
+                    "UPDATE payment_sessions SET status = 'captured', data = ?, updated_at = ? \
+                     WHERE id = ? \
+                     AND status IN ('pending', 'requires_action', 'authorized', 'failed')",
                 )
+                .bind(new_data.to_json_string())
                 .bind(now)
-                .bind(provider)
-                .bind(provider_session_id)
+                .bind(session.id.as_str())
                 .execute(&mut *tx)
                 .await
-                .map_err(database_error)?
+                .map_err(database_error)?;
+                transitioned |= updated.rows_affected() > 0;
+                if updated.rows_affected() == 0 && new_data != session.data {
+                    // The session was captured already but never learned about
+                    // the asynchronous payment; reconcile the reference.
+                    sqlx::query(
+                        "UPDATE payment_sessions SET data = ?, updated_at = ? WHERE id = ? \
+                         AND status IN ('captured', 'partially_refunded', 'refunded')",
+                    )
+                    .bind(new_data.to_json_string())
+                    .bind(now)
+                    .bind(session.id.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+                }
             } else {
-                sqlx::query(
+                let updated = sqlx::query(
                     "UPDATE payment_sessions SET status = 'failed', updated_at = ? \
-                     WHERE provider = ? AND provider_session_id = ? \
+                     WHERE id = ? \
                      AND status IN ('pending', 'requires_action', 'authorized')",
                 )
                 .bind(now)
-                .bind(provider)
-                .bind(provider_session_id)
+                .bind(session.id.as_str())
                 .execute(&mut *tx)
                 .await
-                .map_err(database_error)?
-            };
-            transitioned |= updated.rows_affected() > 0;
+                .map_err(database_error)?;
+                transitioned |= updated.rows_affected() > 0;
+            }
         }
-        // Provider webhooks are the only capture path for asynchronous payment
-        // methods. Emit the same domain event the synchronous capture emits so
+        // Emit the same domain event the synchronous capture emits so
         // notifications and outbox consumers observe exactly one transition.
+        // When the order is not known yet, `assign_order` emits it later.
         if transitioned
             && let Some((order_id, amount, currency)) = payment_order_target(
                 &mut tx,
@@ -1130,7 +1375,11 @@ impl PaymentService {
                 amount,
                 &currency,
                 provider,
-                None,
+                if succeeded {
+                    payment_id.as_deref()
+                } else {
+                    None
+                },
                 None,
             )
             .await?;
@@ -1178,34 +1427,59 @@ impl PaymentService {
         Ok(())
     }
 
-    async fn apply_refund_event(&self, provider: &str, data: &Value) -> Result<(), AppError> {
+    async fn apply_refund_event(
+        &self,
+        provider: &str,
+        data: &Value,
+        succeeded: bool,
+    ) -> Result<(), AppError> {
         let provider_refund_id = string_field(data, &["provider_refund_id", "refund_id"]);
         let provider_payment_id = string_field(data, &["provider_payment_id", "payment_id"]);
         if provider_refund_id.is_none() && provider_payment_id.is_none() {
             return Ok(());
         }
+        let amount_hint = data
+            .get("amount")
+            .and_then(Value::as_i64)
+            .filter(|amount| *amount > 0);
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let mut payment_id: Option<String> = None;
+        let mut refund_id: Option<String> = None;
+        let mut refund_amount = amount_hint;
+        let mut refund_currency: Option<String> = None;
+        let mut refund_transitioned = false;
+
         if let Some(provider_refund_id) = provider_refund_id.as_deref() {
-            payment_id = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT payment_id FROM refunds WHERE provider_refund_id = ? LIMIT 1",
+            let row = sqlx::query_as::<_, (String, Option<String>, i64, String)>(
+                "SELECT id, payment_id, amount, currency_code FROM refunds \
+                 WHERE provider_refund_id = ? LIMIT 1",
             )
             .bind(provider_refund_id)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(database_error)?
-            .flatten();
-            sqlx::query(
-                "UPDATE refunds SET status = 'succeeded', updated_at = ? \
-                 WHERE provider_refund_id = ?",
-            )
-            .bind(now)
-            .bind(provider_refund_id)
-            .execute(&mut *tx)
-            .await
             .map_err(database_error)?;
+            if let Some((id, payment, amount, currency)) = row {
+                refund_id = Some(id.clone());
+                payment_id = payment;
+                refund_amount = Some(amount);
+                refund_currency = Some(currency);
+                let next = if succeeded { "succeeded" } else { "failed" };
+                let updated = sqlx::query(
+                    "UPDATE refunds SET status = ?, updated_at = ? \
+                     WHERE id = ? AND status != ?",
+                )
+                .bind(next)
+                .bind(now)
+                .bind(&id)
+                .bind(next)
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+                refund_transitioned = updated.rows_affected() > 0;
+            }
         }
+
         if payment_id.is_none()
             && let Some(provider_payment_id) = provider_payment_id.as_deref()
         {
@@ -1219,35 +1493,99 @@ impl PaymentService {
             .await
             .map_err(database_error)?;
         }
+
+        // A crash can leave a pending local refund without a provider
+        // reference. A failure notification can still be matched by payment
+        // and amount so the optimistic local refund is reverted.
+        if !succeeded
+            && refund_id.is_none()
+            && let (Some(payment_id), Some(amount)) = (payment_id.as_deref(), amount_hint)
+        {
+            let row = sqlx::query_as::<_, (String, i64, String)>(
+                "SELECT id, amount, currency_code FROM refunds \
+                 WHERE payment_id = ? AND amount = ? AND status = 'pending' \
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(payment_id)
+            .bind(amount)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if let Some((id, amount, currency)) = row {
+                let updated = sqlx::query(
+                    "UPDATE refunds SET status = 'failed', updated_at = ? \
+                     WHERE id = ? AND status = 'pending'",
+                )
+                .bind(now)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+                refund_id = Some(id);
+                refund_amount = Some(amount);
+                refund_currency = Some(currency);
+                refund_transitioned = updated.rows_affected() > 0;
+            }
+        }
+
         if let Some(payment_id) = payment_id {
-            let amount: i64 = sqlx::query_scalar("SELECT amount FROM payments WHERE id = ?")
+            let payment = sqlx::query_as::<_, (Option<String>, i64, String)>(
+                "SELECT order_id, amount, currency_code FROM payments WHERE id = ?",
+            )
+            .bind(&payment_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if let Some((order_id, amount, currency_code)) = payment {
+                let refunded: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(amount), 0) FROM refunds \
+                     WHERE payment_id = ? AND status != 'failed'",
+                )
                 .bind(&payment_id)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(database_error)?;
-            let refunded: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(amount), 0) FROM refunds \
-                 WHERE payment_id = ? AND status != 'failed'",
-            )
-            .bind(&payment_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(database_error)?;
-            let status = if refunded >= amount {
-                PaymentStatus::Refunded
-            } else {
-                PaymentStatus::PartiallyRefunded
-            };
-            sqlx::query(
-                "UPDATE payments SET status = ?, updated_at = ? WHERE id = ? \
-                 AND status IN ('captured', 'partially_refunded', 'refunded')",
-            )
-            .bind(status.as_str())
-            .bind(now)
-            .bind(&payment_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
+                let status = if refunded >= amount {
+                    PaymentStatus::Refunded
+                } else if refunded > 0 {
+                    PaymentStatus::PartiallyRefunded
+                } else {
+                    PaymentStatus::Captured
+                };
+                let updated = sqlx::query(
+                    "UPDATE payments SET status = ?, updated_at = ? WHERE id = ? \
+                     AND status IN ('captured', 'partially_refunded', 'refunded')",
+                )
+                .bind(status.as_str())
+                .bind(now)
+                .bind(&payment_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+                if !succeeded
+                    && refund_transitioned
+                    && updated.rows_affected() > 0
+                    && let Some(order_id) = order_id.as_deref().map(OrderId::from_string)
+                {
+                    // Order-level consumers can revert the refund they
+                    // recorded when the provider reported success first.
+                    let event = DomainEventEnvelope::new(
+                        "payment.refund_failed",
+                        Some(self.db.store_id().clone()),
+                        serde_json::json!({
+                            "payment_id": payment_id,
+                            "order_id": order_id.as_str(),
+                            "refund_id": refund_id,
+                            "amount": refund_amount.unwrap_or(0),
+                            "currency_code": refund_currency.unwrap_or(currency_code),
+                            "provider": provider,
+                        }),
+                    );
+                    append_outbox_event(&mut *tx, &event)
+                        .await
+                        .map_err(database_error)?;
+                }
+            }
         }
         tx.commit().await.map_err(database_error)?;
         Ok(())
@@ -1261,6 +1599,55 @@ fn string_field(data: &Value, keys: &[&str]) -> Option<String> {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     })
+}
+
+/// Wraps a webhook apply failure so the provider redelivers the event.
+fn retryable_webhook_error(error: &AppError) -> AppError {
+    AppError::ExternalService(format!("payment webhook processing failed: {error}"))
+}
+
+/// Records a durable refund claim (timestamp and attempt) separately from the
+/// provider result.
+async fn record_refund_claim(
+    tx: &mut Transaction<'_, Sqlite>,
+    payment_id: &str,
+    provider_key: &str,
+    refund_id: &str,
+    claimed_at: i64,
+) -> Result<(), AppError> {
+    let key = format!("payment-refund-claim:{payment_id}:{provider_key}");
+    let previous: Option<String> =
+        sqlx::query_scalar("SELECT response FROM idempotency_keys WHERE key = ?")
+            .bind(&key)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    let attempt = previous
+        .as_deref()
+        .and_then(|response| serde_json::from_str::<Value>(response).ok())
+        .and_then(|response| response.get("attempt").and_then(Value::as_i64))
+        .unwrap_or(0)
+        + 1;
+    let response = serde_json::json!({
+        "refund_id": refund_id,
+        "claimed_at": claimed_at,
+        "attempt": attempt,
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO idempotency_keys (key, scope, resource_id, response, created_at) \
+         VALUES (?, 'payment.refund_claim', ?, ?, ?) \
+         ON CONFLICT(key) DO UPDATE SET resource_id = excluded.resource_id, \
+             response = excluded.response",
+    )
+    .bind(&key)
+    .bind(refund_id)
+    .bind(response)
+    .bind(claimed_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
 }
 
 /// Appends one payment lifecycle event inside the caller's transaction.
@@ -1680,6 +2067,8 @@ mod tests {
         id: String,
         fail_create: bool,
         fail_capture: bool,
+        invalid_capture: bool,
+        capture_failures_remaining: AtomicUsize,
         fail_refund: bool,
         create_calls: AtomicUsize,
         capture_calls: AtomicUsize,
@@ -1692,6 +2081,8 @@ mod tests {
                 id: id.to_owned(),
                 fail_create: false,
                 fail_capture: false,
+                invalid_capture: false,
+                capture_failures_remaining: AtomicUsize::new(0),
                 fail_refund: false,
                 create_calls: AtomicUsize::new(0),
                 capture_calls: AtomicUsize::new(0),
@@ -1699,9 +2090,16 @@ mod tests {
             }
         }
 
-        fn failing_capture(id: &str) -> Self {
+        fn transient_capture(id: &str) -> Self {
             Self {
-                fail_capture: true,
+                capture_failures_remaining: AtomicUsize::new(1),
+                ..Self::new(id)
+            }
+        }
+
+        fn invalid_capture(id: &str) -> Self {
+            Self {
+                invalid_capture: true,
                 ..Self::new(id)
             }
         }
@@ -1722,6 +2120,10 @@ mod tests {
 
         fn capture_count(&self) -> usize {
             self.capture_calls.load(Ordering::SeqCst)
+        }
+
+        fn refund_count(&self) -> usize {
+            self.refund_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -1748,8 +2150,19 @@ mod tests {
 
         async fn capture(&self, request: CaptureRequest) -> Result<CaptureResult, PaymentError> {
             self.capture_calls.fetch_add(1, Ordering::SeqCst);
+            if self.invalid_capture {
+                return Err(PaymentError::InvalidRequest(
+                    "capture request is invalid".to_owned(),
+                ));
+            }
             if self.fail_capture {
                 return Err(PaymentError::Provider("capture failed".to_owned()));
+            }
+            let remaining = self.capture_failures_remaining.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.capture_failures_remaining
+                    .store(remaining - 1, Ordering::SeqCst);
+                return Err(PaymentError::Provider("capture transport error".to_owned()));
             }
             Ok(CaptureResult {
                 provider_payment_id: format!("{}_payment", self.id),
@@ -1984,15 +2397,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_failure_marks_session_and_attempt_failed() {
+    async fn ambiguous_capture_failure_stays_retryable_and_retries_provider() {
+        let (service, _db) = setup().await;
+        let provider = Arc::new(TestProvider::transient_capture("flaky"));
+        service.register_provider(provider.clone()).unwrap();
+        let session = service.create_session(input("flaky", 1000)).await.unwrap();
+
+        let error = service.capture(session.id.as_str()).await.unwrap_err();
+        assert!(matches!(error, AppError::ExternalService(_)));
+        let stored = service.get_session(session.id.as_str()).await.unwrap();
+        assert_eq!(stored.status, PaymentStatus::Pending);
+        assert!(stored.data.get("capture_claim").is_none());
+        let attempts = service.list_attempts(session.id.as_str()).await.unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[1].status, PaymentStatus::Failed);
+        assert!(attempts[1].error.is_some());
+
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+        assert_eq!(payment.status, PaymentStatus::Captured);
+        assert_eq!(provider.capture_count(), 2);
+        let payments = service
+            .list_payments(ListPaymentsFilter {
+                order_id: None,
+                status: None,
+                pagination: Pagination::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(payments.count, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_capture_request_marks_session_and_attempt_failed() {
         let (service, _db) = setup().await;
         service
-            .register_provider(Arc::new(TestProvider::failing_capture("broken")))
+            .register_provider(Arc::new(TestProvider::invalid_capture("broken")))
             .unwrap();
         let session = service.create_session(input("broken", 1000)).await.unwrap();
 
         let error = service.capture(session.id.as_str()).await.unwrap_err();
-        assert!(matches!(error, AppError::ExternalService(_)));
+        assert!(matches!(error, AppError::Validation(_)));
         let stored = service.get_session(session.id.as_str()).await.unwrap();
         assert_eq!(stored.status, PaymentStatus::Failed);
         let attempts = service.list_attempts(session.id.as_str()).await.unwrap();
@@ -2015,6 +2459,236 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, AppError::ExternalService(_)));
+        let refunds = service.list_refunds(payment.id.as_str()).await.unwrap();
+        assert_eq!(refunds.len(), 1);
+        assert_eq!(refunds[0].status, RefundStatus::Failed);
+        assert_eq!(
+            service
+                .get_payment(payment.id.as_str())
+                .await
+                .unwrap()
+                .status,
+            PaymentStatus::Captured
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_refund_key_returns_the_existing_refund() {
+        let (service, _db) = setup().await;
+        let provider = Arc::new(TestProvider::new("dedupe"));
+        service.register_provider(provider.clone()).unwrap();
+        let session = service.create_session(input("dedupe", 1000)).await.unwrap();
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+
+        let first = service
+            .refund_with_idempotency(
+                payment.id.as_str(),
+                400,
+                None,
+                Some("return-refund:dedupe".to_owned()),
+            )
+            .await
+            .unwrap();
+        let second = service
+            .refund_with_idempotency(
+                payment.id.as_str(),
+                400,
+                None,
+                Some("return-refund:dedupe".to_owned()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.status, RefundStatus::Succeeded);
+        assert_eq!(provider.refund_count(), 1);
+        assert_eq!(
+            service
+                .list_refunds(payment.id.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_full_refund_key_returns_existing_after_payment_is_refunded() {
+        let (service, _db) = setup().await;
+        let provider = Arc::new(TestProvider::new("dedupe-full"));
+        service.register_provider(provider.clone()).unwrap();
+        let session = service
+            .create_session(input("dedupe-full", 1000))
+            .await
+            .unwrap();
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+
+        let first = service
+            .refund_with_idempotency(
+                payment.id.as_str(),
+                1000,
+                None,
+                Some("return-refund:full".to_owned()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .get_payment(payment.id.as_str())
+                .await
+                .unwrap()
+                .status,
+            PaymentStatus::Refunded
+        );
+        let second = service
+            .refund_with_idempotency(
+                payment.id.as_str(),
+                1000,
+                None,
+                Some("return-refund:full".to_owned()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(provider.refund_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicate_refund_keys_return_the_winner() {
+        let (service, _db) = setup().await;
+        let provider = Arc::new(TestProvider::new("dedupe-concurrent"));
+        service.register_provider(provider.clone()).unwrap();
+        let session = service
+            .create_session(input("dedupe-concurrent", 1000))
+            .await
+            .unwrap();
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+        let service = Arc::new(service);
+
+        let first = service.clone();
+        let second = service.clone();
+        let payment_id = payment.id.to_string();
+        let (left, right) = tokio::join!(
+            first.refund_with_idempotency(
+                &payment_id,
+                400,
+                None,
+                Some("return-refund:race".to_owned())
+            ),
+            second.refund_with_idempotency(
+                &payment_id,
+                400,
+                None,
+                Some("return-refund:race".to_owned())
+            )
+        );
+        let left = left.unwrap();
+        let right = right.unwrap();
+        assert_eq!(left.id, right.id);
+        assert_eq!(
+            service
+                .list_refunds(payment_id.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_refund_crash_retry_calls_the_provider_and_reconciles() {
+        let (service, db) = setup().await;
+        let provider = Arc::new(TestProvider::new("crash"));
+        service.register_provider(provider.clone()).unwrap();
+        let session = service.create_session(input("crash", 1000)).await.unwrap();
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+
+        // Simulate a crash after the pending refund row was committed but
+        // before the provider call returned.
+        let now = now_timestamp();
+        sqlx::query(
+            "INSERT INTO refunds \
+             (id, payment_id, order_id, amount, currency_code, status, provider_refund_id, \
+              idempotency_key, reason, created_at, updated_at) \
+             VALUES ('refund_crash', ?, NULL, 400, 'USD', 'pending', NULL, \
+                     'return-refund:crash', NULL, ?, ?)",
+        )
+        .bind(payment.id.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let refund = service
+            .refund_with_idempotency(
+                payment.id.as_str(),
+                400,
+                None,
+                Some("return-refund:crash".to_owned()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refund.id.as_str(), "refund_crash");
+        assert_eq!(refund.status, RefundStatus::Succeeded);
+        assert_eq!(provider.refund_count(), 1);
+        assert_eq!(
+            service
+                .list_refunds(payment.id.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            service
+                .get_payment(payment.id.as_str())
+                .await
+                .unwrap()
+                .status,
+            PaymentStatus::PartiallyRefunded
+        );
+    }
+
+    #[tokio::test]
+    async fn refund_failed_webhook_reverts_the_payment_status() {
+        let (service, db) = setup().await;
+        service.register_provider(manual(Some("secret"))).unwrap();
+        let session = service.create_session(input("manual", 1000)).await.unwrap();
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+
+        let now = now_timestamp();
+        sqlx::query(
+            "INSERT INTO refunds \
+             (id, payment_id, order_id, amount, currency_code, status, provider_refund_id, \
+              idempotency_key, reason, created_at, updated_at) \
+             VALUES ('refund_revert', ?, NULL, 400, 'USD', 'succeeded', \
+                     'manual_refund_revert', NULL, NULL, ?, ?)",
+        )
+        .bind(payment.id.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE payments SET status = 'partially_refunded' WHERE id = ?")
+            .bind(payment.id.as_str())
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let body = r#"{"id":"evt_refund_failed","type":"refund.failed","data":{"provider_refund_id":"manual_refund_revert","provider_payment_id":"unused"}}"#;
+        let record = service
+            .process_webhook(
+                "manual",
+                headers("secret", body.as_bytes()),
+                body.as_bytes(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(record.status, WebhookStatus::Processed);
+
         let refunds = service.list_refunds(payment.id.as_str()).await.unwrap();
         assert_eq!(refunds.len(), 1);
         assert_eq!(refunds[0].status, RefundStatus::Failed);
@@ -2140,6 +2814,231 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_capture_creates_one_payment_and_is_idempotent_on_replay() {
+        let (service, db) = setup().await;
+        service.register_provider(manual(Some("secret"))).unwrap();
+        let session = service.create_session(input("manual", 1000)).await.unwrap();
+        let provider_session_id = session.provider_session_id.clone().unwrap();
+        let body = format!(
+            r#"{{"id":"evt_async","type":"payment.captured","data":{{"provider_session_id":"{provider_session_id}","provider_payment_id":"manual_payment_1","amount":1000,"currency":"USD"}}}}"#
+        );
+
+        let record = service
+            .process_webhook(
+                "manual",
+                headers("secret", body.as_bytes()),
+                body.as_bytes(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(record.status, WebhookStatus::Processed);
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM payments WHERE provider = 'manual'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+
+        let payment = service
+            .payment_for_session_id(session.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(
+            payment.provider_payment_id.as_deref(),
+            Some("manual_payment_1")
+        );
+        assert_eq!(payment.amount, 1000);
+        assert_eq!(payment.currency_code, "USD");
+        assert_eq!(payment.status, PaymentStatus::Captured);
+        let updated = service.get_session(session.id.as_str()).await.unwrap();
+        assert_eq!(updated.status, PaymentStatus::Captured);
+        assert_eq!(
+            updated.data.get("payment_id"),
+            Some(&serde_json::json!(payment.id.as_str()))
+        );
+
+        // Replaying the exact same provider event must not create another row.
+        service
+            .process_webhook(
+                "manual",
+                headers("secret", body.as_bytes()),
+                body.as_bytes(),
+            )
+            .await
+            .unwrap();
+        // A different event with the same provider identifiers is also
+        // idempotent: the unique provider payment id wins.
+        let replay = format!(
+            r#"{{"id":"evt_async_2","type":"payment.captured","data":{{"provider_session_id":"{provider_session_id}","provider_payment_id":"manual_payment_1","amount":1000,"currency":"USD"}}}}"#
+        );
+        service
+            .process_webhook(
+                "manual",
+                headers("secret", replay.as_bytes()),
+                replay.as_bytes(),
+            )
+            .await
+            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM payments WHERE provider = 'manual'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+        let again = service
+            .payment_for_session_id(session.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(again.id, payment.id);
+    }
+
+    #[tokio::test]
+    async fn webhook_capture_emits_the_captured_event_once() {
+        let (service, db) = setup().await;
+        service.register_provider(manual(Some("secret"))).unwrap();
+        let mut session_input = input("manual", 1000);
+        let order_id = OrderId::new();
+        session_input.order_id = Some(order_id.clone());
+        let session = service.create_session(session_input).await.unwrap();
+        let provider_session_id = session.provider_session_id.clone().unwrap();
+        let body = format!(
+            r#"{{"id":"evt_event_once","type":"payment.captured","data":{{"provider_session_id":"{provider_session_id}","provider_payment_id":"manual_payment_event"}}}}"#
+        );
+        service
+            .process_webhook(
+                "manual",
+                headers("secret", body.as_bytes()),
+                body.as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        // A redelivery under a different provider event id is still the same
+        // capture and must not emit a second lifecycle event.
+        let replay = format!(
+            r#"{{"id":"evt_event_once_2","type":"payment.captured","data":{{"provider_session_id":"{provider_session_id}","provider_payment_id":"manual_payment_event"}}}}"#
+        );
+        service
+            .process_webhook(
+                "manual",
+                headers("secret", replay.as_bytes()),
+                replay.as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM outbox WHERE event_type = 'payment.captured'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+        let payload: String =
+            sqlx::query_scalar("SELECT payload FROM outbox WHERE event_type = 'payment.captured'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["order_id"], order_id.as_str());
+        assert!(payload["payment_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn webhook_capture_reconciles_a_failed_session() {
+        let (service, _db) = setup().await;
+        service.register_provider(manual(Some("secret"))).unwrap();
+        let session = service.create_session(input("manual", 1000)).await.unwrap();
+        service
+            .fail_session(session.id.as_str(), "previous ambiguity")
+            .await
+            .unwrap();
+        let provider_session_id = session.provider_session_id.clone().unwrap();
+        let body = format!(
+            r#"{{"id":"evt_recover","type":"payment.captured","data":{{"provider_session_id":"{provider_session_id}","provider_payment_id":"manual_payment_recover","amount":1000}}}}"#
+        );
+
+        service
+            .process_webhook(
+                "manual",
+                headers("secret", body.as_bytes()),
+                body.as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let updated = service.get_session(session.id.as_str()).await.unwrap();
+        assert_eq!(updated.status, PaymentStatus::Captured);
+        let payment = service
+            .payment_for_session_id(session.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(payment.status, PaymentStatus::Captured);
+        assert_eq!(
+            payment.provider_payment_id.as_deref(),
+            Some("manual_payment_recover")
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_apply_failure_is_retryable_and_reapplied_on_redelivery() {
+        let (service, db) = setup().await;
+        service.register_provider(manual(Some("secret"))).unwrap();
+        let session = service.create_session(input("manual", 1000)).await.unwrap();
+        let provider_session_id = session.provider_session_id.clone().unwrap();
+        let body = format!(
+            r#"{{"id":"evt_apply_retry","type":"payment.captured","data":{{"provider_session_id":"{provider_session_id}"}}}}"#
+        );
+        sqlx::query(
+            "CREATE TRIGGER reject_capture BEFORE UPDATE ON payment_sessions \
+             WHEN NEW.status = 'captured' BEGIN SELECT RAISE(ABORT, 'transient'); END",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let error = service
+            .process_webhook(
+                "manual",
+                headers("secret", body.as_bytes()),
+                body.as_bytes(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::ExternalService(_)));
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM payment_webhooks WHERE provider_event_id = 'evt_apply_retry'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(status, "failed");
+
+        sqlx::query("DROP TRIGGER reject_capture")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let record = service
+            .process_webhook(
+                "manual",
+                headers("secret", body.as_bytes()),
+                body.as_bytes(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(record.status, WebhookStatus::Processed);
+        assert_eq!(record.attempts, 2);
+        assert_eq!(
+            service
+                .get_session(session.id.as_str())
+                .await
+                .unwrap()
+                .status,
+            PaymentStatus::Captured
+        );
     }
 
     #[tokio::test]

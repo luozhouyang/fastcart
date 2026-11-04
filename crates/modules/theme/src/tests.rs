@@ -1,6 +1,6 @@
 //! Integration-style tests for the theme registry service.
 
-use fastcart_infrastructure::StoreDatabase;
+use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
 use fastcart_kernel::{AppError, Pagination, StoreId, ThemeId};
 use fastcart_storefront::{ThemeEditorRef, ThemeManifest};
 use serde_json::{Value, json};
@@ -118,6 +118,61 @@ async fn registers_lists_and_reads_themes() {
     assert!(listed.data.iter().any(|theme| theme.id == second.id));
 
     assert!(service.active().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn mutations_append_audit_entries_atomically() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = ThemeService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+
+    let first = service.register(input("first")).await.unwrap();
+    let second = service.register(input("second")).await.unwrap();
+    let third = service.register(input("third")).await.unwrap();
+    service
+        .update_settings(
+            &first.id,
+            UpdateThemeSettingsInput {
+                settings: json!({ "logo": "/new.svg" }),
+            },
+        )
+        .await
+        .unwrap();
+    service.activate(&first.id).await.unwrap();
+    // Activating the already-active theme is a no-op and must not be audited.
+    service.activate(&first.id).await.unwrap();
+    service.activate(&second.id).await.unwrap();
+    service.rollback().await.unwrap();
+    // `second` is now the rollback target (deleting it would be a conflict),
+    // so delete the unrelated inactive theme instead.
+    service.delete(&third.id).await.unwrap();
+
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert_eq!(
+        audits
+            .iter()
+            .map(|audit| audit.action.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "theme.registered",
+            "theme.registered",
+            "theme.registered",
+            "theme.settings_updated",
+            "theme.activated",
+            "theme.activated",
+            "theme.rolled_back",
+            "theme.deleted",
+        ]
+    );
+    assert!(audits.iter().all(|audit| audit.processed_at.is_none()));
+    assert!(
+        audits
+            .iter()
+            .all(|audit| audit.actor_id.as_deref() == Some("user_1"))
+    );
+
+    // Deleting the active theme is rejected and must not append an audit row.
+    assert!(service.delete(&first.id).await.is_err());
+    assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 8);
 }
 
 #[tokio::test]
@@ -286,17 +341,20 @@ async fn rollback_returns_to_the_previous_theme() {
 }
 
 #[tokio::test]
-async fn rollback_conflicts_when_the_previous_theme_is_gone() {
+async fn deletion_is_rejected_while_rollback_targets_the_theme() {
     let service = service().await;
     let first = service.register(input("first")).await.unwrap();
     let second = service.register(input("second")).await.unwrap();
     service.activate(&first.id).await.unwrap();
     service.activate(&second.id).await.unwrap();
 
-    service.delete(&first.id).await.unwrap();
-
-    let error = service.rollback().await.unwrap_err();
+    // The latest activation points rollback at `first`, so deleting it would
+    // make a later rollback fail.
+    let error = service.delete(&first.id).await.unwrap_err();
     assert!(matches!(error, AppError::Conflict(_)));
+
+    let rolled_back = service.rollback().await.unwrap();
+    assert_eq!(rolled_back.id, first.id);
 }
 
 #[tokio::test]

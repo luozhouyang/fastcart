@@ -6,14 +6,17 @@
 //!
 //! # Delivery semantics
 //!
-//! A delivery row is claimed as `pending` before the email job is enqueued and
-//! is marked `sent` only after the job is durably queued. Every failure before
-//! that point releases the claim, so a later outbox retry can enqueue the
-//! notification again. A crash after the job is queued but before the delivery
-//! row is marked `sent` may produce a duplicate email. Delivery is therefore
-//! **at-least-once**: repeated replays of a completed event are suppressed by
-//! the unique `(event_id, template)` constraint, but an interrupted attempt can
-//! duplicate rather than silently drop a notification.
+//! A delivery row is atomically claimed (owner token plus lease) before the
+//! email job is enqueued and is marked `sent` only after the job is durably
+//! queued. Only the attempt holding the token may release or complete the
+//! claim, so concurrent dispatchers cannot enqueue the same notification
+//! twice. Every failure before the job is queued releases this attempt's
+//! claim, so a later outbox retry can enqueue the notification again. A crash
+//! after the job is queued but before the delivery row is marked `sent` may
+//! produce a duplicate email. Delivery is therefore **at-least-once**: repeated
+//! replays of a completed event are suppressed by the unique
+//! `(event_id, template)` constraint, but an interrupted attempt can duplicate
+//! rather than silently drop a notification.
 
 mod catalog;
 mod channel;
@@ -193,6 +196,97 @@ mod tests {
              VALUES ('delivery_1', ?, 'order.placed', 'order_confirmation', 'pending', 0, 0)",
         )
         .bind(event.id.as_str())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let outcome = service
+            .dispatch(&db, &email(), &queue, &event)
+            .await
+            .unwrap();
+        assert!(outcome.is_sent());
+        assert_eq!(queue.count_by_status(status::PENDING).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_dispatches_claim_one_delivery() {
+        let db = database().await;
+        let queue = JobQueue::new(db.pool().clone());
+        let service = service();
+        let event = order_placed_event(db.store_id());
+
+        let email = email();
+        let (first, second) = tokio::join!(
+            service.dispatch(&db, &email, &queue, &event),
+            service.dispatch(&db, &email, &queue, &event),
+        );
+        let outcomes = [first.unwrap(), second.unwrap()];
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_sent()).count(),
+            1,
+            "exactly one concurrent dispatch must enqueue"
+        );
+        for outcome in outcomes.iter().filter(|outcome| !outcome.is_sent()) {
+            assert!(matches!(outcome, NotificationOutcome::Duplicate { .. }));
+        }
+        assert_eq!(queue.count_by_status(status::PENDING).await.unwrap(), 1);
+        assert_eq!(delivery_count(&db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn an_unexpired_claim_cannot_be_taken_by_another_attempt() {
+        let db = database().await;
+        let queue = JobQueue::new(db.pool().clone());
+        let service = service();
+        let event = order_placed_event(db.store_id());
+        let now = fastcart_kernel::now_timestamp();
+
+        sqlx::query(
+            "INSERT INTO notification_deliveries
+             (id, event_id, event_type, template, status, attempts, created_at,
+              claim_token, claimed_at)
+             VALUES ('delivery_1', ?, 'order.placed', 'order_confirmation',
+                     'claimed', 0, ?, 'other-attempt', ?)",
+        )
+        .bind(event.id.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let outcome = service
+            .dispatch(&db, &email(), &queue, &event)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, NotificationOutcome::Duplicate { .. }));
+        assert!(queue.claim("test", 10).await.unwrap().is_empty());
+        let token: Option<String> =
+            sqlx::query_scalar("SELECT claim_token FROM notification_deliveries")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(token.as_deref(), Some("other-attempt"));
+    }
+
+    #[tokio::test]
+    async fn an_expired_claim_can_be_retaken() {
+        let db = database().await;
+        let queue = JobQueue::new(db.pool().clone());
+        let service = service();
+        let event = order_placed_event(db.store_id());
+        let now = fastcart_kernel::now_timestamp();
+
+        sqlx::query(
+            "INSERT INTO notification_deliveries
+             (id, event_id, event_type, template, status, attempts, created_at,
+              claim_token, claimed_at)
+             VALUES ('delivery_1', ?, 'order.placed', 'order_confirmation',
+                     'claimed', 0, ?, 'stale-attempt', ?)",
+        )
+        .bind(event.id.as_str())
+        .bind(now)
+        .bind(now - 3_600)
         .execute(db.pool())
         .await
         .unwrap();

@@ -11,7 +11,7 @@ use fastcart_kernel::{
     AppError, ClaimId, ExchangeId, LineItemId, Metadata, OrderId, Pagination, ReturnId,
 };
 use fastcart_module_inventory::{
-    ExchangeRestockLine, InventoryService, ReturnRestockLine, StockConsumption,
+    ExchangeRestockLine, InventoryService, RestockAudit, ReturnRestockLine, StockConsumption,
 };
 use fastcart_module_order::{
     AfterSalesFulfillment, AfterSalesFulfillmentItemInput, ClaimItemType, ClaimStatus,
@@ -133,6 +133,17 @@ impl AfterSalesWorkflow {
             inventory: InventoryService::new(db),
             shipping,
         }
+    }
+
+    /// Records workflow-owned mutations in the store audit outbox.
+    ///
+    /// The actor is propagated to the order and inventory services so their
+    /// audit rows commit with the mutation they describe.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.order = self.order.with_audit_actor(actor_id.clone());
+        self.inventory = self.inventory.with_audit_actor(actor_id);
+        self
     }
 
     /// Refunds the requested quantities of a return.
@@ -286,7 +297,12 @@ impl AfterSalesWorkflow {
             ));
         }
         if claim.status == ClaimStatus::Requested {
-            claim = self.order.accept_claim(order_id, claim_id).await?;
+            claim = self
+                .order
+                .clone()
+                .without_audit()
+                .accept_claim(order_id, claim_id)
+                .await?;
         }
         let key = format!("{CLAIM_REFUND_PREFIX}:{}", claim_id.as_str());
 
@@ -406,13 +422,10 @@ impl AfterSalesWorkflow {
 
         let mut lines = Vec::new();
         for item in &order_return.items {
-            let previously_received = before
-                .items
-                .iter()
-                .find(|previous| previous.order_item_id == item.order_item_id)
-                .map_or(0, |previous| previous.received_quantity);
-            let newly_received = item.received_quantity - previously_received;
-            if newly_received <= 0 {
+            // Target the full cumulative received quantity for each line. The
+            // inventory service reconciles this against movements already
+            // recorded, so a retry after a failed restock still restocks.
+            if item.received_quantity <= 0 {
                 continue;
             }
             let Some(order_item) = order
@@ -431,17 +444,45 @@ impl AfterSalesWorkflow {
             lines.push(ReturnRestockLine::new(
                 item.order_item_id.clone(),
                 variant_id,
-                newly_received,
+                item.received_quantity,
                 item.received_quantity,
             ));
         }
 
-        let restocked_units = if lines.is_empty() {
-            0
-        } else {
+        let changed = before.status != order_return.status
+            || order_return.items.iter().any(|item| {
+                before
+                    .items
+                    .iter()
+                    .find(|previous| previous.order_item_id == item.order_item_id)
+                    .is_none_or(|previous| previous.received_quantity != item.received_quantity)
+            });
+        let restocked_units = if changed {
+            self.inventory
+                .restock_return_audited(
+                    order_id,
+                    return_id,
+                    &lines,
+                    RestockAudit {
+                        action: "order.return_received".to_owned(),
+                        resource_type: "order_return".to_owned(),
+                        resource_id: return_id.as_str().to_owned(),
+                        data: serde_json::json!({
+                            "order_id": order_id.as_str(),
+                            "status": order_return.status.as_str(),
+                        }),
+                    },
+                )
+                .await?
+        } else if !lines.is_empty() {
+            // The receive transaction may have committed before a previous
+            // restock attempt failed. Reconcile the missing movements without
+            // writing a duplicate receive audit.
             self.inventory
                 .restock_return(order_id, return_id, &lines)
                 .await?
+        } else {
+            0
         };
 
         Ok(ReceiveReturnResult {
@@ -453,10 +494,11 @@ impl AfterSalesWorkflow {
     /// Fulfills the replacement lines of an accepted claim.
     ///
     /// Only [`ClaimItemType::Replace`] lines with a replacement variant are
-    /// shipped; refund lines are handled by [`Self::refund_claim`]. The
-    /// provider is called before any local write. Replaying the call returns
-    /// the existing fulfillment without creating another provider fulfillment
-    /// or stock movement.
+    /// shipped; refund lines are handled by [`Self::refund_claim`]. Stock is
+    /// consumed idempotently before the provider is called, and a provider
+    /// failure reverses the consumption. Replaying the call returns the
+    /// existing fulfillment without creating another provider fulfillment or
+    /// stock movement.
     pub async fn fulfill_claim(
         &self,
         order_id: &OrderId,
@@ -471,7 +513,12 @@ impl AfterSalesWorkflow {
             ));
         }
         if claim.status == ClaimStatus::Requested {
-            claim = self.order.accept_claim(order_id, claim_id).await?;
+            claim = self
+                .order
+                .clone()
+                .without_audit()
+                .accept_claim(order_id, claim_id)
+                .await?;
         }
 
         if let Some(existing) = self.order.claim_fulfillment(order_id, claim_id).await? {
@@ -508,7 +555,24 @@ impl AfterSalesWorkflow {
             });
         }
 
-        let receipt = self
+        let consumptions = replacements
+            .iter()
+            .map(|(line_id, variant_id, quantity)| {
+                StockConsumption::new(
+                    variant_id.clone(),
+                    *quantity,
+                    format!("claim-fulfill:{}:{}", claim_id.as_str(), line_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        // Consume stock before contacting the provider: a stock failure must
+        // not ship goods, and the movement is idempotent across retries.
+        let (consumed_units, consumed_references) = self
+            .inventory
+            .consume_stock_tracked(order_id, &consumptions)
+            .await?;
+
+        let receipt = match self
             .create_provider_fulfillment(
                 order_id,
                 provider_id,
@@ -521,42 +585,49 @@ impl AfterSalesWorkflow {
                         quantity: *quantity,
                     }),
             )
-            .await?;
-
-        let consumptions = replacements
-            .iter()
-            .map(|(line_id, variant_id, quantity)| {
-                StockConsumption::new(
-                    variant_id.clone(),
-                    *quantity,
-                    format!("claim-fulfill:{}:{}", claim_id.as_str(), line_id),
-                )
-            })
-            .collect::<Vec<_>>();
-        let consumed_units = self
-            .inventory
-            .consume_stock(order_id, &consumptions)
-            .await?;
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                // The provider did not accept the replacement, so put the
+                // reserved stock back and let a retry consume it again.
+                if let Err(restore_error) = self
+                    .inventory
+                    .restore_consumed_stock(&consumed_references)
+                    .await
+                {
+                    tracing::error!(
+                        order_id = %order_id,
+                        error = %restore_error,
+                        "failed to restore replacement stock after the provider rejected a claim fulfillment"
+                    );
+                }
+                return Err(error);
+            }
+        };
 
         let fulfillment = self
             .order
-            .create_after_sales_fulfillment(CreateAfterSalesFulfillmentInput {
-                order_id: order_id.clone(),
-                claim_id: Some(claim_id.clone()),
-                exchange_id: None,
-                provider_id: receipt.provider_id.clone(),
-                provider_fulfillment_id: Some(receipt.provider_fulfillment_id.clone()),
-                provider_data: receipt.data.clone(),
-                tracking_numbers: receipt.tracking_numbers.clone(),
-                metadata: Metadata::empty(),
-                items: replacements
-                    .iter()
-                    .map(|(_, variant_id, quantity)| AfterSalesFulfillmentItemInput {
-                        variant_id: variant_id.clone(),
-                        quantity: *quantity,
-                    })
-                    .collect(),
-            })
+            .create_after_sales_fulfillment_audited(
+                CreateAfterSalesFulfillmentInput {
+                    order_id: order_id.clone(),
+                    claim_id: Some(claim_id.clone()),
+                    exchange_id: None,
+                    provider_id: receipt.provider_id.clone(),
+                    provider_fulfillment_id: Some(receipt.provider_fulfillment_id.clone()),
+                    provider_data: receipt.data.clone(),
+                    tracking_numbers: receipt.tracking_numbers.clone(),
+                    metadata: Metadata::empty(),
+                    items: replacements
+                        .iter()
+                        .map(|(_, variant_id, quantity)| AfterSalesFulfillmentItemInput {
+                            variant_id: variant_id.clone(),
+                            quantity: *quantity,
+                        })
+                        .collect(),
+                },
+                consumed_units,
+            )
             .await?;
 
         let order = self.order.get(order_id).await?;
@@ -578,6 +649,16 @@ impl AfterSalesWorkflow {
         order_id: &OrderId,
         exchange_id: &ExchangeId,
     ) -> Result<ExchangeAcceptResult, AppError> {
+        self.accept_exchange_inner(order_id, exchange_id, true)
+            .await
+    }
+
+    async fn accept_exchange_inner(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &ExchangeId,
+        audit_accept: bool,
+    ) -> Result<ExchangeAcceptResult, AppError> {
         let order = self.order.get(order_id).await?;
         let mut exchange = self.order.get_exchange(order_id, exchange_id).await?;
         if exchange.status == ExchangeStatus::Canceled {
@@ -585,7 +666,8 @@ impl AfterSalesWorkflow {
                 "cannot accept a canceled exchange".to_owned(),
             ));
         }
-        if exchange.status == ExchangeStatus::Requested {
+        let was_requested = exchange.status == ExchangeStatus::Requested;
+        if was_requested {
             exchange = self.order.accept_exchange(order_id, exchange_id).await?;
         }
 
@@ -614,9 +696,23 @@ impl AfterSalesWorkflow {
             ));
         }
 
-        let restocked_units = if lines.is_empty() {
-            0
+        let restocked_units = if audit_accept && was_requested {
+            self.inventory
+                .restock_exchange_audited(
+                    order_id,
+                    exchange_id.as_str(),
+                    &lines,
+                    RestockAudit {
+                        action: "order.exchange_accepted".to_owned(),
+                        resource_type: "order_exchange".to_owned(),
+                        resource_id: exchange_id.as_str().to_owned(),
+                        data: serde_json::json!({"order_id": order_id.as_str()}),
+                    },
+                )
+                .await?
         } else {
+            // Restocking is idempotent: retries after an interrupted accept
+            // still reconcile any missing stock movements.
             self.inventory
                 .restock_exchange(order_id, exchange_id.as_str(), &lines)
                 .await?
@@ -631,9 +727,10 @@ impl AfterSalesWorkflow {
 
     /// Fulfills the outbound lines of an accepted exchange.
     ///
-    /// Mirrors [`Self::fulfill_claim`]: the provider is called before local
-    /// writes, replacement stock is consumed idempotently, and replaying the
-    /// call returns the existing fulfillment.
+    /// Mirrors [`Self::fulfill_claim`]: replacement stock is consumed
+    /// idempotently before the provider is called and a provider failure
+    /// reverses the consumption. Replaying the call returns the existing
+    /// fulfillment.
     pub async fn fulfill_exchange(
         &self,
         order_id: &OrderId,
@@ -641,7 +738,10 @@ impl AfterSalesWorkflow {
         provider_id: &str,
         tracking_numbers: Vec<String>,
     ) -> Result<ExchangeFulfillmentResult, AppError> {
-        let exchange = self.accept_exchange(order_id, exchange_id).await?.exchange;
+        let exchange = self
+            .accept_exchange_inner(order_id, exchange_id, false)
+            .await?
+            .exchange;
 
         if let Some(existing) = self
             .order
@@ -683,7 +783,23 @@ impl AfterSalesWorkflow {
             });
         }
 
-        let receipt = self
+        let consumptions = replacements
+            .iter()
+            .map(|(line_id, variant_id, quantity)| {
+                StockConsumption::new(
+                    variant_id.clone(),
+                    *quantity,
+                    format!("exchange-fulfill:{}:{}", exchange_id.as_str(), line_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        // Consume stock before contacting the provider, mirroring claims.
+        let (consumed_units, consumed_references) = self
+            .inventory
+            .consume_stock_tracked(order_id, &consumptions)
+            .await?;
+
+        let receipt = match self
             .create_provider_fulfillment(
                 order_id,
                 provider_id,
@@ -696,42 +812,47 @@ impl AfterSalesWorkflow {
                         quantity: *quantity,
                     }),
             )
-            .await?;
-
-        let consumptions = replacements
-            .iter()
-            .map(|(line_id, variant_id, quantity)| {
-                StockConsumption::new(
-                    variant_id.clone(),
-                    *quantity,
-                    format!("exchange-fulfill:{}:{}", exchange_id.as_str(), line_id),
-                )
-            })
-            .collect::<Vec<_>>();
-        let consumed_units = self
-            .inventory
-            .consume_stock(order_id, &consumptions)
-            .await?;
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if let Err(restore_error) = self
+                    .inventory
+                    .restore_consumed_stock(&consumed_references)
+                    .await
+                {
+                    tracing::error!(
+                        order_id = %order_id,
+                        error = %restore_error,
+                        "failed to restore replacement stock after the provider rejected an exchange fulfillment"
+                    );
+                }
+                return Err(error);
+            }
+        };
 
         let fulfillment = self
             .order
-            .create_after_sales_fulfillment(CreateAfterSalesFulfillmentInput {
-                order_id: order_id.clone(),
-                claim_id: None,
-                exchange_id: Some(exchange_id.clone()),
-                provider_id: receipt.provider_id.clone(),
-                provider_fulfillment_id: Some(receipt.provider_fulfillment_id.clone()),
-                provider_data: receipt.data.clone(),
-                tracking_numbers: receipt.tracking_numbers.clone(),
-                metadata: Metadata::empty(),
-                items: replacements
-                    .iter()
-                    .map(|(_, variant_id, quantity)| AfterSalesFulfillmentItemInput {
-                        variant_id: variant_id.clone(),
-                        quantity: *quantity,
-                    })
-                    .collect(),
-            })
+            .create_after_sales_fulfillment_audited(
+                CreateAfterSalesFulfillmentInput {
+                    order_id: order_id.clone(),
+                    claim_id: None,
+                    exchange_id: Some(exchange_id.clone()),
+                    provider_id: receipt.provider_id.clone(),
+                    provider_fulfillment_id: Some(receipt.provider_fulfillment_id.clone()),
+                    provider_data: receipt.data.clone(),
+                    tracking_numbers: receipt.tracking_numbers.clone(),
+                    metadata: Metadata::empty(),
+                    items: replacements
+                        .iter()
+                        .map(|(_, variant_id, quantity)| AfterSalesFulfillmentItemInput {
+                            variant_id: variant_id.clone(),
+                            quantity: *quantity,
+                        })
+                        .collect(),
+                },
+                consumed_units,
+            )
             .await?;
 
         let order = self.order.get(order_id).await?;

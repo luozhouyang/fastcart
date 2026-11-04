@@ -2,7 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS checkout_sessions (
     id TEXT PRIMARY KEY,
-    cart_id TEXT NOT NULL UNIQUE,
+    cart_id TEXT NOT NULL,
     customer_id TEXT,
     email TEXT,
     currency_code TEXT NOT NULL,
@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS checkout_sessions (
     billing_address TEXT NOT NULL DEFAULT '{}',
     shipping_method TEXT NOT NULL DEFAULT '{}',
     totals TEXT NOT NULL DEFAULT '{}',
+    cart_items TEXT NOT NULL DEFAULT '[]',
     promotion_codes TEXT NOT NULL DEFAULT '[]',
     payment_session_id TEXT,
     order_id TEXT,
@@ -19,6 +20,12 @@ CREATE TABLE IF NOT EXISTS checkout_sessions (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- A cart has at most one checkout that can still complete. Failed, canceled
+-- and expired sessions are superseded by the next attempt.
+CREATE UNIQUE INDEX IF NOT EXISTS checkout_active_cart_unique
+    ON checkout_sessions (cart_id)
+    WHERE status NOT IN ('failed', 'canceled', 'expired');
 
 CREATE INDEX IF NOT EXISTS idx_checkout_status ON checkout_sessions (status, expires_at);
 

@@ -18,7 +18,7 @@ use serde_json::Value;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::{StoreDb, record_store_audit};
+use super::StoreDb;
 use crate::dto::{PageResponse, ThemeDto, ThemeManifestDto};
 use crate::state::AppContext;
 
@@ -149,21 +149,10 @@ async fn register_theme(
             )))
         })?);
     }
-    let theme = ThemeService::new(db).register(input).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "theme.registered",
-        "theme",
-        theme.id.as_str(),
-        serde_json::json!({
-            "manifest_id": theme.manifest.id.clone(),
-            "version": theme.manifest.version.clone(),
-            "bundle_path": theme.bundle_path.clone(),
-            "has_editor_manifest": theme.editor_manifest.is_some(),
-        }),
-    )
-    .await;
+    let theme = ThemeService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .register(input)
+        .await?;
     Ok((StatusCode::CREATED, Json(ThemeDto::from(theme))))
 }
 
@@ -237,7 +226,6 @@ async fn get_active_theme(
     responses((status = 200, body = ThemeDto))
 )]
 async fn update_theme_settings(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -245,17 +233,9 @@ async fn update_theme_settings(
 ) -> ApiResult<Json<ThemeDto>> {
     authorize(&actor, "themes.write")?;
     let theme = ThemeService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .update_settings(&ThemeId::from_string(id), input.into())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "theme.settings_updated",
-        "theme",
-        theme.id.as_str(),
-        serde_json::json!({"manifest_id": theme.manifest.id.clone()}),
-    )
-    .await;
     Ok(Json(ThemeDto::from(theme)))
 }
 
@@ -268,24 +248,15 @@ async fn update_theme_settings(
     responses((status = 200, body = ThemeDto))
 )]
 async fn activate_theme(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ThemeDto>> {
     authorize(&actor, "themes.write")?;
     let theme = ThemeService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .activate(&ThemeId::from_string(id))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "theme.activated",
-        "theme",
-        theme.id.as_str(),
-        serde_json::json!({"manifest_id": theme.manifest.id.clone()}),
-    )
-    .await;
     Ok(Json(ThemeDto::from(theme)))
 }
 
@@ -298,21 +269,14 @@ async fn activate_theme(
     responses((status = 200, body = ThemeDto))
 )]
 async fn rollback_theme(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
 ) -> ApiResult<Json<ThemeDto>> {
     authorize(&actor, "themes.write")?;
-    let theme = ThemeService::new(db).rollback().await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "theme.rolled_back",
-        "theme",
-        theme.id.as_str(),
-        serde_json::json!({"manifest_id": theme.manifest.id.clone()}),
-    )
-    .await;
+    let theme = ThemeService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .rollback()
+        .await?;
     Ok(Json(ThemeDto::from(theme)))
 }
 
@@ -325,22 +289,15 @@ async fn rollback_theme(
     responses((status = 204))
 )]
 async fn delete_theme(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "themes.write")?;
     let theme_id = ThemeId::from_string(id);
-    ThemeService::new(db).delete(&theme_id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "theme.deleted",
-        "theme",
-        theme_id.as_str(),
-        serde_json::Value::Null,
-    )
-    .await;
+    ThemeService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .delete(&theme_id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }

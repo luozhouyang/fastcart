@@ -15,13 +15,16 @@ use axum::routing::{get, post};
 use fastcart_http::extractors::ApiQuery;
 use fastcart_http::{AdminActor, ApiError, ApiResult};
 use fastcart_kernel::{ActorContext, AppError, Pagination};
-use fastcart_module_asset::{Asset, AssetFilter, AssetService, CreateAssetInput, MAX_SIZE_BYTES};
+use fastcart_module_asset::{
+    Asset, AssetFilter, AssetService, CreateAssetInput, MAX_SIZE_BYTES,
+    fetch_pending_asset_purge_for_key, mark_asset_purge_failed, mark_asset_purge_processed,
+};
 use serde::Deserialize;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use super::StoreDb;
 use super::store_inquiry::{sanitize_file_name, sniff_content_type};
-use super::{StoreDb, record_store_audit};
 use crate::dto::PageResponse;
 use crate::state::AppContext;
 
@@ -202,7 +205,11 @@ async fn upload_asset(
         height,
         created_by: actor.user_id.as_ref().map(ToString::to_string),
     };
-    let asset = match AssetService::new(db).create_asset(input).await {
+    let asset = match AssetService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .create_asset(input)
+        .await
+    {
         Ok(asset) => asset,
         Err(error) => {
             // Do not leave an unreferenced blob behind when metadata validation
@@ -211,19 +218,6 @@ async fn upload_asset(
             return Err(ApiError::new(error));
         }
     };
-    record_store_audit(
-        &context,
-        &actor,
-        "asset.created",
-        "asset",
-        &asset.id,
-        serde_json::json!({
-            "filename": &asset.filename,
-            "content_type": &asset.content_type,
-            "size_bytes": asset.size_bytes,
-        }),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(asset)))
 }
 
@@ -242,19 +236,55 @@ async fn delete_asset(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "themes.write")?;
-    let asset = AssetService::new(db).delete_asset(&id).await?;
-    if let Err(error) = context.storage.delete(&asset.storage_key).await {
-        tracing::warn!(asset_id = %asset.id, error = %error, "could not delete asset object");
+    let asset = AssetService::new(db.clone())
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .delete_asset(&id)
+        .await?;
+    // The metadata transaction already recorded a durable purge obligation.
+    // Try the delete now; on failure leave the row pending for maintenance and
+    // still return 204 because the asset metadata is gone.
+    match fetch_pending_asset_purge_for_key(db.pool(), &asset.storage_key).await {
+        Ok(Some(purge)) => match context.storage.delete(&purge.storage_key).await {
+            Ok(()) => {
+                if let Err(error) = mark_asset_purge_processed(db.pool(), &purge.id).await {
+                    tracing::warn!(
+                        asset_id = %asset.id,
+                        purge_id = %purge.id,
+                        error = %error,
+                        "could not mark asset object purge processed"
+                    );
+                }
+            }
+            Err(error) => {
+                let attempt = purge.attempts.saturating_add(1);
+                tracing::warn!(
+                    asset_id = %asset.id,
+                    purge_id = %purge.id,
+                    attempt,
+                    error = %error,
+                    "could not delete asset object; leaving purge pending"
+                );
+                if let Err(mark_error) =
+                    mark_asset_purge_failed(db.pool(), &purge.id, attempt, &error.to_string()).await
+                {
+                    tracing::warn!(
+                        asset_id = %asset.id,
+                        purge_id = %purge.id,
+                        error = %mark_error,
+                        "could not record asset object purge failure"
+                    );
+                }
+            }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                asset_id = %asset.id,
+                error = %error,
+                "could not read asset object purge obligation"
+            );
+        }
     }
-    record_store_audit(
-        &context,
-        &actor,
-        "asset.deleted",
-        "asset",
-        &asset.id,
-        serde_json::json!({ "filename": asset.filename }),
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 

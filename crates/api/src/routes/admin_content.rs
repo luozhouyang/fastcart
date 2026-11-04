@@ -602,7 +602,6 @@ pub struct RevokePreviewTokenRequest {
     responses((status = 204))
 )]
 async fn revoke_preview_token(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -620,9 +619,11 @@ async fn revoke_preview_token(
     // load; the jti itself is opaque and carries no page authority.
     ContentService::new(db.clone()).get_page(&page_id).await?;
     let now = now_timestamp();
+    let store_id = db.store_id().as_str().to_owned();
+    let mut tx = db.begin().await.map_err(AppError::from)?;
     sqlx::query("DELETE FROM preview_token_revocations WHERE expires_at <= ?")
         .bind(now)
-        .execute(db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(fastcart_infrastructure::database_error)?;
     sqlx::query(
@@ -632,18 +633,24 @@ async fn revoke_preview_token(
     .bind(jti)
     .bind(page_id.as_str())
     .bind(now.saturating_add(crate::routes::preview::PREVIEW_TOKEN_TTL_SECONDS))
-    .execute(db.pool())
+    .execute(&mut *tx)
     .await
     .map_err(fastcart_infrastructure::database_error)?;
-    record_store_audit(
-        &context,
-        &actor,
-        "page.preview_token.revoked",
-        "page",
-        page_id.as_str(),
-        serde_json::json!({ "jti": jti }),
-    )
-    .await;
+    if let Some(user_id) = actor.user_id.as_ref() {
+        fastcart_infrastructure::AuditActor::new(user_id.to_string(), store_id)
+            .append(
+                &mut *tx,
+                "page.preview_token.revoked",
+                "page",
+                page_id.as_str(),
+                serde_json::json!({ "jti": jti }),
+            )
+            .await
+            .map_err(fastcart_infrastructure::database_error)?;
+    }
+    tx.commit()
+        .await
+        .map_err(fastcart_infrastructure::database_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

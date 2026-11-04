@@ -135,8 +135,16 @@ impl JobQueue {
 
     /// Enqueues a job and returns the persisted row.
     pub async fn enqueue(&self, job: NewJob) -> Result<JobRecord, sqlx::Error> {
+        self.enqueue_with_id(&JobId::new(), job).await
+    }
+
+    /// Enqueues a job under a caller-supplied identifier.
+    ///
+    /// Callers that persist a reference to the job before it is enqueued (for
+    /// example, notification deliveries recording an ownership token) can use
+    /// this to keep the stored reference and the queued row identical.
+    pub async fn enqueue_with_id(&self, id: &JobId, job: NewJob) -> Result<JobRecord, sqlx::Error> {
         let now = now_timestamp();
-        let id = JobId::new().to_string();
         sqlx::query_as::<_, JobRecord>(
             "INSERT INTO jobs
              (id, type, payload, status, priority, attempts, max_attempts,
@@ -144,7 +152,7 @@ impl JobQueue {
              VALUES (?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?)
              RETURNING *",
         )
-        .bind(id)
+        .bind(id.as_str())
         .bind(job.job_type)
         .bind(job.payload.to_string())
         .bind(job.priority)
@@ -280,6 +288,32 @@ impl JobQueue {
         )
         .bind(now_timestamp())
         .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Renews the lease on a running job held by `worker_id`.
+    ///
+    /// Refreshes `locked_at` so a slow handler is not returned to the pending
+    /// queue by [`Self::reap_expired`]. The jobs table measures staleness from
+    /// `locked_at`, so the renewed lease starts now; `lease_seconds` is the
+    /// staleness window the caller's reaper uses and must match it.
+    pub async fn renew_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        _lease_seconds: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let now = now_timestamp();
+        let result = sqlx::query(
+            "UPDATE jobs SET locked_at = ?, updated_at = ?
+             WHERE id = ? AND status = 'running' AND locked_by = ?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(id)
+        .bind(worker_id)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
@@ -445,6 +479,34 @@ mod tests {
         queue.claim("worker", 1).await.unwrap();
         assert_eq!(queue.reap_expired(0).await.unwrap(), 1);
         assert_eq!(queue.count_by_status(status::PENDING).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn renewed_leases_are_not_reaped() {
+        let queue = queue().await;
+        let job = queue.enqueue(NewJob::new("slow", json!({}))).await.unwrap();
+        queue.claim("worker", 1).await.unwrap();
+
+        // Simulate a handler that has been running longer than the lease.
+        let stale = fastcart_kernel::now_timestamp().saturating_sub(600);
+        sqlx::query("UPDATE jobs SET locked_at = ? WHERE id = ?")
+            .bind(stale)
+            .bind(&job.id)
+            .execute(queue.pool())
+            .await
+            .unwrap();
+
+        assert!(queue.renew_lease(&job.id, "worker", 300).await.unwrap());
+        assert_eq!(
+            queue.reap_expired(300).await.unwrap(),
+            0,
+            "a renewed lease was reaped"
+        );
+        assert_eq!(queue.count_by_status(status::RUNNING).await.unwrap(), 1);
+
+        // A different worker cannot renew someone else's lease.
+        assert!(!queue.renew_lease(&job.id, "other", 300).await.unwrap());
+        assert!(queue.complete(&job.id, "worker").await.unwrap());
     }
 
     #[tokio::test]

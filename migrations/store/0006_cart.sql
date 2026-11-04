@@ -75,6 +75,13 @@ CREATE TABLE IF NOT EXISTS cart_discounts (
 
 CREATE INDEX IF NOT EXISTS idx_cart_discounts_cart ON cart_discounts (cart_id);
 
+-- A discount snapshot is unique per promotion or code within a cart so retried
+-- or concurrent applications update the existing row instead of duplicating it.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cart_discounts_promotion
+    ON cart_discounts (cart_id, promotion_id) WHERE promotion_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cart_discounts_code
+    ON cart_discounts (cart_id, code) WHERE code IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS cart_shipping_methods (
     id TEXT PRIMARY KEY,
     cart_id TEXT NOT NULL REFERENCES carts (id) ON DELETE CASCADE,

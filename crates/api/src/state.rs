@@ -114,6 +114,15 @@ const STOREFRONT_EDITOR_CACHE_CAPACITY: u64 = 1024;
 const STOREFRONT_PAGE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 /// Lifetime of compiled storefront entries.
 const STOREFRONT_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Lifetime of the request-context customer and cart lookups.
+///
+/// These cache entries carry live commerce data, so the window is deliberately
+/// short: a mutation that bypasses explicit invalidation becomes visible within
+/// a couple of seconds, while bursts of SSR requests for the same visitor share
+/// one database round trip.
+const STOREFRONT_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(2);
+/// Maximum number of cached customer sessions and cart snapshots per process.
+const STOREFRONT_CONTEXT_CACHE_CAPACITY: u64 = 10_000;
 
 /// A validated page and the data bindings extracted in the same pass.
 ///
@@ -185,6 +194,18 @@ pub struct AppContext {
         moka::future::Cache<String, Option<Arc<fastcart_storefront::ThemeEditorManifest>>>,
     /// Compiled storefront pages keyed by store, page revision and theme.
     pub storefront_page_cache: moka::future::Cache<String, Arc<CompiledPage>>,
+    /// Recently resolved storefront customer sessions.
+    ///
+    /// Keyed by store and a digest of the session token so raw tokens are not
+    /// retained in the cache. Values are `None` for invalid sessions.
+    pub storefront_customer_cache:
+        moka::future::Cache<String, Option<Arc<fastcart_module_customer::Customer>>>,
+    /// Recently resolved storefront cart snapshots for the request context.
+    ///
+    /// Keyed by store plus customer id (authenticated) or cart id (guest).
+    /// Explicitly invalidated by cart mutations; the short TTL bounds staleness
+    /// for writes that do not pass through those handlers.
+    pub storefront_cart_cache: moka::future::Cache<String, Option<Arc<fastcart_module_cart::Cart>>>,
     /// Provider-independent transactional email delivery.
     pub email: EmailService,
     /// Private object storage used for inquiry attachments.
@@ -250,6 +271,14 @@ impl AppContext {
                 .weigher(|_key: &String, value: &Arc<CompiledPage>| value.cache_weight())
                 .time_to_live(STOREFRONT_CACHE_TTL)
                 .build(),
+            storefront_customer_cache: moka::future::Cache::builder()
+                .max_capacity(STOREFRONT_CONTEXT_CACHE_CAPACITY)
+                .time_to_live(STOREFRONT_CONTEXT_CACHE_TTL)
+                .build(),
+            storefront_cart_cache: moka::future::Cache::builder()
+                .max_capacity(STOREFRONT_CONTEXT_CACHE_CAPACITY)
+                .time_to_live(STOREFRONT_CONTEXT_CACHE_TTL)
+                .build(),
             email: EmailService::with_default_registry(),
             storage,
             inquiry_limiter: RateLimiter::new(5, Duration::from_secs(10 * 60)),
@@ -276,6 +305,16 @@ impl AppContext {
     pub fn with_storage(mut self, storage: Arc<dyn Storage>) -> Self {
         self.storage = storage;
         self
+    }
+
+    /// Drops cached storefront cart snapshots after a cart mutation.
+    pub fn invalidate_storefront_carts(&self) {
+        self.storefront_cart_cache.invalidate_all();
+    }
+
+    /// Drops cached storefront customer sessions after login, logout or revocation.
+    pub fn invalidate_storefront_customers(&self) {
+        self.storefront_customer_cache.invalidate_all();
     }
 }
 

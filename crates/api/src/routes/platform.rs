@@ -520,8 +520,11 @@ async fn upsert_membership(
         return Err(ApiError::new(AppError::not_found("user", &user_id)));
     }
     let roles: Vec<&str> = request.roles.iter().map(String::as_str).collect();
+    let audit_actor = actor.user_id.as_ref().map(ToString::to_string);
     let membership = context
         .platform
+        .clone()
+        .with_audit_actor(audit_actor)
         .upsert_membership(&user_id, &store_id, &roles)
         .await?;
     Ok((StatusCode::CREATED, Json(MembershipDto::from(&membership))))
@@ -543,24 +546,11 @@ async fn remove_membership(
     let store_id = parse_store_id(&store_id)?;
     authorize_store(&context.platform, &actor, &store_id, Some("users.write")).await?;
     let user_id = UserId::from_string(user_id);
-    if let Some(membership) = context.platform.get_membership(&user_id, &store_id).await?
-        && membership.roles.iter().any(|role| role == "owner")
-    {
-        let memberships = context.platform.list_store_memberships(&store_id).await?;
-        let other_owners = memberships
-            .iter()
-            .filter(|membership| {
-                membership.user_id != user_id && membership.roles.iter().any(|role| role == "owner")
-            })
-            .count();
-        if other_owners == 0 {
-            return Err(ApiError::new(AppError::Conflict(
-                "cannot remove the last owner of a store".to_owned(),
-            )));
-        }
-    }
+    let audit_actor = actor.user_id.as_ref().map(ToString::to_string);
     context
         .platform
+        .clone()
+        .with_audit_actor(audit_actor)
         .revoke_membership(&user_id, &store_id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -621,10 +611,18 @@ async fn create_user(
     let mut input = CreateUserInput::new(&request.email);
     input.first_name = request.first_name;
     input.last_name = request.last_name;
-    let user = context.auth.register(input, &request.password).await?;
+    let audit_actor = actor.user_id.as_ref().map(ToString::to_string);
+    let user = context
+        .auth
+        .clone()
+        .with_audit_actor(audit_actor.clone())
+        .register(input, &request.password)
+        .await?;
     let roles: Vec<&str> = request.roles.iter().map(String::as_str).collect();
     context
         .platform
+        .clone()
+        .with_audit_actor(audit_actor)
         .upsert_membership(&user.id, &store_id, &roles)
         .await?;
     Ok((StatusCode::CREATED, Json(UserDto::from(&user))))

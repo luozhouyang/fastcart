@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     output TEXT,
     error TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
+    compensation_attempts INTEGER NOT NULL DEFAULT 0,
     compensated_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,

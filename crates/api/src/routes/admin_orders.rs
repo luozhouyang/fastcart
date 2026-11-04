@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::{StoreDb, record_store_audit};
+use super::StoreDb;
 use crate::dto::{
     CancelAfterSaleRequest, CreateClaimRequest, CreateExchangeRequest, CreateOrderEditRequest,
     CreateReturnRequest, PageResponse, ReceiveReturnRequest, WriteOffReturnRequest,
@@ -608,7 +608,7 @@ async fn get_order_by_number(
     responses((status = 200, body = Order))
 )]
 async fn confirm_order(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -617,16 +617,10 @@ async fn confirm_order(
         .require_permission("orders.write")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
-    let order = OrderService::new(db).confirm(&id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.confirmed",
-        "order",
-        order.id.as_str(),
-        serde_json::Value::Null,
-    )
-    .await;
+    let order = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .confirm(&id)
+        .await?;
     Ok(Json(order))
 }
 
@@ -639,7 +633,7 @@ async fn confirm_order(
     responses((status = 200, body = Order))
 )]
 async fn process_order(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -648,16 +642,10 @@ async fn process_order(
         .require_permission("orders.write")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
-    let order = OrderService::new(db).start_processing(&id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.processing_started",
-        "order",
-        order.id.as_str(),
-        serde_json::Value::Null,
-    )
-    .await;
+    let order = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .start_processing(&id)
+        .await?;
     Ok(Json(order))
 }
 
@@ -671,7 +659,7 @@ async fn process_order(
     responses((status = 200, body = Order))
 )]
 async fn cancel_order(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -681,7 +669,8 @@ async fn cancel_order(
         .require_permission("orders.cancel")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
-    let orders = OrderService::new(db.clone());
+    let orders = OrderService::new(db.clone())
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let current = orders.get(&id).await?;
     if current.status == OrderStatus::Canceled {
         // Restocking is idempotent; retry it after an interrupted cancellation.
@@ -693,15 +682,6 @@ async fn cancel_order(
     // order that was already restocked.
     let order = orders.cancel(&id, reason.as_deref()).await?;
     InventoryService::new(db).restock_order(&id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.canceled",
-        "order",
-        order.id.as_str(),
-        serde_json::json!({"reason": reason}),
-    )
-    .await;
     Ok(Json(order))
 }
 
@@ -725,7 +705,8 @@ async fn fulfill_order(
         .require_permission("orders.write")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
-    let orders = OrderService::new(db);
+    let orders =
+        OrderService::new(db).with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let current = orders.get(&id).await?;
 
     let provider_id = request
@@ -780,18 +761,6 @@ async fn fulfill_order(
     }
 
     let order = orders.fulfill(&id, input).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.fulfilled",
-        "order",
-        order.id.as_str(),
-        serde_json::json!({
-            "fulfillment_status": order.fulfillment_status.as_str(),
-            "status": order.status.as_str(),
-        }),
-    )
-    .await;
     Ok(Json(order))
 }
 
@@ -862,21 +831,9 @@ async fn create_refund(
         .refund_with_idempotency(payment_id.as_str(), amount, reason, idempotency_key)
         .await?;
     let order = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .add_refund(&id, map_refund_input(request))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.refunded",
-        "order",
-        order.id.as_str(),
-        serde_json::json!({
-            "payment_id": payment_id,
-            "amount": amount,
-            "currency_code": order.currency_code.clone(),
-        }),
-    )
-    .await;
     Ok(Json(order))
 }
 
@@ -961,7 +918,7 @@ async fn get_return(
     responses((status = 201, body = OrderReturn))
 )]
 async fn create_return(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -972,17 +929,9 @@ async fn create_return(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let order_return = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_return(&id, map_return_input(request))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.return_created",
-        "order_return",
-        order_return.id.as_str(),
-        serde_json::json!({"order_id": id.as_str()}),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(order_return)))
 }
 
@@ -995,7 +944,7 @@ async fn create_return(
     responses((status = 200, body = OrderReturn))
 )]
 async fn request_return(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, return_id)): Path<(String, String)>,
@@ -1006,17 +955,9 @@ async fn request_return(
     let id = OrderId::from_string(id);
     let return_id = ReturnId::from_string(return_id);
     let order_return = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .request_return(&id, &return_id)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.return_requested",
-        "order_return",
-        order_return.id.as_str(),
-        serde_json::json!({"order_id": id.as_str()}),
-    )
-    .await;
     Ok(Json(order_return))
 }
 
@@ -1044,24 +985,12 @@ async fn receive_return(
     let workflow = AfterSalesWorkflow::new(
         db.clone(),
         PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
-    );
+    )
+    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow
         .receive_return(&id, &return_id, map_receive_input(request))
         .await?;
     let order_return = result.order_return;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.return_received",
-        "order_return",
-        order_return.id.as_str(),
-        serde_json::json!({
-            "order_id": id.as_str(),
-            "status": order_return.status.as_str(),
-            "restocked_units": result.restocked_units,
-        }),
-    )
-    .await;
     Ok(Json(order_return))
 }
 
@@ -1089,24 +1018,11 @@ async fn refund_return(
     let workflow = AfterSalesWorkflow::new(
         db.clone(),
         PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
-    );
+    )
+    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow
         .refund_return(&id, &return_id, request.reason)
         .await?;
-    let refunded_amount = result.order_refund.as_ref().map(|refund| refund.amount);
-    record_store_audit(
-        &context,
-        &actor,
-        "order.return_refunded",
-        "order_return",
-        result.order_return.id.as_str(),
-        serde_json::json!({
-            "order_id": id.as_str(),
-            "refunded_amount": refunded_amount,
-            "currency_code": result.order.currency_code.clone(),
-        }),
-    )
-    .await;
     Ok(Json(ReturnRefundResponse {
         order: result.order,
         order_return: result.order_return,
@@ -1125,7 +1041,7 @@ async fn refund_return(
     responses((status = 200, body = OrderReturn))
 )]
 async fn write_off_return(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, return_id)): Path<(String, String)>,
@@ -1137,20 +1053,9 @@ async fn write_off_return(
     let id = OrderId::from_string(id);
     let return_id = ReturnId::from_string(return_id);
     let order_return = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .write_off_return(&id, &return_id, map_write_off_input(request))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.return_written_off",
-        "order_return",
-        order_return.id.as_str(),
-        serde_json::json!({
-            "order_id": id.as_str(),
-            "status": order_return.status.as_str(),
-        }),
-    )
-    .await;
     Ok(Json(order_return))
 }
 
@@ -1164,7 +1069,7 @@ async fn write_off_return(
     responses((status = 200, body = OrderReturn))
 )]
 async fn cancel_return(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, return_id)): Path<(String, String)>,
@@ -1175,16 +1080,10 @@ async fn cancel_return(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let return_id = ReturnId::from_string(return_id);
-    let order_return = OrderService::new(db).cancel_return(&id, &return_id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.return_canceled",
-        "order_return",
-        order_return.id.as_str(),
-        serde_json::json!({"order_id": id.as_str(), "reason": request.reason}),
-    )
-    .await;
+    let order_return = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .cancel_return_with_reason(&id, &return_id, request.reason.as_deref())
+        .await?;
     Ok(Json(order_return))
 }
 
@@ -1245,7 +1144,7 @@ async fn get_claim(
     responses((status = 201, body = OrderClaim))
 )]
 async fn create_claim(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -1256,17 +1155,9 @@ async fn create_claim(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let claim = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_claim(&id, map_claim_input(request))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.claim_created",
-        "order_claim",
-        claim.id.as_str(),
-        serde_json::json!({"order_id": id.as_str()}),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(claim)))
 }
 
@@ -1279,7 +1170,7 @@ async fn create_claim(
     responses((status = 200, body = OrderClaim))
 )]
 async fn accept_claim(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, claim_id)): Path<(String, String)>,
@@ -1289,16 +1180,10 @@ async fn accept_claim(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let claim_id = ClaimId::from_string(claim_id);
-    let claim = OrderService::new(db).accept_claim(&id, &claim_id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.claim_accepted",
-        "order_claim",
-        claim.id.as_str(),
-        serde_json::json!({"order_id": id.as_str()}),
-    )
-    .await;
+    let claim = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .accept_claim(&id, &claim_id)
+        .await?;
     Ok(Json(claim))
 }
 
@@ -1326,24 +1211,11 @@ async fn refund_claim(
     let workflow = AfterSalesWorkflow::new(
         db.clone(),
         PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
-    );
+    )
+    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow
         .refund_claim(&id, &claim_id, request.reason)
         .await?;
-    let refunded_amount = result.order_refund.as_ref().map(|refund| refund.amount);
-    record_store_audit(
-        &context,
-        &actor,
-        "order.claim_refunded",
-        "order_claim",
-        result.claim.id.as_str(),
-        serde_json::json!({
-            "order_id": id.as_str(),
-            "refunded_amount": refunded_amount,
-            "currency_code": result.order.currency_code.clone(),
-        }),
-    )
-    .await;
     Ok(Json(ClaimRefundResponse {
         order: result.order,
         claim: result.claim,
@@ -1362,7 +1234,7 @@ async fn refund_claim(
     responses((status = 200, body = OrderClaim))
 )]
 async fn cancel_claim(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, claim_id)): Path<(String, String)>,
@@ -1373,16 +1245,10 @@ async fn cancel_claim(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let claim_id = ClaimId::from_string(claim_id);
-    let claim = OrderService::new(db).cancel_claim(&id, &claim_id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.claim_canceled",
-        "order_claim",
-        claim.id.as_str(),
-        serde_json::json!({"order_id": id.as_str(), "reason": request.reason}),
-    )
-    .await;
+    let claim = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .cancel_claim_with_reason(&id, &claim_id, request.reason.as_deref())
+        .await?;
     Ok(Json(claim))
 }
 
@@ -1447,7 +1313,7 @@ async fn get_exchange(
     responses((status = 201, body = OrderExchange))
 )]
 async fn create_exchange(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -1458,17 +1324,9 @@ async fn create_exchange(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let exchange = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_exchange(&id, map_exchange_input(request))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.exchange_created",
-        "order_exchange",
-        exchange.id.as_str(),
-        serde_json::json!({"order_id": id.as_str()}),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(exchange)))
 }
 
@@ -1495,20 +1353,9 @@ async fn accept_exchange(
         db.clone(),
         PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
         context.shipping_providers.clone(),
-    );
-    let result = workflow.accept_exchange(&id, &exchange_id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.exchange_accepted",
-        "order_exchange",
-        result.exchange.id.as_str(),
-        serde_json::json!({
-            "order_id": id.as_str(),
-            "restocked_units": result.restocked_units,
-        }),
     )
-    .await;
+    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let result = workflow.accept_exchange(&id, &exchange_id).await?;
     Ok(Json(result.exchange))
 }
 
@@ -1537,7 +1384,8 @@ async fn fulfill_claim(
         db.clone(),
         PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
         context.shipping_providers.clone(),
-    );
+    )
+    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow
         .fulfill_claim(
             &id,
@@ -1546,18 +1394,6 @@ async fn fulfill_claim(
             request.tracking_numbers,
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.claim_fulfilled",
-        "order_claim",
-        result.claim.id.as_str(),
-        serde_json::json!({
-            "order_id": id.as_str(),
-            "consumed_units": result.consumed_units,
-        }),
-    )
-    .await;
     Ok(Json(ClaimFulfillmentResponse {
         order: result.order,
         claim: result.claim,
@@ -1591,7 +1427,8 @@ async fn fulfill_exchange(
         db.clone(),
         PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
         context.shipping_providers.clone(),
-    );
+    )
+    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow
         .fulfill_exchange(
             &id,
@@ -1600,18 +1437,6 @@ async fn fulfill_exchange(
             request.tracking_numbers,
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.exchange_fulfilled",
-        "order_exchange",
-        result.exchange.id.as_str(),
-        serde_json::json!({
-            "order_id": id.as_str(),
-            "consumed_units": result.consumed_units,
-        }),
-    )
-    .await;
     Ok(Json(ExchangeFulfillmentResponse {
         order: result.order,
         exchange: result.exchange,
@@ -1630,7 +1455,7 @@ async fn fulfill_exchange(
     responses((status = 200, body = OrderExchange))
 )]
 async fn cancel_exchange(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, exchange_id)): Path<(String, String)>,
@@ -1642,17 +1467,9 @@ async fn cancel_exchange(
     let id = OrderId::from_string(id);
     let exchange_id = ExchangeId::from_string(exchange_id);
     let exchange = OrderService::new(db)
-        .cancel_exchange(&id, &exchange_id)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .cancel_exchange_with_reason(&id, &exchange_id, request.reason.as_deref())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.exchange_canceled",
-        "order_exchange",
-        exchange.id.as_str(),
-        serde_json::json!({"order_id": id.as_str(), "reason": request.reason}),
-    )
-    .await;
     Ok(Json(exchange))
 }
 
@@ -1715,7 +1532,7 @@ async fn get_order_edit(
     responses((status = 201, body = OrderEdit))
 )]
 async fn create_order_edit(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -1726,17 +1543,9 @@ async fn create_order_edit(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let edit = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_order_edit(&id, map_edit_input(request))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.edit_created",
-        "order_edit",
-        edit.id.as_str(),
-        serde_json::json!({"order_id": id.as_str()}),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(edit)))
 }
 
@@ -1749,7 +1558,7 @@ async fn create_order_edit(
     responses((status = 200, body = OrderEdit))
 )]
 async fn confirm_order_edit(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, edit_id)): Path<(String, String)>,
@@ -1760,17 +1569,9 @@ async fn confirm_order_edit(
     let id = OrderId::from_string(id);
     let edit_id = OrderEditId::from_string(edit_id);
     let edit = OrderService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .confirm_order_edit(&id, &edit_id)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.edit_confirmed",
-        "order_edit",
-        edit.id.as_str(),
-        serde_json::json!({"order_id": id.as_str(), "after_total": edit.after_total}),
-    )
-    .await;
     Ok(Json(edit))
 }
 
@@ -1784,7 +1585,7 @@ async fn confirm_order_edit(
     responses((status = 200, body = OrderEdit))
 )]
 async fn cancel_order_edit(
-    State(context): State<Arc<AppContext>>,
+    State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, edit_id)): Path<(String, String)>,
@@ -1796,17 +1597,9 @@ async fn cancel_order_edit(
     let id = OrderId::from_string(id);
     let edit_id = OrderEditId::from_string(edit_id);
     let edit = OrderService::new(db)
-        .cancel_order_edit(&id, &edit_id)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .cancel_order_edit_with_reason(&id, &edit_id, request.reason.as_deref())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "order.edit_canceled",
-        "order_edit",
-        edit.id.as_str(),
-        serde_json::json!({"order_id": id.as_str(), "reason": request.reason}),
-    )
-    .await;
     Ok(Json(edit))
 }
 

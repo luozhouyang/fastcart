@@ -1,10 +1,12 @@
 //! SQLite-backed application service for the media asset registry.
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{AppError, PageResult, Pagination, now_timestamp};
+use serde_json::Value;
 use sqlx::FromRow;
 
 use crate::domain::{Asset, AssetFilter, CreateAssetInput};
+use crate::purge::insert_asset_blob_purge;
 
 const ASSET_COLUMNS: &str = "id, filename, content_type, size_bytes, storage_key, alt, width, \
      height, created_by, created_at, deleted_at";
@@ -13,13 +15,42 @@ const ASSET_COLUMNS: &str = "id, filename, content_type, size_bytes, storage_key
 #[derive(Clone, Debug)]
 pub struct AssetService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl AssetService {
     /// Creates a service bound to one store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records asset mutations in the store audit outbox.
+    ///
+    /// When an actor is set, every mutating method appends its audit entry in
+    /// the same transaction as the change, so a crash cannot separate them.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     /// Registers a new asset and returns the stored row.
@@ -36,6 +67,7 @@ impl AssetService {
 
         let id = format!("asset_{}", uuid::Uuid::now_v7().simple());
         let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
         sqlx::query(
             "INSERT INTO assets (id, filename, content_type, size_bytes, storage_key, alt, width, \
              height, created_by, created_at, deleted_at) \
@@ -51,9 +83,22 @@ impl AssetService {
         .bind(input.height)
         .bind(input.created_by.as_deref())
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|error| unique_conflict(error, "asset storage key already exists"))?;
+        self.append_audit(
+            &mut tx,
+            "asset.created",
+            "asset",
+            &id,
+            serde_json::json!({
+                "filename": &filename,
+                "content_type": &content_type,
+                "size_bytes": input.size_bytes,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.get_asset(&id).await
     }
@@ -119,7 +164,9 @@ impl AssetService {
 
     /// Soft-deletes an asset and returns the deleted row.
     ///
-    /// Callers are responsible for deleting the corresponding stored object.
+    /// The metadata update and a durable blob-purge obligation commit together.
+    /// Callers attempt the storage delete immediately and may retry it from the
+    /// pending purge row; a failed delete therefore cannot leak the object.
     /// Deleting an already deleted or unknown asset returns a not-found error.
     pub async fn delete_asset(&self, id: &str) -> Result<Asset, AppError> {
         let mut tx = self.db.begin().await?;
@@ -142,6 +189,17 @@ impl AssetService {
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("asset", id));
         }
+        insert_asset_blob_purge(&mut *tx, &row.storage_key)
+            .await
+            .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "asset.deleted",
+            "asset",
+            id,
+            serde_json::json!({ "filename": &row.filename }),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
 
         let mut asset = row.into_asset();

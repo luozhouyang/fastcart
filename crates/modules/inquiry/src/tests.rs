@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use fastcart_infrastructure::StoreDatabase;
+use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
 use fastcart_kernel::{AppError, InquiryFileId, InquiryId, Pagination, StoreId, now_timestamp};
 use serde_json::{Value, json};
 
@@ -259,6 +259,41 @@ async fn save_draft_publish_and_lookup_by_handle() {
 }
 
 #[tokio::test]
+async fn saving_an_identical_draft_skips_the_write_and_audit() {
+    let db = test_db().await;
+    let service = InquiryFormService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+    let form = service.create_form(form_input("Contact")).await.unwrap();
+
+    let first = service
+        .save_draft(
+            &form.id,
+            SaveInquiryDraftInput {
+                fields: default_fields(),
+                settings: InquiryFormSettings::default(),
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 2);
+
+    let second = service
+        .save_draft(
+            &form.id,
+            SaveInquiryDraftInput {
+                fields: default_fields(),
+                settings: InquiryFormSettings::default(),
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.id, first.id);
+    // The identical save is not written or audited.
+    assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn editing_after_publish_creates_next_draft_and_keeps_published_version() {
     let db = test_db().await;
     let service = InquiryFormService::new(db);
@@ -312,6 +347,49 @@ async fn archive_hides_from_published_by_handle() {
 
     let error = service.published_by_handle(&form.handle).await.unwrap_err();
     assert!(error.is_not_found());
+}
+
+#[tokio::test]
+async fn partial_form_update_preserves_unsupplied_fields() {
+    let db = test_db().await;
+    let service = InquiryFormService::new(db);
+    let form = service
+        .create_form(CreateInquiryFormInput {
+            name: "Contact".to_owned(),
+            handle: None,
+            description: Some("Get in touch".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    let updated = service
+        .update_form(
+            &form.id,
+            UpdateInquiryFormInput {
+                name: Some("Support".to_owned()),
+                description: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.name, "Support");
+    assert_eq!(updated.description.as_deref(), Some("Get in touch"));
+}
+
+#[tokio::test]
+async fn archived_form_cannot_be_published() {
+    let db = test_db().await;
+    let service = InquiryFormService::new(db);
+    let form = service.create_form(form_input("Contact")).await.unwrap();
+    service.publish(&form.id, None).await.unwrap();
+    service.archive(&form.id).await.unwrap();
+
+    let error = service.publish(&form.id, Some(1)).await.unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)));
+
+    let after = service.get_form(&form.id).await.unwrap();
+    assert_eq!(after.status, InquiryFormStatus::Archived);
+    assert_eq!(after.published_version, Some(1));
 }
 
 #[tokio::test]
@@ -782,4 +860,66 @@ async fn retention_scan_and_delete_remove_old_inquiries() {
     service.delete(&inquiry.id).await.unwrap();
     assert!(service.get(&inquiry.id).await.is_err());
     assert_eq!(service.get(&recent.id).await.unwrap().id, recent.id);
+}
+
+#[tokio::test]
+async fn form_mutations_append_audit_entries_in_the_same_transaction() {
+    let db = test_db().await;
+    let form = InquiryFormService::new(db.clone())
+        .create_form(form_input("Audited"))
+        .await
+        .unwrap();
+
+    let service = InquiryFormService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+    let published = service.publish(&form.id, None).await.unwrap();
+    assert_eq!(published.published_version, Some(1));
+
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].action, "inquiry_form.published");
+    assert_eq!(audits[0].actor_id.as_deref(), Some("user_1"));
+    assert!(audits[0].processed_at.is_none());
+
+    // Publishing the same revision again is a no-op and must not append.
+    service.publish(&form.id, Some(1)).await.unwrap();
+    assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn status_changes_append_audit_entries_and_skip_noops() {
+    let db = test_db().await;
+    let published = published_default_form(&db).await;
+    let inquiry = InquiryService::new(db.clone())
+        .create(inquiry_input(&published.form.handle))
+        .await
+        .unwrap();
+
+    let service = InquiryService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+    service
+        .update_status(
+            &inquiry.id,
+            UpdateInquiryStatusInput {
+                status: InquiryStatus::Read,
+            },
+        )
+        .await
+        .unwrap();
+
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].action, "inquiry.status_changed");
+    assert_eq!(audits[0].actor_id.as_deref(), Some("user_1"));
+    assert!(audits[0].processed_at.is_none());
+
+    // Repeating the same status is a no-op and must not append.
+    service
+        .update_status(
+            &inquiry.id,
+            UpdateInquiryStatusInput {
+                status: InquiryStatus::Read,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 1);
 }

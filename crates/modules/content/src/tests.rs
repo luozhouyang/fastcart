@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::{
     ContentService, CreateNavigationInput, CreatePageInput, CreateRedirectInput, MAX_BODY_BYTES,
     NavigationItemInput, PageRevisionOrigin, PageStatus, PageVersion, PageVersionKind,
-    UpdatePageInput,
+    UpdateNavigationInput, UpdatePageInput,
 };
 
 async fn service() -> ContentService {
@@ -759,6 +759,118 @@ async fn rejects_navigation_item_cycles_and_foreign_parents() {
         .await
         .unwrap_err();
     assert!(matches!(error, AppError::Validation(_)));
+}
+
+#[tokio::test]
+async fn navigation_cycle_check_sees_the_transactional_parent_chain() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = ContentService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+    let navigation = service
+        .create_navigation(navigation_input("Main Menu"))
+        .await
+        .unwrap();
+    let root = service
+        .add_navigation_item(&navigation.id, item_input("Root", "/root"))
+        .await
+        .unwrap();
+    let child = service
+        .add_navigation_item(
+            &navigation.id,
+            NavigationItemInput {
+                parent_id: Some(root.id.clone()),
+                ..item_input("Child", "/child")
+            },
+        )
+        .await
+        .unwrap();
+    let grandchild = service
+        .add_navigation_item(
+            &navigation.id,
+            NavigationItemInput {
+                parent_id: Some(child.id.clone()),
+                ..item_input("Grandchild", "/grandchild")
+            },
+        )
+        .await
+        .unwrap();
+
+    // Reparenting the root below its own grandchild must be rejected even
+    // though the ancestor chain is several levels deep.
+    let error = service
+        .update_navigation_item(
+            &root.id,
+            NavigationItemInput {
+                parent_id: Some(grandchild.id.clone()),
+                ..item_input("Root", "/root")
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)));
+
+    // The rejected update left the item untouched and wrote no audit entry.
+    let navigation = service.get_navigation(&navigation.id).await.unwrap();
+    let stored_root = navigation
+        .items
+        .iter()
+        .find(|item| item.id == root.id)
+        .expect("root survives a rejected cycle");
+    assert!(stored_root.parent_id.is_none());
+
+    let audits = fetch_pending_audits(db.pool(), 20).await.unwrap();
+    assert!(
+        !audits
+            .iter()
+            .any(|audit| audit.action == "navigation_item.updated")
+    );
+}
+
+#[tokio::test]
+async fn updating_a_missing_navigation_item_is_not_found_without_audit() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = ContentService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+
+    let error = service
+        .update_navigation_item("nitem_missing", item_input("Missing", "/missing"))
+        .await
+        .unwrap_err();
+    assert!(error.is_not_found());
+
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert!(audits.is_empty());
+}
+
+#[tokio::test]
+async fn navigation_handle_races_map_to_conflicts_without_audit() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = ContentService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+    let first = service
+        .create_navigation(navigation_input("First"))
+        .await
+        .unwrap();
+    let second = service
+        .create_navigation(navigation_input("Second"))
+        .await
+        .unwrap();
+
+    let error = service
+        .update_navigation(
+            &second.id,
+            UpdateNavigationInput {
+                handle: Some(first.handle.clone()),
+                ..UpdateNavigationInput::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)));
+
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert!(
+        !audits
+            .iter()
+            .any(|audit| audit.action == "navigation.updated")
+    );
 }
 
 #[tokio::test]

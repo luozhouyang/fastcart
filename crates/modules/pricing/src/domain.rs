@@ -660,21 +660,30 @@ pub(crate) fn normalize_rule_input(
             "price list rule attribute must not be empty",
         ));
     }
+    if !matches!(
+        attribute.as_str(),
+        "customer_group_id" | "sales_channel_id" | "currency" | "currency_code"
+    ) {
+        return Err(AppError::validation(format!(
+            "unsupported price list rule attribute: {attribute}"
+        )));
+    }
     let operator = input
         .operator
         .as_deref()
         .unwrap_or("eq")
         .trim()
         .to_ascii_lowercase();
-    if operator.is_empty() {
-        return Err(AppError::validation(
-            "price list rule operator must not be empty",
-        ));
+    if !matches!(operator.as_str(), "eq" | "ne") {
+        return Err(AppError::validation(format!(
+            "unsupported price list rule operator: {operator}"
+        )));
     }
-    if input.value.trim().is_empty() {
+    let value = input.value.trim().to_owned();
+    if value.is_empty() {
         return Err(AppError::validation(
             "price list rule value must not be empty",
         ));
     }
-    Ok((attribute, operator, input.value.clone()))
+    Ok((attribute, operator, value))
 }

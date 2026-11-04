@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use fastcart_infrastructure::{StoreDatabase, append_outbox_event, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, append_outbox_event, database_error};
 use fastcart_kernel::{
     AppError, DomainEventEnvelope, InquiryFileId, InquiryFormId, InquiryId, InquiryRevisionId,
     Metadata, PageResult, Pagination, Timestamp, now_timestamp, validate_handle, validate_length,
@@ -63,13 +63,42 @@ macro_rules! apply_inquiry_binds {
 #[derive(Clone, Debug)]
 pub struct InquiryFormService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl InquiryFormService {
     /// Creates a service bound to one store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records form mutations in the store audit outbox.
+    ///
+    /// When an actor is set, every mutating method appends its audit entry in
+    /// the same transaction as the change, so a crash cannot separate them.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     /// Creates a form with an initial draft revision containing sensible
@@ -159,6 +188,14 @@ impl InquiryFormService {
         .await
         .map_err(database_error)?;
 
+        self.append_audit(
+            &mut tx,
+            "inquiry_form.created",
+            "inquiry_form",
+            id.as_str(),
+            serde_json::json!({"handle": handle}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.get_form(&id).await
     }
@@ -207,13 +244,22 @@ impl InquiryFormService {
         id: &InquiryFormId,
         input: UpdateInquiryFormInput,
     ) -> Result<InquiryForm, AppError> {
-        let existing = self.get_form(id).await?;
+        let mut tx = self.db.begin().await?;
+        let existing: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT name, description FROM inquiry_forms WHERE id = ?")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let Some((previous_name, previous_description)) = existing else {
+            return Err(AppError::not_found("inquiry form", id));
+        };
         let name = match input.name {
             Some(name) => {
                 validate_length(&name, "name", MAX_NAME_LENGTH)?;
                 name.trim().to_owned()
             }
-            None => existing.name,
+            None => previous_name.clone(),
         };
         let description = match input.description {
             Some(description) => {
@@ -224,8 +270,9 @@ impl InquiryFormService {
                     Some(description.to_owned())
                 }
             }
-            None => existing.description,
+            None => previous_description.clone(),
         };
+        let changed = name != previous_name || description != previous_description;
 
         let result = sqlx::query(
             "UPDATE inquiry_forms SET name = ?, description = ?, updated_at = ? WHERE id = ?",
@@ -234,12 +281,23 @@ impl InquiryFormService {
         .bind(&description)
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("inquiry form", id));
         }
+        if changed {
+            self.append_audit(
+                &mut tx,
+                "inquiry_form.updated",
+                "inquiry_form",
+                id.as_str(),
+                serde_json::json!({}),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
         self.get_form(id).await
     }
 
@@ -276,6 +334,11 @@ impl InquiryFormService {
         .map_err(database_error)?;
 
         if let Some(draft) = draft {
+            // Saving an identical draft is a no-op: skip both the write and
+            // its audit entry.
+            if draft.fields == fields_json && draft.settings == settings_json {
+                return draft.into_revision();
+            }
             sqlx::query(
                 "UPDATE inquiry_form_revisions \
                  SET fields = ?, settings = ?, created_by = ?, created_at = ? WHERE id = ?",
@@ -288,6 +351,14 @@ impl InquiryFormService {
             .execute(&mut *tx)
             .await
             .map_err(|error| unique_conflict(error, "inquiry form draft changed concurrently"))?;
+            self.append_audit(
+                &mut tx,
+                "inquiry_form.draft_saved",
+                "inquiry_form_revision",
+                &draft.id,
+                serde_json::json!({"version": draft.version}),
+            )
+            .await?;
             tx.commit().await.map_err(database_error)?;
 
             return Ok(InquiryFormRevision {
@@ -336,6 +407,14 @@ impl InquiryFormService {
             .await
             .map_err(database_error)?;
 
+        self.append_audit(
+            &mut tx,
+            "inquiry_form.draft_saved",
+            "inquiry_form_revision",
+            revision_id.as_str(),
+            serde_json::json!({"version": version}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
 
         Ok(InquiryFormRevision {
@@ -424,6 +503,24 @@ impl InquiryFormService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
+        let current: Option<(String, Option<i64>)> =
+            sqlx::query_as("SELECT status, published_version FROM inquiry_forms WHERE id = ?")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let Some((status, published_version)) = current else {
+            return Err(AppError::not_found("inquiry form", id));
+        };
+        // There is no unarchive path, so publishing must not silently revive
+        // an archived form.
+        if status == InquiryFormStatus::Archived.as_str() {
+            return Err(AppError::conflict(
+                "an archived inquiry form cannot be published",
+            ));
+        }
+        let no_op = status == InquiryFormStatus::Published.as_str()
+            && published_version == Some(revision.version);
         sqlx::query(
             "UPDATE inquiry_form_revisions SET published_at = ? \
              WHERE id = ? AND published_at IS NULL",
@@ -448,23 +545,48 @@ impl InquiryFormService {
             return Err(AppError::not_found("inquiry form", id));
         }
 
+        if !no_op {
+            self.append_audit(
+                &mut tx,
+                "inquiry_form.published",
+                "inquiry_form",
+                id.as_str(),
+                serde_json::json!({"version": revision.version}),
+            )
+            .await?;
+        }
         tx.commit().await.map_err(database_error)?;
         self.get_form(id).await
     }
 
     /// Archives a form, removing it from storefront lookups.
     pub async fn archive(&self, id: &InquiryFormId) -> Result<InquiryForm, AppError> {
+        let existing = self.get_form(id).await?;
+        let changed = existing.status != InquiryFormStatus::Archived;
+
+        let mut tx = self.db.begin().await?;
         let result = sqlx::query(
             "UPDATE inquiry_forms SET status = 'archived', updated_at = ? WHERE id = ?",
         )
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("inquiry form", id));
         }
+        if changed {
+            self.append_audit(
+                &mut tx,
+                "inquiry_form.archived",
+                "inquiry_form",
+                id.as_str(),
+                serde_json::json!({}),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
         self.get_form(id).await
     }
 
@@ -503,13 +625,42 @@ impl InquiryFormService {
 #[derive(Clone, Debug)]
 pub struct InquiryService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl InquiryService {
     /// Creates a service bound to one store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records inquiry mutations in the store audit outbox.
+    ///
+    /// When an actor is set, every mutating method appends its audit entry in
+    /// the same transaction as the change, so a crash cannot separate them.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     /// Accepts a submission against the currently published form revision.
@@ -704,16 +855,39 @@ impl InquiryService {
         id: &InquiryId,
         input: UpdateInquiryStatusInput,
     ) -> Result<Inquiry, AppError> {
+        let mut tx = self.db.begin().await?;
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT status FROM inquiries WHERE id = ?")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let Some(current) = current else {
+            return Err(AppError::not_found("inquiry", id));
+        };
+        let changed = current != input.status.as_str();
+
         let result = sqlx::query("UPDATE inquiries SET status = ?, updated_at = ? WHERE id = ?")
             .bind(input.status.as_str())
             .bind(now_timestamp())
             .bind(id.as_str())
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("inquiry", id));
         }
+        if changed {
+            self.append_audit(
+                &mut tx,
+                "inquiry.status_changed",
+                "inquiry",
+                id.as_str(),
+                serde_json::json!({"status": input.status.as_str()}),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
         self.get(id).await
     }
 

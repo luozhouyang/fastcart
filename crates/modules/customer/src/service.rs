@@ -181,17 +181,47 @@ impl CustomerService {
     }
 
     /// Applies a partial update to a non-deleted customer.
+    ///
+    /// The read, merge and write share a single write lock so concurrent
+    /// updates cannot fabricate a result from a stale read. Renaming the email
+    /// also updates the credential row used by login and clears verification.
     pub async fn update_customer(
         &self,
         id: &CustomerId,
         input: UpdateCustomerInput,
     ) -> Result<Customer, AppError> {
-        let mut customer = self.get_customer(id).await?;
+        let mut tx = self.db.begin().await?;
+        let sql =
+            format!("SELECT {CUSTOMER_COLUMNS} FROM customers WHERE id = ? AND deleted_at IS NULL");
+        let row = sqlx::query_as::<_, CustomerRow>(&sql)
+            .bind(id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("customer", id))?;
+        let mut customer = row.into_customer();
 
+        let mut email_changed = false;
         if let Some(email) = input.email {
             let email = normalize_email(&email);
             validate_email(&email, "email")?;
-            self.ensure_email_available(&email, Some(id)).await?;
+            let existing: Option<String> =
+                sqlx::query_scalar("SELECT id FROM customers WHERE email = ?")
+                    .bind(&email)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            if let Some(existing) = existing
+                && existing != customer.id.as_str()
+            {
+                return Err(AppError::conflict(
+                    "a customer with this email already exists",
+                ));
+            }
+            if email != customer.email {
+                email_changed = true;
+                customer.email_verified_at = None;
+            }
             customer.email = email;
         }
         if let Some(first_name) = input.first_name {
@@ -212,10 +242,10 @@ impl CustomerService {
         }
         customer.updated_at = now_timestamp();
 
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE customers
              SET email = ?, first_name = ?, last_name = ?, phone = ?, status = ?,
-                 metadata = ?, updated_at = ?
+                 email_verified_at = ?, metadata = ?, updated_at = ?
              WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(&customer.email)
@@ -223,15 +253,35 @@ impl CustomerService {
         .bind(&customer.last_name)
         .bind(&customer.phone)
         .bind(customer.status.as_str())
+        .bind(customer.email_verified_at)
         .bind(customer.metadata.to_json_string())
         .bind(customer.updated_at)
         .bind(customer.id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|error| {
             conflict_or_database(error, "a customer with this email already exists")
         })?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::not_found("customer", id));
+        }
 
+        if email_changed {
+            sqlx::query(
+                "UPDATE customer_credentials SET email = ?, updated_at = ?
+                 WHERE customer_id = ?",
+            )
+            .bind(&customer.email)
+            .bind(customer.updated_at)
+            .bind(customer.id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                conflict_or_database(error, "a customer with this email already exists")
+            })?;
+        }
+
+        tx.commit().await.map_err(database_error)?;
         Ok(customer)
     }
 
@@ -240,6 +290,7 @@ impl CustomerService {
     /// Deleted customers can no longer be fetched or authenticated.
     pub async fn delete_customer(&self, id: &CustomerId) -> Result<(), AppError> {
         let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
         let result = sqlx::query(
             "UPDATE customers SET deleted_at = ?, updated_at = ?
              WHERE id = ? AND deleted_at IS NULL",
@@ -247,13 +298,22 @@ impl CustomerService {
         .bind(now)
         .bind(now)
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
-        if result.rows_affected() == 0 {
+        if result.rows_affected() != 1 {
             return Err(AppError::not_found("customer", id));
         }
-        self.revoke_all_sessions(id).await?;
+        sqlx::query(
+            "UPDATE customer_sessions SET revoked_at = ?
+             WHERE customer_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -262,6 +322,9 @@ impl CustomerService {
     /// Existing profiles are returned unchanged when they are accounts. Guest
     /// profiles only receive names that were previously missing; existing data
     /// is never overwritten.
+    ///
+    /// Lookup, insertion and name backfill run inside one write transaction so
+    /// concurrent checkouts for the same email resolve to a single profile.
     pub async fn find_or_create_guest(
         &self,
         email: &str,
@@ -274,8 +337,20 @@ impl CustomerService {
             clean_optional(first_name.map(str::to_owned), "first_name", MAX_NAME_LENGTH)?;
         let last_name = clean_optional(last_name.map(str::to_owned), "last_name", MAX_NAME_LENGTH)?;
 
-        if let Some(mut customer) = self.get_customer_by_email(&email).await? {
+        let mut tx = self.db.begin().await?;
+        let sql = format!(
+            "SELECT {CUSTOMER_COLUMNS} FROM customers WHERE email = ? AND deleted_at IS NULL"
+        );
+        let existing = sqlx::query_as::<_, CustomerRow>(&sql)
+            .bind(&email)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+
+        if let Some(row) = existing {
+            let mut customer = row.into_customer();
             if customer.has_account {
+                tx.commit().await.map_err(database_error)?;
                 return Ok(customer);
             }
             let mut changed = false;
@@ -291,32 +366,74 @@ impl CustomerService {
                 customer.last_name = Some(name);
                 changed = true;
             }
-            if !changed {
-                return Ok(customer);
+            if changed {
+                customer.updated_at = now_timestamp();
+                let updated = sqlx::query(
+                    "UPDATE customers SET first_name = ?, last_name = ?, updated_at = ?
+                     WHERE id = ? AND deleted_at IS NULL",
+                )
+                .bind(&customer.first_name)
+                .bind(&customer.last_name)
+                .bind(customer.updated_at)
+                .bind(customer.id.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+                if updated.rows_affected() != 1 {
+                    return Err(AppError::not_found("customer", &customer.id));
+                }
             }
-            customer.updated_at = now_timestamp();
-            sqlx::query(
-                "UPDATE customers SET first_name = ?, last_name = ?, updated_at = ?
-                 WHERE id = ? AND deleted_at IS NULL",
-            )
-            .bind(&customer.first_name)
-            .bind(&customer.last_name)
-            .bind(customer.updated_at)
-            .bind(customer.id.as_str())
-            .execute(self.db.pool())
-            .await
-            .map_err(database_error)?;
+            tx.commit().await.map_err(database_error)?;
             return Ok(customer);
         }
 
-        self.create_customer(CreateCustomerInput {
-            email,
-            first_name,
-            last_name,
-            phone: None,
-            metadata: Metadata::empty(),
-        })
+        let id = CustomerId::new();
+        let now = now_timestamp();
+        let inserted = sqlx::query(
+            "INSERT INTO customers
+             (id, email, first_name, last_name, phone, has_account, status, metadata,
+              created_at, updated_at, deleted_at)
+             VALUES (?, ?, ?, ?, NULL, 0, ?, '{}', ?, ?, NULL)
+             ON CONFLICT(email) DO NOTHING",
+        )
+        .bind(id.as_str())
+        .bind(&email)
+        .bind(&first_name)
+        .bind(&last_name)
+        .bind(CustomerStatus::Active.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
         .await
+        .map_err(database_error)?;
+
+        let row = if inserted.rows_affected() == 1 {
+            Some(CustomerRow {
+                id: id.as_str().to_owned(),
+                email,
+                first_name,
+                last_name,
+                phone: None,
+                has_account: 0,
+                status: CustomerStatus::Active.as_str().to_owned(),
+                email_verified_at: None,
+                metadata: Metadata::empty().to_json_string(),
+                created_at: now,
+                updated_at: now,
+                deleted_at: None,
+            })
+        } else {
+            // Another transaction won the race; return its profile unchanged.
+            sqlx::query_as::<_, CustomerRow>(&sql)
+                .bind(&email)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?
+        };
+
+        tx.commit().await.map_err(database_error)?;
+        row.map(CustomerRow::into_customer)
+            .ok_or_else(|| AppError::conflict("a customer with this email already exists"))
     }
 
     // ---------------------------------------------------------------------
@@ -393,18 +510,34 @@ impl CustomerService {
     }
 
     /// Replaces an existing address, moving defaults atomically.
+    ///
+    /// The row is read, verified and updated under one write lock; defaults are
+    /// only cleared once the target row has been confirmed.
     pub async fn update_address(
         &self,
         customer_id: &CustomerId,
         address_id: &str,
         input: AddressInput,
     ) -> Result<Address, AppError> {
-        let existing = self.get_address(customer_id, address_id).await?;
         let normalized = normalize_address(input)?;
         let now = now_timestamp();
+
+        let mut tx = self.db.begin().await?;
+        let sql = format!(
+            "SELECT {ADDRESS_COLUMNS} FROM customer_addresses
+             WHERE id = ? AND customer_id = ?"
+        );
+        let existing = sqlx::query_as::<_, AddressRow>(&sql)
+            .bind(address_id)
+            .bind(customer_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("address", address_id))?;
+
         let address = Address {
             id: existing.id,
-            customer_id: existing.customer_id,
+            customer_id: CustomerId::from_string(existing.customer_id),
             is_default_shipping: normalized.is_default_shipping,
             is_default_billing: normalized.is_default_billing,
             first_name: normalized.first_name,
@@ -422,14 +555,7 @@ impl CustomerService {
             updated_at: now,
         };
 
-        let mut tx = self.db.begin().await?;
-        if address.is_default_shipping {
-            clear_default_shipping(&mut tx, customer_id, Some(address_id)).await?;
-        }
-        if address.is_default_billing {
-            clear_default_billing(&mut tx, customer_id, Some(address_id)).await?;
-        }
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE customer_addresses
              SET is_default_shipping = ?, is_default_billing = ?, first_name = ?, last_name = ?,
                  company = ?, address_1 = ?, address_2 = ?, city = ?, province = ?,
@@ -455,9 +581,27 @@ impl CustomerService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::not_found("address", address_id));
+        }
+
+        if address.is_default_shipping {
+            clear_default_shipping(&mut tx, customer_id, Some(address_id)).await?;
+        }
+        if address.is_default_billing {
+            clear_default_billing(&mut tx, customer_id, Some(address_id)).await?;
+        }
+
+        let row = sqlx::query_as::<_, AddressRow>(&sql)
+            .bind(address_id)
+            .bind(customer_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("address", address_id))?;
         tx.commit().await.map_err(database_error)?;
 
-        Ok(address)
+        Ok(row.into_address())
     }
 
     /// Returns one address owned by the customer.
@@ -648,6 +792,28 @@ impl CustomerService {
     /// A guest profile with the same email is upgraded to an account instead of
     /// being duplicated. An existing credential always yields a conflict.
     pub async fn register(&self, input: RegisterCustomerInput) -> Result<Customer, AppError> {
+        let (customer, _) = self.register_internal(input, false).await?;
+        Ok(customer)
+    }
+
+    /// Registers a customer and creates its first session in one transaction.
+    ///
+    /// The returned token is shown exactly once; only its SHA-256 digest is
+    /// persisted. Registration and automatic login therefore succeed or fail
+    /// together.
+    pub async fn register_with_session(
+        &self,
+        input: RegisterCustomerInput,
+    ) -> Result<CreatedCustomerSession, AppError> {
+        let (_, session) = self.register_internal(input, true).await?;
+        session.ok_or_else(|| AppError::internal("customer session was not created"))
+    }
+
+    async fn register_internal(
+        &self,
+        input: RegisterCustomerInput,
+        create_session: bool,
+    ) -> Result<(Customer, Option<CreatedCustomerSession>), AppError> {
         let email = normalize_email(&input.email);
         validate_email(&email, "email")?;
         validate_new_password(&input.password)?;
@@ -744,9 +910,48 @@ impl CustomerService {
         .map_err(|error| {
             conflict_or_database(error, "an account with this email already exists")
         })?;
-        tx.commit().await.map_err(database_error)?;
+        let sql =
+            format!("SELECT {CUSTOMER_COLUMNS} FROM customers WHERE id = ? AND deleted_at IS NULL");
+        let customer = sqlx::query_as::<_, CustomerRow>(&sql)
+            .bind(customer_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("customer", &customer_id))?
+            .into_customer();
 
-        self.get_customer(&customer_id).await
+        let session = if create_session {
+            let token = random_hex(32);
+            let csrf_token = random_hex(24);
+            let session_id = CustomerSessionId::new();
+            let expires_at = now.saturating_add(CUSTOMER_SESSION_TTL_SECONDS);
+            sqlx::query(
+                "INSERT INTO customer_sessions
+                 (id, customer_id, token_hash, expires_at, revoked_at, last_used_at, created_at)
+                 VALUES (?, ?, ?, ?, NULL, ?, ?)",
+            )
+            .bind(session_id.as_str())
+            .bind(customer.id.as_str())
+            .bind(hash_token(&token))
+            .bind(expires_at)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            Some(CreatedCustomerSession {
+                token,
+                csrf_token,
+                session_id,
+                customer: customer.clone(),
+                expires_at,
+            })
+        } else {
+            None
+        };
+
+        tx.commit().await.map_err(database_error)?;
+        Ok((customer, session))
     }
 
     /// Authenticates a customer and creates a store-scoped session.
@@ -818,7 +1023,8 @@ impl CustomerService {
         let Some(row) = row else {
             return Err(AppError::Unauthorized);
         };
-        if row.expires_at <= now_timestamp() {
+        let now = now_timestamp();
+        if row.expires_at <= now {
             return Err(AppError::Unauthorized);
         }
 
@@ -828,12 +1034,21 @@ impl CustomerService {
             return Err(AppError::Forbidden);
         }
 
-        sqlx::query("UPDATE customer_sessions SET last_used_at = ? WHERE id = ?")
-            .bind(now_timestamp())
-            .bind(session_id.as_str())
-            .execute(self.db.pool())
-            .await
-            .map_err(database_error)?;
+        // Fail when the session was revoked or expired between the read and
+        // this refresh instead of resurrecting it.
+        let refreshed = sqlx::query(
+            "UPDATE customer_sessions SET last_used_at = ?
+             WHERE id = ? AND revoked_at IS NULL AND expires_at > ?",
+        )
+        .bind(now)
+        .bind(session_id.as_str())
+        .bind(now)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        if refreshed.rows_affected() != 1 {
+            return Err(AppError::Unauthorized);
+        }
 
         Ok(AuthenticatedCustomerSession {
             customer,
@@ -907,6 +1122,9 @@ impl CustomerService {
     }
 
     /// Changes a customer's password and revokes all active sessions.
+    ///
+    /// The write is conditioned on the hash that was verified so a concurrent
+    /// reset cannot be silently overwritten.
     pub async fn change_password(
         &self,
         customer_id: &CustomerId,
@@ -931,16 +1149,20 @@ impl CustomerService {
         let password_hash = hash_password(new_password)?;
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE customer_credentials SET password_hash = ?, updated_at = ?
-             WHERE customer_id = ?",
+             WHERE customer_id = ? AND password_hash = ?",
         )
         .bind(&password_hash)
         .bind(now)
         .bind(customer_id.as_str())
+        .bind(&stored)
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::Unauthorized);
+        }
         sqlx::query(
             "UPDATE customer_sessions SET revoked_at = ?
              WHERE customer_id = ? AND revoked_at IS NULL",
@@ -1755,6 +1977,184 @@ mod tests {
         assert_eq!(updated.last_name.as_deref(), Some("Lovelace"));
         assert_eq!(updated.status, CustomerStatus::Disabled);
         assert_eq!(updated.email, customer.email);
+    }
+
+    #[tokio::test]
+    async fn email_change_updates_credentials_and_clears_verification() {
+        let (service, _) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new("owner@example.com", "password"))
+            .await
+            .unwrap();
+        let token = service
+            .request_email_verification(&customer.id)
+            .await
+            .unwrap();
+        service.verify_email(&token.token).await.unwrap();
+
+        let updated = service
+            .update_customer(
+                &customer.id,
+                UpdateCustomerInput {
+                    email: Some("  NewOwner@Example.COM ".to_owned()),
+                    ..UpdateCustomerInput::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.email, "newowner@example.com");
+        assert!(updated.email_verified_at.is_none());
+
+        // Login joins the credential email, which must move with the profile.
+        assert!(
+            service
+                .login("NEWOWNER@example.com", "password")
+                .await
+                .is_ok()
+        );
+        assert!(
+            service
+                .login("owner@example.com", "password")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn update_customer_does_not_fabricate_a_result() {
+        let (service, _) = service().await;
+        let first = service
+            .create_customer(CreateCustomerInput::new("first@example.com"))
+            .await
+            .unwrap();
+        let second = service
+            .create_customer(CreateCustomerInput::new("second@example.com"))
+            .await
+            .unwrap();
+
+        let conflict = service
+            .update_customer(
+                &first.id,
+                UpdateCustomerInput {
+                    email: Some("SECOND@example.com".to_owned()),
+                    ..UpdateCustomerInput::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(conflict, AppError::Conflict(_)));
+        assert_eq!(
+            service.get_customer(&first.id).await.unwrap().email,
+            "first@example.com"
+        );
+
+        service.delete_customer(&second.id).await.unwrap();
+        let missing = service
+            .update_customer(
+                &second.id,
+                UpdateCustomerInput {
+                    first_name: Some("Ghost".to_owned()),
+                    ..UpdateCustomerInput::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_customer_revokes_sessions_atomically() {
+        let (service, db) = service().await;
+        let customer = service
+            .register(RegisterCustomerInput::new("owner@example.com", "password"))
+            .await
+            .unwrap();
+        let session = service
+            .login("owner@example.com", "password")
+            .await
+            .unwrap();
+
+        service.delete_customer(&customer.id).await.unwrap();
+
+        let revoked_at: Option<i64> =
+            sqlx::query_scalar("SELECT revoked_at FROM customer_sessions WHERE id = ?")
+                .bind(session.session_id.as_str())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        let deleted_at: Option<i64> =
+            sqlx::query_scalar("SELECT deleted_at FROM customers WHERE id = ?")
+                .bind(customer.id.as_str())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert!(revoked_at.is_some());
+        assert!(deleted_at.is_some());
+        assert!(service.authenticate_session(&session.token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_address_keeps_existing_defaults_when_target_is_missing() {
+        let (service, _) = service().await;
+        let customer = service
+            .create_customer(CreateCustomerInput::new("owner@example.com"))
+            .await
+            .unwrap();
+
+        let mut first_input = address("1 Main St");
+        first_input.is_default_shipping = true;
+        let first = service
+            .add_address(&customer.id, first_input)
+            .await
+            .unwrap();
+
+        let mut replacement = address("2 Main St");
+        replacement.is_default_shipping = true;
+        let error = service
+            .update_address(&customer.id, "addr_missing", replacement)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+
+        let unchanged = service.get_address(&customer.id, &first.id).await.unwrap();
+        assert!(unchanged.is_default_shipping);
+        assert_eq!(unchanged.address_1.as_deref(), Some("1 Main St"));
+    }
+
+    #[tokio::test]
+    async fn guest_creation_is_idempotent_under_concurrency() {
+        let (service, db) = service().await;
+        let (first, second) = tokio::join!(
+            service.find_or_create_guest("guest@example.com", Some("Ada"), None),
+            service.find_or_create_guest("guest@example.com", Some("Grace"), None),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.id, second.id);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM customers WHERE email = ?")
+            .bind("guest@example.com")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn registration_with_session_is_authenticatable() {
+        let (service, _) = service().await;
+        let session = service
+            .register_with_session(RegisterCustomerInput::new("owner@example.com", "password"))
+            .await
+            .unwrap();
+
+        assert!(session.customer.has_account);
+        assert_eq!(session.customer.email, "owner@example.com");
+
+        let authenticated = service.authenticate_session(&session.token).await.unwrap();
+        assert_eq!(authenticated.customer.id, session.customer.id);
+        assert_eq!(authenticated.session_id, session.session_id);
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 //! Regions, supported currencies and storefront publishable API keys.
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, CountryCode, CurrencyCode, Metadata, PageResult, Pagination, now_timestamp,
     validate_metadata,
@@ -115,13 +115,42 @@ pub struct CreatePublishableApiKeyInput {
 #[derive(Clone, Debug)]
 pub struct RegionService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl RegionService {
     /// Creates a service over an already-migrated store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records region and publishable-key mutations in the store audit outbox.
+    ///
+    /// When an actor is set, audited mutations append their outbox row in the
+    /// same transaction as the change, so a rollback leaves no audit behind.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     /// Returns the default region.
@@ -172,6 +201,14 @@ impl RegionService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "region.created",
+            "region",
+            &id,
+            serde_json::json!({"name": name, "is_default": input.is_default}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.get_region(&id).await
     }
@@ -223,7 +260,22 @@ impl RegionService {
         id: &str,
         input: UpdateRegionInput,
     ) -> Result<Region, AppError> {
-        let existing = self.get_region(id).await?;
+        let now = now_timestamp();
+        // `begin` takes the write lock up front, so the read below and the
+        // write it feeds see the same snapshot.
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let row = sqlx::query(
+            "SELECT id, name, currency_code, countries, tax_region_id, payment_providers,
+                    is_default, metadata, created_at, updated_at
+             FROM regions WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("region", id))?;
+        let existing = region_from_row(row)?;
+
         let name = input.name.as_deref().map_or_else(
             || Ok(existing.name.clone()),
             |name| validate_name(name, "region name"),
@@ -245,14 +297,25 @@ impl RegionService {
         let metadata = input.metadata.unwrap_or_else(|| existing.metadata.clone());
         validate_metadata(&metadata)?;
         let is_default = input.is_default.unwrap_or(existing.is_default);
-        let now = now_timestamp();
-        let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        if is_default && !existing.is_default {
-            sqlx::query("UPDATE regions SET is_default = 0, updated_at = ? WHERE is_default = 1")
-                .bind(now)
-                .execute(&mut *tx)
-                .await
-                .map_err(database_error)?;
+        let changed = name != existing.name
+            || currency != existing.currency_code
+            || countries != existing.countries
+            || tax_region_id != existing.tax_region_id
+            || payment_providers != existing.payment_providers
+            || metadata != existing.metadata
+            || is_default != existing.is_default;
+        if is_default {
+            // Always clear any other default before setting this one. The
+            // partial unique index only allows a single default row.
+            sqlx::query(
+                "UPDATE regions SET is_default = 0, updated_at = ? \
+                 WHERE is_default = 1 AND id <> ?",
+            )
+            .bind(now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
         }
         let updated = sqlx::query(
             "UPDATE regions SET name = ?, currency_code = ?, countries = ?, tax_region_id = ?,
@@ -270,10 +333,20 @@ impl RegionService {
         .bind(id)
         .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_conflict(error, "another region is already the default"))?;
         if updated.rows_affected() == 0 {
             tx.rollback().await.map_err(database_error)?;
             return Err(AppError::not_found("region", id));
+        }
+        if changed {
+            self.append_audit(
+                &mut tx,
+                "region.updated",
+                "region",
+                id,
+                serde_json::json!({"name": name, "is_default": is_default}),
+            )
+            .await?;
         }
         tx.commit().await.map_err(database_error)?;
         self.get_region(id).await
@@ -281,15 +354,35 @@ impl RegionService {
 
     /// Deletes a non-default region.
     pub async fn delete_region(&self, id: &str) -> Result<(), AppError> {
-        let region = self.get_region(id).await?;
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let row = sqlx::query(
+            "SELECT id, name, currency_code, countries, tax_region_id, payment_providers,
+                    is_default, metadata, created_at, updated_at
+             FROM regions WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("region", id))?;
+        let region = region_from_row(row)?;
         if region.is_default {
             return Err(AppError::conflict("the default region cannot be deleted"));
         }
         sqlx::query("DELETE FROM regions WHERE id = ?")
             .bind(id)
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "region.deleted",
+            "region",
+            id,
+            serde_json::Value::Null,
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -304,11 +397,12 @@ impl RegionService {
                 "a publishable key must be scoped to at least one sales channel",
             ));
         }
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         for channel_id in &input.sales_channel_ids {
             let channel: Option<(String, i64)> =
                 sqlx::query_as("SELECT id, is_disabled FROM sales_channels WHERE id = ?")
                     .bind(channel_id)
-                    .fetch_optional(self.db.pool())
+                    .fetch_optional(&mut *tx)
                     .await
                     .map_err(database_error)?;
             match channel {
@@ -338,9 +432,18 @@ impl RegionService {
         .bind(hash_token(&token))
         .bind(serde_json::to_string(&input.sales_channel_ids).unwrap_or_else(|_| "[]".to_owned()))
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "publishable_key.created",
+            "publishable_api_key",
+            &id,
+            serde_json::json!({"sales_channel_ids": input.sales_channel_ids.clone()}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(CreatedPublishableApiKey {
             token,
             key: PublishableApiKey {
@@ -369,17 +472,27 @@ impl RegionService {
 
     /// Revokes a publishable key.
     pub async fn revoke_publishable_key(&self, id: &str) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let result = sqlx::query(
             "UPDATE publishable_api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
         )
         .bind(now_timestamp())
         .bind(id)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("publishable API key", id));
         }
+        self.append_audit(
+            &mut tx,
+            "publishable_key.revoked",
+            "publishable_api_key",
+            id,
+            serde_json::Value::Null,
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -496,4 +609,17 @@ fn random_token(bytes: usize) -> String {
 
 fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+fn unique_conflict(error: sqlx::Error, message: &str) -> AppError {
+    if let sqlx::Error::Database(database) = &error
+        && (database.is_unique_violation()
+            || database
+                .message()
+                .to_ascii_lowercase()
+                .contains("unique constraint"))
+    {
+        return AppError::conflict(message);
+    }
+    database_error(error)
 }

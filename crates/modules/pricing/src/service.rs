@@ -7,7 +7,7 @@ use fastcart_kernel::{
     AppError, CurrencyCode, PageResult, Pagination, PriceId, PriceListId, PriceSetId, now_timestamp,
 };
 use sqlx::Row;
-use sqlx::{QueryBuilder, Sqlite};
+use sqlx::{QueryBuilder, Sqlite, Transaction};
 
 use crate::domain::{
     CreatePriceInput, CreatePriceListInput, Price, PriceContext, PriceFilter, PriceList,
@@ -91,12 +91,16 @@ impl PricingService {
     }
 
     /// Updates a price list and optionally replaces its rules.
+    ///
+    /// The row is read and rewritten under one `BEGIN IMMEDIATE` transaction
+    /// so concurrent partial updates cannot overwrite each other.
     pub async fn update_price_list(
         &self,
         id: &str,
         input: UpdatePriceListInput,
     ) -> Result<PriceList, AppError> {
-        let existing = self.get_price_list(id).await?;
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let existing = load_price_list_tx(&mut transaction, id).await?;
         let created_at = existing.created_at;
         let existing_rules = existing.rules;
 
@@ -111,8 +115,7 @@ impl PricingService {
         validate_price_list_fields(&title, starts_at, ends_at, &metadata)?;
 
         let now = now_timestamp();
-        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query(
+        let affected = sqlx::query(
             "UPDATE price_lists
              SET title = ?, description = ?, type = ?, status = ?, starts_at = ?, ends_at = ?,
                  metadata = ?, updated_at = ?
@@ -129,7 +132,11 @@ impl PricingService {
         .bind(id)
         .execute(&mut *transaction)
         .await
-        .map_err(database_error)?;
+        .map_err(database_error)?
+        .rows_affected();
+        if affected == 0 {
+            return Err(AppError::not_found("price list", id));
+        }
 
         let rules = match input.rules {
             Some(rules) => {
@@ -251,7 +258,12 @@ impl PricingService {
     }
 
     /// Creates a price.
+    ///
+    /// Blank customer-group and sales-channel scopes are normalized to `None`
+    /// and non-blank scopes must reference existing rows.
     pub async fn create_price(&self, input: CreatePriceInput) -> Result<Price, AppError> {
+        let customer_group_id = normalize_scope(input.customer_group_id.as_deref());
+        let sales_channel_id = normalize_scope(input.sales_channel_id.as_deref());
         validate_price_fields(
             &input.variant_id,
             input.amount,
@@ -261,30 +273,39 @@ impl PricingService {
             input.ends_at,
             &input.metadata,
         )?;
+
+        let id = PriceId::new().to_string();
+        let now = now_timestamp();
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
         let price_list_type = match input.price_list_id.as_deref() {
-            Some(price_list_id) => Some(self.ensure_price_list_exists(price_list_id).await?),
+            Some(price_list_id) => {
+                Some(ensure_price_list_exists_tx(&mut transaction, price_list_id).await?)
+            }
             None => None,
         };
-        if self
-            .find_price_id_by_scope(
-                &input.variant_id,
-                &input.currency_code,
-                input.price_list_id.as_deref(),
-                input.customer_group_id.as_deref(),
-                input.sales_channel_id.as_deref(),
-                input.min_quantity,
-            )
-            .await?
-            .is_some()
+        ensure_scope_ids_exist_tx(
+            &mut transaction,
+            customer_group_id.as_deref(),
+            sales_channel_id.as_deref(),
+        )
+        .await?;
+        if find_price_id_by_scope_tx(
+            &mut transaction,
+            &input.variant_id,
+            &input.currency_code,
+            input.price_list_id.as_deref(),
+            customer_group_id.as_deref(),
+            sales_channel_id.as_deref(),
+            input.min_quantity,
+        )
+        .await?
+        .is_some()
         {
             return Err(AppError::conflict(
                 "a price already exists for the same scope",
             ));
         }
 
-        let id = PriceId::new().to_string();
-        let now = now_timestamp();
-        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
         let price_set = ensure_price_set_tx(&mut transaction, &input.variant_id).await?;
         sqlx::query(
             "INSERT INTO prices
@@ -301,8 +322,8 @@ impl PricingService {
         .bind(input.amount)
         .bind(input.min_quantity)
         .bind(input.max_quantity)
-        .bind(&input.customer_group_id)
-        .bind(&input.sales_channel_id)
+        .bind(&customer_group_id)
+        .bind(&sales_channel_id)
         .bind(input.starts_at)
         .bind(input.ends_at)
         .bind(input.metadata.to_json_string())
@@ -310,7 +331,7 @@ impl PricingService {
         .bind(now)
         .execute(&mut *transaction)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_or_database(error, "a price already exists for the same scope"))?;
         transaction.commit().await.map_err(database_error)?;
 
         Ok(Price {
@@ -322,8 +343,8 @@ impl PricingService {
             amount: input.amount,
             min_quantity: input.min_quantity,
             max_quantity: input.max_quantity,
-            customer_group_id: input.customer_group_id,
-            sales_channel_id: input.sales_channel_id,
+            customer_group_id,
+            sales_channel_id,
             starts_at: input.starts_at,
             ends_at: input.ends_at,
             metadata: input.metadata,
@@ -334,8 +355,14 @@ impl PricingService {
     }
 
     /// Updates a price.
+    ///
+    /// The read, merge, validation and write happen under one `BEGIN
+    /// IMMEDIATE` transaction, and blank scopes are normalized to `None`.
     pub async fn update_price(&self, id: &str, input: UpdatePriceInput) -> Result<Price, AppError> {
-        let existing = self.get_price(id).await?;
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let existing = get_price_tx(&mut transaction, id).await?;
+        let created_at = existing.created_at;
+        let price_list_rule_count = existing.price_list_rule_count;
 
         let price_list_id = input.price_list_id.unwrap_or(existing.price_list_id);
         let variant_id = input.variant_id.unwrap_or(existing.variant_id);
@@ -343,10 +370,14 @@ impl PricingService {
         let amount = input.amount.unwrap_or(existing.amount);
         let min_quantity = input.min_quantity.unwrap_or(existing.min_quantity);
         let max_quantity = input.max_quantity.unwrap_or(existing.max_quantity);
-        let customer_group_id = input
-            .customer_group_id
-            .unwrap_or(existing.customer_group_id);
-        let sales_channel_id = input.sales_channel_id.unwrap_or(existing.sales_channel_id);
+        let customer_group_id = match input.customer_group_id {
+            Some(value) => normalize_scope(value.as_deref()),
+            None => normalize_scope(existing.customer_group_id.as_deref()),
+        };
+        let sales_channel_id = match input.sales_channel_id {
+            Some(value) => normalize_scope(value.as_deref()),
+            None => normalize_scope(existing.sales_channel_id.as_deref()),
+        };
         let starts_at = input.starts_at.unwrap_or(existing.starts_at);
         let ends_at = input.ends_at.unwrap_or(existing.ends_at);
         let metadata = input.metadata.unwrap_or(existing.metadata);
@@ -361,19 +392,27 @@ impl PricingService {
             &metadata,
         )?;
         let price_list_type = match price_list_id.as_deref() {
-            Some(price_list_id) => Some(self.ensure_price_list_exists(price_list_id).await?),
+            Some(price_list_id) => {
+                Some(ensure_price_list_exists_tx(&mut transaction, price_list_id).await?)
+            }
             None => None,
         };
-        if let Some(found_id) = self
-            .find_price_id_by_scope(
-                &variant_id,
-                &currency_code,
-                price_list_id.as_deref(),
-                customer_group_id.as_deref(),
-                sales_channel_id.as_deref(),
-                min_quantity,
-            )
-            .await?
+        ensure_scope_ids_exist_tx(
+            &mut transaction,
+            customer_group_id.as_deref(),
+            sales_channel_id.as_deref(),
+        )
+        .await?;
+        if let Some(found_id) = find_price_id_by_scope_tx(
+            &mut transaction,
+            &variant_id,
+            &currency_code,
+            price_list_id.as_deref(),
+            customer_group_id.as_deref(),
+            sales_channel_id.as_deref(),
+            min_quantity,
+        )
+        .await?
             && found_id != id
         {
             return Err(AppError::conflict(
@@ -382,9 +421,8 @@ impl PricingService {
         }
 
         let now = now_timestamp();
-        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
         let price_set = ensure_price_set_tx(&mut transaction, &variant_id).await?;
-        sqlx::query(
+        let affected = sqlx::query(
             "UPDATE prices
              SET price_list_id = ?, price_set_id = ?, variant_id = ?, currency_code = ?,
                  amount = ?, min_quantity = ?, max_quantity = ?, customer_group_id = ?,
@@ -407,7 +445,11 @@ impl PricingService {
         .bind(id)
         .execute(&mut *transaction)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_or_database(error, "a price already exists for the same scope"))?
+        .rows_affected();
+        if affected == 0 {
+            return Err(AppError::not_found("price", id));
+        }
         transaction.commit().await.map_err(database_error)?;
 
         Ok(Price {
@@ -424,9 +466,9 @@ impl PricingService {
             starts_at,
             ends_at,
             metadata,
-            created_at: existing.created_at,
+            created_at,
             updated_at: now,
-            price_list_rule_count: existing.price_list_rule_count,
+            price_list_rule_count,
         })
     }
 
@@ -495,11 +537,16 @@ impl PricingService {
     }
 
     /// Inserts or updates a batch of prices keyed by their unique scope.
+    ///
+    /// Blank scopes are normalized before the duplicate-scope check, and
+    /// non-blank scope identifiers must exist.
     pub async fn bulk_upsert_prices(
         &self,
-        inputs: Vec<CreatePriceInput>,
+        mut inputs: Vec<CreatePriceInput>,
     ) -> Result<Vec<Price>, AppError> {
-        for input in &inputs {
+        for input in &mut inputs {
+            input.customer_group_id = normalize_scope(input.customer_group_id.as_deref());
+            input.sales_channel_id = normalize_scope(input.sales_channel_id.as_deref());
             validate_price_fields(
                 &input.variant_id,
                 input.amount,
@@ -517,16 +564,14 @@ impl PricingService {
 
         for input in inputs {
             if let Some(price_list_id) = input.price_list_id.as_deref() {
-                let exists: Option<String> =
-                    sqlx::query_scalar("SELECT id FROM price_lists WHERE id = ?")
-                        .bind(price_list_id)
-                        .fetch_optional(&mut *transaction)
-                        .await
-                        .map_err(database_error)?;
-                if exists.is_none() {
-                    return Err(AppError::not_found("price list", price_list_id));
-                }
+                ensure_price_list_exists_tx(&mut transaction, price_list_id).await?;
             }
+            ensure_scope_ids_exist_tx(
+                &mut transaction,
+                input.customer_group_id.as_deref(),
+                input.sales_channel_id.as_deref(),
+            )
+            .await?;
             let scope = scope_key(
                 &input.variant_id,
                 &input.currency_code,
@@ -576,7 +621,9 @@ impl PricingService {
                 .bind(&existing_id)
                 .execute(&mut *transaction)
                 .await
-                .map_err(database_error)?;
+                .map_err(|error| {
+                    unique_or_database(error, "a price already exists for the same scope")
+                })?;
                 existing_id
             } else {
                 let id = PriceId::new().to_string();
@@ -605,7 +652,9 @@ impl PricingService {
                 .bind(now)
                 .execute(&mut *transaction)
                 .await
-                .map_err(database_error)?;
+                .map_err(|error| {
+                    unique_or_database(error, "a price already exists for the same scope")
+                })?;
                 id
             };
             ids.push(id);
@@ -773,46 +822,6 @@ impl PricingService {
         Ok(rules)
     }
 
-    async fn ensure_price_list_exists(&self, id: &str) -> Result<PriceListType, AppError> {
-        let price_type: Option<String> =
-            sqlx::query_scalar("SELECT type FROM price_lists WHERE id = ?")
-                .bind(id)
-                .fetch_optional(self.db.pool())
-                .await
-                .map_err(database_error)?;
-        match price_type {
-            Some(price_type) => price_type.parse(),
-            None => Err(AppError::not_found("price list", id)),
-        }
-    }
-
-    async fn find_price_id_by_scope(
-        &self,
-        variant_id: &str,
-        currency_code: &CurrencyCode,
-        price_list_id: Option<&str>,
-        customer_group_id: Option<&str>,
-        sales_channel_id: Option<&str>,
-        min_quantity: i64,
-    ) -> Result<Option<String>, AppError> {
-        sqlx::query_scalar(
-            "SELECT id FROM prices
-             WHERE variant_id = ? AND currency_code = ?
-               AND IFNULL(price_list_id, '') = ? AND IFNULL(customer_group_id, '') = ?
-               AND IFNULL(sales_channel_id, '') = ? AND min_quantity = ?
-             LIMIT 1",
-        )
-        .bind(variant_id)
-        .bind(currency_code.as_str())
-        .bind(price_list_id.unwrap_or(""))
-        .bind(customer_group_id.unwrap_or(""))
-        .bind(sales_channel_id.unwrap_or(""))
-        .bind(min_quantity)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(database_error)
-    }
-
     async fn load_price_list_rules(
         &self,
         price_list_id: &str,
@@ -827,6 +836,142 @@ impl PricingService {
         .map_err(database_error)?;
         Ok(rows.into_iter().map(PriceListRuleRow::into_rule).collect())
     }
+}
+
+fn unique_or_database(error: sqlx::Error, conflict_message: &str) -> AppError {
+    match &error {
+        sqlx::Error::Database(database) if database.is_unique_violation() => {
+            AppError::conflict(conflict_message)
+        }
+        _ => database_error(error),
+    }
+}
+
+/// Trims an optional scope identifier and folds blanks to `None`.
+fn normalize_scope(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+async fn ensure_scope_ids_exist_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    customer_group_id: Option<&str>,
+    sales_channel_id: Option<&str>,
+) -> Result<(), AppError> {
+    if let Some(customer_group_id) = customer_group_id {
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM customer_groups WHERE id = ?")
+                .bind(customer_group_id)
+                .fetch_optional(&mut **transaction)
+                .await
+                .map_err(database_error)?;
+        if existing.is_none() {
+            return Err(AppError::not_found("customer group", customer_group_id));
+        }
+    }
+    if let Some(sales_channel_id) = sales_channel_id {
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM sales_channels WHERE id = ?")
+                .bind(sales_channel_id)
+                .fetch_optional(&mut **transaction)
+                .await
+                .map_err(database_error)?;
+        if existing.is_none() {
+            return Err(AppError::not_found("sales channel", sales_channel_id));
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_price_list_exists_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<PriceListType, AppError> {
+    let price_type: Option<String> =
+        sqlx::query_scalar("SELECT type FROM price_lists WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(database_error)?;
+    match price_type {
+        Some(price_type) => price_type.parse(),
+        None => Err(AppError::not_found("price list", id)),
+    }
+}
+
+async fn find_price_id_by_scope_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    variant_id: &str,
+    currency_code: &CurrencyCode,
+    price_list_id: Option<&str>,
+    customer_group_id: Option<&str>,
+    sales_channel_id: Option<&str>,
+    min_quantity: i64,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar(
+        "SELECT id FROM prices
+         WHERE variant_id = ? AND currency_code = ?
+           AND IFNULL(price_list_id, '') = ? AND IFNULL(customer_group_id, '') = ?
+           AND IFNULL(sales_channel_id, '') = ? AND min_quantity = ?
+         LIMIT 1",
+    )
+    .bind(variant_id)
+    .bind(currency_code.as_str())
+    .bind(price_list_id.unwrap_or(""))
+    .bind(customer_group_id.unwrap_or(""))
+    .bind(sales_channel_id.unwrap_or(""))
+    .bind(min_quantity)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(database_error)
+}
+
+async fn get_price_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<Price, AppError> {
+    let row =
+        sqlx::query_as::<_, PriceRow>(&format!("SELECT {PRICE_COLUMNS} FROM prices WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("price", id))?;
+    row.into_price()
+}
+
+async fn load_price_list_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<PriceList, AppError> {
+    let row = sqlx::query_as::<_, PriceListRow>(&format!(
+        "SELECT {PRICE_LIST_COLUMNS} FROM price_lists WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(database_error)?
+    .ok_or_else(|| AppError::not_found("price list", id))?;
+    let mut price_list = row.into_price_list()?;
+    price_list.rules = load_price_list_rules_tx(transaction, &price_list.id).await?;
+    Ok(price_list)
+}
+
+async fn load_price_list_rules_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    price_list_id: &str,
+) -> Result<Vec<PriceListRule>, AppError> {
+    let rows = sqlx::query_as::<_, PriceListRuleRow>(&format!(
+        "SELECT {PRICE_LIST_RULE_COLUMNS} FROM price_list_rules
+         WHERE price_list_id = ? ORDER BY created_at, id"
+    ))
+    .bind(price_list_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    Ok(rows.into_iter().map(PriceListRuleRow::into_rule).collect())
 }
 
 fn push_price_filters(builder: &mut QueryBuilder<'_, Sqlite>, filter: &PriceFilter) {
@@ -1685,6 +1830,13 @@ mod tests {
     #[tokio::test]
     async fn calculation_applies_scopes_and_batch_variants() {
         let service = service().await;
+        sqlx::query(
+            "INSERT INTO customer_groups (id, name, metadata, created_at, updated_at) \
+             VALUES ('vip', 'VIP', '{}', 0, 0)",
+        )
+        .execute(service.db.pool())
+        .await
+        .unwrap();
         service
             .create_price(CreatePriceInput::new("var_1", usd(), 1000))
             .await
@@ -1847,5 +1999,103 @@ mod tests {
         assert_eq!(selected.amount, 1500);
         assert_eq!(selected.price_list_type, Some(PriceListType::Override));
         assert_eq!(selected.original_amount, Some(1000));
+    }
+
+    #[tokio::test]
+    async fn blank_price_scopes_are_normalized_to_none() {
+        let service = service().await;
+        let mut input = CreatePriceInput::new("var_1", usd(), 1000);
+        input.customer_group_id = Some("   ".to_owned());
+        input.sales_channel_id = Some(String::new());
+        let created = service.create_price(input).await.unwrap();
+        assert_eq!(created.customer_group_id, None);
+        assert_eq!(created.sales_channel_id, None);
+
+        let mut duplicate = CreatePriceInput::new("var_1", usd(), 900);
+        duplicate.customer_group_id = Some(" ".to_owned());
+        let error = service.create_price(duplicate).await.unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn non_blank_price_scopes_must_exist() {
+        let service = service().await;
+
+        let mut missing_group = CreatePriceInput::new("var_1", usd(), 1000);
+        missing_group.customer_group_id = Some("cg_missing".to_owned());
+        assert!(matches!(
+            service.create_price(missing_group).await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
+
+        let mut missing_channel = CreatePriceInput::new("var_1", usd(), 1000);
+        missing_channel.sales_channel_id = Some("sc_missing".to_owned());
+        assert!(matches!(
+            service.create_price(missing_channel).await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn bulk_upsert_normalizes_blank_scopes_and_rejects_missing_ids() {
+        let service = service().await;
+        let mut blank = CreatePriceInput::new("var_1", usd(), 1000);
+        blank.customer_group_id = Some("  ".to_owned());
+        let created = service.bulk_upsert_prices(vec![blank]).await.unwrap();
+        assert_eq!(created[0].customer_group_id, None);
+
+        let mut missing = CreatePriceInput::new("var_2", usd(), 1000);
+        missing.sales_channel_id = Some("sc_missing".to_owned());
+        assert!(matches!(
+            service.bulk_upsert_prices(vec![missing]).await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn price_list_rules_reject_unsupported_attributes_and_operators() {
+        let service = service().await;
+
+        let bad_attribute = CreatePriceListInput::new("Bad")
+            .with_rule(PriceListRuleInput::eq("unknown_attribute", "value"));
+        assert!(matches!(
+            service.create_price_list(bad_attribute).await.unwrap_err(),
+            AppError::Validation(_)
+        ));
+
+        let bad_operator = CreatePriceListInput::new("Bad").with_rule(PriceListRuleInput {
+            attribute: "currency".to_owned(),
+            operator: Some("gt".to_owned()),
+            value: "USD".to_owned(),
+        });
+        assert!(matches!(
+            service.create_price_list(bad_operator).await.unwrap_err(),
+            AppError::Validation(_)
+        ));
+
+        let trimmed = CreatePriceListInput::new("Good")
+            .with_rule(PriceListRuleInput::eq("  currency_code  ", "  USD  "));
+        let created = service.create_price_list(trimmed).await.unwrap();
+        assert_eq!(created.rules[0].attribute, "currency_code");
+        assert_eq!(created.rules[0].value, "USD");
+    }
+
+    #[tokio::test]
+    async fn updating_missing_prices_and_lists_returns_not_found() {
+        let service = service().await;
+        assert!(matches!(
+            service
+                .update_price("price_missing", UpdatePriceInput::default())
+                .await
+                .unwrap_err(),
+            AppError::NotFound(_)
+        ));
+        assert!(matches!(
+            service
+                .update_price_list("plist_missing", UpdatePriceListInput::default())
+                .await
+                .unwrap_err(),
+            AppError::NotFound(_)
+        ));
     }
 }

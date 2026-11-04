@@ -21,7 +21,7 @@ pub mod storage;
 pub mod store_db_manager;
 
 pub use audit_outbox::{
-    AuditOutboxRecord, NewAuditOutbox, append_audit_outbox, fetch_pending_audits,
+    AuditActor, AuditOutboxRecord, NewAuditOutbox, append_audit_outbox, fetch_pending_audits,
     mark_audit_failed, mark_audit_processed,
 };
 pub use cache::StoreCache;

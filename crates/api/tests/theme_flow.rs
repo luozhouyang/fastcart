@@ -494,7 +494,8 @@ async fn theme_registry_admin_and_storefront_flow() {
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["settings"]["logo"], "/new-logo.svg");
 
-    // The active theme cannot be deleted; inactive themes can.
+    // The active theme cannot be deleted. The inactive theme is the target of
+    // the latest activation's rollback, so deleting it is refused as well.
     let (status, _) = request(
         &app,
         "DELETE",
@@ -513,7 +514,7 @@ async fn theme_registry_admin_and_storefront_flow() {
         &store_headers,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::CONFLICT);
 
     let (status, _) = request(
         &app,

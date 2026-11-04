@@ -146,6 +146,46 @@ pub async fn record_store_audit(
     }
 }
 
+/// Invalidates short-lived storefront context caches after successful mutations.
+///
+/// The customer and cart context caches are also bounded by a two-second TTL.
+/// This middleware closes the window for the ordinary storefront flows (cart
+/// edits, checkout, login, logout, profile updates) so a response that changes
+/// the viewer's context is not followed by a stale render.
+pub async fn storefront_context_invalidation_middleware(
+    State(context): State<Arc<AppContext>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+    let cacheable = !matches!(
+        method,
+        axum::http::Method::GET
+            | axum::http::Method::HEAD
+            | axum::http::Method::OPTIONS
+            | axum::http::Method::TRACE
+    ) && response.status().is_success();
+    if cacheable {
+        // The store router is nested at `/api/v1/store`, so middleware inside
+        // it sees paths relative to that prefix, while the upload router is
+        // merged at the root with its full path. Accept both shapes.
+        let under = |suffix: &str| {
+            path.starts_with(suffix) || path.starts_with(&format!("/api/v1/store{suffix}"))
+        };
+        if under("/carts") || under("/checkouts") {
+            context.invalidate_storefront_carts();
+        }
+        if under("/customers") {
+            context.invalidate_storefront_customers();
+            // Login, logout and profile changes can alter cart ownership.
+            context.invalidate_storefront_carts();
+        }
+    }
+    response
+}
+
 /// Requires the configured secret on the internal storefront HTTP surface.
 ///
 /// The in-process bridge does not need this middleware; it exists only for a

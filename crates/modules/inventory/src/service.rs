@@ -1,6 +1,6 @@
 //! SQLite-backed inventory application service.
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, CheckoutId, InventoryItemId, InventoryLocationId, LineItemId, Metadata, OrderId,
     PageResult, Pagination, ReservationId, ReturnId, Timestamp, VariantId, now_timestamp,
@@ -24,8 +24,30 @@ const RETURN_RESTOCK_REASON: &str = "return_restock";
 const EXCHANGE_RESTOCK_REASON: &str = "exchange_restock";
 const AFTER_SALES_CONSUME_REASON: &str = "after_sales_consume";
 
+/// Audit entry appended in the same transaction as a restock.
+///
+/// The calling workflow supplies the action and resource; the service adds the
+/// `restocked_units` field once the actual restocked quantity is known.
+#[derive(Clone, Debug)]
+pub struct RestockAudit {
+    /// Audit action name.
+    pub action: String,
+    /// Resource type.
+    pub resource_type: String,
+    /// Resource identifier.
+    pub resource_id: String,
+    /// Base JSON payload.
+    pub data: serde_json::Value,
+}
+
 fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7().simple())
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|database| database.is_unique_violation())
 }
 
 fn metadata_string(metadata: Option<Metadata>) -> String {
@@ -342,13 +364,39 @@ async fn release_rows_in_tx(
 #[derive(Clone, Debug)]
 pub struct InventoryService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl InventoryService {
     /// Creates a service over a migrated store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records audited restocks in the store audit outbox.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     // Locations
@@ -506,7 +554,16 @@ impl InventoryService {
         .bind(now)
         .execute(self.db.pool())
         .await
-        .map_err(database_error)?;
+        .map_err(|error| {
+            // The pre-checks above race with concurrent creators; the unique
+            // indexes are the source of truth, so surface those races as
+            // conflicts rather than internal database errors.
+            if is_unique_violation(&error) {
+                AppError::conflict("inventory item already exists for this sku or variant")
+            } else {
+                database_error(error)
+            }
+        })?;
         self.get_item(&id).await
     }
 
@@ -602,7 +659,17 @@ impl InventoryService {
             .bind(item_id.as_str())
             .execute(self.db.pool())
             .await
-            .map_err(database_error)?;
+            .map_err(|error| {
+                // The pre-check above races with concurrent attaches; the
+                // unique variant index is the source of truth.
+                if is_unique_violation(&error) {
+                    AppError::conflict(format!(
+                        "variant already has an inventory item: {variant_id}"
+                    ))
+                } else {
+                    database_error(error)
+                }
+            })?;
         self.get_item(item_id).await
     }
 
@@ -1287,43 +1354,177 @@ impl InventoryService {
         Ok(u64::try_from(rows.len()).unwrap_or(u64::MAX))
     }
 
-    /// Restocks quantities newly received on an order return.
+    /// Brings stock up to the cumulative received quantities of an order
+    /// return.
     ///
-    /// Each movement reference is derived from the return, order line and
-    /// cumulative received quantity, so replaying a receive neither records a
-    /// second movement nor increases stock twice. Partial receipts keep
-    /// distinct references because their cumulative quantities differ.
+    /// Each line's `received_quantity` is the target cumulative quantity for
+    /// that order line. The service compares it with the movements already
+    /// recorded for the line and applies only the missing delta, so replaying a
+    /// receive and retrying after the order transaction committed but the
+    /// restock failed both converge on the same stock level. Partial receipts
+    /// keep distinct references because their cumulative quantities differ.
     ///
     /// The destination location follows the order's committed reservation for
     /// the variant when one exists, otherwise `loc_default`. Lines whose
     /// variant has no inventory item are ignored. Returns the number of units
-    /// actually restocked.
+    /// actually restocked by this call.
     pub async fn restock_return(
         &self,
         order_id: &OrderId,
         return_id: &ReturnId,
         lines: &[ReturnRestockLine],
     ) -> Result<i64, AppError> {
-        if lines.is_empty() {
+        self.restock_return_inner(order_id, return_id, lines, None)
+            .await
+    }
+
+    /// Restocks received return quantities and appends an audit row atomically.
+    pub async fn restock_return_audited(
+        &self,
+        order_id: &OrderId,
+        return_id: &ReturnId,
+        lines: &[ReturnRestockLine],
+        audit: RestockAudit,
+    ) -> Result<i64, AppError> {
+        self.restock_return_inner(order_id, return_id, lines, Some(audit))
+            .await
+    }
+
+    async fn restock_return_inner(
+        &self,
+        order_id: &OrderId,
+        return_id: &ReturnId,
+        lines: &[ReturnRestockLine],
+        audit: Option<RestockAudit>,
+    ) -> Result<i64, AppError> {
+        if lines.is_empty() && audit.is_none() {
             return Ok(0);
         }
         for line in lines {
             validate_positive_quantity(line.quantity, "quantity")?;
         }
-        let entries = lines
-            .iter()
-            .map(|line| RestockEntry {
-                variant_id: &line.variant_id,
-                quantity: line.quantity,
-                reference: return_restock_reference(
-                    return_id,
-                    &line.order_item_id,
-                    line.received_quantity,
-                ),
-            })
-            .collect::<Vec<_>>();
-        self.restock_variant_lines(order_id, RETURN_RESTOCK_REASON, &entries)
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
+        let mut restocked = 0_i64;
+        for line in lines {
+            let target = line.received_quantity.max(line.quantity);
+            if target <= 0 {
+                continue;
+            }
+            let item_id: Option<String> =
+                sqlx::query_scalar("SELECT id FROM inventory_items WHERE variant_id = ?")
+                    .bind(line.variant_id.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            let Some(item_id) = item_id else {
+                continue;
+            };
+            let item_id = InventoryItemId::from_string(item_id);
+
+            // Reconcile against the restock movements already persisted for
+            // this return line. A retry after a failed restock sees the
+            // original receive row but no movement and restocks the difference.
+            let prefix = format!(
+                "return-restock:{}:{}:%",
+                return_id.as_str(),
+                line.order_item_id.as_str()
+            );
+            let already: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(quantity_delta), 0) FROM inventory_movements \
+                 WHERE reason = ? AND reference LIKE ?",
+            )
+            .bind(RETURN_RESTOCK_REASON)
+            .bind(&prefix)
+            .fetch_one(&mut *tx)
             .await
+            .map_err(database_error)?;
+            let delta = target.saturating_sub(already);
+            if delta <= 0 {
+                continue;
+            }
+
+            let location_id: Option<String> = sqlx::query_scalar(
+                "SELECT location_id FROM inventory_reservations \
+                 WHERE order_id = ? AND inventory_item_id = ? AND status = 'committed' \
+                 ORDER BY CASE WHEN location_id = ? THEN 0 ELSE 1 END, created_at, rowid \
+                 LIMIT 1",
+            )
+            .bind(order_id.as_str())
+            .bind(item_id.as_str())
+            .bind(DEFAULT_LOCATION_ID)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            let location_id = match location_id {
+                Some(location_id) => InventoryLocationId::from_string(location_id),
+                None => {
+                    ensure_default_location_in_tx(&mut tx, now).await?;
+                    InventoryLocationId::from_string(DEFAULT_LOCATION_ID)
+                }
+            };
+            ensure_level_in_tx(&mut tx, &item_id, &location_id, now).await?;
+
+            let reference = return_restock_reference(return_id, &line.order_item_id, target);
+            let inserted = sqlx::query(
+                "INSERT OR IGNORE INTO inventory_movements \
+                 (id, inventory_item_id, location_id, quantity_delta, reason, reference, \
+                  actor_id, metadata, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, NULL, '{}', ?)",
+            )
+            .bind(new_id("imvt"))
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .bind(delta)
+            .bind(RETURN_RESTOCK_REASON)
+            .bind(&reference)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if inserted.rows_affected() == 0 {
+                continue;
+            }
+
+            let affected = sqlx::query(
+                "UPDATE inventory_levels \
+                 SET stocked_quantity = stocked_quantity + ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ?",
+            )
+            .bind(delta)
+            .bind(now)
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if affected.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "inventory level no longer matches the restock movement",
+                ));
+            }
+            restocked = restocked
+                .checked_add(delta)
+                .ok_or_else(|| AppError::conflict("restocked quantity overflow"))?;
+        }
+
+        if let Some(audit) = audit {
+            let mut data = audit.data.clone();
+            if let Some(object) = data.as_object_mut() {
+                object.insert("restocked_units".to_owned(), serde_json::json!(restocked));
+            }
+            self.append_audit(
+                &mut tx,
+                &audit.action,
+                &audit.resource_type,
+                &audit.resource_id,
+                data,
+            )
+            .await?;
+        }
+
+        tx.commit().await.map_err(database_error)?;
+        Ok(restocked)
     }
 
     /// Restocks quantities received on an accepted exchange.
@@ -1337,7 +1538,31 @@ impl InventoryService {
         exchange_id: &str,
         lines: &[ExchangeRestockLine],
     ) -> Result<i64, AppError> {
-        if lines.is_empty() {
+        self.restock_exchange_inner(order_id, exchange_id, lines, None)
+            .await
+    }
+
+    /// Restocks accepted exchange inbound quantities and appends an audit row
+    /// atomically.
+    pub async fn restock_exchange_audited(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &str,
+        lines: &[ExchangeRestockLine],
+        audit: RestockAudit,
+    ) -> Result<i64, AppError> {
+        self.restock_exchange_inner(order_id, exchange_id, lines, Some(audit))
+            .await
+    }
+
+    async fn restock_exchange_inner(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &str,
+        lines: &[ExchangeRestockLine],
+        audit: Option<RestockAudit>,
+    ) -> Result<i64, AppError> {
+        if lines.is_empty() && audit.is_none() {
             return Ok(0);
         }
         for line in lines {
@@ -1351,7 +1576,7 @@ impl InventoryService {
                 reference: exchange_restock_reference(exchange_id, &line.exchange_item_id),
             })
             .collect::<Vec<_>>();
-        self.restock_variant_lines(order_id, EXCHANGE_RESTOCK_REASON, &entries)
+        self.restock_variant_lines(order_id, EXCHANGE_RESTOCK_REASON, &entries, audit.as_ref())
             .await
     }
 
@@ -1368,8 +1593,30 @@ impl InventoryService {
         order_id: &OrderId,
         lines: &[StockConsumption],
     ) -> Result<i64, AppError> {
+        Ok(self.consume_stock_inner(order_id, lines).await?.0)
+    }
+
+    /// Consumes stock and reports which movement references this call inserted.
+    ///
+    /// Callers that need to undo a later failure can pass these references to
+    /// [`Self::restore_consumed_stock`]. References already consumed by another
+    /// attempt are not reported, so a concurrent retry never reverses stock it
+    /// did not remove.
+    pub async fn consume_stock_tracked(
+        &self,
+        order_id: &OrderId,
+        lines: &[StockConsumption],
+    ) -> Result<(i64, Vec<String>), AppError> {
+        self.consume_stock_inner(order_id, lines).await
+    }
+
+    async fn consume_stock_inner(
+        &self,
+        order_id: &OrderId,
+        lines: &[StockConsumption],
+    ) -> Result<(i64, Vec<String>), AppError> {
         if lines.is_empty() {
-            return Ok(0);
+            return Ok((0, Vec::new()));
         }
         for line in lines {
             validate_positive_quantity(line.quantity, "quantity")?;
@@ -1379,6 +1626,7 @@ impl InventoryService {
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
         let mut consumed = 0_i64;
+        let mut inserted_references = Vec::new();
         for line in lines {
             let item_id: Option<String> =
                 sqlx::query_scalar("SELECT id FROM inventory_items WHERE variant_id = ?")
@@ -1435,6 +1683,7 @@ impl InventoryService {
                 // This replacement has already consumed its stock.
                 continue;
             }
+            inserted_references.push(line.reference.clone());
 
             let affected = sqlx::query(
                 "UPDATE inventory_levels \
@@ -1462,7 +1711,75 @@ impl InventoryService {
         }
 
         tx.commit().await.map_err(database_error)?;
-        Ok(consumed)
+        Ok((consumed, inserted_references))
+    }
+
+    /// Reverses consumptions inserted by a failed after-sales provider call.
+    ///
+    /// Only the supplied references are considered, so a concurrent attempt
+    /// that already consumed the same lines keeps its stock movement. The
+    /// movements are removed rather than offset so a later retry can consume
+    /// the replacements again. Returns the number of units restored.
+    pub async fn restore_consumed_stock(&self, references: &[String]) -> Result<i64, AppError> {
+        if references.is_empty() {
+            return Ok(0);
+        }
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
+        let mut restored = 0_i64;
+        for reference in references {
+            let row = sqlx::query(
+                "SELECT inventory_item_id, location_id, quantity_delta \
+                 FROM inventory_movements WHERE reason = ? AND reference = ?",
+            )
+            .bind(AFTER_SALES_CONSUME_REASON)
+            .bind(reference)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            let Some(row) = row else {
+                continue;
+            };
+            let quantity_delta: i64 = row.try_get("quantity_delta").map_err(database_error)?;
+            if quantity_delta >= 0 {
+                continue;
+            }
+            let item_id: String = row.try_get("inventory_item_id").map_err(database_error)?;
+            let location_id: String = row.try_get("location_id").map_err(database_error)?;
+            let deleted =
+                sqlx::query("DELETE FROM inventory_movements WHERE reason = ? AND reference = ?")
+                    .bind(AFTER_SALES_CONSUME_REASON)
+                    .bind(reference)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            if deleted.rows_affected() == 0 {
+                continue;
+            }
+            let quantity = -quantity_delta;
+            let affected = sqlx::query(
+                "UPDATE inventory_levels \
+                 SET stocked_quantity = stocked_quantity + ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ?",
+            )
+            .bind(quantity)
+            .bind(now)
+            .bind(&item_id)
+            .bind(&location_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if affected.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "inventory level no longer matches the consumed movement",
+                ));
+            }
+            restored = restored
+                .checked_add(quantity)
+                .ok_or_else(|| AppError::conflict("restored quantity overflow"))?;
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(restored)
     }
 
     /// Shared implementation for return and exchange restocking.
@@ -1471,6 +1788,7 @@ impl InventoryService {
         order_id: &OrderId,
         reason: &str,
         lines: &[RestockEntry<'_>],
+        audit: Option<&RestockAudit>,
     ) -> Result<i64, AppError> {
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
@@ -1549,6 +1867,21 @@ impl InventoryService {
             restocked = restocked
                 .checked_add(line.quantity)
                 .ok_or_else(|| AppError::conflict("restocked quantity overflow"))?;
+        }
+
+        if let Some(audit) = audit {
+            let mut data = audit.data.clone();
+            if let Some(object) = data.as_object_mut() {
+                object.insert("restocked_units".to_owned(), serde_json::json!(restocked));
+            }
+            self.append_audit(
+                &mut tx,
+                &audit.action,
+                &audit.resource_type,
+                &audit.resource_id,
+                data,
+            )
+            .await?;
         }
 
         tx.commit().await.map_err(database_error)?;

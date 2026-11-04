@@ -1,6 +1,6 @@
 //! SQLite-backed theme registry and activation service.
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, PageResult, Pagination, ThemeActivationId, ThemeId, now_timestamp,
 };
@@ -19,13 +19,42 @@ const THEME_COLUMNS: &str = "id, manifest, bundle_path, settings_schema, setting
 #[derive(Clone, Debug)]
 pub struct ThemeService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl ThemeService {
     /// Creates a service bound to one store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records theme mutations in the store audit outbox.
+    ///
+    /// When an actor is set, every mutating method appends its audit entry in
+    /// the same transaction as the change.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     /// Registers a validated theme bundle.
@@ -95,6 +124,7 @@ impl ThemeService {
             None => None,
         };
 
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         sqlx::query(
             "INSERT INTO themes \
              (id, manifest_id, name, version, runtime, manifest, bundle_path, settings_schema, \
@@ -114,9 +144,23 @@ impl ThemeService {
         .bind(i64::from(schema_version))
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|error| unique_conflict(error, "theme already registered"))?;
+        self.append_audit(
+            &mut tx,
+            "theme.registered",
+            "theme",
+            id.as_str(),
+            serde_json::json!({
+                "manifest_id": manifest.id,
+                "version": manifest.version,
+                "bundle_path": bundle_path,
+                "has_editor_manifest": editor_manifest_json.is_some(),
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.get(&id).await
     }
@@ -197,13 +241,29 @@ impl ThemeService {
         validate_settings(theme.settings_schema.as_ref(), &input.settings)?;
 
         let settings_json = serialize_json(&input.settings, "settings")?;
-        sqlx::query("UPDATE themes SET settings = ?, updated_at = ? WHERE id = ?")
+        let changed = theme.settings != input.settings;
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let result = sqlx::query("UPDATE themes SET settings = ?, updated_at = ? WHERE id = ?")
             .bind(&settings_json)
             .bind(now_timestamp())
             .bind(id.as_str())
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("theme", id));
+        }
+        if changed {
+            self.append_audit(
+                &mut tx,
+                "theme.settings_updated",
+                "theme",
+                id.as_str(),
+                serde_json::json!({"manifest_id": theme.manifest.id}),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
 
         self.get(id).await
     }
@@ -218,10 +278,11 @@ impl ThemeService {
             .await
             .map_err(database_error)?
             .ok_or_else(|| AppError::not_found("theme", id))?;
+        let target = target.into_theme()?;
 
-        if target.is_active != 0 {
+        if target.is_active {
             tx.commit().await.map_err(database_error)?;
-            return target.into_theme();
+            return Ok(target);
         }
 
         let previous_id: Option<String> =
@@ -253,6 +314,14 @@ impl ThemeService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "theme.activated",
+            "theme",
+            id.as_str(),
+            serde_json::json!({"manifest_id": target.manifest.id}),
+        )
+        .await?;
 
         tx.commit().await.map_err(database_error)?;
         self.get(id).await
@@ -275,16 +344,17 @@ impl ThemeService {
             })?;
         let previous_id = ThemeId::from_string(previous_id);
 
-        let previous_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM themes WHERE id = ?")
-            .bind(previous_id.as_str())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(database_error)?;
-        if previous_exists == 0 {
+        let previous_manifest_id: Option<String> =
+            sqlx::query_scalar("SELECT manifest_id FROM themes WHERE id = ?")
+                .bind(previous_id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let Some(previous_manifest_id) = previous_manifest_id else {
             return Err(AppError::conflict(format!(
                 "previous theme no longer exists: {previous_id}"
             )));
-        }
+        };
 
         let current_id: Option<String> =
             sqlx::query_scalar("SELECT id FROM themes WHERE is_active = 1 LIMIT 1")
@@ -315,6 +385,14 @@ impl ThemeService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "theme.rolled_back",
+            "theme",
+            previous_id.as_str(),
+            serde_json::json!({"manifest_id": previous_manifest_id}),
+        )
+        .await?;
 
         tx.commit().await.map_err(database_error)?;
         self.get(&previous_id).await
@@ -325,20 +403,39 @@ impl ThemeService {
     /// The active check is part of the delete statement so a concurrent
     /// activation cannot slip between the check and the delete.
     pub async fn delete(&self, id: &ThemeId) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        // The latest activation remembers the theme that rollback would
+        // restore; deleting it would leave rollback pointing at a missing row.
+        let latest_previous: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT previous_theme_id FROM theme_activations \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if latest_previous.flatten().as_deref() == Some(id.as_str()) {
+            return Err(AppError::conflict(
+                "cannot delete a theme targeted by the latest activation rollback",
+            ));
+        }
         let result = sqlx::query("DELETE FROM themes WHERE id = ? AND is_active = 0")
             .bind(id.as_str())
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
         if result.rows_affected() == 0 {
             // Distinguish a missing theme from an active one without relying
             // on the pre-delete state.
+            drop(tx);
             let theme = self.fetch_row(id).await?;
             if theme.is_active != 0 {
                 return Err(AppError::conflict("cannot delete the active theme"));
             }
             return Err(AppError::not_found("theme", id));
         }
+        self.append_audit(&mut tx, "theme.deleted", "theme", id.as_str(), Value::Null)
+            .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 

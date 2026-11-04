@@ -90,27 +90,109 @@ fn row_to_rate(row: &SqliteRow) -> Result<TaxRate, AppError> {
     })
 }
 
+fn unique_or_database(error: sqlx::Error, conflict_message: &str) -> AppError {
+    match &error {
+        sqlx::Error::Database(database) if database.is_unique_violation() => {
+            AppError::conflict(conflict_message)
+        }
+        _ => database_error(error),
+    }
+}
+
+/// Picks the most recently created rate, using the identifier as a stable
+/// tie-break for rates created within the same second.
+fn newest_rate<'a>(rates: impl Iterator<Item = &'a TaxRate>) -> Option<&'a TaxRate> {
+    rates.max_by(|left, right| {
+        (left.created_at, left.id.as_str()).cmp(&(right.created_at, right.id.as_str()))
+    })
+}
+
 fn pick_rate(rates: &[TaxRate], category_id: Option<&TaxCategoryId>) -> Option<TaxRate> {
     if let Some(category_id) = category_id
-        && let Some(rate) = rates
-            .iter()
-            .filter(|rate| rate.tax_category_id.as_ref() == Some(category_id))
-            .min_by(|left, right| left.id.as_str().cmp(right.id.as_str()))
+        && let Some(rate) = newest_rate(
+            rates
+                .iter()
+                .filter(|rate| rate.tax_category_id.as_ref() == Some(category_id)),
+        )
     {
         return Some(rate.clone());
     }
-    if let Some(rate) = rates
-        .iter()
-        .filter(|rate| rate.is_default)
-        .min_by(|left, right| left.id.as_str().cmp(right.id.as_str()))
-    {
+    if let Some(rate) = newest_rate(rates.iter().filter(|rate| rate.is_default)) {
         return Some(rate.clone());
     }
-    rates
-        .iter()
-        .filter(|rate| rate.tax_category_id.is_none())
-        .min_by(|left, right| left.id.as_str().cmp(right.id.as_str()))
-        .cloned()
+    newest_rate(rates.iter().filter(|rate| rate.tax_category_id.is_none())).cloned()
+}
+
+async fn get_region_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &TaxRegionId,
+) -> Result<TaxRegion, AppError> {
+    let row = sqlx::query(&format!(
+        "SELECT {REGION_COLUMNS} FROM tax_regions WHERE id = ?"
+    ))
+    .bind(id.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    match row {
+        Some(row) => row_to_region(&row),
+        None => Err(AppError::not_found("tax region", id)),
+    }
+}
+
+async fn get_rate_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &TaxRateId,
+) -> Result<TaxRate, AppError> {
+    let row = sqlx::query(&format!(
+        "SELECT {RATE_COLUMNS} FROM tax_rates WHERE id = ?"
+    ))
+    .bind(id.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    match row {
+        Some(row) => row_to_rate(&row),
+        None => Err(AppError::not_found("tax rate", id)),
+    }
+}
+
+async fn region_exists_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    country_code: &CountryCode,
+    province_code: Option<&str>,
+    exclude: Option<&TaxRegionId>,
+) -> Result<bool, AppError> {
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM tax_regions WHERE country_code = ? \
+         AND IFNULL(province_code, '') = IFNULL(?, '') AND (? IS NULL OR id <> ?)",
+    )
+    .bind(country_code.as_str())
+    .bind(province_code)
+    .bind(exclude.map(TaxRegionId::as_str))
+    .bind(exclude.map(TaxRegionId::as_str))
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(existing.is_some())
+}
+
+async fn clear_region_defaults_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    region_id: &TaxRegionId,
+    exclude: Option<&TaxRateId>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE tax_rates SET is_default = 0 \
+         WHERE tax_region_id = ? AND is_default <> 0 AND (? IS NULL OR id <> ?)",
+    )
+    .bind(region_id.as_str())
+    .bind(exclude.map(TaxRateId::as_str))
+    .bind(exclude.map(TaxRateId::as_str))
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
 }
 
 async fn ensure_category_in_tx(
@@ -170,13 +252,13 @@ impl TaxService {
         )
         .bind(id.as_str())
         .bind(input.name.trim())
-        .bind(code)
+        .bind(&code)
         .bind(input.description)
         .bind(now)
         .bind(now)
         .execute(self.db.pool())
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_or_database(error, &format!("tax code already in use: {code}")))?;
         self.get_category(&id).await
     }
 
@@ -270,21 +352,53 @@ impl TaxService {
         .bind(id.as_str())
         .execute(self.db.pool())
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_or_database(error, "tax code already in use"))?;
         self.get_category(id).await
     }
 
     /// Deletes a tax category.
+    ///
+    /// Categories referenced by tax rates or product variants are rejected
+    /// rather than leaving dangling identifiers behind, because those columns
+    /// intentionally have no foreign key.
     pub async fn delete_category(&self, id: &TaxCategoryId) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM tax_categories WHERE id = ?")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        if existing.is_none() {
+            return Err(AppError::not_found("tax category", id));
+        }
+        let rate_references: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tax_rates WHERE tax_category_id = ?")
+                .bind(id.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let variant_references: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM product_variants WHERE tax_category_id = ?")
+                .bind(id.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        if rate_references > 0 || variant_references > 0 {
+            return Err(AppError::conflict(
+                "tax category is still referenced by tax rates or product variants",
+            ));
+        }
         let affected = sqlx::query("DELETE FROM tax_categories WHERE id = ?")
             .bind(id.as_str())
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?
             .rows_affected();
         if affected == 0 {
             return Err(AppError::not_found("tax category", id));
         }
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -295,9 +409,8 @@ impl TaxService {
         validate_tax_name(&input.name, "name")?;
         validate_metadata_option(input.metadata.as_ref())?;
         let province_code = normalize_province(input.province_code.as_deref());
-        if self
-            .region_exists(&input.country_code, province_code.as_deref(), None)
-            .await?
+        let mut tx = self.db.begin().await?;
+        if region_exists_in_tx(&mut tx, &input.country_code, province_code.as_deref(), None).await?
         {
             return Err(AppError::conflict(
                 "a tax region already exists for this country and province",
@@ -317,9 +430,15 @@ impl TaxService {
         .bind(metadata_string(input.metadata))
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| {
+            unique_or_database(
+                error,
+                "a tax region already exists for this country and province",
+            )
+        })?;
+        tx.commit().await.map_err(database_error)?;
         self.get_region(&id).await
     }
 
@@ -369,7 +488,8 @@ impl TaxService {
         id: &TaxRegionId,
         input: UpdateTaxRegionInput,
     ) -> Result<TaxRegion, AppError> {
-        let existing = self.get_region(id).await?;
+        let mut tx = self.db.begin().await?;
+        let existing = get_region_in_tx(&mut tx, id).await?;
         let name = match input.name {
             Some(name) => {
                 validate_tax_name(&name, "name")?;
@@ -382,17 +502,14 @@ impl TaxService {
             Some(province_code) => normalize_province(province_code.as_deref()),
             None => existing.province_code,
         };
-        if self
-            .region_exists(&country_code, province_code.as_deref(), Some(id))
-            .await?
-        {
+        if region_exists_in_tx(&mut tx, &country_code, province_code.as_deref(), Some(id)).await? {
             return Err(AppError::conflict(
                 "a tax region already exists for this country and province",
             ));
         }
         validate_metadata_option(input.metadata.as_ref())?;
         let metadata = input.metadata.unwrap_or(existing.metadata);
-        sqlx::query(
+        let affected = sqlx::query(
             "UPDATE tax_regions SET name = ?, country_code = ?, province_code = ?, \
              metadata = ?, updated_at = ? WHERE id = ?",
         )
@@ -402,9 +519,19 @@ impl TaxService {
         .bind(metadata.to_json_string())
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| {
+            unique_or_database(
+                error,
+                "a tax region already exists for this country and province",
+            )
+        })?
+        .rows_affected();
+        if affected == 0 {
+            return Err(AppError::not_found("tax region", id));
+        }
+        tx.commit().await.map_err(database_error)?;
         self.get_region(id).await
     }
 
@@ -422,29 +549,13 @@ impl TaxService {
         Ok(())
     }
 
-    async fn region_exists(
-        &self,
-        country_code: &CountryCode,
-        province_code: Option<&str>,
-        exclude: Option<&TaxRegionId>,
-    ) -> Result<bool, AppError> {
-        let existing: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM tax_regions WHERE country_code = ? \
-             AND IFNULL(province_code, '') = IFNULL(?, '') AND (? IS NULL OR id <> ?)",
-        )
-        .bind(country_code.as_str())
-        .bind(province_code)
-        .bind(exclude.map(TaxRegionId::as_str))
-        .bind(exclude.map(TaxRegionId::as_str))
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(database_error)?;
-        Ok(existing.is_some())
-    }
-
     // Rates
 
     /// Creates a tax rate for a region and optional category.
+    ///
+    /// A region may have at most one rate per category (including the
+    /// uncategorized bucket). Setting a default clears the region's previous
+    /// default inside the same transaction so exactly one default survives.
     pub async fn create_rate(&self, input: CreateTaxRateInput) -> Result<TaxRate, AppError> {
         validate_tax_name(&input.name, "name")?;
         validate_rate_bps(input.rate_bps)?;
@@ -454,6 +565,9 @@ impl TaxService {
             .await?;
         if let Some(category_id) = input.tax_category_id.as_ref() {
             ensure_category_in_tx(&mut tx, category_id).await?;
+        }
+        if input.is_default {
+            clear_region_defaults_in_tx(&mut tx, &input.tax_region_id, None).await?;
         }
         let now = now_timestamp();
         let id = TaxRateId::new();
@@ -475,7 +589,12 @@ impl TaxService {
         .bind(now)
         .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| {
+            unique_or_database(
+                error,
+                "a tax rate already exists for this region and category",
+            )
+        })?;
         tx.commit().await.map_err(database_error)?;
         self.get_rate(&id).await
     }
@@ -509,33 +628,43 @@ impl TaxService {
     }
 
     /// Updates a tax rate.
+    ///
+    /// The read, merge and write all happen under the `BEGIN IMMEDIATE` write
+    /// lock so concurrent partial updates cannot lose each other's fields.
     pub async fn update_rate(
         &self,
         id: &TaxRateId,
         input: UpdateTaxRateInput,
     ) -> Result<TaxRate, AppError> {
-        let existing = self.get_rate(id).await?;
-        let category_id = match input.tax_category_id {
-            Some(category_id) => category_id,
-            None => existing.tax_category_id,
-        };
+        if let Some(name) = input.name.as_deref() {
+            validate_tax_name(name, "name")?;
+        }
+        if let Some(rate_bps) = input.rate_bps {
+            validate_rate_bps(rate_bps)?;
+        }
+        validate_metadata_option(input.metadata.as_ref())?;
+
+        let mut tx = self.db.begin().await?;
+        let existing = get_rate_in_tx(&mut tx, id).await?;
+        let region_id = existing.tax_region_id.clone();
+        let category_id = input.tax_category_id.unwrap_or(existing.tax_category_id);
         if let Some(category_id) = category_id.as_ref() {
-            self.ensure_category_exists(category_id).await?;
+            ensure_category_in_tx(&mut tx, category_id).await?;
         }
         let name = match input.name {
-            Some(name) => {
-                validate_tax_name(&name, "name")?;
-                name.trim().to_owned()
-            }
+            Some(name) => name.trim().to_owned(),
             None => existing.name,
         };
         let rate_bps = input.rate_bps.unwrap_or(existing.rate_bps);
-        validate_rate_bps(rate_bps)?;
         let is_inclusive = input.is_inclusive.unwrap_or(existing.is_inclusive);
         let is_default = input.is_default.unwrap_or(existing.is_default);
-        validate_metadata_option(input.metadata.as_ref())?;
         let metadata = input.metadata.unwrap_or(existing.metadata);
-        sqlx::query(
+
+        if is_default {
+            clear_region_defaults_in_tx(&mut tx, &region_id, Some(id)).await?;
+        }
+
+        let affected = sqlx::query(
             "UPDATE tax_rates SET tax_category_id = ?, name = ?, rate_bps = ?, \
              is_inclusive = ?, is_default = ?, metadata = ?, updated_at = ? WHERE id = ?",
         )
@@ -547,9 +676,19 @@ impl TaxService {
         .bind(metadata.to_json_string())
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| {
+            unique_or_database(
+                error,
+                "a tax rate already exists for this region and category",
+            )
+        })?
+        .rows_affected();
+        if affected == 0 {
+            return Err(AppError::not_found("tax rate", id));
+        }
+        tx.commit().await.map_err(database_error)?;
         self.get_rate(id).await
     }
 
@@ -625,6 +764,9 @@ impl TaxService {
         amount_minor: i64,
         inclusive_override: Option<bool>,
     ) -> Result<TaxLine, AppError> {
+        if amount_minor < 0 {
+            return Err(AppError::validation("amount_minor must not be negative"));
+        }
         let resolved = self
             .resolve_rate(country_code, province_code, category_id, None)
             .await?;
@@ -717,19 +859,6 @@ impl TaxService {
                 .map_err(database_error)?;
         if existing.is_none() {
             return Err(AppError::not_found("tax region", id));
-        }
-        Ok(())
-    }
-
-    async fn ensure_category_exists(&self, id: &TaxCategoryId) -> Result<(), AppError> {
-        let existing: Option<String> =
-            sqlx::query_scalar("SELECT id FROM tax_categories WHERE id = ?")
-                .bind(id.as_str())
-                .fetch_optional(self.db.pool())
-                .await
-                .map_err(database_error)?;
-        if existing.is_none() {
-            return Err(AppError::not_found("tax category", id));
         }
         Ok(())
     }

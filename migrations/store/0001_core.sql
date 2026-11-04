@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS sales_channels (
     updated_at INTEGER NOT NULL
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_channels_name ON sales_channels (name);
+
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key TEXT PRIMARY KEY,
     scope TEXT NOT NULL,

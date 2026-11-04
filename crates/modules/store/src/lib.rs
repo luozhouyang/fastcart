@@ -18,4 +18,5 @@ pub use region::{
 };
 pub use service::{
     MAX_SALES_CHANNEL_NAME_LENGTH, MAX_SETTING_KEY_LENGTH, MAX_SETTING_VALUE_BYTES, StoreService,
+    is_secret_setting_key,
 };

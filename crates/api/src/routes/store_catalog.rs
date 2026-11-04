@@ -256,7 +256,7 @@ async fn search(
     responses((status = 200, body = BTreeMap<String, String>))
 )]
 async fn public_settings(StoreDb(db): StoreDb) -> ApiResult<Json<BTreeMap<String, String>>> {
-    let settings = StoreService::new(db).get_all_settings().await?;
+    let settings = StoreService::new(db).public_settings().await?;
     let public = settings
         .into_iter()
         .filter(|(key, _)| is_public_setting_key(key))
@@ -358,10 +358,7 @@ async fn calculate_product_prices(
 
 /// Returns true when a setting key may be exposed to storefronts.
 fn is_public_setting_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    !["secret", "password", "token", "api_key"]
-        .iter()
-        .any(|needle| key.contains(needle))
+    !fastcart_module_store::is_secret_setting_key(key)
 }
 
 #[cfg(test)]

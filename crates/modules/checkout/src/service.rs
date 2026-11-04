@@ -8,7 +8,7 @@ use fastcart_kernel::{
 use serde_json::Value;
 
 use crate::domain::{
-    CheckoutSession, CheckoutStateHistory, CheckoutStatus, CreateCheckoutInput,
+    CheckoutCartItem, CheckoutSession, CheckoutStateHistory, CheckoutStatus, CreateCheckoutInput,
     UpdateCheckoutDetailsInput,
 };
 
@@ -25,6 +25,7 @@ struct CheckoutRow {
     billing_address: String,
     shipping_method: String,
     totals: String,
+    cart_items: String,
     promotion_codes: String,
     payment_session_id: Option<String>,
     order_id: Option<String>,
@@ -49,6 +50,9 @@ impl CheckoutRow {
             billing_address: json_value(&self.billing_address),
             shipping_method: json_value(&self.shipping_method),
             totals: json_value(&self.totals),
+            cart_items: serde_json::from_str(&self.cart_items).map_err(|error| {
+                AppError::database(format!("invalid checkout cart item snapshot: {error}"))
+            })?,
             promotion_codes: json_string_list(&self.promotion_codes),
             payment_session_id: self
                 .payment_session_id
@@ -134,42 +138,111 @@ impl CheckoutService {
             .ok_or_else(|| AppError::validation("checkout expiry is out of range"))?;
 
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let cart_id = input.cart_id.as_str().to_owned();
+        let requested_customer = input.customer_id.as_ref().map(|value| value.as_str());
 
         if let Some(key) = idempotency_key.as_deref() {
-            let existing = sqlx::query_scalar::<_, String>(
-                "SELECT id FROM checkout_sessions WHERE idempotency_key = ?",
-            )
-            .bind(key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(database_error)?;
-            if let Some(existing) = existing {
-                tx.commit().await.map_err(database_error)?;
-                return self.get(&CheckoutId::from_string(existing)).await;
-            }
-        }
-
-        let cart_id = input.cart_id.as_str().to_owned();
-        let existing_cart =
-            sqlx::query_scalar::<_, String>("SELECT id FROM checkout_sessions WHERE cart_id = ?")
-                .bind(&cart_id)
+            let existing =
+                sqlx::query_as::<_, (String, String, Option<i64>, String, Option<String>)>(
+                    "SELECT id, status, expires_at, cart_id, customer_id \
+                 FROM checkout_sessions WHERE idempotency_key = ?",
+                )
+                .bind(key)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(database_error)?;
-        if existing_cart.is_some() {
+            if let Some((existing, status, expires_at, existing_cart, existing_customer)) = existing
+            {
+                let stale = matches!(status.as_str(), "failed" | "canceled")
+                    || expires_at.is_some_and(|expires| expires <= now);
+                if stale {
+                    // A failed or expired attempt must not poison retries with
+                    // the same key; release the key and start a fresh session.
+                    cancel_stale_session(&mut tx, &existing, status.as_str(), now).await?;
+                } else if existing_cart != cart_id
+                    || existing_customer.as_deref() != requested_customer
+                {
+                    // Never replay another cart's or customer's checkout for a
+                    // reused key; that would expose a different session's data.
+                    return Err(AppError::conflict(
+                        "idempotency key was used for a different checkout".to_owned(),
+                    ));
+                } else {
+                    tx.commit().await.map_err(database_error)?;
+                    return self.get(&CheckoutId::from_string(existing)).await;
+                }
+            }
+        }
+
+        let cart = sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT status, currency_code, customer_id FROM carts WHERE id = ?",
+        )
+        .bind(&cart_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let Some((cart_status, cart_currency, cart_customer)) = cart else {
+            return Err(AppError::not_found("cart", &cart_id));
+        };
+        if cart_status != "open" {
             return Err(AppError::conflict(
-                "a checkout session already exists for this cart".to_owned(),
+                "only open carts can be checked out".to_owned(),
             ));
+        }
+        if cart_currency != currency {
+            return Err(AppError::validation(
+                "checkout currency must match the cart currency".to_owned(),
+            ));
+        }
+        if requested_customer != cart_customer.as_deref() {
+            return Err(AppError::conflict(
+                "checkout customer does not match the cart owner".to_owned(),
+            ));
+        }
+
+        let existing_cart = sqlx::query_as::<_, (String, String, Option<i64>)>(
+            "SELECT id, status, expires_at FROM checkout_sessions \
+             WHERE cart_id = ? AND status NOT IN ('failed', 'canceled')",
+        )
+        .bind(&cart_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if let Some((existing, status, expires_at)) = existing_cart {
+            if expires_at.is_some_and(|expires| expires <= now) {
+                cancel_stale_session(&mut tx, &existing, &status, now).await?;
+            } else {
+                return Err(AppError::conflict(
+                    "a checkout session already exists for this cart".to_owned(),
+                ));
+            }
+        }
+
+        let cart_items = sqlx::query_as::<_, (String, i64)>(
+            "SELECT variant_id, quantity FROM cart_items WHERE cart_id = ? ORDER BY variant_id",
+        )
+        .bind(&cart_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?
+        .into_iter()
+        .map(|(variant_id, quantity)| CheckoutCartItem {
+            variant_id,
+            quantity,
+        })
+        .collect::<Vec<_>>();
+        if cart_items.is_empty() {
+            return Err(AppError::validation("cart is empty"));
         }
 
         let id = CheckoutId::new();
         sqlx::query(
             "INSERT INTO checkout_sessions (
                 id, cart_id, customer_id, email, currency_code, status,
-                shipping_address, billing_address, shipping_method, totals,
+                shipping_address, billing_address, shipping_method, totals, cart_items,
                 promotion_codes, payment_session_id, order_id, idempotency_key,
                 expires_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
         )
         .bind(id.as_str())
         .bind(&cart_id)
@@ -181,6 +254,10 @@ impl CheckoutService {
         .bind(json_text(&input.billing_address)?)
         .bind(json_text(&input.shipping_method)?)
         .bind(json_text(&input.totals)?)
+        .bind(
+            serde_json::to_string(&cart_items)
+                .map_err(|error| AppError::validation(error.to_string()))?,
+        )
         .bind(json_text(&input.promotion_codes)?)
         .bind(idempotency_key.as_deref())
         .bind(expires_at)
@@ -208,7 +285,7 @@ impl CheckoutService {
     pub async fn get(&self, id: &CheckoutId) -> Result<CheckoutSession, AppError> {
         let row = sqlx::query_as::<_, CheckoutRow>(
             "SELECT id, cart_id, customer_id, email, currency_code, status,
-                    shipping_address, billing_address, shipping_method, totals,
+                    shipping_address, billing_address, shipping_method, totals, cart_items,
                     promotion_codes, payment_session_id, order_id, idempotency_key,
                     expires_at, created_at, updated_at
              FROM checkout_sessions WHERE id = ?",
@@ -227,7 +304,7 @@ impl CheckoutService {
     pub async fn get_by_cart(&self, cart_id: &CartId) -> Result<Option<CheckoutSession>, AppError> {
         let row = sqlx::query_as::<_, CheckoutRow>(
             "SELECT id, cart_id, customer_id, email, currency_code, status,
-                    shipping_address, billing_address, shipping_method, totals,
+                    shipping_address, billing_address, shipping_method, totals, cart_items,
                     promotion_codes, payment_session_id, order_id, idempotency_key,
                     expires_at, created_at, updated_at
              FROM checkout_sessions WHERE cart_id = ?",
@@ -246,7 +323,7 @@ impl CheckoutService {
     ) -> Result<Option<CheckoutSession>, AppError> {
         let row = sqlx::query_as::<_, CheckoutRow>(
             "SELECT id, cart_id, customer_id, email, currency_code, status,
-                    shipping_address, billing_address, shipping_method, totals,
+                    shipping_address, billing_address, shipping_method, totals, cart_items,
                     promotion_codes, payment_session_id, order_id, idempotency_key,
                     expires_at, created_at, updated_at
              FROM checkout_sessions WHERE idempotency_key = ?",
@@ -265,7 +342,7 @@ impl CheckoutService {
     ) -> Result<Vec<CheckoutSession>, AppError> {
         let rows = sqlx::query_as::<_, CheckoutRow>(
             "SELECT id, cart_id, customer_id, email, currency_code, status,
-                    shipping_address, billing_address, shipping_method, totals,
+                    shipping_address, billing_address, shipping_method, totals, cart_items,
                     promotion_codes, payment_session_id, order_id, idempotency_key,
                     expires_at, created_at, updated_at
              FROM checkout_sessions WHERE status = ?
@@ -279,59 +356,70 @@ impl CheckoutService {
     }
 
     /// Updates mutable checkout details while the session is still editable.
+    ///
+    /// Only supplied fields are written, guarded by the status observed inside
+    /// the same immediate transaction, so concurrent partial updates cannot
+    /// overwrite each other with stale snapshots.
     pub async fn update_details(
         &self,
         id: &CheckoutId,
         input: UpdateCheckoutDetailsInput,
     ) -> Result<CheckoutSession, AppError> {
-        let session = self.get(id).await?;
-        if !session.status.can_update_details() {
-            return Err(AppError::conflict(format!(
-                "checkout in state {} cannot be updated",
-                session.status.as_str()
-            )));
-        }
-
         let email = match input.email {
             Some(value) => {
                 validate_email(&value, "email")?;
                 Some(normalize_email(&value))
             }
-            None => session.email.clone(),
+            None => None,
         };
-        let shipping_address = input
-            .shipping_address
-            .unwrap_or_else(|| session.shipping_address.clone());
-        let billing_address = input
-            .billing_address
-            .unwrap_or_else(|| session.billing_address.clone());
-        let shipping_method = input
-            .shipping_method
-            .unwrap_or_else(|| session.shipping_method.clone());
-        let totals = input.totals.unwrap_or_else(|| session.totals.clone());
-        let promotion_codes = input
-            .promotion_codes
-            .unwrap_or_else(|| session.promotion_codes.clone());
-
         let now = now_timestamp();
-        sqlx::query(
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM checkout_sessions WHERE id = ?")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let Some(status) = status else {
+            return Err(AppError::not_found("checkout", id.as_str()));
+        };
+        let status = CheckoutStatus::from_stored(&status)?;
+        if !status.can_update_details() {
+            return Err(AppError::conflict(format!(
+                "checkout in state {} cannot be updated",
+                status.as_str()
+            )));
+        }
+
+        let result = sqlx::query(
             "UPDATE checkout_sessions
-             SET email = ?, shipping_address = ?, billing_address = ?,
-                 shipping_method = ?, totals = ?, promotion_codes = ?, updated_at = ?
-             WHERE id = ?",
+             SET email = COALESCE(?, email),
+                 shipping_address = COALESCE(?, shipping_address),
+                 billing_address = COALESCE(?, billing_address),
+                 shipping_method = COALESCE(?, shipping_method),
+                 totals = COALESCE(?, totals),
+                 promotion_codes = COALESCE(?, promotion_codes),
+                 updated_at = ?
+             WHERE id = ? AND status = ?",
         )
         .bind(email.as_deref())
-        .bind(json_text(&shipping_address)?)
-        .bind(json_text(&billing_address)?)
-        .bind(json_text(&shipping_method)?)
-        .bind(json_text(&totals)?)
-        .bind(json_text(&promotion_codes)?)
+        .bind(input.shipping_address.as_ref().map(json_text).transpose()?)
+        .bind(input.billing_address.as_ref().map(json_text).transpose()?)
+        .bind(input.shipping_method.as_ref().map(json_text).transpose()?)
+        .bind(input.totals.as_ref().map(json_text).transpose()?)
+        .bind(input.promotion_codes.as_ref().map(json_text).transpose()?)
         .bind(now)
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .bind(status.as_str())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
-
+        if result.rows_affected() == 0 {
+            return Err(AppError::conflict(
+                "checkout changed while updating details".to_owned(),
+            ));
+        }
+        tx.commit().await.map_err(database_error)?;
         self.get(id).await
     }
 
@@ -565,6 +653,43 @@ async fn insert_history(
     Ok(())
 }
 
+/// Releases a stale checkout session so a retry can create a new one.
+///
+/// Failed and canceled sessions keep their terminal state; expired active
+/// sessions are transitioned to `canceled` and recorded in history. In both
+/// cases the idempotency key is cleared so the retry is a new attempt.
+async fn cancel_stale_session(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    checkout_id: &str,
+    status: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE checkout_sessions
+         SET status = CASE WHEN status IN ('failed', 'canceled') THEN status ELSE 'canceled' END,
+             idempotency_key = NULL,
+             updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(now)
+    .bind(checkout_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    if status != "failed" && status != "canceled" {
+        insert_history(
+            tx,
+            &CheckoutId::from_string(checkout_id.to_owned()),
+            Some(CheckoutStatus::from_stored(status)?),
+            CheckoutStatus::Canceled,
+            Some("checkout expired"),
+            now,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn map_create_error(error: sqlx::Error) -> AppError {
     if error
         .as_database_error()
@@ -599,9 +724,62 @@ mod tests {
     use super::CheckoutService;
     use crate::domain::{CheckoutStatus, CreateCheckoutInput, UpdateCheckoutDetailsInput};
 
-    async fn service() -> CheckoutService {
+    /// Test wrapper that seeds the cart rows `create` now validates.
+    struct TestService {
+        service: CheckoutService,
+    }
+
+    impl std::ops::Deref for TestService {
+        type Target = CheckoutService;
+
+        fn deref(&self) -> &Self::Target {
+            &self.service
+        }
+    }
+
+    impl TestService {
+        async fn create(
+            &self,
+            input: CreateCheckoutInput,
+        ) -> Result<crate::domain::CheckoutSession, fastcart_kernel::AppError> {
+            seed_cart(&self.service, &input.cart_id).await;
+            self.service.create(input).await
+        }
+    }
+
+    async fn seed_cart(service: &CheckoutService, cart: &CartId) {
+        let now = now_timestamp();
+        sqlx::query(
+            "INSERT OR IGNORE INTO carts
+                (id, currency_code, status, created_at, updated_at)
+             VALUES (?, 'USD', 'open', ?, ?)",
+        )
+        .bind(cart.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(service.db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO cart_items
+                (id, cart_id, product_id, variant_id, quantity, title, unit_price,
+                 currency_code, created_at, updated_at)
+             VALUES (?, ?, 'prod_test', 'variant_test', 1, 'Test', 2500, 'USD', ?, ?)",
+        )
+        .bind(format!("item_{}", cart.as_str()))
+        .bind(cart.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(service.db.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn service() -> TestService {
         let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
-        CheckoutService::new(db)
+        TestService {
+            service: CheckoutService::new(db),
+        }
     }
 
     fn input(cart: CartId) -> CreateCheckoutInput {
@@ -847,5 +1025,65 @@ mod tests {
         let error = service.get(&CheckoutId::new()).await.unwrap_err();
         assert!(error.is_not_found());
         assert!(service.get_by_cart(&CartId::new()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshots_cart_items_at_creation() {
+        let service = service().await;
+        let session = service.create(input(CartId::new())).await.unwrap();
+        assert_eq!(
+            session.cart_items,
+            vec![crate::domain::CheckoutCartItem {
+                variant_id: "variant_test".to_owned(),
+                quantity: 1,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_session_is_superseded_on_retry() {
+        let service = service().await;
+        let mut request = input(CartId::new());
+        request.idempotency_key = Some("retry-key".to_owned());
+        let first = service.create(request.clone()).await.unwrap();
+        service
+            .transition(&first.id, CheckoutStatus::Failed, Some("transient"))
+            .await
+            .unwrap();
+
+        let second = service.create(request).await.unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(second.status, CheckoutStatus::Created);
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_completed_or_mismatched_carts() {
+        let service = service().await;
+
+        // Missing cart.
+        let error = service
+            .service
+            .create(input(CartId::new()))
+            .await
+            .unwrap_err();
+        assert!(error.is_not_found());
+
+        // Completed cart.
+        let cart = CartId::new();
+        seed_cart(&service.service, &cart).await;
+        sqlx::query("UPDATE carts SET status = 'completed' WHERE id = ?")
+            .bind(cart.as_str())
+            .execute(service.db.pool())
+            .await
+            .unwrap();
+        let error = service.service.create(input(cart)).await.unwrap_err();
+        assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+
+        // Currency mismatch.
+        let cart = CartId::new();
+        let mut request = input(cart);
+        request.currency_code = "EUR".to_owned();
+        let error = service.create(request).await.unwrap_err();
+        assert!(matches!(error, fastcart_kernel::AppError::Validation(_)));
     }
 }

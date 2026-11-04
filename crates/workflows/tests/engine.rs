@@ -19,6 +19,7 @@ struct TestStep {
     fail_until: usize,
     retryable: bool,
     delay_ms: u64,
+    compensate_failures: AtomicUsize,
 }
 
 impl TestStep {
@@ -35,6 +36,23 @@ impl TestStep {
             fail_until,
             retryable,
             delay_ms,
+            compensate_failures: AtomicUsize::new(0),
+        })
+    }
+
+    /// Creates a step whose compensation fails the first `failures` times.
+    fn with_failing_compensation(
+        calls: &Arc<AtomicUsize>,
+        events: &Arc<Mutex<Vec<String>>>,
+        failures: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::clone(calls),
+            events: Arc::clone(events),
+            fail_until: 0,
+            retryable: true,
+            delay_ms: 0,
+            compensate_failures: AtomicUsize::new(failures),
         })
     }
 }
@@ -71,6 +89,15 @@ impl WorkflowStep for TestStep {
             .lock()
             .unwrap()
             .push(format!("compensate:{}", context.step_name));
+        if self
+            .compensate_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(StepError::retryable("compensation provider unavailable"));
+        }
         Ok(())
     }
 }
@@ -460,6 +487,102 @@ async fn expired_leases_can_be_reclaimed() {
     assert_eq!(b_calls.load(Ordering::SeqCst), 1);
     assert!(execution.locked_by.is_none());
     assert!(execution.locked_until.is_none());
+}
+
+#[tokio::test]
+async fn failed_compensation_is_retried_on_a_resumed_drive() {
+    let (_dir, database) = store().await;
+    let engine = WorkflowEngine::new(database).with_max_attempts(3);
+    let a_calls = Arc::new(AtomicUsize::new(0));
+    let b_calls = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    engine
+        .register(
+            "a",
+            TestStep::with_failing_compensation(&a_calls, &events, 1),
+        )
+        .unwrap();
+    engine
+        .register("b", TestStep::new(&b_calls, &events, 1, false, 0))
+        .unwrap();
+
+    let definition = WorkflowDefinition::new("resumable-compensation", ["a", "b"]);
+    let key = Some("resume-compensation".to_owned());
+
+    // First drive: step b fails, step a's compensation provider is down.
+    let first = engine
+        .run(&definition, json!({}), key.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        first.status,
+        status::PENDING,
+        "prematurely finalized a failed compensation"
+    );
+    let detail = engine.get(&first.id).await.unwrap();
+    assert_eq!(detail.steps[0].status, status::step::COMPENSATION_FAILED);
+    assert_eq!(detail.steps[0].compensation_attempts, 1);
+    assert_eq!(detail.steps[1].status, status::step::FAILED);
+
+    // Resuming retries the failed compensation instead of skipping it.
+    let second = engine.run(&definition, json!({}), key).await.unwrap();
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.status, status::FAILED);
+    let detail = engine.get(&first.id).await.unwrap();
+    assert_eq!(detail.steps[0].status, status::step::COMPENSATED);
+    assert_eq!(detail.steps[0].compensation_attempts, 2);
+    assert!(detail.steps[0].compensated_at.is_some());
+    assert_eq!(detail.steps[1].status, status::step::FAILED);
+
+    let compensations: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.starts_with("compensate:"))
+        .cloned()
+        .collect();
+    assert_eq!(compensations, vec!["compensate:a", "compensate:a"]);
+}
+
+#[tokio::test]
+async fn compensation_retries_stop_at_the_attempt_budget() {
+    let (_dir, database) = store().await;
+    let engine = WorkflowEngine::new(database).with_max_attempts(2);
+    let a_calls = Arc::new(AtomicUsize::new(0));
+    let b_calls = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    engine
+        .register(
+            "a",
+            TestStep::with_failing_compensation(&a_calls, &events, usize::MAX),
+        )
+        .unwrap();
+    engine
+        .register("b", TestStep::new(&b_calls, &events, 1, false, 0))
+        .unwrap();
+
+    let definition = WorkflowDefinition::new("exhausted-compensation", ["a", "b"]);
+    let key = Some("exhausted-compensation".to_owned());
+
+    let first = engine
+        .run(&definition, json!({}), key.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.status, status::PENDING);
+
+    let second = engine.run(&definition, json!({}), key).await.unwrap();
+    assert_eq!(second.status, status::FAILED);
+    let detail = engine.get(&first.id).await.unwrap();
+    assert_eq!(detail.steps[0].status, status::step::COMPENSATION_FAILED);
+    assert_eq!(detail.steps[0].compensation_attempts, 2);
+
+    let compensations = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.starts_with("compensate:"))
+        .count();
+    assert_eq!(compensations, 2, "retried past the attempt budget");
 }
 
 #[tokio::test]

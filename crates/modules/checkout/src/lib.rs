@@ -8,7 +8,7 @@ pub mod domain;
 pub mod service;
 
 pub use domain::{
-    CheckoutSession, CheckoutStateHistory, CheckoutStatus, CreateCheckoutInput,
+    CheckoutCartItem, CheckoutSession, CheckoutStateHistory, CheckoutStatus, CreateCheckoutInput,
     UpdateCheckoutDetailsInput,
 };
 pub use service::CheckoutService;

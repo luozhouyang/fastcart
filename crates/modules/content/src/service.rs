@@ -877,7 +877,8 @@ impl ContentService {
         let id = NavigationId::new();
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
-        sqlx::query(
+        let conflict_message = format!("navigation handle already exists: {handle}");
+        let inserted = sqlx::query(
             "INSERT INTO navigations (id, name, handle, metadata, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -889,7 +890,10 @@ impl ContentService {
         .bind(now)
         .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_conflict(error, &conflict_message))?;
+        if inserted.rows_affected() != 1 {
+            return Err(AppError::internal("navigation was not created"));
+        }
         self.append_audit(
             &mut tx,
             "navigation.created",
@@ -1046,7 +1050,8 @@ impl ContentService {
         validate_metadata(&metadata)?;
 
         let mut tx = self.db.begin().await?;
-        sqlx::query(
+        let conflict_message = format!("navigation handle already exists: {handle}");
+        let updated = sqlx::query(
             "UPDATE navigations SET name = ?, handle = ?, metadata = ?, updated_at = ? \
              WHERE id = ?",
         )
@@ -1057,7 +1062,10 @@ impl ContentService {
         .bind(id.as_str())
         .execute(&mut *tx)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_conflict(error, &conflict_message))?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::not_found("navigation", id));
+        }
         self.append_audit(
             &mut tx,
             "navigation.updated",
@@ -1104,20 +1112,21 @@ impl ContentService {
         navigation_id: &NavigationId,
         input: NavigationItemInput,
     ) -> Result<NavigationItem, AppError> {
-        self.fetch_navigation_row(navigation_id).await?;
+        let mut tx = self.db.begin().await?;
+        self.fetch_navigation_row_in_tx(&mut tx, navigation_id)
+            .await?;
         let title = self.validated_item_title(&input.title)?;
         let url = self.validated_item_url(&input.url)?;
         let rank = input.rank.unwrap_or(0);
         validate_rank(rank)?;
         if let Some(parent_id) = input.parent_id.as_deref() {
-            self.ensure_parent_in_navigation(navigation_id, parent_id, None)
+            self.ensure_parent_in_navigation(&mut tx, navigation_id, parent_id, None)
                 .await?;
         }
         validate_metadata(&input.metadata)?;
 
         let id = generate_id("nitem");
-        let mut tx = self.db.begin().await?;
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO navigation_items \
              (id, navigation_id, parent_id, title, url, rank, metadata) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1132,6 +1141,9 @@ impl ContentService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if inserted.rows_affected() != 1 {
+            return Err(AppError::internal("navigation item was not created"));
+        }
         self.append_audit(
             &mut tx,
             "navigation_item.created",
@@ -1149,25 +1161,34 @@ impl ContentService {
     }
 
     /// Updates an existing navigation item.
+    ///
+    /// The item and its ancestor chain are read under the same write lock as
+    /// the update, so the cycle check cannot race a concurrent reparent.
     pub async fn update_navigation_item(
         &self,
         item_id: &str,
         input: NavigationItemInput,
     ) -> Result<NavigationItem, AppError> {
-        let existing = self.fetch_navigation_item_row(item_id).await?;
+        let mut tx = self.db.begin().await?;
+        let sql = format!("SELECT {NAVIGATION_ITEM_COLUMNS} FROM navigation_items WHERE id = ?");
+        let existing = sqlx::query_as::<_, NavigationItemRow>(&sql)
+            .bind(item_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("navigation item", item_id))?;
         let navigation_id = NavigationId::from_string(existing.navigation_id.clone());
         let title = self.validated_item_title(&input.title)?;
         let url = self.validated_item_url(&input.url)?;
         let rank = input.rank.unwrap_or(existing.rank);
         validate_rank(rank)?;
         if let Some(parent_id) = input.parent_id.as_deref() {
-            self.ensure_parent_in_navigation(&navigation_id, parent_id, Some(item_id))
+            self.ensure_parent_in_navigation(&mut tx, &navigation_id, parent_id, Some(item_id))
                 .await?;
         }
         validate_metadata(&input.metadata)?;
 
-        let mut tx = self.db.begin().await?;
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE navigation_items SET parent_id = ?, title = ?, url = ?, rank = ?, \
              metadata = ? WHERE id = ?",
         )
@@ -1180,6 +1201,9 @@ impl ContentService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::not_found("navigation item", item_id));
+        }
         self.append_audit(
             &mut tx,
             "navigation_item.updated",
@@ -1475,6 +1499,20 @@ impl ContentService {
             .ok_or_else(|| AppError::not_found("navigation", id))
     }
 
+    async fn fetch_navigation_row_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &NavigationId,
+    ) -> Result<NavigationRow, AppError> {
+        let sql = format!("SELECT {NAVIGATION_COLUMNS} FROM navigations WHERE id = ?");
+        sqlx::query_as::<_, NavigationRow>(&sql)
+            .bind(id.as_str())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("navigation", id))
+    }
+
     async fn fetch_navigation_row_by_handle(
         &self,
         handle: &str,
@@ -1563,6 +1601,7 @@ impl ContentService {
 
     async fn ensure_parent_in_navigation(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         navigation_id: &NavigationId,
         parent_id: &str,
         item_id: Option<&str>,
@@ -1585,7 +1624,7 @@ impl ContentService {
                 "SELECT navigation_id, parent_id FROM navigation_items WHERE id = ?",
             )
             .bind(&current_id)
-            .fetch_optional(self.db.pool())
+            .fetch_optional(&mut **tx)
             .await
             .map_err(database_error)?;
             let Some((owner, next_parent)) = row else {

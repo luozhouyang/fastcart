@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, CategoryId, CollectionId, ImageId, Metadata, OptionId, OptionValueId, PageResult,
     Pagination, ProductId, TagId, VariantId, now_timestamp, slugify, validate_handle,
@@ -37,13 +37,42 @@ const PRODUCT_COLUMNS: &str = "p.id, p.title, p.subtitle, p.description, p.handl
 #[derive(Clone, Debug)]
 pub struct CatalogService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl CatalogService {
     /// Creates a service over an already-migrated store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records catalog mutations in the store audit outbox.
+    ///
+    /// When an actor is set, audited mutations append their outbox row in the
+    /// same transaction as the change, so a rollback leaves no audit behind.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------------
@@ -243,14 +272,7 @@ impl CatalogService {
         .map_err(|error| unique_or_database(error, "product handle already exists"))?;
 
         let option_map = match input.options.as_ref() {
-            Some(options) => {
-                sqlx::query("DELETE FROM product_options WHERE product_id = ?")
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(database_error)?;
-                insert_options_tx(&mut tx, id, options).await?
-            }
+            Some(options) => sync_options_tx(&mut tx, id, options).await?,
             None => option_map_from_tx(&mut tx, id).await?,
         };
 
@@ -297,6 +319,14 @@ impl CatalogService {
             return Err(AppError::not_found("product", id));
         }
         sync_search_index_tx(&mut tx, id).await?;
+        self.append_audit(
+            &mut tx,
+            "product.deleted",
+            "product",
+            id,
+            serde_json::Value::Null,
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         Ok(())
     }
@@ -363,7 +393,8 @@ impl CatalogService {
         if existing.status == ProductStatus::Active {
             return Ok(existing);
         }
-        self.set_product_status(id, ProductStatus::Active).await
+        self.set_product_status(id, ProductStatus::Active, None)
+            .await
     }
 
     /// Archives a product. Archived products are no longer purchasable.
@@ -372,7 +403,8 @@ impl CatalogService {
         if existing.status == ProductStatus::Archived {
             return Ok(existing);
         }
-        self.set_product_status(id, ProductStatus::Archived).await
+        self.set_product_status(id, ProductStatus::Archived, Some("product.archived"))
+            .await
     }
 
     /// Lists active, non-deleted products for storefronts.
@@ -497,6 +529,22 @@ impl CatalogService {
             }
         }
 
+        // Replacing the links with the same set is a no-op and must not emit
+        // an audit row for a change that did not happen.
+        let existing: HashSet<String> = sqlx::query_scalar(
+            "SELECT sales_channel_id FROM product_sales_channels WHERE product_id = ?",
+        )
+        .bind(product_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?
+        .into_iter()
+        .collect();
+        if existing.len() == seen.len() && seen.iter().all(|id| existing.contains(id.as_str())) {
+            tx.commit().await.map_err(database_error)?;
+            return Ok(());
+        }
+
         sqlx::query("DELETE FROM product_sales_channels WHERE product_id = ?")
             .bind(product_id)
             .execute(&mut *tx)
@@ -512,6 +560,14 @@ impl CatalogService {
             .await
             .map_err(database_error)?;
         }
+        self.append_audit(
+            &mut tx,
+            "product.sales_channels_updated",
+            "product",
+            product_id,
+            serde_json::json!({"sales_channel_ids": channel_ids}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         Ok(())
     }
@@ -535,6 +591,7 @@ impl CatalogService {
         &self,
         id: &str,
         status: ProductStatus,
+        audit_action: Option<&str>,
     ) -> Result<Product, AppError> {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let result = sqlx::query(
@@ -551,6 +608,10 @@ impl CatalogService {
             return Err(AppError::not_found("product", id));
         }
         sync_search_index_tx(&mut tx, id).await?;
+        if let Some(action) = audit_action {
+            self.append_audit(&mut tx, action, "product", id, serde_json::Value::Null)
+                .await?;
+        }
         tx.commit().await.map_err(database_error)?;
         self.get_product(id).await
     }
@@ -682,7 +743,15 @@ impl CatalogService {
         id: &str,
         input: UpdateCategoryInput,
     ) -> Result<Category, AppError> {
-        let existing = self.get_category(id).await?;
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let existing_row =
+            sqlx::query("SELECT * FROM categories WHERE id = ? AND deleted_at IS NULL")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?
+                .ok_or_else(|| AppError::not_found("category", id))?;
+        let existing = category_from_row(&existing_row)?;
         let title = match input.title.as_deref() {
             Some(value) => validate_title(value, "category title")?,
             None => existing.title.clone(),
@@ -696,15 +765,14 @@ impl CatalogService {
             None => existing.handle.clone(),
         };
         if handle != existing.handle {
-            self.ensure_category_handle_available(&handle, Some(id))
-                .await?;
+            ensure_category_handle_available_tx(&mut tx, &handle, Some(id)).await?;
         }
         let parent_id = match input.parent_id {
             Some(value) => {
                 let parent_id = normalize_optional(Some(value));
                 if let Some(parent_id) = parent_id.as_deref() {
-                    self.ensure_category_exists(parent_id).await?;
-                    self.ensure_no_category_cycle(id, parent_id).await?;
+                    ensure_category_exists_tx(&mut tx, parent_id).await?;
+                    ensure_no_category_cycle_tx(&mut tx, id, parent_id).await?;
                 }
                 parent_id
             }
@@ -722,9 +790,10 @@ impl CatalogService {
             None => existing.metadata.clone(),
         };
 
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE categories SET parent_id = ?, title = ?, handle = ?, description = ?, \
-             is_active = ?, is_internal = ?, rank = ?, metadata = ?, updated_at = ? WHERE id = ?",
+             is_active = ?, is_internal = ?, rank = ?, metadata = ?, updated_at = ? \
+             WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(&parent_id)
         .bind(&title)
@@ -738,9 +807,13 @@ impl CatalogService {
         .bind(metadata.to_json_string())
         .bind(now_timestamp())
         .bind(id)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|error| unique_or_database(error, "category handle already exists"))?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("category", id));
+        }
+        tx.commit().await.map_err(database_error)?;
         self.get_category(id).await
     }
 
@@ -838,12 +911,22 @@ impl CatalogService {
 
     /// Soft-deletes a category after checking for children and linked products.
     pub async fn delete_category(&self, id: &str) -> Result<(), AppError> {
-        self.get_category(id).await?;
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM categories WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if exists == 0 {
+            return Err(AppError::not_found("category", id));
+        }
         let children: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM categories WHERE parent_id = ? AND deleted_at IS NULL",
         )
         .bind(id)
-        .fetch_one(self.db.pool())
+        .fetch_one(&mut *tx)
         .await
         .map_err(database_error)?;
         if children > 0 {
@@ -854,7 +937,7 @@ impl CatalogService {
         let linked: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM product_category_links WHERE category_id = ?")
                 .bind(id)
-                .fetch_one(self.db.pool())
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(database_error)?;
         if linked > 0 {
@@ -862,13 +945,20 @@ impl CatalogService {
                 "category has linked products and cannot be deleted",
             ));
         }
-        sqlx::query("UPDATE categories SET deleted_at = ?, updated_at = ? WHERE id = ?")
-            .bind(now_timestamp())
-            .bind(now_timestamp())
-            .bind(id)
-            .execute(self.db.pool())
-            .await
-            .map_err(database_error)?;
+        let result = sqlx::query(
+            "UPDATE categories SET deleted_at = ?, updated_at = ? \
+             WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(now_timestamp())
+        .bind(now_timestamp())
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("category", id));
+        }
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -910,32 +1000,6 @@ impl CatalogService {
             return Err(AppError::conflict(format!(
                 "category handle already exists: {handle}"
             )));
-        }
-        Ok(())
-    }
-
-    async fn ensure_no_category_cycle(
-        &self,
-        category_id: &str,
-        parent_id: &str,
-    ) -> Result<(), AppError> {
-        let mut current = Some(parent_id.to_owned());
-        let mut visited = HashSet::new();
-        while let Some(id) = current {
-            if id == category_id {
-                return Err(AppError::conflict("category cannot be its own ancestor"));
-            }
-            if !visited.insert(id.clone()) {
-                return Err(AppError::conflict("category hierarchy contains a cycle"));
-            }
-            current = sqlx::query("SELECT parent_id FROM categories WHERE id = ?")
-                .bind(&id)
-                .fetch_optional(self.db.pool())
-                .await
-                .map_err(database_error)?
-                .map(|row| column::<Option<String>>(&row, "parent_id"))
-                .transpose()?
-                .flatten();
         }
         Ok(())
     }
@@ -1341,14 +1405,16 @@ impl CatalogService {
 
     /// Attaches a tag value to a product, creating the tag when needed.
     pub async fn attach_tag(&self, product_id: &str, value: &str) -> Result<Tag, AppError> {
-        self.ensure_product_exists(product_id).await?;
-        let tag = self.create_tag(value).await?;
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        ensure_product_exists_tx(&mut tx, product_id).await?;
+        let tag = get_or_create_tag_tx(&mut tx, value).await?;
         sqlx::query("INSERT OR IGNORE INTO product_tag_links (product_id, tag_id) VALUES (?, ?)")
             .bind(product_id)
             .bind(&tag.id)
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
         Ok(tag)
     }
 
@@ -1380,9 +1446,10 @@ impl CatalogService {
         let url = input.url.trim();
         validate_length(url, "image url", MAX_URL_LENGTH)?;
         validate_metadata(&input.metadata)?;
-        self.ensure_product_exists(product_id).await?;
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        ensure_product_exists_tx(&mut tx, product_id).await?;
         if let Some(variant_id) = input.variant_id.as_deref() {
-            self.ensure_variant_belongs(product_id, variant_id).await?;
+            ensure_variant_belongs_tx(&mut tx, product_id, variant_id).await?;
         }
         let rank = match input.rank {
             Some(rank) => rank,
@@ -1390,7 +1457,7 @@ impl CatalogService {
                 "SELECT COALESCE(MAX(rank), -1) + 1 FROM product_images WHERE product_id = ?",
             )
             .bind(product_id)
-            .fetch_one(self.db.pool())
+            .fetch_one(&mut *tx)
             .await
             .map_err(database_error)?,
         };
@@ -1408,9 +1475,10 @@ impl CatalogService {
         .bind(rank)
         .bind(input.metadata.to_json_string())
         .bind(now_timestamp())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
         self.get_image(&id).await
     }
 
@@ -1461,22 +1529,40 @@ impl CatalogService {
         product_id: &str,
         image_ids: &[String],
     ) -> Result<Vec<ProductImage>, AppError> {
-        let existing = self.list_images(product_id).await?;
-        let existing_ids: HashSet<&str> = existing.iter().map(|image| image.id.as_str()).collect();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let existing_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM product_images WHERE product_id = ?")
+                .bind(product_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let existing_ids: HashSet<&str> = existing_ids.iter().map(String::as_str).collect();
+        let mut seen = HashSet::new();
         for image_id in image_ids {
+            if !seen.insert(image_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "duplicate image id in reorder request: {image_id}"
+                )));
+            }
             if !existing_ids.contains(image_id.as_str()) {
                 return Err(AppError::not_found("image", image_id));
             }
         }
         for (rank, image_id) in image_ids.iter().enumerate() {
-            sqlx::query("UPDATE product_images SET rank = ? WHERE id = ? AND product_id = ?")
-                .bind(i64::try_from(rank).map_err(|_| AppError::validation("rank overflow"))?)
-                .bind(image_id)
-                .bind(product_id)
-                .execute(self.db.pool())
-                .await
-                .map_err(database_error)?;
+            let rank = i64::try_from(rank).map_err(|_| AppError::validation("rank overflow"))?;
+            let updated =
+                sqlx::query("UPDATE product_images SET rank = ? WHERE id = ? AND product_id = ?")
+                    .bind(rank)
+                    .bind(image_id)
+                    .bind(product_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::not_found("image", image_id));
+            }
         }
+        tx.commit().await.map_err(database_error)?;
         self.list_images(product_id).await
     }
 
@@ -1848,26 +1934,6 @@ impl CatalogService {
                 .map_err(database_error)?;
         if count == 0 {
             return Err(AppError::not_found("product", id));
-        }
-        Ok(())
-    }
-
-    async fn ensure_variant_belongs(
-        &self,
-        product_id: &str,
-        variant_id: &str,
-    ) -> Result<(), AppError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM product_variants \
-             WHERE id = ? AND product_id = ? AND deleted_at IS NULL",
-        )
-        .bind(variant_id)
-        .bind(product_id)
-        .fetch_one(self.db.pool())
-        .await
-        .map_err(database_error)?;
-        if count == 0 {
-            return Err(AppError::not_found("variant", variant_id));
         }
         Ok(())
     }
@@ -2511,6 +2577,286 @@ fn option_map_from_rows(rows: &[SqliteRow]) -> Result<HashMap<(String, String), 
         );
     }
     Ok(map)
+}
+
+/// Applies a full option replacement while preserving the identifiers of
+/// options and values whose natural keys are unchanged.
+///
+/// This keeps `product_variant_option_values` links intact for variants that
+/// are not resubmitted with the product update.
+async fn sync_options_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    product_id: &str,
+    options: &[CreateOptionInput],
+) -> Result<HashMap<(String, String), String>, AppError> {
+    let existing_option_rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, title FROM product_options WHERE product_id = ?",
+    )
+    .bind(product_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let mut existing_options: HashMap<String, String> = existing_option_rows
+        .into_iter()
+        .map(|(id, title)| (normalize_key(&title), id))
+        .collect();
+
+    let existing_value_rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT v.id, v.product_option_id, v.value \
+         FROM product_option_values v \
+         JOIN product_options o ON o.id = v.product_option_id \
+         WHERE o.product_id = ?",
+    )
+    .bind(product_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let mut existing_values: HashMap<(String, String), String> = existing_value_rows
+        .into_iter()
+        .map(|(id, option_id, value)| ((option_id, normalize_key(&value)), id))
+        .collect();
+
+    let mut map = HashMap::new();
+    let mut titles = HashSet::new();
+    for (index, option) in options.iter().enumerate() {
+        let title = validate_title(&option.title, "option title")?;
+        if !titles.insert(normalize_key(&title)) {
+            return Err(AppError::validation("duplicate option title"));
+        }
+        validate_metadata(&option.metadata)?;
+        let rank = match option.rank {
+            Some(rank) => rank,
+            None => i64::try_from(index).map_err(|_| AppError::validation("rank overflow"))?,
+        };
+        let option_id = match existing_options.remove(&normalize_key(&title)) {
+            Some(option_id) => {
+                sqlx::query(
+                    "UPDATE product_options SET title = ?, rank = ?, metadata = ? WHERE id = ?",
+                )
+                .bind(&title)
+                .bind(rank)
+                .bind(option.metadata.to_json_string())
+                .bind(&option_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(database_error)?;
+                option_id
+            }
+            None => {
+                let option_id = OptionId::new().as_str().to_owned();
+                sqlx::query(
+                    "INSERT INTO product_options (id, product_id, title, rank, metadata) \
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(&option_id)
+                .bind(product_id)
+                .bind(&title)
+                .bind(rank)
+                .bind(option.metadata.to_json_string())
+                .execute(&mut **tx)
+                .await
+                .map_err(database_error)?;
+                option_id
+            }
+        };
+
+        let mut values = HashSet::new();
+        for (value_index, value) in option.values.iter().enumerate() {
+            let value = value.trim();
+            validate_length(value, "option value", MAX_OPTION_VALUE_LENGTH)?;
+            if !values.insert(normalize_key(value)) {
+                return Err(AppError::validation("duplicate option value"));
+            }
+            let value_rank =
+                i64::try_from(value_index).map_err(|_| AppError::validation("rank overflow"))?;
+            let key = (option_id.clone(), normalize_key(value));
+            let value_id = match existing_values.remove(&key) {
+                Some(value_id) => {
+                    sqlx::query(
+                        "UPDATE product_option_values SET value = ?, rank = ? WHERE id = ?",
+                    )
+                    .bind(value)
+                    .bind(value_rank)
+                    .bind(&value_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(database_error)?;
+                    value_id
+                }
+                None => {
+                    let value_id = OptionValueId::new().as_str().to_owned();
+                    sqlx::query(
+                        "INSERT INTO product_option_values \
+                         (id, product_option_id, value, rank, metadata) VALUES (?, ?, ?, ?, '{}')",
+                    )
+                    .bind(&value_id)
+                    .bind(&option_id)
+                    .bind(value)
+                    .bind(value_rank)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(database_error)?;
+                    value_id
+                }
+            };
+            map.insert((normalize_key(&title), normalize_key(value)), value_id);
+        }
+    }
+
+    // Values are removed first so deleting an option never cascades away a
+    // value that another (kept) option still references.
+    for value_id in existing_values.values() {
+        sqlx::query("DELETE FROM product_option_values WHERE id = ?")
+            .bind(value_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    }
+    for option_id in existing_options.values() {
+        sqlx::query("DELETE FROM product_options WHERE id = ?")
+            .bind(option_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    }
+    Ok(map)
+}
+
+async fn get_or_create_tag_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    value: &str,
+) -> Result<Tag, AppError> {
+    let value = value.trim();
+    validate_length(value, "tag value", MAX_TAG_VALUE_LENGTH)?;
+    if let Some(row) = sqlx::query("SELECT * FROM tags WHERE value = ?")
+        .bind(value)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+    {
+        return tag_from_row(&row);
+    }
+    let id = TagId::new().as_str().to_owned();
+    let now = now_timestamp();
+    sqlx::query("INSERT INTO tags (id, value, metadata, created_at) VALUES (?, ?, '{}', ?)")
+        .bind(&id)
+        .bind(value)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| unique_or_database(error, "tag value already exists"))?;
+    Ok(Tag {
+        id,
+        value: value.to_owned(),
+        metadata: Metadata::empty(),
+        created_at: now,
+    })
+}
+
+async fn ensure_product_exists_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<(), AppError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE id = ? AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    if count == 0 {
+        return Err(AppError::not_found("product", id));
+    }
+    Ok(())
+}
+
+async fn ensure_variant_belongs_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    product_id: &str,
+    variant_id: &str,
+) -> Result<(), AppError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM product_variants \
+         WHERE id = ? AND product_id = ? AND deleted_at IS NULL",
+    )
+    .bind(variant_id)
+    .bind(product_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    if count == 0 {
+        return Err(AppError::not_found("variant", variant_id));
+    }
+    Ok(())
+}
+
+async fn ensure_category_exists_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<(), AppError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM categories WHERE id = ? AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    if count == 0 {
+        return Err(AppError::not_found("category", id));
+    }
+    Ok(())
+}
+
+async fn ensure_category_handle_available_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    handle: &str,
+    exclude_id: Option<&str>,
+) -> Result<(), AppError> {
+    let count: i64 = match exclude_id {
+        Some(exclude_id) => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM categories WHERE handle = ? AND id <> ?")
+                .bind(handle)
+                .bind(exclude_id)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(database_error)?
+        }
+        None => sqlx::query_scalar("SELECT COUNT(*) FROM categories WHERE handle = ?")
+            .bind(handle)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(database_error)?,
+    };
+    if count > 0 {
+        return Err(AppError::conflict(format!(
+            "category handle already exists: {handle}"
+        )));
+    }
+    Ok(())
+}
+
+async fn ensure_no_category_cycle_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    category_id: &str,
+    parent_id: &str,
+) -> Result<(), AppError> {
+    let mut current = Some(parent_id.to_owned());
+    let mut visited = HashSet::new();
+    while let Some(id) = current {
+        if id == category_id {
+            return Err(AppError::conflict("category cannot be its own ancestor"));
+        }
+        if !visited.insert(id.clone()) {
+            return Err(AppError::conflict("category hierarchy contains a cycle"));
+        }
+        current = sqlx::query("SELECT parent_id FROM categories WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(database_error)?
+            .map(|row| column::<Option<String>>(&row, "parent_id"))
+            .transpose()?
+            .flatten();
+    }
+    Ok(())
 }
 
 async fn sync_search_index_tx(

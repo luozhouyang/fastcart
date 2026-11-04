@@ -1,10 +1,11 @@
 //! After-sales workflow: return/claim refunds and idempotent restocking.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{
-    CheckoutId, InventoryItemId, InventoryLocationId, Metadata, StoreId, VariantId,
+    AppError, CheckoutId, InventoryItemId, InventoryLocationId, Metadata, StoreId, VariantId,
 };
 use fastcart_module_inventory::{
     CreateInventoryItemInput, CreateLocationInput, InventoryService, ReservationLine,
@@ -14,11 +15,15 @@ use fastcart_module_order::{
     ClaimItemInput, ClaimItemType, ClaimStatus, CreateClaimInput, CreateExchangeInput,
     CreateOrderInput, CreateOrderItemInput, CreateReturnInput, ExchangeItemInput, Order,
     OrderReturn, OrderService, ReceiveReturnInput, ReceiveReturnItemInput, RefundInput,
-    RefundStatus as OrderRefundStatus, ReturnItemInput, ReturnStatus,
+    RefundStatus as OrderRefundStatus, ReturnItemInput, ReturnStatus, WriteOffReturnInput,
+    WriteOffReturnItemInput,
 };
 use fastcart_module_payment::{
     CreatePaymentSessionInput, ManualProvider, Payment, PaymentService, ProviderRegistry,
     RefundStatus as PaymentRefundStatus,
+};
+use fastcart_module_shipping::{
+    CreateFulfillmentRequest, FulfillmentProvider, FulfillmentProviderRegistry, FulfillmentReceipt,
 };
 use fastcart_workflows::AfterSalesWorkflow;
 use serde_json::json;
@@ -45,6 +50,79 @@ async fn fixture() -> Fixture {
         payments: PaymentService::with_registry(db.clone(), providers),
         db,
         workflow,
+    }
+}
+
+async fn fixture_with_shipping(shipping: FulfillmentProviderRegistry) -> Fixture {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let providers = ProviderRegistry::new();
+    providers
+        .register(Arc::new(ManualProvider::sandbox()))
+        .unwrap();
+    let workflow = AfterSalesWorkflow::with_shipping_providers(
+        db.clone(),
+        PaymentService::with_registry(db.clone(), providers.clone()),
+        shipping,
+    );
+    Fixture {
+        orders: OrderService::new(db.clone()),
+        payments: PaymentService::with_registry(db.clone(), providers),
+        db,
+        workflow,
+    }
+}
+
+/// Fulfillment provider that records calls and can be made to fail.
+struct TestProvider {
+    id: String,
+    calls: AtomicUsize,
+    failing: AtomicBool,
+}
+
+impl TestProvider {
+    fn new(id: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            calls: AtomicUsize::new(0),
+            failing: AtomicBool::new(false),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn set_failing(&self, failing: bool) {
+        self.failing.store(failing, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl FulfillmentProvider for TestProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    async fn create_fulfillment(
+        &self,
+        request: CreateFulfillmentRequest,
+    ) -> Result<FulfillmentReceipt, AppError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.failing.load(Ordering::SeqCst) {
+            return Err(AppError::ExternalService(
+                "test provider is unavailable".to_owned(),
+            ));
+        }
+        Ok(FulfillmentReceipt {
+            provider_id: self.id.clone(),
+            provider_fulfillment_id: format!("test-{}", request.order_id),
+            tracking_numbers: request.tracking_numbers,
+            data: json!({}),
+        })
+    }
+
+    async fn cancel_fulfillment(&self, _provider_fulfillment_id: &str) -> Result<(), AppError> {
+        Ok(())
     }
 }
 
@@ -1000,5 +1078,273 @@ async fn refund_and_replacement_claim_lines_compose() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn retry_after_a_failed_restock_restocks_once() {
+    let fixture = fixture().await;
+    let variant = VariantId::new();
+    let order = create_order(&fixture.orders, 2, Some(variant.clone()), true).await;
+    let (inventory, item_id, location_id) = stock_order(&fixture.db, &order, &variant, 10, 2).await;
+    let order_return = requested_return(&fixture.orders, &order, 2).await;
+
+    // Simulate a crash after the order transaction committed the receive but
+    // before the inventory restock ran.
+    fixture
+        .orders
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        inventory
+            .available_quantity(&item_id, &location_id)
+            .await
+            .unwrap(),
+        8
+    );
+
+    let retried = fixture
+        .workflow
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
+    assert_eq!(retried.order_return.status, ReturnStatus::Received);
+    assert_eq!(retried.restocked_units, 2);
+    assert_eq!(
+        inventory
+            .available_quantity(&item_id, &location_id)
+            .await
+            .unwrap(),
+        10
+    );
+
+    let replay = fixture
+        .workflow
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
+    assert_eq!(replay.restocked_units, 0);
+    let movements = inventory.list_movements(&item_id).await.unwrap();
+    assert_eq!(restock_movements(&movements).len(), 1);
+}
+
+#[tokio::test]
+async fn claim_fulfillment_does_not_call_the_provider_without_stock() {
+    let provider = Arc::new(TestProvider::new("test"));
+    let shipping = FulfillmentProviderRegistry::new();
+    shipping.register(provider.clone()).unwrap();
+    let fixture = fixture_with_shipping(shipping).await;
+
+    let original = VariantId::new();
+    let replacement = VariantId::new();
+    let order = create_order(&fixture.orders, 1, Some(original.clone()), true).await;
+    let _ = stock_order(&fixture.db, &order, &original, 10, 1).await;
+    let claim = fixture
+        .orders
+        .create_claim(
+            &order.id,
+            CreateClaimInput {
+                reason: None,
+                metadata: Metadata::empty(),
+                items: vec![ClaimItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                    item_type: ClaimItemType::Replace,
+                    replacement_variant_id: Some(replacement),
+                    reason: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = fixture
+        .workflow
+        .fulfill_claim(&order.id, &claim.id, "test", Vec::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)));
+    assert_eq!(
+        provider.calls(),
+        0,
+        "the provider must not be called when stock consumption fails"
+    );
+}
+
+#[tokio::test]
+async fn claim_fulfillment_restores_stock_when_the_provider_fails() {
+    let provider = Arc::new(TestProvider::new("test"));
+    provider.set_failing(true);
+    let shipping = FulfillmentProviderRegistry::new();
+    shipping.register(provider.clone()).unwrap();
+    let fixture = fixture_with_shipping(shipping).await;
+
+    let original = VariantId::new();
+    let replacement = VariantId::new();
+    let order = create_order(&fixture.orders, 1, Some(original.clone()), true).await;
+    let (inventory, _, location) = stock_order(&fixture.db, &order, &original, 10, 1).await;
+    let replacement_item =
+        stock_replacement_variant(&inventory, &order.id, &replacement, &location, 5).await;
+    assert_eq!(
+        inventory
+            .available_quantity(&replacement_item, &location)
+            .await
+            .unwrap(),
+        4
+    );
+    let claim = fixture
+        .orders
+        .create_claim(
+            &order.id,
+            CreateClaimInput {
+                reason: None,
+                metadata: Metadata::empty(),
+                items: vec![ClaimItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                    item_type: ClaimItemType::Replace,
+                    replacement_variant_id: Some(replacement),
+                    reason: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = fixture
+        .workflow
+        .fulfill_claim(&order.id, &claim.id, "test", Vec::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::ExternalService(_)));
+    assert_eq!(provider.calls(), 1);
+    assert_eq!(
+        inventory
+            .available_quantity(&replacement_item, &location)
+            .await
+            .unwrap(),
+        4,
+        "a provider failure must put the consumed replacements back"
+    );
+    assert_eq!(
+        inventory
+            .list_movements(&replacement_item)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|movement| movement.reason == "after_sales_consume")
+            .count(),
+        0
+    );
+
+    // A retry after the provider recovers consumes the stock once and records
+    // the fulfillment.
+    provider.set_failing(false);
+    let fulfilled = fixture
+        .workflow
+        .fulfill_claim(&order.id, &claim.id, "test", Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(fulfilled.consumed_units, 1);
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(
+        inventory
+            .available_quantity(&replacement_item, &location)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        inventory
+            .list_movements(&replacement_item)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|movement| movement.reason == "after_sales_consume")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn writing_off_received_units_reverses_the_restock() {
+    let fixture = fixture().await;
+    let variant = VariantId::new();
+    let order = create_order(&fixture.orders, 2, Some(variant.clone()), true).await;
+    let (inventory, item_id, location_id) = stock_order(&fixture.db, &order, &variant, 10, 2).await;
+    let order_return = requested_return(&fixture.orders, &order, 2).await;
+    fixture
+        .workflow
+        .receive_return(&order.id, &order_return.id, ReceiveReturnInput::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        inventory
+            .available_quantity(&item_id, &location_id)
+            .await
+            .unwrap(),
+        10
+    );
+
+    let written_off = fixture
+        .orders
+        .write_off_return(
+            &order.id,
+            &order_return.id,
+            WriteOffReturnInput {
+                items: vec![WriteOffReturnItemInput {
+                    order_item_id: order.items[0].id.clone(),
+                    quantity: 1,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(written_off.items[0].written_off_quantity, 1);
+    assert_eq!(
+        inventory
+            .available_quantity(&item_id, &location_id)
+            .await
+            .unwrap(),
+        9
+    );
+    let movements = inventory.list_movements(&item_id).await.unwrap();
+    let reversals: Vec<_> = movements
+        .iter()
+        .filter(|movement| movement.reason == "return_writeoff")
+        .collect();
+    assert_eq!(reversals.len(), 1);
+    assert_eq!(reversals[0].quantity_delta, -1);
+    assert_eq!(reversals[0].location_id, location_id);
+
+    // Writing off the remaining unit reverses again, and replaying the
+    // completed write-off does not reverse a third time.
+    let completed = fixture
+        .orders
+        .write_off_return(&order.id, &order_return.id, WriteOffReturnInput::default())
+        .await
+        .unwrap();
+    assert_eq!(completed.status, ReturnStatus::WrittenOff);
+    let replay = fixture
+        .orders
+        .write_off_return(&order.id, &order_return.id, WriteOffReturnInput::default())
+        .await
+        .unwrap();
+    assert_eq!(replay.status, ReturnStatus::WrittenOff);
+    assert_eq!(
+        inventory
+            .available_quantity(&item_id, &location_id)
+            .await
+            .unwrap(),
+        8
+    );
+    let movements = inventory.list_movements(&item_id).await.unwrap();
+    assert_eq!(
+        movements
+            .iter()
+            .filter(|movement| movement.reason == "return_writeoff")
+            .count(),
+        2
     );
 }

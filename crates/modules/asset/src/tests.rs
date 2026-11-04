@@ -1,11 +1,12 @@
 //! Integration-style tests for the asset module service.
 
-use fastcart_infrastructure::StoreDatabase;
+use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
 use fastcart_kernel::{AppError, Pagination, StoreId};
 
 use crate::{
     AssetFilter, AssetService, CreateAssetInput, MAX_ALT_LENGTH, MAX_CONTENT_TYPE_LENGTH,
-    MAX_FILENAME_LENGTH, MAX_SIZE_BYTES, MAX_STORAGE_KEY_LENGTH,
+    MAX_FILENAME_LENGTH, MAX_SIZE_BYTES, MAX_STORAGE_KEY_LENGTH, fetch_pending_asset_purges,
+    mark_asset_purge_failed, mark_asset_purge_processed,
 };
 
 trait ValidationError {
@@ -320,4 +321,103 @@ async fn validation_rejects_bad_input() {
             .unwrap_err()
             .is_not_found()
     );
+}
+
+#[tokio::test]
+async fn delete_commits_a_durable_blob_purge_obligation() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = AssetService::new(db.clone());
+    let asset = service.create_asset(asset_input("logo.png")).await.unwrap();
+
+    assert!(
+        fetch_pending_asset_purges(db.pool(), 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "creating an asset must not enqueue a purge"
+    );
+
+    service.delete_asset(&asset.id).await.unwrap();
+    let pending = fetch_pending_asset_purges(db.pool(), 10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].storage_key, asset.storage_key);
+    assert_eq!(pending[0].attempts, 0);
+    assert!(pending[0].last_error.is_none());
+    assert!(pending[0].processed_at.is_none());
+
+    // A rejected duplicate delete must not add another obligation.
+    assert!(service.delete_asset(&asset.id).await.is_err());
+    assert_eq!(
+        fetch_pending_asset_purges(db.pool(), 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_purge_stays_pending_until_marked_processed() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = AssetService::new(db.clone());
+    let first = service
+        .create_asset(asset_input("first.png"))
+        .await
+        .unwrap();
+    let second = service
+        .create_asset(asset_input("second.png"))
+        .await
+        .unwrap();
+    service.delete_asset(&first.id).await.unwrap();
+    service.delete_asset(&second.id).await.unwrap();
+
+    let pending = fetch_pending_asset_purges(db.pool(), 10).await.unwrap();
+    assert_eq!(pending.len(), 2);
+    let failed_id = pending[0].id.clone();
+
+    mark_asset_purge_failed(db.pool(), &failed_id, 1, "storage unavailable")
+        .await
+        .unwrap();
+    let still_pending = fetch_pending_asset_purges(db.pool(), 10).await.unwrap();
+    assert_eq!(still_pending.len(), 2);
+    let failed = still_pending
+        .iter()
+        .find(|purge| purge.id == failed_id)
+        .unwrap();
+    assert_eq!(failed.attempts, 1);
+    assert_eq!(failed.last_error.as_deref(), Some("storage unavailable"));
+    assert!(failed.processed_at.is_none());
+
+    mark_asset_purge_processed(db.pool(), &failed_id)
+        .await
+        .unwrap();
+    let remaining = fetch_pending_asset_purges(db.pool(), 10).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_ne!(remaining[0].id, failed_id);
+}
+
+#[tokio::test]
+async fn mutations_append_audit_entries_and_skip_noops() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = AssetService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+
+    let asset = service.create_asset(asset_input("logo.png")).await.unwrap();
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].action, "asset.created");
+    assert_eq!(audits[0].actor_id.as_deref(), Some("user_1"));
+    assert!(audits[0].processed_at.is_none());
+
+    // Re-using the storage key fails validation and must not append.
+    assert!(service.create_asset(asset_input("logo.png")).await.is_err());
+    assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 1);
+
+    service.delete_asset(&asset.id).await.unwrap();
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert_eq!(audits.len(), 2);
+    assert_eq!(audits[1].action, "asset.deleted");
+
+    // Deleting an already deleted asset is a no-op error and must not append.
+    assert!(service.delete_asset(&asset.id).await.is_err());
+    assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 2);
 }

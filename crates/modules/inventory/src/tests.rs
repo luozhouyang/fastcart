@@ -1066,3 +1066,61 @@ async fn exchange_restock_is_idempotent_and_prefers_the_committed_location() {
         Some(exchange_restock_reference(exchange, "evt_line").as_str())
     );
 }
+
+#[tokio::test]
+async fn concurrent_item_creation_maps_unique_violations_to_conflict() {
+    let (_db, service) = setup().await;
+    let variant = VariantId::new();
+    let input = CreateInventoryItemInput {
+        sku: Some("race-sku".to_owned()),
+        variant_id: Some(variant),
+        metadata: None,
+    };
+    let (first, second) = tokio::join!(
+        service.create_item(input.clone()),
+        service.create_item(input),
+    );
+
+    let successes = usize::from(first.is_ok()) + usize::from(second.is_ok());
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent creation should win: {first:?} / {second:?}"
+    );
+    assert!(
+        matches!(&first, Err(AppError::Conflict(_)))
+            || matches!(&second, Err(AppError::Conflict(_))),
+        "the loser must surface a conflict: {first:?} / {second:?}"
+    );
+    assert!(!matches!(&first, Err(AppError::Internal(_))));
+    assert!(!matches!(&second, Err(AppError::Internal(_))));
+}
+
+#[tokio::test]
+async fn concurrent_variant_attach_maps_unique_violations_to_conflict() {
+    let (_db, service) = setup().await;
+    let first = service
+        .create_item(CreateInventoryItemInput::default())
+        .await
+        .unwrap();
+    let second = service
+        .create_item(CreateInventoryItemInput::default())
+        .await
+        .unwrap();
+    let variant = VariantId::new();
+    let (left, right) = tokio::join!(
+        service.attach_variant(&first.id, &variant),
+        service.attach_variant(&second.id, &variant),
+    );
+
+    let successes = usize::from(left.is_ok()) + usize::from(right.is_ok());
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent attach should win: {left:?} / {right:?}"
+    );
+    assert!(
+        matches!(&left, Err(AppError::Conflict(_))) || matches!(&right, Err(AppError::Conflict(_))),
+        "the loser must surface a conflict: {left:?} / {right:?}"
+    );
+    assert!(!matches!(&left, Err(AppError::Internal(_))));
+    assert!(!matches!(&right, Err(AppError::Internal(_))));
+}

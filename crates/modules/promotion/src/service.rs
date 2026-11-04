@@ -1,6 +1,6 @@
 //! SQLite-backed promotion service.
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, CouponId, EventId, PageResult, Pagination, PromotionId, now_timestamp,
     validate_metadata,
@@ -27,13 +27,42 @@ const COUPON_COLUMNS: &str = "id, code, promotion_id, usage_limit, usage_count, 
 #[derive(Clone, Debug)]
 pub struct PromotionService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl PromotionService {
     /// Creates a service over an already-migrated store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records campaign mutations in the store audit outbox.
+    ///
+    /// When an actor is set, every mutating campaign method appends its audit
+    /// entry in the same transaction as the change.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     /// Creates a promotion and its rules.
@@ -51,13 +80,13 @@ impl PromotionService {
             &input.metadata,
         )?;
         let code = input.code.as_deref().map(normalize_code).transpose()?;
-        if let Some(code) = code.as_deref() {
-            self.ensure_promotion_code_available(code, None).await?;
-        }
 
         let id = PromotionId::new().to_string();
         let now = now_timestamp();
         let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        if let Some(code) = code.as_deref() {
+            ensure_promotion_code_available_tx(&mut transaction, code, None).await?;
+        }
         sqlx::query(
             "INSERT INTO promotions
              (id, code, title, type, value, status, is_automatic, starts_at, ends_at, usage_limit,
@@ -79,7 +108,7 @@ impl PromotionService {
         .bind(now)
         .execute(&mut *transaction)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_or_database(error, "promotion code is already in use"))?;
 
         let rules = insert_promotion_rules(&mut transaction, &id, &input.rules, now).await?;
         transaction.commit().await.map_err(database_error)?;
@@ -109,9 +138,19 @@ impl PromotionService {
         id: &str,
         input: UpdatePromotionInput,
     ) -> Result<Promotion, AppError> {
-        let existing = self.get_promotion(id).await?;
+        let now = now_timestamp();
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let existing_row = sqlx::query_as::<_, PromotionRow>(&format!(
+            "SELECT {PROMOTION_COLUMNS} FROM promotions WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("promotion", id))?;
+        let existing = existing_row.into_promotion()?;
         let created_at = existing.created_at;
-        let existing_rules = existing.rules;
+        let existing_rules = load_promotion_rules_tx(&mut transaction, id).await?;
 
         let raw_code = input.code.unwrap_or(existing.code);
         let code = raw_code.as_deref().map(normalize_code).transpose()?;
@@ -141,16 +180,14 @@ impl PromotionService {
             ));
         }
         if let Some(code) = code.as_deref() {
-            self.ensure_promotion_code_available(code, Some(id)).await?;
+            ensure_promotion_code_available_tx(&mut transaction, code, Some(id)).await?;
         }
 
-        let now = now_timestamp();
-        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE promotions
              SET code = ?, title = ?, type = ?, value = ?, status = ?, is_automatic = ?,
                  starts_at = ?, ends_at = ?, usage_limit = ?, metadata = ?, updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND (? IS NULL OR ? >= usage_count)",
         )
         .bind(&code)
         .bind(&title)
@@ -164,9 +201,24 @@ impl PromotionService {
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(id)
+        .bind(usage_limit)
+        .bind(usage_limit)
         .execute(&mut *transaction)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_or_database(error, "promotion code is already in use"))?;
+        if updated.rows_affected() == 0 {
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM promotions WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(database_error)?;
+            if exists == 0 {
+                return Err(AppError::not_found("promotion", id));
+            }
+            return Err(AppError::validation(
+                "usage_limit must not be lower than the recorded usage_count",
+            ));
+        }
 
         let rules = match input.rules {
             Some(rules) => {
@@ -301,11 +353,12 @@ impl PromotionService {
         validate_usage_limit(input.usage_limit, "coupon usage_limit")?;
         validate_window(input.starts_at, input.ends_at, "coupon")?;
         validate_metadata(&input.metadata)?;
-        self.ensure_promotion_exists(&input.promotion_id).await?;
-        self.ensure_coupon_code_available(&code, None).await?;
 
         let id = CouponId::new().to_string();
         let now = now_timestamp();
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        ensure_promotion_exists_tx(&mut transaction, &input.promotion_id).await?;
+        ensure_coupon_code_available_tx(&mut transaction, &code, None).await?;
         sqlx::query(
             "INSERT INTO coupons
              (id, code, promotion_id, usage_limit, usage_count, starts_at, ends_at, metadata,
@@ -321,9 +374,10 @@ impl PromotionService {
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *transaction)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_or_database(error, "coupon code is already in use"))?;
+        transaction.commit().await.map_err(database_error)?;
 
         Ok(Coupon {
             id,
@@ -345,7 +399,17 @@ impl PromotionService {
         id: &str,
         input: UpdateCouponInput,
     ) -> Result<Coupon, AppError> {
-        let existing = self.get_coupon(id).await?;
+        let now = now_timestamp();
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let existing_row = sqlx::query_as::<_, CouponRow>(&format!(
+            "SELECT {COUPON_COLUMNS} FROM coupons WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("coupon", id))?;
+        let existing = existing_row.into_coupon();
         let created_at = existing.created_at;
 
         let code = match input.code {
@@ -367,15 +431,14 @@ impl PromotionService {
         }
         validate_window(starts_at, ends_at, "coupon")?;
         validate_metadata(&metadata)?;
-        self.ensure_promotion_exists(&promotion_id).await?;
-        self.ensure_coupon_code_available(&code, Some(id)).await?;
+        ensure_promotion_exists_tx(&mut transaction, &promotion_id).await?;
+        ensure_coupon_code_available_tx(&mut transaction, &code, Some(id)).await?;
 
-        let now = now_timestamp();
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE coupons
              SET code = ?, promotion_id = ?, usage_limit = ?, starts_at = ?, ends_at = ?,
                  metadata = ?, updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND (? IS NULL OR ? >= usage_count)",
         )
         .bind(&code)
         .bind(&promotion_id)
@@ -385,9 +448,25 @@ impl PromotionService {
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(id)
-        .execute(self.db.pool())
+        .bind(usage_limit)
+        .bind(usage_limit)
+        .execute(&mut *transaction)
         .await
-        .map_err(database_error)?;
+        .map_err(|error| unique_or_database(error, "coupon code is already in use"))?;
+        if updated.rows_affected() == 0 {
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM coupons WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(database_error)?;
+            if exists == 0 {
+                return Err(AppError::not_found("coupon", id));
+            }
+            return Err(AppError::validation(
+                "usage_limit must not be lower than the recorded usage_count",
+            ));
+        }
+        transaction.commit().await.map_err(database_error)?;
 
         Ok(Coupon {
             id: id.to_owned(),
@@ -523,6 +602,7 @@ impl PromotionService {
         validate_metadata(&input.metadata)?;
         let id = format!("camp_{}", uuid::Uuid::now_v7().simple());
         let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         sqlx::query(
             "INSERT INTO campaigns
              (id, name, description, budget_type, currency_code, budget_limit, budget_used,
@@ -540,9 +620,18 @@ impl PromotionService {
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "campaign.created",
+            "campaign",
+            &id,
+            serde_json::json!({"name": name, "budget_limit": input.budget_limit}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         self.get_campaign(&id).await
     }
 
@@ -557,7 +646,7 @@ impl PromotionService {
         .await
         .map_err(database_error)?
         .ok_or_else(|| AppError::not_found("campaign", id))?;
-        Ok(row.into_campaign())
+        row.into_campaign()
     }
 
     /// Lists campaigns newest first.
@@ -579,11 +668,11 @@ impl PromotionService {
         .fetch_all(self.db.pool())
         .await
         .map_err(database_error)?;
-        Ok(PageResult::new(
-            rows.into_iter().map(CampaignRow::into_campaign).collect(),
-            count,
-            pagination,
-        ))
+        let data = rows
+            .into_iter()
+            .map(CampaignRow::into_campaign)
+            .collect::<Result<Vec<_>, AppError>>()?;
+        Ok(PageResult::new(data, count, pagination))
     }
 
     /// Partially updates a campaign.
@@ -592,7 +681,20 @@ impl PromotionService {
         id: &str,
         input: UpdateCampaignInput,
     ) -> Result<Campaign, AppError> {
-        let existing = self.get_campaign(id).await?;
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let existing_row = sqlx::query_as::<_, CampaignRow>(
+            "SELECT id, name, description, budget_type, currency_code, budget_limit,
+                    budget_used, starts_at, ends_at, metadata, created_at, updated_at
+             FROM campaigns WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("campaign", id))?;
+        let existing = existing_row.into_campaign()?;
+
         let name = input.name.as_deref().map_or_else(
             || Ok(existing.name.clone()),
             |name| {
@@ -615,6 +717,14 @@ impl PromotionService {
         let currency_code = input
             .currency_code
             .unwrap_or_else(|| existing.currency_code.clone());
+        if budget_type == CampaignBudgetType::Spend
+            && existing.budget_used > 0
+            && currency_code != existing.currency_code
+        {
+            return Err(AppError::conflict(
+                "campaign currency cannot change after spend has been recorded",
+            ));
+        }
         let budget_limit = input.budget_limit.unwrap_or(existing.budget_limit);
         validate_campaign_budget(budget_type, currency_code.as_ref(), budget_limit)?;
         if budget_limit.is_some_and(|limit| limit < existing.budget_used) {
@@ -627,11 +737,11 @@ impl PromotionService {
         validate_window(starts_at, ends_at, "campaign")?;
         let metadata = input.metadata.unwrap_or_else(|| existing.metadata.clone());
         validate_metadata(&metadata)?;
-        let now = now_timestamp();
+
         let updated = sqlx::query(
             "UPDATE campaigns SET name = ?, description = ?, budget_type = ?, currency_code = ?,
              budget_limit = ?, starts_at = ?, ends_at = ?, metadata = ?, updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND (? IS NULL OR ? >= budget_used)",
         )
         .bind(&name)
         .bind(
@@ -648,25 +758,56 @@ impl PromotionService {
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(id)
-        .execute(self.db.pool())
+        .bind(budget_limit)
+        .bind(budget_limit)
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
         if updated.rows_affected() == 0 {
-            return Err(AppError::not_found("campaign", id));
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM campaigns WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database_error)?;
+            if exists == 0 {
+                return Err(AppError::not_found("campaign", id));
+            }
+            return Err(AppError::conflict(
+                "campaign budget cannot be below consumed usage",
+            ));
         }
+        self.append_audit(
+            &mut tx,
+            "campaign.updated",
+            "campaign",
+            id,
+            serde_json::json!({"name": name, "budget_limit": budget_limit}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         self.get_campaign(id).await
     }
 
     /// Deletes a campaign; promotion links are removed by cascade.
     pub async fn delete_campaign(&self, id: &str) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let result = sqlx::query("DELETE FROM campaigns WHERE id = ?")
             .bind(id)
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("campaign", id));
         }
+        self.append_audit(
+            &mut tx,
+            "campaign.deleted",
+            "campaign",
+            id,
+            serde_json::Value::Null,
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -685,15 +826,27 @@ impl PromotionService {
         if exists.is_none() {
             return Err(AppError::not_found("promotion", promotion_id));
         }
-        sqlx::query(
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let linked = sqlx::query(
             "INSERT OR IGNORE INTO campaign_promotions (campaign_id, promotion_id)
              VALUES (?, ?)",
         )
         .bind(campaign_id)
         .bind(promotion_id)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if linked.rows_affected() > 0 {
+            self.append_audit(
+                &mut tx,
+                "campaign.promotion_linked",
+                "campaign",
+                campaign_id,
+                serde_json::json!({"promotion_id": promotion_id}),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -703,12 +856,26 @@ impl PromotionService {
         campaign_id: &str,
         promotion_id: &str,
     ) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM campaign_promotions WHERE campaign_id = ? AND promotion_id = ?")
-            .bind(campaign_id)
-            .bind(promotion_id)
-            .execute(self.db.pool())
-            .await
-            .map_err(database_error)?;
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let removed = sqlx::query(
+            "DELETE FROM campaign_promotions WHERE campaign_id = ? AND promotion_id = ?",
+        )
+        .bind(campaign_id)
+        .bind(promotion_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if removed.rows_affected() > 0 {
+            self.append_audit(
+                &mut tx,
+                "campaign.promotion_unlinked",
+                "campaign",
+                campaign_id,
+                serde_json::json!({"promotion_id": promotion_id}),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -746,6 +913,10 @@ impl PromotionService {
         }
         let usage_currency = currency_code.map(|code| code.trim().to_ascii_uppercase());
         let now = now_timestamp();
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+
+        // The idempotency lookup runs under the same write lock as the insert,
+        // so a duplicate order cannot slip in between the two statements.
         if let Some(order_id) = order_id
             && let Some(existing) = sqlx::query_as::<_, PromotionUsageRow>(
                 "SELECT id, promotion_id, coupon_id, customer_id, order_id, created_at
@@ -753,13 +924,12 @@ impl PromotionService {
             )
             .bind(promotion_id)
             .bind(order_id)
-            .fetch_optional(self.db.pool())
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(database_error)?
         {
             return Ok(existing.into_usage());
         }
-        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
 
         let promotion: Option<(Option<i64>, i64)> =
             sqlx::query_as("SELECT usage_limit, usage_count FROM promotions WHERE id = ?")
@@ -808,7 +978,7 @@ impl PromotionService {
         }
 
         let id = EventId::new().to_string();
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO promotion_usage
              (id, promotion_id, coupon_id, customer_id, order_id, created_at)
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -820,8 +990,24 @@ impl PromotionService {
         .bind(order_id)
         .bind(now)
         .execute(&mut *transaction)
-        .await
-        .map_err(database_error)?;
+        .await;
+        if let Err(error) = inserted {
+            if is_unique_violation(&error)
+                && let Some(order_id) = order_id
+                && let Some(existing) = sqlx::query_as::<_, PromotionUsageRow>(
+                    "SELECT id, promotion_id, coupon_id, customer_id, order_id, created_at
+                     FROM promotion_usage WHERE promotion_id = ? AND order_id = ?",
+                )
+                .bind(promotion_id)
+                .bind(order_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(database_error)?
+            {
+                return Ok(existing.into_usage());
+            }
+            return Err(database_error(error));
+        }
         let updated = sqlx::query(
             "UPDATE promotions SET usage_count = usage_count + 1, updated_at = ?
              WHERE id = ? AND (usage_limit IS NULL OR usage_count < usage_limit)",
@@ -970,54 +1156,86 @@ impl PromotionService {
         .map_err(database_error)?;
         Ok(row.map(CouponRow::into_coupon))
     }
+}
 
-    async fn ensure_promotion_exists(&self, id: &str) -> Result<(), AppError> {
-        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM promotions WHERE id = ?")
-            .bind(id)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(database_error)?;
-        if exists.is_none() {
-            return Err(AppError::not_found("promotion", id));
-        }
-        Ok(())
+async fn load_promotion_rules_tx(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    promotion_id: &str,
+) -> Result<Vec<PromotionRule>, AppError> {
+    let rows = sqlx::query_as::<_, PromotionRuleRow>(&format!(
+        "SELECT {PROMOTION_RULE_COLUMNS} FROM promotion_rules
+         WHERE promotion_id = ? ORDER BY created_at, id"
+    ))
+    .bind(promotion_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    rows.into_iter().map(PromotionRuleRow::into_rule).collect()
+}
+
+async fn ensure_promotion_exists_tx(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<(), AppError> {
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM promotions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    if exists.is_none() {
+        return Err(AppError::not_found("promotion", id));
     }
+    Ok(())
+}
 
-    async fn ensure_promotion_code_available(
-        &self,
-        code: &str,
-        exclude_id: Option<&str>,
-    ) -> Result<(), AppError> {
-        let existing: Option<String> =
-            sqlx::query_scalar("SELECT id FROM promotions WHERE code = ?")
-                .bind(code)
-                .fetch_optional(self.db.pool())
-                .await
-                .map_err(database_error)?;
-        if let Some(existing) = existing
-            && exclude_id != Some(existing.as_str())
-        {
-            return Err(AppError::conflict("promotion code is already in use"));
-        }
-        Ok(())
+async fn ensure_promotion_code_available_tx(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    code: &str,
+    exclude_id: Option<&str>,
+) -> Result<(), AppError> {
+    let existing: Option<String> = sqlx::query_scalar("SELECT id FROM promotions WHERE code = ?")
+        .bind(code)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    if let Some(existing) = existing
+        && exclude_id != Some(existing.as_str())
+    {
+        return Err(AppError::conflict("promotion code is already in use"));
     }
+    Ok(())
+}
 
-    async fn ensure_coupon_code_available(
-        &self,
-        code: &str,
-        exclude_id: Option<&str>,
-    ) -> Result<(), AppError> {
-        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM coupons WHERE code = ?")
-            .bind(code)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(database_error)?;
-        if let Some(existing) = existing
-            && exclude_id != Some(existing.as_str())
-        {
-            return Err(AppError::conflict("coupon code is already in use"));
-        }
-        Ok(())
+async fn ensure_coupon_code_available_tx(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    code: &str,
+    exclude_id: Option<&str>,
+) -> Result<(), AppError> {
+    let existing: Option<String> = sqlx::query_scalar("SELECT id FROM coupons WHERE code = ?")
+        .bind(code)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    if let Some(existing) = existing
+        && exclude_id != Some(existing.as_str())
+    {
+        return Err(AppError::conflict("coupon code is already in use"));
+    }
+    Ok(())
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database) => database.is_unique_violation(),
+        _ => false,
+    }
+}
+
+fn unique_or_database(error: sqlx::Error, conflict_message: &str) -> AppError {
+    if is_unique_violation(&error) {
+        AppError::conflict(conflict_message)
+    } else {
+        database_error(error)
     }
 }
 
@@ -1113,18 +1331,25 @@ struct CampaignRow {
 }
 
 impl CampaignRow {
-    fn into_campaign(self) -> Campaign {
-        Campaign {
+    fn into_campaign(self) -> Result<Campaign, AppError> {
+        let budget_type = self.budget_type.parse().map_err(|error| {
+            AppError::internal(format!("invalid stored campaign budget type: {error}"))
+        })?;
+        let currency_code = match self.currency_code {
+            Some(code) => Some(
+                code.parse::<fastcart_kernel::CurrencyCode>()
+                    .map_err(|error| {
+                        AppError::internal(format!("invalid stored campaign currency: {error}"))
+                    })?,
+            ),
+            None => None,
+        };
+        Ok(Campaign {
             id: self.id,
             name: self.name,
             description: self.description,
-            budget_type: self
-                .budget_type
-                .parse()
-                .unwrap_or(CampaignBudgetType::Usage),
-            currency_code: self
-                .currency_code
-                .and_then(|code| code.parse::<fastcart_kernel::CurrencyCode>().ok()),
+            budget_type,
+            currency_code,
             budget_limit: self.budget_limit,
             budget_used: self.budget_used,
             starts_at: self.starts_at,
@@ -1132,7 +1357,7 @@ impl CampaignRow {
             metadata: fastcart_kernel::Metadata::from_json_str(&self.metadata),
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }
 
@@ -1255,7 +1480,7 @@ impl CouponRow {
 
 #[cfg(test)]
 mod tests {
-    use fastcart_infrastructure::StoreDatabase;
+    use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
     use fastcart_kernel::{AppError, CurrencyCode, Metadata, Pagination, StoreId};
 
     use super::PromotionService;
@@ -1263,7 +1488,7 @@ mod tests {
         CampaignBudgetType, CreateCampaignInput, CreateCouponInput, CreatePromotionInput,
         Promotion, PromotionCart, PromotionContext, PromotionFilter, PromotionLine, PromotionRule,
         PromotionRuleAttribute, PromotionRuleInput, PromotionRuleOperator, PromotionStatus,
-        PromotionType, UpdatePromotionInput, calculate_promotions,
+        PromotionType, UpdateCampaignInput, UpdatePromotionInput, calculate_promotions,
     };
 
     async fn service() -> PromotionService {
@@ -1919,6 +2144,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_usage_is_idempotent_per_order() {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = PromotionService::new(db.clone());
+        let promotion = service
+            .create_promotion(
+                CreatePromotionInput::new("Idempotent promo", PromotionType::FixedAmount, 500)
+                    .active()
+                    .with_usage_limit(5),
+            )
+            .await
+            .unwrap();
+        let coupon = service
+            .create_coupon(CreateCouponInput::new("ONCEPERORDER", &promotion.id))
+            .await
+            .unwrap();
+
+        let first = service
+            .record_usage(
+                &promotion.id,
+                Some(&coupon.id),
+                Some("cust_1"),
+                Some("order_1"),
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+        let repeated = service
+            .record_usage(
+                &promotion.id,
+                Some(&coupon.id),
+                Some("cust_1"),
+                Some("order_1"),
+                250,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.id, repeated.id);
+        assert_eq!(service.usage_count(&promotion.id).await.unwrap(), 1);
+        assert_eq!(service.coupon_usage_count(&coupon.id).await.unwrap(), 1);
+        let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM promotion_usage")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(recorded, 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_codes_are_reported_as_conflicts() {
+        let service = service().await;
+        let first = service
+            .create_promotion(
+                CreatePromotionInput::new("First", PromotionType::FixedAmount, 100)
+                    .with_code("SHARED"),
+            )
+            .await
+            .unwrap();
+        let second = service
+            .create_promotion(
+                CreatePromotionInput::new("Second", PromotionType::FixedAmount, 100)
+                    .with_code("OTHER"),
+            )
+            .await
+            .unwrap();
+        let error = service
+            .update_promotion(
+                &second.id,
+                UpdatePromotionInput {
+                    code: Some(Some("shared".to_owned())),
+                    ..UpdatePromotionInput::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+
+        let coupon = service
+            .create_coupon(CreateCouponInput::new("COUPON-ONE", &first.id))
+            .await
+            .unwrap();
+        service
+            .create_coupon(CreateCouponInput::new("COUPON-TWO", &first.id))
+            .await
+            .unwrap();
+        let error = service
+            .update_coupon(
+                &coupon.id,
+                crate::domain::UpdateCouponInput {
+                    code: Some("coupon-two".to_owned()),
+                    ..crate::domain::UpdateCouponInput::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
     async fn usage_limits_are_enforced() {
         let service = service().await;
         let promotion = service
@@ -2032,6 +2357,50 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].promotion_id, "promo_active");
+    }
+
+    #[tokio::test]
+    async fn campaign_mutations_append_audit_entries_atomically() {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = PromotionService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+
+        let campaign = service
+            .create_campaign(CreateCampaignInput {
+                name: "Launch".to_owned(),
+                ..CreateCampaignInput::default()
+            })
+            .await
+            .unwrap();
+        service
+            .update_campaign(
+                &campaign.id,
+                UpdateCampaignInput {
+                    name: Some("Launch 2".to_owned()),
+                    ..UpdateCampaignInput::default()
+                },
+            )
+            .await
+            .unwrap();
+        service.delete_campaign(&campaign.id).await.unwrap();
+
+        let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+        assert_eq!(
+            audits
+                .iter()
+                .map(|audit| audit.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["campaign.created", "campaign.updated", "campaign.deleted"]
+        );
+        assert!(audits.iter().all(|audit| audit.processed_at.is_none()));
+        assert!(
+            audits
+                .iter()
+                .all(|audit| audit.actor_id.as_deref() == Some("user_1"))
+        );
+
+        // A failed deletion is a no-op and must not append an audit row.
+        assert!(service.delete_campaign(&campaign.id).await.is_err());
+        assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 3);
     }
 
     #[tokio::test]

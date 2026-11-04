@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use fastcart_infrastructure::{StoreDatabase, append_outbox_event, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, append_outbox_event, database_error};
 use fastcart_kernel::{
     AppError, CurrencyCode, CustomerId, DomainEventEnvelope, EventId, FulfillmentId, LineItemId,
     Metadata, OrderId, Pagination, PaymentId, ProductId, RefundId, Timestamp, VariantId,
@@ -327,13 +327,52 @@ impl From<AppError> for CreateAttemptError {
 #[derive(Clone, Debug)]
 pub struct OrderService {
     db: StoreDatabase,
+    audit: Option<AuditActor>,
 }
 
 impl OrderService {
     /// Creates a service bound to one store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        Self { db, audit: None }
+    }
+
+    /// Records mutating order operations in the store audit outbox.
+    ///
+    /// When an actor is set, every audited mutation appends its audit entry in
+    /// the same transaction as the change.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Returns a copy of this service that does not record audit entries.
+    ///
+    /// Workflows use this for internally implied transitions whose audit is
+    /// owned by a different step, avoiding duplicate entries.
+    #[must_use]
+    pub fn without_audit(mut self) -> Self {
+        self.audit = None;
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    pub(crate) async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     /// Returns the store database backing this service.
@@ -574,6 +613,7 @@ impl OrderService {
             OrderStatus::Pending,
             OrderStatus::Confirmed,
             Some("order confirmed"),
+            Some(("order.confirmed", serde_json::Value::Null)),
         )
         .await?;
         self.load_order(id).await
@@ -593,6 +633,7 @@ impl OrderService {
             OrderStatus::Confirmed,
             OrderStatus::Processing,
             Some("order processing started"),
+            Some(("order.processing_started", serde_json::Value::Null)),
         )
         .await?;
         self.load_order(id).await
@@ -648,6 +689,14 @@ impl OrderService {
         append_outbox_event(&mut *tx, &event)
             .await
             .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.canceled",
+            "order",
+            id.as_str(),
+            serde_json::json!({"reason": reason}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
 
         self.load_order(id).await
@@ -856,6 +905,17 @@ impl OrderService {
         append_outbox_event(&mut *tx, &event)
             .await
             .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.fulfilled",
+            "order",
+            id.as_str(),
+            serde_json::json!({
+                "fulfillment_status": next_status.as_str(),
+                "status": next_order_status.as_str(),
+            }),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
 
         self.load_order(id).await
@@ -867,7 +927,7 @@ impl OrderService {
     /// order total. When the cumulative refund reaches the order total the
     /// order is marked refunded, otherwise partially refunded.
     pub async fn add_refund(&self, id: &OrderId, input: RefundInput) -> Result<Order, AppError> {
-        let (order, _) = self.add_refund_inner(id, input, None).await?;
+        let (order, _) = self.add_refund_inner(id, input, None, true).await?;
         Ok(order)
     }
 
@@ -888,7 +948,7 @@ impl OrderService {
                 "refund idempotency_key must not be empty",
             ));
         }
-        self.add_refund_inner(id, input, Some(key)).await
+        self.add_refund_inner(id, input, Some(key), false).await
     }
 
     async fn add_refund_inner(
@@ -896,6 +956,7 @@ impl OrderService {
         id: &OrderId,
         input: RefundInput,
         idempotency_key: Option<&str>,
+        audit: bool,
     ) -> Result<(Order, RefundId), AppError> {
         if input.amount <= 0 {
             return Err(AppError::validation(
@@ -1049,6 +1110,20 @@ impl OrderService {
         append_outbox_event(&mut *tx, &event)
             .await
             .map_err(database_error)?;
+        if audit {
+            self.append_audit(
+                &mut tx,
+                "order.refunded",
+                "order",
+                id.as_str(),
+                serde_json::json!({
+                    "payment_id": input.payment_id,
+                    "amount": input.amount,
+                    "currency_code": order.currency_code,
+                }),
+            )
+            .await?;
+        }
         tx.commit().await.map_err(database_error)?;
 
         let order = self.load_order(id).await?;
@@ -1119,6 +1194,7 @@ impl OrderService {
         previous: OrderStatus,
         next: OrderStatus,
         note: Option<&str>,
+        audit: Option<(&str, serde_json::Value)>,
     ) -> Result<(), AppError> {
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
@@ -1136,6 +1212,10 @@ impl OrderService {
             return Err(AppError::conflict("order status changed concurrently"));
         }
         insert_history(&mut tx, id, next, Some(previous), note, now).await?;
+        if let Some((action, data)) = audit {
+            self.append_audit(&mut tx, action, "order", id.as_str(), data)
+                .await?;
+        }
         tx.commit().await.map_err(database_error)?;
         Ok(())
     }
@@ -1773,7 +1853,7 @@ fn parse_shipping_methods(text: &str) -> Result<Vec<OrderShippingMethod>, AppErr
 
 #[cfg(test)]
 mod tests {
-    use fastcart_infrastructure::StoreDatabase;
+    use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
     use fastcart_kernel::{
         CustomerId, OrderId, Pagination, PaymentId, ProductId, StoreId, VariantId, now_timestamp,
     };
@@ -2026,6 +2106,30 @@ mod tests {
 
         let error = service.confirm(&order.id).await.unwrap_err();
         assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn audit_commits_with_the_order_mutation_and_skips_repeats() {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = OrderService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+        let order = service
+            .create_order(order_input(vec![item(100, 1)]))
+            .await
+            .unwrap();
+
+        service.confirm(&order.id).await.unwrap();
+
+        let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "order.confirmed");
+        assert_eq!(audits[0].resource_type.as_deref(), Some("order"));
+        assert_eq!(audits[0].resource_id.as_deref(), Some(order.id.as_str()));
+        assert_eq!(audits[0].actor_id.as_deref(), Some("user_1"));
+        assert_eq!(audits[0].store_id.as_deref(), Some(db.store_id().as_str()));
+
+        // Repeating the transition must not append a second audit row.
+        assert!(service.confirm(&order.id).await.is_err());
+        assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

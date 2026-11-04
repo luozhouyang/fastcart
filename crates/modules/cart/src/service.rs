@@ -93,6 +93,7 @@ impl CartService {
         let cart_id = CartId::new();
         let expires_at = now.saturating_add(ttl);
 
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         sqlx::query(
             "INSERT INTO carts (id, currency_code, customer_id, email, sales_channel_id, status, \
              shipping_address, billing_address, metadata, created_at, updated_at, completed_at, \
@@ -107,22 +108,39 @@ impl CartService {
         .bind(now)
         .bind(now)
         .bind(expires_at)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
 
-        self.get_cart(&cart_id).await
+        let cart = Self::load_aggregate(&mut tx, &cart_id).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(cart)
     }
 
     /// Loads the full aggregate and recalculates its totals.
+    ///
+    /// Every child table is read through one deferred transaction so a
+    /// concurrent writer cannot produce a torn snapshot with totals derived
+    /// from rows belonging to different revisions.
     pub async fn get_cart(&self, cart_id: &CartId) -> Result<Cart, AppError> {
-        let row = self.cart_row(cart_id).await?;
-        let items = self.load_items(cart_id).await?;
-        let discounts = self.load_discounts(cart_id).await?;
-        let shipping_methods = self.load_shipping_methods(cart_id).await?;
-        let shipping_adjustments = self.load_shipping_adjustments(cart_id).await?;
-        let tax_lines = self.load_tax_lines(cart_id).await?;
-        let addresses = self.load_addresses(cart_id).await?;
+        let mut tx = self.db.pool().begin().await.map_err(database_error)?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(cart)
+    }
+
+    /// Builds the aggregate from one transaction/connection.
+    async fn load_aggregate(
+        tx: &mut Transaction<'_, Sqlite>,
+        cart_id: &CartId,
+    ) -> Result<Cart, AppError> {
+        let row = Self::cart_row_tx(tx, cart_id).await?;
+        let items = Self::load_items(tx, cart_id).await?;
+        let discounts = Self::load_discounts(tx, cart_id).await?;
+        let shipping_methods = Self::load_shipping_methods(tx, cart_id).await?;
+        let shipping_adjustments = Self::load_shipping_adjustments(tx, cart_id).await?;
+        let tax_lines = Self::load_tax_lines(tx, cart_id).await?;
+        let addresses = Self::load_addresses(tx, cart_id).await?;
 
         let item_adjustments = items
             .iter()
@@ -130,6 +148,14 @@ impl CartService {
             .collect::<Vec<_>>();
 
         let currency_code = CurrencyCode::new(row.currency_code.as_str())?;
+        let shipping_address = match addresses.shipping {
+            Some(address) => address,
+            None => parse_address(&row.shipping_address)?,
+        };
+        let billing_address = match addresses.billing {
+            Some(address) => address,
+            None => parse_address(&row.billing_address)?,
+        };
         let mut cart = Cart {
             id: CartId::from_string(row.id),
             currency_code: currency_code.clone(),
@@ -137,12 +163,8 @@ impl CartService {
             email: row.email,
             sales_channel_id: row.sales_channel_id,
             status: CartStatus::from_db(&row.status),
-            shipping_address: addresses
-                .shipping
-                .unwrap_or_else(|| parse_address(&row.shipping_address)),
-            billing_address: addresses
-                .billing
-                .unwrap_or_else(|| parse_address(&row.billing_address)),
+            shipping_address,
+            billing_address,
             items,
             discounts,
             shipping_methods,
@@ -170,12 +192,15 @@ impl CartService {
         &self,
         customer_id: &CustomerId,
     ) -> Result<Option<Cart>, AppError> {
+        let now = now_timestamp();
         let cart_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM carts WHERE customer_id = ? AND status = ? \
+             AND (expires_at IS NULL OR expires_at > ?) \
              ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .bind(customer_id.as_str())
         .bind(CartStatus::Open.as_str())
+        .bind(now)
         .fetch_optional(self.db.pool())
         .await
         .map_err(database_error)?;
@@ -207,6 +232,7 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
 
         let existing: Option<(String, i64)> = sqlx::query_as(
             "SELECT id, quantity FROM cart_items WHERE cart_id = ? AND variant_id = ?",
@@ -258,8 +284,9 @@ impl CartService {
         }
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Sets a line quantity. A quantity of zero removes the line.
@@ -274,6 +301,7 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
         let found: Option<String> =
             sqlx::query_scalar("SELECT id FROM cart_items WHERE id = ? AND cart_id = ?")
                 .bind(item_id.as_str())
@@ -312,8 +340,9 @@ impl CartService {
         }
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Removes one line item.
@@ -325,6 +354,7 @@ impl CartService {
         self.ensure_open(cart_id).await?;
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
 
         let result = sqlx::query("DELETE FROM cart_items WHERE id = ? AND cart_id = ?")
             .bind(item_id.as_str())
@@ -343,8 +373,9 @@ impl CartService {
             .map_err(database_error)?;
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Removes every line item from the cart.
@@ -352,6 +383,7 @@ impl CartService {
         self.ensure_open(cart_id).await?;
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
 
         sqlx::query("DELETE FROM cart_items WHERE cart_id = ?")
             .bind(cart_id.as_str())
@@ -365,29 +397,23 @@ impl CartService {
             .map_err(database_error)?;
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Attaches an authenticated customer and optionally updates the email.
     ///
     /// A cart that already belongs to a different customer is rejected with a
-    /// conflict rather than silently transferred.
+    /// conflict rather than silently transferred. Ownership and lifecycle are
+    /// decided inside the immediate transaction and the update is conditional
+    /// so a concurrent attach cannot be lost.
     pub async fn attach_customer(
         &self,
         cart_id: &CartId,
         customer_id: &CustomerId,
         email: Option<String>,
     ) -> Result<Cart, AppError> {
-        let row = self.ensure_open(cart_id).await?;
-        if let Some(existing) = row.customer_id.as_deref()
-            && existing != customer_id.as_str()
-        {
-            return Err(AppError::conflict(
-                "cart already belongs to a different customer",
-            ));
-        }
-
         let email = match email {
             Some(value) => {
                 validate_email(&value, "email")?;
@@ -397,19 +423,46 @@ impl CartService {
         };
 
         let now = now_timestamp();
-        sqlx::query(
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let row = Self::cart_row_tx(&mut tx, cart_id).await?;
+        Self::check_open(&row)?;
+        if let Some(existing) = row.customer_id.as_deref()
+            && existing != customer_id.as_str()
+        {
+            return Err(AppError::conflict(
+                "cart already belongs to a different customer",
+            ));
+        }
+
+        let result = sqlx::query(
             "UPDATE carts SET customer_id = ?, email = COALESCE(?, email), updated_at = ? \
-             WHERE id = ?",
+             WHERE id = ? AND status = 'open' \
+             AND (expires_at IS NULL OR expires_at > ?) \
+             AND (customer_id IS NULL OR customer_id = ?)",
         )
         .bind(customer_id.as_str())
         .bind(email.as_deref())
         .bind(now)
         .bind(cart_id.as_str())
-        .execute(self.db.pool())
+        .bind(now)
+        .bind(customer_id.as_str())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
 
-        self.get_cart(cart_id).await
+        if result.rows_affected() == 0 {
+            // The conditional update lost: classify the current state so a
+            // missing cart is not reported as an ownership conflict.
+            let current = Self::cart_row_tx(&mut tx, cart_id).await?;
+            Self::check_open(&current)?;
+            return Err(AppError::conflict(
+                "cart already belongs to a different customer",
+            ));
+        }
+
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(cart)
     }
 
     /// Sets the contact email.
@@ -418,14 +471,18 @@ impl CartService {
         validate_email(email, "email")?;
         let email = normalize_email(email);
         let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
         sqlx::query("UPDATE carts SET email = ?, updated_at = ? WHERE id = ?")
             .bind(email)
             .bind(now)
             .bind(cart_id.as_str())
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
-        self.get_cart(cart_id).await
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(cart)
     }
 
     /// Sets the shipping address snapshot.
@@ -465,12 +522,22 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
 
         sqlx::query("DELETE FROM cart_shipping_methods WHERE cart_id = ?")
             .bind(cart_id.as_str())
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        // Shipping-scoped tax lines describe the replaced method; keeping them
+        // would leave stale tax on the aggregate.
+        sqlx::query(
+            "DELETE FROM cart_tax_lines WHERE cart_id = ? AND shipping_method_id IS NOT NULL",
+        )
+        .bind(cart_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
         sqlx::query(
             "INSERT INTO cart_shipping_methods (id, cart_id, shipping_option_id, name, amount, \
              currency_code, is_tax_inclusive, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -482,15 +549,16 @@ impl CartService {
         .bind(input.amount)
         .bind(shipping_currency.as_str())
         .bind(input.is_tax_inclusive)
-        .bind(json_string(&input.data))
+        .bind(json_string(&input.data)?)
         .bind(now)
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Adds a cart-level discount snapshot.
@@ -504,25 +572,13 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query(
-            "INSERT INTO cart_discounts (id, cart_id, promotion_id, code, amount, is_automatic, \
-             metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(row_id("disc"))
-        .bind(cart_id.as_str())
-        .bind(input.promotion_id.as_ref().map(PromotionId::as_str))
-        .bind(input.code.as_deref())
-        .bind(input.amount)
-        .bind(input.is_automatic)
-        .bind(input.metadata.to_json_string())
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
+        upsert_discount(&mut tx, cart_id, &input, now).await?;
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Removes every discount produced by a promotion.
@@ -534,6 +590,7 @@ impl CartService {
         self.ensure_open(cart_id).await?;
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
 
         let result =
             sqlx::query("DELETE FROM cart_discounts WHERE cart_id = ? AND promotion_id = ?")
@@ -547,8 +604,9 @@ impl CartService {
         }
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Replaces every cart-level discount, as promotion workflows do.
@@ -564,32 +622,20 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
         sqlx::query("DELETE FROM cart_discounts WHERE cart_id = ?")
             .bind(cart_id.as_str())
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
-        for discount in discounts {
-            sqlx::query(
-                "INSERT INTO cart_discounts (id, cart_id, promotion_id, code, amount, \
-                 is_automatic, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(row_id("disc"))
-            .bind(cart_id.as_str())
-            .bind(discount.promotion_id.as_ref().map(PromotionId::as_str))
-            .bind(discount.code.as_deref())
-            .bind(discount.amount)
-            .bind(discount.is_automatic)
-            .bind(discount.metadata.to_json_string())
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
+        for discount in &discounts {
+            upsert_discount(&mut tx, cart_id, discount, now).await?;
         }
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Appends one adjustment to a line item.
@@ -604,6 +650,7 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
         ensure_item_belongs_to_cart(&mut tx, cart_id, item_id).await?;
         insert_adjustment(
             &mut tx,
@@ -616,8 +663,9 @@ impl CartService {
         .await?;
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Replaces every adjustment attached to one line item.
@@ -634,6 +682,7 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
         ensure_item_belongs_to_cart(&mut tx, cart_id, item_id).await?;
         sqlx::query("DELETE FROM cart_item_adjustments WHERE cart_item_id = ?")
             .bind(item_id.as_str())
@@ -653,8 +702,9 @@ impl CartService {
         }
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Replaces the shipping adjustments on the cart's single shipping method.
@@ -670,6 +720,7 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
         let method_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM cart_shipping_methods WHERE cart_id = ? \
              ORDER BY created_at ASC, id ASC LIMIT 1",
@@ -700,8 +751,9 @@ impl CartService {
         }
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Replaces every tax line on the cart.
@@ -717,6 +769,43 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
+
+        // Reject tax lines whose scoped targets do not belong to this cart
+        // before replacing the existing snapshot.
+        for line in &lines {
+            if let Some(item_id) = &line.cart_item_id {
+                let found: Option<String> =
+                    sqlx::query_scalar("SELECT id FROM cart_items WHERE id = ? AND cart_id = ?")
+                        .bind(item_id.as_str())
+                        .bind(cart_id.as_str())
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(database_error)?;
+                if found.is_none() {
+                    return Err(AppError::validation(
+                        "tax line cart_item_id does not belong to the cart",
+                    ));
+                }
+            }
+            if let Some(shipping_method_id) = &line.shipping_method_id {
+                let found: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM cart_shipping_methods \
+                     WHERE cart_id = ? AND shipping_option_id = ?",
+                )
+                .bind(cart_id.as_str())
+                .bind(shipping_method_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+                if found.is_none() {
+                    return Err(AppError::validation(
+                        "tax line shipping_method_id does not belong to the cart",
+                    ));
+                }
+            }
+        }
+
         sqlx::query("DELETE FROM cart_tax_lines WHERE cart_id = ?")
             .bind(cart_id.as_str())
             .execute(&mut *tx)
@@ -743,8 +832,9 @@ impl CartService {
         }
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Updates a line's unit price snapshot.
@@ -770,6 +860,7 @@ impl CartService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
         let result = sqlx::query(
             "UPDATE cart_items SET unit_price = ?, updated_at = ? WHERE id = ? AND cart_id = ?",
         )
@@ -785,8 +876,9 @@ impl CartService {
         }
 
         Self::touch_cart(&mut tx, cart_id, now).await?;
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     /// Recalculates and returns the current totals.
@@ -797,6 +889,7 @@ impl CartService {
     /// Marks an open cart as completed.
     pub async fn complete_cart(&self, cart_id: &CartId) -> Result<Cart, AppError> {
         let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let result = sqlx::query(
             "UPDATE carts SET status = 'completed', completed_at = ?, updated_at = ? \
              WHERE id = ? AND status = 'open'",
@@ -804,31 +897,36 @@ impl CartService {
         .bind(now)
         .bind(now)
         .bind(cart_id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
 
         if result.rows_affected() == 0 {
-            let _ = self.cart_row(cart_id).await?;
+            let _ = Self::cart_row_tx(&mut tx, cart_id).await?;
             return Err(AppError::conflict("only open carts can be completed"));
         }
-        self.get_cart(cart_id).await
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(cart)
     }
 
     /// Expires every open cart whose expiration timestamp passed.
     ///
     /// Returns the number of carts transitioned to `expired`.
     pub async fn expire_due(&self, now: i64) -> Result<u64, AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let result = sqlx::query(
             "UPDATE carts SET status = 'expired', updated_at = ? \
              WHERE status = 'open' AND expires_at IS NOT NULL AND expires_at <= ?",
         )
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
-        Ok(result.rows_affected())
+        let affected = result.rows_affected();
+        tx.commit().await.map_err(database_error)?;
+        Ok(affected)
     }
 
     /// Lists carts, optionally filtered by customer.
@@ -898,6 +996,7 @@ impl CartService {
         };
 
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        Self::ensure_open_tx(&mut tx, cart_id).await?;
         sqlx::query(
             "INSERT INTO cart_addresses (id, cart_id, type, first_name, last_name, company, \
              address_1, address_2, city, province, postal_code, country_code, phone, metadata, \
@@ -931,15 +1030,16 @@ impl CartService {
 
         let update = format!("UPDATE carts SET {column} = ?, updated_at = ? WHERE id = ?");
         sqlx::query(&update)
-            .bind(json_string(&address))
+            .bind(json_string(&address)?)
             .bind(now)
             .bind(cart_id.as_str())
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
 
+        let cart = Self::load_aggregate(&mut tx, cart_id).await?;
         tx.commit().await.map_err(database_error)?;
-        self.get_cart(cart_id).await
+        Ok(cart)
     }
 
     async fn cart_row(&self, cart_id: &CartId) -> Result<CartRow, AppError> {
@@ -951,23 +1051,56 @@ impl CartService {
             .ok_or_else(|| AppError::not_found("cart", cart_id))
     }
 
+    async fn cart_row_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        cart_id: &CartId,
+    ) -> Result<CartRow, AppError> {
+        sqlx::query_as::<_, CartRow>(CART_COLUMNS)
+            .bind(cart_id.as_str())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("cart", cart_id))
+    }
+
     async fn ensure_open(&self, cart_id: &CartId) -> Result<CartRow, AppError> {
         let row = self.cart_row(cart_id).await?;
-        if !CartStatus::from_db(&row.status).is_open() {
-            return Err(AppError::conflict("only open carts can be modified"));
-        }
+        Self::check_open(&row)?;
         Ok(row)
     }
 
-    async fn load_items(&self, cart_id: &CartId) -> Result<Vec<CartItem>, AppError> {
+    async fn ensure_open_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        cart_id: &CartId,
+    ) -> Result<CartRow, AppError> {
+        let row = Self::cart_row_tx(tx, cart_id).await?;
+        Self::check_open(&row)?;
+        Ok(row)
+    }
+
+    fn check_open(row: &CartRow) -> Result<(), AppError> {
+        if !CartStatus::from_db(&row.status).is_open()
+            || row
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= now_timestamp())
+        {
+            return Err(AppError::conflict("only open carts can be modified"));
+        }
+        Ok(())
+    }
+
+    async fn load_items(
+        tx: &mut Transaction<'_, Sqlite>,
+        cart_id: &CartId,
+    ) -> Result<Vec<CartItem>, AppError> {
         let rows = sqlx::query_as::<_, CartItemRow>(ITEM_COLUMNS)
             .bind(cart_id.as_str())
-            .fetch_all(self.db.pool())
+            .fetch_all(&mut **tx)
             .await
             .map_err(database_error)?;
         let adjustment_rows = sqlx::query_as::<_, ItemAdjustmentRow>(ITEM_ADJUSTMENT_COLUMNS)
             .bind(cart_id.as_str())
-            .fetch_all(self.db.pool())
+            .fetch_all(&mut **tx)
             .await
             .map_err(database_error)?;
 
@@ -1008,10 +1141,13 @@ impl CartService {
         Ok(items)
     }
 
-    async fn load_discounts(&self, cart_id: &CartId) -> Result<Vec<CartDiscount>, AppError> {
+    async fn load_discounts(
+        tx: &mut Transaction<'_, Sqlite>,
+        cart_id: &CartId,
+    ) -> Result<Vec<CartDiscount>, AppError> {
         let rows = sqlx::query_as::<_, DiscountRow>(DISCOUNT_COLUMNS)
             .bind(cart_id.as_str())
-            .fetch_all(self.db.pool())
+            .fetch_all(&mut **tx)
             .await
             .map_err(database_error)?;
         Ok(rows
@@ -1027,12 +1163,12 @@ impl CartService {
     }
 
     async fn load_shipping_methods(
-        &self,
+        tx: &mut Transaction<'_, Sqlite>,
         cart_id: &CartId,
     ) -> Result<Vec<CartShippingMethod>, AppError> {
         let rows = sqlx::query_as::<_, ShippingMethodRow>(SHIPPING_METHOD_COLUMNS)
             .bind(cart_id.as_str())
-            .fetch_all(self.db.pool())
+            .fetch_all(&mut **tx)
             .await
             .map_err(database_error)?;
         let mut methods = Vec::with_capacity(rows.len());
@@ -1043,19 +1179,19 @@ impl CartService {
                 amount: row.amount,
                 currency: CurrencyCode::new(row.currency_code)?,
                 is_tax_inclusive: row.is_tax_inclusive,
-                data: parse_data(&row.data),
+                data: parse_data(&row.data)?,
             });
         }
         Ok(methods)
     }
 
     async fn load_shipping_adjustments(
-        &self,
+        tx: &mut Transaction<'_, Sqlite>,
         cart_id: &CartId,
     ) -> Result<Vec<CartAdjustment>, AppError> {
         let rows = sqlx::query_as::<_, ShippingAdjustmentRow>(SHIPPING_ADJUSTMENT_COLUMNS)
             .bind(cart_id.as_str())
-            .fetch_all(self.db.pool())
+            .fetch_all(&mut **tx)
             .await
             .map_err(database_error)?;
         Ok(rows
@@ -1069,10 +1205,13 @@ impl CartService {
             .collect())
     }
 
-    async fn load_tax_lines(&self, cart_id: &CartId) -> Result<Vec<CartTaxLine>, AppError> {
+    async fn load_tax_lines(
+        tx: &mut Transaction<'_, Sqlite>,
+        cart_id: &CartId,
+    ) -> Result<Vec<CartTaxLine>, AppError> {
         let rows = sqlx::query_as::<_, TaxLineRow>(TAX_LINE_COLUMNS)
             .bind(cart_id.as_str())
-            .fetch_all(self.db.pool())
+            .fetch_all(&mut **tx)
             .await
             .map_err(database_error)?;
         Ok(rows
@@ -1088,10 +1227,13 @@ impl CartService {
             .collect())
     }
 
-    async fn load_addresses(&self, cart_id: &CartId) -> Result<Addresses, AppError> {
+    async fn load_addresses(
+        tx: &mut Transaction<'_, Sqlite>,
+        cart_id: &CartId,
+    ) -> Result<Addresses, AppError> {
         let rows = sqlx::query_as::<_, AddressRow>(ADDRESS_COLUMNS)
             .bind(cart_id.as_str())
-            .fetch_all(self.db.pool())
+            .fetch_all(&mut **tx)
             .await
             .map_err(database_error)?;
         let mut addresses = Addresses::default();
@@ -1308,16 +1450,48 @@ fn validate_tax_line_input(input: &TaxLineInput) -> Result<(), AppError> {
     validate_non_negative_amount(input.amount, "tax amount")
 }
 
-fn json_string<T: Serialize>(value: &T) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned())
+async fn upsert_discount(
+    tx: &mut Transaction<'_, Sqlite>,
+    cart_id: &CartId,
+    input: &DiscountInput,
+    created_at: i64,
+) -> Result<(), AppError> {
+    // The partial unique indexes on (cart_id, promotion_id) and (cart_id, code)
+    // make retried or concurrent applications idempotent: a matching row is
+    // refreshed instead of duplicated.
+    sqlx::query(
+        "INSERT INTO cart_discounts (id, cart_id, promotion_id, code, amount, is_automatic, \
+         metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT DO UPDATE SET amount = excluded.amount, \
+         is_automatic = excluded.is_automatic, metadata = excluded.metadata",
+    )
+    .bind(row_id("disc"))
+    .bind(cart_id.as_str())
+    .bind(input.promotion_id.as_ref().map(PromotionId::as_str))
+    .bind(input.code.as_deref())
+    .bind(input.amount)
+    .bind(input.is_automatic)
+    .bind(input.metadata.to_json_string())
+    .bind(created_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
 }
 
-fn parse_address(raw: &str) -> Address {
-    serde_json::from_str(raw).unwrap_or_default()
+fn json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
+    serde_json::to_string(value)
+        .map_err(|error| AppError::internal(format!("failed to serialize cart snapshot: {error}")))
 }
 
-fn parse_data(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or(Value::Null)
+fn parse_address(raw: &str) -> Result<Address, AppError> {
+    serde_json::from_str(raw)
+        .map_err(|error| AppError::database(format!("malformed cart address snapshot: {error}")))
+}
+
+fn parse_data(raw: &str) -> Result<Value, AppError> {
+    serde_json::from_str(raw)
+        .map_err(|error| AppError::database(format!("malformed shipping snapshot: {error}")))
 }
 
 /// Generates an opaque surrogate key for a child row.
@@ -1336,7 +1510,7 @@ mod tests {
     use fastcart_infrastructure::StoreDatabase;
     use fastcart_kernel::{
         CurrencyCode, CustomerId, LineItemId, Metadata, Pagination, ProductId, PromotionId,
-        ShippingOptionId, StoreId, VariantId,
+        ShippingOptionId, StoreId, VariantId, now_timestamp,
     };
 
     use super::CartService;
@@ -1971,5 +2145,179 @@ mod tests {
 
         let missing = fastcart_kernel::CartId::new();
         assert!(service.recalculate(&missing).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn attach_customer_never_overwrites_a_concurrent_owner() {
+        let service = service().await;
+        let cart = create_cart(&service, "USD").await;
+        let first = CustomerId::new();
+        let second = CustomerId::new();
+
+        // Simulate another writer attaching a customer after this request
+        // loaded the cart but before it updated it.
+        sqlx::query("UPDATE carts SET customer_id = ? WHERE id = ?")
+            .bind(first.as_str())
+            .bind(cart.id.as_str())
+            .execute(service.db.pool())
+            .await
+            .unwrap();
+
+        let error = service
+            .attach_customer(&cart.id, &second, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+
+        let stored = service.get_cart(&cart.id).await.unwrap();
+        assert_eq!(stored.customer_id.as_ref(), Some(&first));
+    }
+
+    #[tokio::test]
+    async fn add_item_on_a_completed_cart_is_rejected() {
+        let service = service().await;
+        let cart = create_cart(&service, "USD").await;
+        service.complete_cart(&cart.id).await.unwrap();
+
+        let error = service
+            .add_item(&cart.id, item_input("USD", variant(), 100, 1))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+
+        let stored = service.get_cart(&cart.id).await.unwrap();
+        assert!(stored.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn changing_shipping_method_clears_stale_shipping_tax_lines() {
+        let service = service().await;
+        let cart = create_cart(&service, "USD").await;
+        let cart = service
+            .add_item(&cart.id, item_input("USD", variant(), 1_000, 1))
+            .await
+            .unwrap();
+        let item_id = cart.items[0].id.clone();
+
+        let first_shipping = shipping_input("USD", 500);
+        let first_option = first_shipping.shipping_option_id.clone();
+        let cart = service
+            .set_shipping_method(&cart.id, first_shipping)
+            .await
+            .unwrap();
+
+        let cart = service
+            .replace_tax_lines(
+                &cart.id,
+                vec![
+                    TaxLineInput {
+                        name: "Item tax".to_owned(),
+                        rate_bps: 1_000,
+                        amount: 100,
+                        is_tax_inclusive: false,
+                        cart_item_id: Some(item_id),
+                        shipping_method_id: None,
+                    },
+                    TaxLineInput {
+                        name: "Shipping tax".to_owned(),
+                        rate_bps: 1_000,
+                        amount: 50,
+                        is_tax_inclusive: false,
+                        cart_item_id: None,
+                        shipping_method_id: Some(first_option.to_string()),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(cart.tax_lines.len(), 2);
+
+        let cart = service
+            .set_shipping_method(&cart.id, shipping_input("USD", 700))
+            .await
+            .unwrap();
+        assert_eq!(cart.tax_lines.len(), 1);
+        assert_eq!(cart.tax_lines[0].name, "Item tax");
+        assert!(
+            cart.tax_lines
+                .iter()
+                .all(|line| line.shipping_method_id.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn applying_the_same_discount_twice_updates_one_row() {
+        let service = service().await;
+        let cart = create_cart(&service, "USD").await;
+        let cart = service
+            .add_item(&cart.id, item_input("USD", variant(), 1_000, 1))
+            .await
+            .unwrap();
+        let promotion = PromotionId::new();
+        let discount = |amount| DiscountInput {
+            promotion_id: Some(promotion.clone()),
+            code: Some("SAVE".to_owned()),
+            amount,
+            is_automatic: false,
+            metadata: Metadata::empty(),
+        };
+
+        let cart = service.add_discount(&cart.id, discount(100)).await.unwrap();
+        assert_eq!(cart.discounts.len(), 1);
+
+        let cart = service.add_discount(&cart.id, discount(250)).await.unwrap();
+        assert_eq!(cart.discounts.len(), 1);
+        assert_eq!(cart.discounts[0].amount, 250);
+        assert_eq!(cart.totals.discount_total, 250);
+    }
+
+    #[tokio::test]
+    async fn an_expired_but_unswept_cart_is_not_active() {
+        let service = service().await;
+        let customer = CustomerId::new();
+        let cart = service
+            .create_cart(CreateCartInput {
+                customer_id: Some(customer.clone()),
+                ..create_input("USD")
+            })
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE carts SET expires_at = ? WHERE id = ?")
+            .bind(now_timestamp() - 1)
+            .bind(cart.id.as_str())
+            .execute(service.db.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            service
+                .active_cart_for_customer(&customer)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let error = service
+            .add_item(&cart.id, item_input("USD", variant(), 100, 1))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn malformed_stored_address_snapshot_is_a_database_error() {
+        let service = service().await;
+        let cart = create_cart(&service, "USD").await;
+
+        sqlx::query("UPDATE carts SET shipping_address = ? WHERE id = ?")
+            .bind("{not json")
+            .bind(cart.id.as_str())
+            .execute(service.db.pool())
+            .await
+            .unwrap();
+
+        let error = service.get_cart(&cart.id).await.unwrap_err();
+        assert!(matches!(error, fastcart_kernel::AppError::Database(_)));
     }
 }

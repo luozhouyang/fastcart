@@ -3,7 +3,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, DomainEventEnvelope, Metadata, Timestamp, WebhookDeliveryId, WebhookId,
     now_timestamp, validate_metadata,
@@ -35,6 +35,7 @@ pub struct WebhookService {
     client: reqwest::Client,
     max_attempts: u32,
     allow_private_networks: bool,
+    audit: Option<AuditActor>,
 }
 
 impl WebhookService {
@@ -50,7 +51,36 @@ impl WebhookService {
                 .expect("the webhook HTTP client configuration is valid"),
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             allow_private_networks: false,
+            audit: None,
         }
+    }
+
+    /// Records endpoint mutations in the store audit outbox.
+    ///
+    /// When an actor is set, every mutating endpoint method appends its audit
+    /// entry in the same transaction as the change.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit = actor_id.map(|id| AuditActor::new(id, self.db.store_id().as_str()));
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: serde_json::Value,
+    ) -> Result<(), AppError> {
+        if let Some(audit) = &self.audit {
+            audit
+                .append(&mut **tx, action, resource_type, resource_id, data)
+                .await
+                .map_err(database_error)?;
+        }
+        Ok(())
     }
 
     /// Allows loopback and private destinations. Only for tests and local
@@ -80,6 +110,8 @@ impl WebhookService {
         &self,
         input: CreateWebhookEndpointInput,
     ) -> Result<CreatedWebhookEndpoint, AppError> {
+        let audit_url = sanitize_audit_url(&input.url);
+        let audit_events = input.events.clone();
         let url = validate_url(&input.url, self.allow_private_networks)?;
         let events = normalize_events(input.events)?;
         let secret = match input.secret {
@@ -94,6 +126,7 @@ impl WebhookService {
 
         let id = WebhookId::new();
         let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         sqlx::query(
             "INSERT INTO webhook_endpoints
              (id, url, secret, is_active, events, metadata, created_at, updated_at)
@@ -106,9 +139,18 @@ impl WebhookService {
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "webhook.created",
+            "webhook_endpoint",
+            id.as_str(),
+            serde_json::json!({"url": audit_url, "events": audit_events}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         Ok(CreatedWebhookEndpoint {
             endpoint: self.get_endpoint(&id).await?,
@@ -143,15 +185,24 @@ impl WebhookService {
             Some(url) => validate_url(&url, self.allow_private_networks)?,
             None => current.url.clone(),
         };
+        let current_events = current.events()?;
         let events = match input.events {
             Some(events) => normalize_events(events)?,
-            None => current.events()?,
+            None => current_events.clone(),
         };
         let is_active = input
             .is_active
             .map_or(current.is_active != 0, |active| active);
+        let unchanged =
+            url == current.url && events == current_events && is_active == (current.is_active != 0);
+        if unchanged {
+            // A byte-identical PATCH is a true no-op: no write, no updated_at
+            // bump and no audit row.
+            return self.get_endpoint(id).await;
+        }
 
-        sqlx::query(
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let result = sqlx::query(
             "UPDATE webhook_endpoints
              SET url = ?, events = ?, is_active = ?, updated_at = ?
              WHERE id = ?",
@@ -161,40 +212,77 @@ impl WebhookService {
         .bind(i64::from(is_active))
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            // Roll back and report the concurrent delete before writing audit.
+            return Err(AppError::not_found("webhook endpoint", id));
+        }
+        self.append_audit(
+            &mut tx,
+            "webhook.updated",
+            "webhook_endpoint",
+            id.as_str(),
+            serde_json::json!({
+                "url": sanitize_audit_url(&url),
+                "events": events,
+                "is_active": is_active,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.get_endpoint(id).await
     }
 
     /// Deletes an endpoint and its delivery history.
     pub async fn delete_endpoint(&self, id: &WebhookId) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let result = sqlx::query("DELETE FROM webhook_endpoints WHERE id = ?")
             .bind(id.as_str())
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("webhook endpoint", id));
         }
+        self.append_audit(
+            &mut tx,
+            "webhook.deleted",
+            "webhook_endpoint",
+            id.as_str(),
+            serde_json::Value::Null,
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
     /// Rotates the signing secret and returns it exactly once.
     pub async fn rotate_secret(&self, id: &WebhookId) -> Result<String, AppError> {
         let secret = generate_secret();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let result =
             sqlx::query("UPDATE webhook_endpoints SET secret = ?, updated_at = ? WHERE id = ?")
                 .bind(&secret)
                 .bind(now_timestamp())
                 .bind(id.as_str())
-                .execute(self.db.pool())
+                .execute(&mut *tx)
                 .await
                 .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("webhook endpoint", id));
         }
+        self.append_audit(
+            &mut tx,
+            "webhook.secret_rotated",
+            "webhook_endpoint",
+            id.as_str(),
+            serde_json::Value::Null,
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(secret)
     }
 
@@ -340,7 +428,13 @@ impl WebhookService {
                 continue;
             }
 
-            let outcome = self.send(&row, &endpoint, now).await?;
+            let outcome = match self.send(&row, &endpoint, now).await {
+                Ok(outcome) => outcome,
+                // A delivery-specific failure (for example a host that no
+                // longer resolves) must not abandon the rest of the claimed
+                // batch. Record it and continue with the next delivery.
+                Err(error) => self.record_send_failure(&row, now, &error).await?,
+            };
             match outcome {
                 SendOutcome::Delivered => report.delivered += 1,
                 SendOutcome::Retried => report.retried += 1,
@@ -348,6 +442,43 @@ impl WebhookService {
             }
         }
         Ok(report)
+    }
+
+    /// Records a delivery-level send failure and reschedules it when attempts
+    /// remain. Infrastructure failures while persisting the outcome propagate.
+    async fn record_send_failure(
+        &self,
+        row: &DeliveryRow,
+        now: Timestamp,
+        error: &AppError,
+    ) -> Result<SendOutcome, AppError> {
+        let retry = row.attempts < i64::from(self.max_attempts);
+        let status = if retry {
+            DeliveryStatus::Pending
+        } else {
+            DeliveryStatus::Failed
+        };
+        let next_retry_at = retry.then(|| now.saturating_add(retry_delay_seconds(row.attempts)));
+        let response_body = truncate_bytes(error.to_string().as_bytes());
+        sqlx::query(
+            "UPDATE webhook_deliveries
+             SET status = ?, response_status = NULL, response_body = ?,
+                 next_retry_at = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(status.as_str())
+        .bind(&response_body)
+        .bind(next_retry_at)
+        .bind(now_timestamp())
+        .bind(&row.id)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(if retry {
+            SendOutcome::Retried
+        } else {
+            SendOutcome::Failed
+        })
     }
 
     async fn fetch_endpoint_row(&self, id: &WebhookId) -> Result<EndpointRow, AppError> {
@@ -583,6 +714,19 @@ impl DeliveryRow {
     }
 }
 
+/// Strips query parameters and fragments so audit payloads never persist
+/// secrets that callers may have embedded in the endpoint URL.
+fn sanitize_audit_url(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(mut url) => {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => raw.to_owned(),
+    }
+}
+
 fn validate_url(raw: &str, allow_private: bool) -> Result<String, AppError> {
     let url = raw.trim();
     if url.is_empty() {
@@ -811,7 +955,7 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::post;
     use axum::serve;
-    use fastcart_infrastructure::StoreDatabase;
+    use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
     use fastcart_kernel::{DomainEventEnvelope, StoreId, now_timestamp};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -995,6 +1139,151 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn endpoint_mutations_append_audit_entries_atomically() {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = WebhookService::new(db.clone())
+            .with_private_networks_allowed(true)
+            .with_audit_actor(Some("user_1".to_owned()));
+
+        let created = service
+            .create_endpoint(CreateWebhookEndpointInput {
+                url: "https://example.com/hooks".to_owned(),
+                events: vec!["order.placed".to_owned()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        service
+            .update_endpoint(
+                &created.endpoint.id,
+                UpdateWebhookEndpointInput {
+                    is_active: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        service.rotate_secret(&created.endpoint.id).await.unwrap();
+        service.delete_endpoint(&created.endpoint.id).await.unwrap();
+
+        let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+        assert_eq!(
+            audits
+                .iter()
+                .map(|audit| audit.action.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "webhook.created",
+                "webhook.updated",
+                "webhook.secret_rotated",
+                "webhook.deleted",
+            ]
+        );
+        assert!(audits.iter().all(|audit| audit.processed_at.is_none()));
+        assert!(
+            audits
+                .iter()
+                .all(|audit| audit.actor_id.as_deref() == Some("user_1"))
+        );
+
+        // A failed deletion is a no-op and must not append an audit row.
+        assert!(service.delete_endpoint(&created.endpoint.id).await.is_err());
+        assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn no_op_updates_skip_audit_and_missing_endpoints_return_not_found() {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = WebhookService::new(db.clone())
+            .with_private_networks_allowed(true)
+            .with_audit_actor(Some("user_1".to_owned()));
+        let created = service
+            .create_endpoint(CreateWebhookEndpointInput {
+                url: "https://example.com/hooks".to_owned(),
+                events: vec!["order.placed".to_owned()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let unchanged = service
+            .update_endpoint(
+                &created.endpoint.id,
+                UpdateWebhookEndpointInput {
+                    url: Some(created.endpoint.url.clone()),
+                    events: Some(created.endpoint.events.clone()),
+                    is_active: Some(true),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged, created.endpoint);
+        assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 1);
+
+        service.delete_endpoint(&created.endpoint.id).await.unwrap();
+        let error = service
+            .update_endpoint(
+                &created.endpoint.id,
+                UpdateWebhookEndpointInput {
+                    is_active: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.is_not_found());
+        let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+        assert_eq!(
+            audits
+                .iter()
+                .map(|audit| audit.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["webhook.created", "webhook.deleted"]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_errors_do_not_abort_the_delivery_batch() {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = WebhookService::new(db.clone());
+        let now = now_timestamp();
+        for (id, url) in [
+            ("wh_bad_one", "not a url one"),
+            ("wh_bad_two", "not a url two"),
+        ] {
+            sqlx::query(
+                "INSERT INTO webhook_endpoints
+                 (id, url, secret, is_active, events, metadata, created_at, updated_at)
+                 VALUES (?, ?, 'whsec_unused_invalid_secret', 1, ?, '{}', ?, ?)",
+            )
+            .bind(id)
+            .bind(url)
+            .bind(r#"["order.placed"]"#)
+            .bind(now)
+            .bind(now)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let event = DomainEventEnvelope::new("order.placed", None, serde_json::json!({}));
+        assert_eq!(service.fan_out(&event).await.unwrap(), 2);
+
+        let report = service.deliver_due(now, 10).await.unwrap();
+        assert_eq!(report.attempted, 2);
+        assert_eq!(report.retried, 2);
+        assert_eq!(report.failed, 0);
+
+        let delivering: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webhook_deliveries WHERE status = 'delivering'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(delivering, 0);
     }
 
     #[tokio::test]

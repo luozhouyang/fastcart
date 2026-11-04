@@ -111,6 +111,19 @@ impl CheckoutStatus {
     }
 }
 
+/// A cart line captured when the checkout was created.
+///
+/// Completion verifies the live cart against this snapshot so a cart edit
+/// between checkout creation and payment capture cannot place an order for
+/// different variants than the inventory reservation covers.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CheckoutCartItem {
+    /// Variant identifier.
+    pub variant_id: String,
+    /// Quantity checked out.
+    pub quantity: i64,
+}
+
 /// A checkout session converting a cart into an order.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CheckoutSession {
@@ -134,6 +147,8 @@ pub struct CheckoutSession {
     pub shipping_method: Value,
     /// Commercial totals snapshot.
     pub totals: Value,
+    /// Cart line snapshot captured at creation.
+    pub cart_items: Vec<CheckoutCartItem>,
     /// Applied promotion codes.
     pub promotion_codes: Vec<String>,
     /// Payment session attached to the checkout, if any.

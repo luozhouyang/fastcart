@@ -262,6 +262,7 @@ pub(crate) async fn render(
     data.insert(
         RESERVED_CONTEXT_KEY.to_owned(),
         build_context_data(
+            &context,
             &database,
             request.headers(),
             &store,

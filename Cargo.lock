@@ -1457,6 +1457,7 @@ dependencies = [
  "fastcart-email",
  "fastcart-infrastructure",
  "fastcart-kernel",
+ "fastcart-module-asset",
  "fastcart-module-cart",
  "fastcart-module-catalog",
  "fastcart-module-checkout",

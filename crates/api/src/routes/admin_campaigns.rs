@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::{StoreDb, record_store_audit};
+use super::StoreDb;
 use crate::dto::{PageInfo, PageResponse};
 use crate::state::AppContext;
 
@@ -209,13 +209,13 @@ async fn get_campaign(
     responses((status = 201, body = CampaignDto))
 )]
 async fn create_campaign(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateCampaignRequest>,
 ) -> ApiResult<(StatusCode, Json<CampaignDto>)> {
     authorize(&actor, "promotions.write")?;
     let campaign = PromotionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_campaign(CreateCampaignInput {
             name: request.name,
             description: request.description,
@@ -227,15 +227,6 @@ async fn create_campaign(
             metadata: request.metadata,
         })
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "campaign.created",
-        "campaign",
-        &campaign.id,
-        serde_json::json!({"name": campaign.name, "budget_limit": campaign.budget_limit}),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(CampaignDto::from(campaign))))
 }
 
@@ -249,7 +240,6 @@ async fn create_campaign(
     responses((status = 200, body = CampaignDto))
 )]
 async fn update_campaign(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -257,6 +247,7 @@ async fn update_campaign(
 ) -> ApiResult<Json<CampaignDto>> {
     authorize(&actor, "promotions.write")?;
     let campaign = PromotionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .update_campaign(
             &id,
             UpdateCampaignInput {
@@ -271,15 +262,6 @@ async fn update_campaign(
             },
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "campaign.updated",
-        "campaign",
-        &campaign.id,
-        serde_json::json!({"name": campaign.name, "budget_limit": campaign.budget_limit}),
-    )
-    .await;
     Ok(Json(CampaignDto::from(campaign)))
 }
 
@@ -292,22 +274,15 @@ async fn update_campaign(
     responses((status = 204))
 )]
 async fn delete_campaign(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "promotions.write")?;
-    PromotionService::new(db).delete_campaign(&id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "campaign.deleted",
-        "campaign",
-        &id,
-        serde_json::Value::Null,
-    )
-    .await;
+    PromotionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .delete_campaign(&id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -342,7 +317,6 @@ async fn list_promotions(
     responses((status = 204))
 )]
 async fn link_promotion(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -350,17 +324,9 @@ async fn link_promotion(
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "promotions.write")?;
     PromotionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .link_promotion(&id, &request.promotion_id)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "campaign.promotion_linked",
-        "campaign",
-        &id,
-        serde_json::json!({"promotion_id": request.promotion_id}),
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -373,23 +339,14 @@ async fn link_promotion(
     responses((status = 204))
 )]
 async fn unlink_promotion(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, promotion_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "promotions.write")?;
     PromotionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .unlink_promotion(&id, &promotion_id)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "campaign.promotion_unlinked",
-        "campaign",
-        &id,
-        serde_json::json!({"promotion_id": promotion_id}),
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }

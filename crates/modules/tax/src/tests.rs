@@ -550,3 +550,81 @@ async fn deleting_a_region_removes_its_rates() {
         Err(AppError::NotFound(_))
     ));
 }
+
+#[tokio::test]
+async fn duplicate_rate_for_region_and_category_conflicts() {
+    let (_db, service) = setup().await;
+    let region_id = region(&service, "US", None).await;
+    let standard = category(&service, "standard").await;
+    rate(&service, &region_id, Some(&standard), 1000, false, false).await;
+
+    let error = service
+        .create_rate(CreateTaxRateInput {
+            tax_region_id: region_id.clone(),
+            tax_category_id: Some(standard),
+            name: "Second".to_owned(),
+            rate_bps: 900,
+            is_inclusive: false,
+            is_default: false,
+            metadata: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn setting_a_new_default_clears_the_previous_region_default() {
+    let (_db, service) = setup().await;
+    let region_id = region(&service, "US", None).await;
+    let standard = category(&service, "standard").await;
+    let reduced = category(&service, "reduced").await;
+
+    let first = rate(&service, &region_id, Some(&standard), 1000, false, true).await;
+    let second = rate(&service, &region_id, Some(&reduced), 2500, false, true).await;
+
+    let (resolved, _) = service
+        .resolve_rate(&country("US"), None, None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.id, second.id);
+
+    let rates = service.list_rates(&region_id).await.unwrap();
+    assert_eq!(rates.iter().filter(|rate| rate.is_default).count(), 1);
+    assert!(
+        !rates
+            .iter()
+            .find(|rate| rate.id == first.id)
+            .unwrap()
+            .is_default
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_referenced_category_conflicts() {
+    let (_db, service) = setup().await;
+    let region_id = region(&service, "US", None).await;
+    let standard = category(&service, "standard").await;
+    let created = rate(&service, &region_id, Some(&standard), 1000, false, false).await;
+
+    let error = service.delete_category(&standard).await.unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)));
+
+    service.delete_rate(&created.id).await.unwrap();
+    service.delete_category(&standard).await.unwrap();
+    assert!(matches!(
+        service.get_category(&standard).await,
+        Err(AppError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn negative_line_amounts_are_rejected() {
+    let (_db, service) = setup().await;
+    let error = service
+        .calculate_for_line(&country("US"), None, None, -1, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)));
+}

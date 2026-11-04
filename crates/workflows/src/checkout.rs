@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use fastcart_infrastructure::StoreDatabase;
-use fastcart_kernel::{AppError, CartId, CheckoutId, Metadata, now_timestamp};
+use fastcart_kernel::{AppError, CartId, CheckoutId, Metadata, PaymentSessionId, now_timestamp};
 use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::{
     CheckoutService, CheckoutSession, CheckoutStatus, CreateCheckoutInput,
@@ -200,14 +200,7 @@ impl CheckoutWorkflow {
                 )
                 .await
         {
-            let _ = self
-                .checkout
-                .transition(
-                    &checkout.id,
-                    CheckoutStatus::Failed,
-                    Some(&error.to_string()),
-                )
-                .await;
+            self.abort_checkout_creation(&checkout, &error, None).await;
             return Err(error);
         }
 
@@ -231,15 +224,7 @@ impl CheckoutWorkflow {
         {
             Ok(session) => session,
             Err(error) => {
-                let _ = self.inventory.release_checkout(&checkout.id).await;
-                let _ = self
-                    .checkout
-                    .transition(
-                        &checkout.id,
-                        CheckoutStatus::Failed,
-                        Some(&error.to_string()),
-                    )
-                    .await;
+                self.abort_checkout_creation(&checkout, &error, None).await;
                 return Err(error);
             }
         };
@@ -251,17 +236,92 @@ impl CheckoutWorkflow {
         {
             Ok(checkout) => Ok(checkout),
             Err(error) => {
-                let _ = self.inventory.release_checkout(&checkout.id).await;
-                let _ = self
-                    .checkout
-                    .transition(
-                        &checkout.id,
-                        CheckoutStatus::Failed,
-                        Some(&error.to_string()),
-                    )
+                self.abort_checkout_creation(&checkout, &error, Some(&session.id))
                     .await;
                 Err(error)
             }
+        }
+    }
+
+    /// Releases an incomplete checkout without orphaning a provider session.
+    ///
+    /// Release failures are retried and logged; the reservations also carry a
+    /// TTL and are swept by maintenance if both attempts fail.
+    async fn abort_checkout_creation(
+        &self,
+        checkout: &CheckoutSession,
+        error: &AppError,
+        payment_session: Option<&PaymentSessionId>,
+    ) {
+        let latest = self.checkout.get(&checkout.id).await.ok();
+        // A concurrent creator may already have attached its session. Leave
+        // that checkout and its reservations alone; only clean up our own work.
+        let another_runner_owns = latest.as_ref().is_some_and(|session| {
+            matches!(
+                session.status,
+                CheckoutStatus::PaymentPending | CheckoutStatus::OrderPlaced
+            )
+        });
+
+        if let Some(payment_session) = payment_session {
+            let already_attached = latest
+                .as_ref()
+                .and_then(|session| session.payment_session_id.as_ref())
+                == Some(payment_session);
+            if !already_attached
+                && let Err(cancel_error) =
+                    self.payment.cancel_session(payment_session.as_str()).await
+            {
+                tracing::warn!(
+                    checkout_id = %checkout.id,
+                    payment_session_id = %payment_session,
+                    error = %cancel_error,
+                    "failed to cancel the payment session of an aborted checkout"
+                );
+            }
+        }
+        if another_runner_owns {
+            return;
+        }
+
+        let mut released = false;
+        for attempt in 1..=2 {
+            match self.inventory.release_checkout(&checkout.id).await {
+                Ok(_) => {
+                    released = true;
+                    break;
+                }
+                Err(release_error) => {
+                    tracing::error!(
+                        checkout_id = %checkout.id,
+                        attempt,
+                        error = %release_error,
+                        "failed to release checkout reservations"
+                    );
+                }
+            }
+        }
+        if !released {
+            tracing::error!(
+                checkout_id = %checkout.id,
+                "checkout reservations could not be released; expiry will retry"
+            );
+        }
+
+        if let Err(transition_error) = self
+            .checkout
+            .transition(
+                &checkout.id,
+                CheckoutStatus::Failed,
+                Some(&error.to_string()),
+            )
+            .await
+        {
+            tracing::warn!(
+                checkout_id = %checkout.id,
+                error = %transition_error,
+                "failed to mark an aborted checkout as failed"
+            );
         }
     }
 
@@ -280,23 +340,7 @@ impl CheckoutWorkflow {
             .clone()
             .ok_or_else(|| AppError::conflict("checkout has no payment session"))?;
         if checkout.status == CheckoutStatus::OrderPlaced {
-            let order_id = checkout
-                .order_id
-                .clone()
-                .ok_or_else(|| AppError::conflict("checkout has no order"))?;
-            let order = self.order.get(&order_id).await?;
-            let payment = self
-                .payment
-                .payment_for_session_id(payment_session_id.as_str())
-                .await?;
-            if let Ok(cart) = self.carts.get_cart(&checkout.cart_id).await {
-                self.record_promotion_usage(&cart, &order).await;
-            }
-            return Ok(CompleteCheckoutResult {
-                order,
-                payment,
-                checkout,
-            });
+            return self.placed_result(&checkout).await;
         }
         if !matches!(
             checkout.status,
@@ -318,15 +362,26 @@ impl CheckoutWorkflow {
                 "cart totals changed since checkout was created",
             ));
         }
+        let mut live_items: Vec<(String, i64)> = cart
+            .items
+            .iter()
+            .map(|item| (item.variant_id.to_string(), item.quantity))
+            .collect();
+        live_items.sort();
+        let mut snapshot: Vec<(String, i64)> = checkout
+            .cart_items
+            .iter()
+            .map(|item| (item.variant_id.clone(), item.quantity))
+            .collect();
+        snapshot.sort();
+        if live_items != snapshot {
+            return Err(AppError::conflict(
+                "cart items changed since checkout was created",
+            ));
+        }
 
-        let checkout = if checkout.status == CheckoutStatus::PaymentPending {
-            self.checkout
-                .transition(checkout_id, CheckoutStatus::PaymentConfirmed, None)
-                .await?
-        } else {
-            checkout
-        };
-
+        // Capture before marking the checkout as confirmed. A session that
+        // looks paid but was never captured must never reach order placement.
         let payment = self.payment.capture(payment_session_id.as_str()).await?;
         if payment.status != PaymentSessionStatus::Captured {
             return Err(AppError::conflict(format!(
@@ -334,6 +389,36 @@ impl CheckoutWorkflow {
                 payment.status
             )));
         }
+
+        let checkout = match checkout.status {
+            CheckoutStatus::PaymentPending => {
+                match self
+                    .checkout
+                    .transition(checkout_id, CheckoutStatus::PaymentConfirmed, None)
+                    .await
+                {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        let latest = self.checkout.get(checkout_id).await?;
+                        match latest.status {
+                            CheckoutStatus::PaymentConfirmed => latest,
+                            CheckoutStatus::OrderPlaced => {
+                                return self.placed_result(&latest).await;
+                            }
+                            CheckoutStatus::Failed | CheckoutStatus::Canceled => {
+                                // The checkout was expired while we captured.
+                                // Refund the customer rather than orphan money.
+                                self.compensate(&latest, &payment, None).await;
+                                return Err(error);
+                            }
+                            _ => return Err(error),
+                        }
+                    }
+                }
+            }
+            CheckoutStatus::PaymentConfirmed => checkout,
+            _ => unreachable!("checkout status was validated above"),
+        };
 
         let mut items = Vec::with_capacity(cart.items.len());
         let mut subtotal = 0_i64;
@@ -481,6 +566,33 @@ impl CheckoutWorkflow {
         })
     }
 
+    async fn placed_result(
+        &self,
+        checkout: &CheckoutSession,
+    ) -> Result<CompleteCheckoutResult, AppError> {
+        let order_id = checkout
+            .order_id
+            .clone()
+            .ok_or_else(|| AppError::conflict("checkout has no order"))?;
+        let payment_session_id = checkout
+            .payment_session_id
+            .clone()
+            .ok_or_else(|| AppError::conflict("checkout has no payment session"))?;
+        let order = self.order.get(&order_id).await?;
+        let payment = self
+            .payment
+            .payment_for_session_id(payment_session_id.as_str())
+            .await?;
+        if let Ok(cart) = self.carts.get_cart(&checkout.cart_id).await {
+            self.record_promotion_usage(&cart, &order).await;
+        }
+        Ok(CompleteCheckoutResult {
+            order,
+            payment,
+            checkout: checkout.clone(),
+        })
+    }
+
     async fn finish_order(
         &self,
         checkout: &CheckoutSession,
@@ -503,16 +615,40 @@ impl CheckoutWorkflow {
         self.payment
             .assign_order(payment.id.as_str(), &order.id)
             .await?;
-        let current = self.order.get(&order.id).await?;
-        if current.payment_status != OrderPaymentStatus::Captured {
-            self.order
+        let mut order = self.order.get(&order.id).await?;
+        if order.payment_status != OrderPaymentStatus::Captured {
+            match self
+                .order
                 .set_payment_status(&order.id, OrderPaymentStatus::Captured)
-                .await?;
+                .await
+            {
+                Ok(updated) => order = updated,
+                Err(error) => {
+                    let latest = self.order.get(&order.id).await?;
+                    if latest.payment_status == OrderPaymentStatus::Captured {
+                        order = latest;
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
         }
-        if self.order.get(&order.id).await?.status == OrderStatus::Pending {
-            self.order.confirm(&order.id).await?;
+        if order.status == OrderStatus::Pending {
+            match self.order.confirm(&order.id).await {
+                Ok(confirmed) => order = confirmed,
+                Err(error) => {
+                    // Another runner may have confirmed the same order between
+                    // our read and this call. That is success, not a reason to
+                    // compensate a good order.
+                    let latest = self.order.get(&order.id).await?;
+                    if is_placed_order_status(latest.status) {
+                        order = latest;
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
         }
-        let order = self.order.get(&order.id).await?;
 
         self.inventory.commit(&checkout.id, &order.id).await?;
 
@@ -532,9 +668,17 @@ impl CheckoutWorkflow {
         if cart.status == fastcart_module_cart::CartStatus::Open
             && let Err(error) = self.carts.complete_cart(&cart.id).await
         {
+            // The order is already placed and inventory committed; a cart that
+            // expired (or a transient failure here) must not trigger compensation.
             let latest = self.carts.get_cart(&cart.id).await?;
-            if latest.status != fastcart_module_cart::CartStatus::Completed {
-                return Err(error);
+            if latest.status != fastcart_module_cart::CartStatus::Completed
+                && latest.status != fastcart_module_cart::CartStatus::Expired
+            {
+                tracing::warn!(
+                    cart_id = %cart.id,
+                    error = %error,
+                    "cart completion failed after the order was placed"
+                );
             }
         }
         Ok(order)
@@ -546,7 +690,42 @@ impl CheckoutWorkflow {
         payment: &Payment,
         order: Option<&Order>,
     ) {
+        // Re-read persisted state before undoing anything. A concurrent runner
+        // may have placed the order after this runner observed a failure; only
+        // compensate when the checkout and order are still unplaced.
+        let latest_checkout = match self.checkout.get(&checkout.id).await {
+            Ok(latest) => Some(latest),
+            Err(error) => {
+                tracing::warn!(
+                    checkout_id = %checkout.id,
+                    error = %error,
+                    "could not re-read checkout before compensation"
+                );
+                None
+            }
+        };
+        if latest_checkout.as_ref().is_some_and(|latest| {
+            latest.status == CheckoutStatus::OrderPlaced
+                || order.is_some_and(|order| latest.order_id.as_ref() == Some(&order.id))
+        }) {
+            return;
+        }
+
         if let Some(order) = order {
+            match self.order.get(&order.id).await {
+                Ok(latest) if is_placed_order_status(latest.status) => {
+                    // Another runner placed this order; never cancel it.
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        order_id = %order.id,
+                        error = %error,
+                        "could not re-read order before compensation"
+                    );
+                }
+            }
             let _ = self.inventory.restock_order(&order.id).await;
             let _ = self
                 .order
@@ -558,12 +737,14 @@ impl CheckoutWorkflow {
                 .await;
         }
         let _ = self.inventory.release_checkout(&checkout.id).await;
+        let refund_key = format!("checkout-compensation:{}", checkout.id.as_str());
         if let Err(error) = self
             .payment
-            .refund(
+            .refund_with_idempotency(
                 payment.id.as_str(),
                 payment.amount,
                 Some("checkout compensation".to_owned()),
+                Some(refund_key),
             )
             .await
         {
@@ -624,4 +805,15 @@ impl CheckoutWorkflow {
             }
         }
     }
+}
+
+/// Returns true when an order has been accepted into fulfillment.
+fn is_placed_order_status(status: OrderStatus) -> bool {
+    matches!(
+        status,
+        OrderStatus::Confirmed
+            | OrderStatus::Processing
+            | OrderStatus::Fulfilled
+            | OrderStatus::Completed
+    )
 }

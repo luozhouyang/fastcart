@@ -1,5 +1,7 @@
 //! Periodic maintenance over active store databases.
 
+use std::time::Duration;
+
 use fastcart_email::{EmailService, SEND_EMAIL_JOB_TYPE};
 use fastcart_infrastructure::{
     EventBus, JobQueue, JobRecord, Storage, StoreDatabase, StoreDatabaseManager,
@@ -7,6 +9,9 @@ use fastcart_infrastructure::{
     mark_outbox_failed, mark_outbox_processed,
 };
 use fastcart_kernel::{AppError, Pagination, StoreId, now_timestamp};
+use fastcart_module_asset::{
+    fetch_pending_asset_purges, mark_asset_purge_failed, mark_asset_purge_processed,
+};
 use fastcart_module_cart::CartService;
 use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::CheckoutService;
@@ -18,6 +23,12 @@ use fastcart_notifications::{
     SEND_CHANNEL_NOTIFICATION_JOB_TYPE,
 };
 use fastcart_platform::{NewAudit, PlatformStore, StoreStatus};
+
+/// How long a claimed job may go without a renewal before it is reaped.
+const JOB_LEASE_SECONDS: i64 = 300;
+
+/// How often a running handler refreshes its job lease.
+const JOB_LEASE_RENEW_SECONDS: u64 = 60;
 
 /// Counts produced by one maintenance sweep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -163,7 +174,7 @@ pub async fn run_maintenance_with_notifications(
                 }
             }
             let queue = JobQueue::new(database.pool().clone());
-            match queue.reap_expired(300).await {
+            match queue.reap_expired(JOB_LEASE_SECONDS).await {
                 Ok(count) => report.jobs_reaped += count,
                 Err(error) => {
                     tracing::warn!(store_id = %store.id, error = %error, "job lease reap failed");
@@ -595,7 +606,11 @@ async fn run_claimed_jobs(
     report: &mut MaintenanceReport,
 ) {
     for job in jobs {
+        // Keep the lease fresh while a handler runs so a slow delivery is not
+        // handed to another worker by reap_expired.
+        let lease = spawn_lease_heartbeat(queue, &job.id, worker_id);
         let outcome = process_job(store_id, database, &job, email, channels, now).await;
+        drop(lease);
         match outcome {
             Ok(()) => match queue.complete(&job.id, worker_id).await {
                 Ok(true) => report.jobs_processed += 1,
@@ -619,6 +634,46 @@ async fn run_claimed_jobs(
             }
         }
     }
+}
+
+/// Aborts the renewal task when the handler finishes or unwinds.
+struct LeaseHeartbeat(tokio::task::JoinHandle<()>);
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Refreshes one job's lease periodically until the guard is dropped.
+fn spawn_lease_heartbeat(queue: &JobQueue, job_id: &str, worker_id: &str) -> LeaseHeartbeat {
+    let queue = queue.clone();
+    let job_id = job_id.to_owned();
+    let worker_id = worker_id.to_owned();
+    LeaseHeartbeat(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(JOB_LEASE_RENEW_SECONDS));
+        // The first interval tick is immediate; consume it before waiting.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match queue
+                .renew_lease(&job_id, &worker_id, JOB_LEASE_SECONDS)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        "job lease renewal rejected because the lease was lost"
+                    );
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(job_id = %job_id, error = %error, "job lease renewal failed");
+                }
+            }
+        }
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -806,19 +861,100 @@ pub async fn cleanup_inquiry_files(
     removed
 }
 
+/// Removes asset blobs whose metadata was deleted but storage cleanup failed.
+///
+/// Deleting asset metadata commits a durable purge obligation in the store
+/// database. A storage failure keeps the row pending with an incremented
+/// attempt count so the next sweep retries instead of leaking the object.
+pub async fn cleanup_asset_purges(
+    platform: &PlatformStore,
+    databases: &StoreDatabaseManager,
+    storage: &dyn Storage,
+) -> u64 {
+    let mut purged = 0_u64;
+    let mut offset = 0_i64;
+    loop {
+        let page = match platform
+            .list_stores(Pagination { limit: 100, offset })
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(error = %error, "asset purge cleanup could not list stores");
+                break;
+            }
+        };
+        for store in &page.data {
+            if store.status != StoreStatus::Active {
+                continue;
+            }
+            let database = match databases.database(&store.id).await {
+                Ok(database) => database,
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "asset purge cleanup could not open store database");
+                    continue;
+                }
+            };
+            let purges = match fetch_pending_asset_purges(database.pool(), 100).await {
+                Ok(purges) => purges,
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "asset purge scan failed");
+                    continue;
+                }
+            };
+            for purge in purges {
+                match storage.delete(&purge.storage_key).await {
+                    Ok(()) => match mark_asset_purge_processed(database.pool(), &purge.id).await {
+                        Ok(()) => purged += 1,
+                        Err(error) => {
+                            tracing::warn!(store_id = %store.id, purge_id = %purge.id, error = %error, "asset purge state update failed");
+                        }
+                    },
+                    Err(error) => {
+                        let attempt = purge.attempts.saturating_add(1);
+                        tracing::warn!(
+                            store_id = %store.id,
+                            purge_id = %purge.id,
+                            attempt,
+                            error = %error,
+                            "asset blob purge failed"
+                        );
+                        if let Err(mark_error) = mark_asset_purge_failed(
+                            database.pool(),
+                            &purge.id,
+                            attempt,
+                            &error.to_string(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(store_id = %store.id, purge_id = %purge.id, error = %mark_error, "asset purge failure recording failed");
+                        }
+                    }
+                }
+            }
+        }
+        offset += page.data.len() as i64;
+        if offset >= page.count || page.data.is_empty() {
+            break;
+        }
+    }
+    purged
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use fastcart_email::{EmailService, SEND_EMAIL_JOB_TYPE, SendEmailJob};
     use fastcart_infrastructure::{
-        DatabaseOptions, EventBus, JobQueue, NewAuditOutbox, StoreDatabaseManager,
-        append_audit_outbox, append_outbox_event, fetch_pending_audits,
+        DatabaseOptions, EventBus, JobQueue, LocalStorage, NewAuditOutbox, Storage,
+        StoreDatabaseManager, append_audit_outbox, append_outbox_event, fetch_pending_audits,
     };
     use fastcart_kernel::{DomainEventEnvelope, Pagination};
+    use fastcart_module_asset::{AssetService, CreateAssetInput, fetch_pending_asset_purges};
     use fastcart_platform::{CreateStoreInput, PlatformStore, StoreProvisioningService};
 
-    use super::run_maintenance_with_options;
+    use super::{cleanup_asset_purges, run_maintenance_with_options};
 
     #[tokio::test]
     async fn maintenance_enqueues_exactly_one_notification_email() {
@@ -879,6 +1015,73 @@ mod tests {
         assert_eq!(payload.to, "buyer@example.com");
         assert!(payload.html.as_deref().is_some_and(|html| !html.is_empty()));
         assert!(queue.claim("test", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maintenance_purges_blobs_left_by_asset_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = PlatformStore::in_memory().await.unwrap();
+        let databases = Arc::new(StoreDatabaseManager::new(
+            dir.path().join("stores"),
+            DatabaseOptions::default().with_max_connections(2),
+        ));
+        let store = platform
+            .create_store(CreateStoreInput::new(
+                "Asset Store",
+                "asset-store",
+                "assets.example.com",
+            ))
+            .await
+            .unwrap();
+        StoreProvisioningService::new(platform.clone(), databases.clone())
+            .provision(&store.id, None)
+            .await
+            .unwrap();
+        let database = databases.database(&store.id).await.unwrap();
+
+        let storage = LocalStorage::new(dir.path().join("objects"));
+        let asset = AssetService::new(database.clone())
+            .create_asset(CreateAssetInput {
+                filename: "logo.png".to_owned(),
+                content_type: "image/png".to_owned(),
+                size_bytes: 4,
+                storage_key: "assets/logo.png".to_owned(),
+                alt: None,
+                width: None,
+                height: None,
+                created_by: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .put(&asset.storage_key, b"png!", Some("image/png"))
+            .await
+            .unwrap();
+
+        AssetService::new(database.clone())
+            .delete_asset(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            fetch_pending_asset_purges(database.pool(), 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "deletion must record a pending blob purge"
+        );
+
+        let purged = cleanup_asset_purges(&platform, &databases, &storage).await;
+
+        assert_eq!(purged, 1);
+        assert!(
+            fetch_pending_asset_purges(database.pool(), 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "purged rows must be marked processed"
+        );
+        assert!(!storage.exists(&asset.storage_key).await.unwrap());
     }
 
     #[tokio::test]

@@ -14,6 +14,8 @@ use crate::context::TemplateContext;
 
 /// Priority used for transactional email jobs.
 const EMAIL_PRIORITY: i64 = 10;
+/// How long one attempt owns a delivery claim before another may take over.
+const CLAIM_LEASE_SECONDS: i64 = 300;
 
 /// Errors raised while dispatching one notification.
 ///
@@ -116,33 +118,38 @@ impl NotificationService {
         let rendered = self.templates.render(rule.template, &context)?;
 
         match claim_delivery(db, event, rule).await? {
-            DeliveryClaim::Sent => {
-                return Ok(NotificationOutcome::Duplicate {
+            DeliveryClaim::Sent => Ok(NotificationOutcome::Duplicate {
+                template: rule.template,
+            }),
+            // Another attempt owns an unexpired claim for this event. Treat it
+            // like a duplicate so this outbox pass cannot enqueue a second
+            // email.
+            DeliveryClaim::Busy => Ok(NotificationOutcome::Duplicate {
+                template: rule.template,
+            }),
+            DeliveryClaim::Claimed { token } => {
+                let message = EmailMessage::new(recipient, rendered.subject)
+                    .with_text(rendered.text)
+                    .with_html(rendered.html)
+                    .with_metadata(metadata(event, rule));
+                let job_id = match email.enqueue(queue, message, Some(EMAIL_PRIORITY)).await {
+                    Ok(job_id) => job_id,
+                    Err(error) => {
+                        // The job was not queued, so release our claim. The
+                        // token ensures a concurrent attempt's row is not
+                        // deleted by mistake.
+                        release_claim(db, event, rule, &token).await?;
+                        return Err(error.into());
+                    }
+                };
+
+                mark_delivery_sent(db, event, rule, job_id.as_str(), &token).await?;
+                Ok(NotificationOutcome::Sent {
                     template: rule.template,
-                });
+                    job_id,
+                })
             }
-            DeliveryClaim::Pending | DeliveryClaim::New => {}
         }
-
-        let message = EmailMessage::new(recipient, rendered.subject)
-            .with_text(rendered.text)
-            .with_html(rendered.html)
-            .with_metadata(metadata(event, rule));
-        let job_id = match email.enqueue(queue, message, Some(EMAIL_PRIORITY)).await {
-            Ok(job_id) => job_id,
-            Err(error) => {
-                // The job was not queued, so release the claim. A later
-                // outbox retry can then deliver the notification.
-                release_claim(db, event, rule).await?;
-                return Err(error.into());
-            }
-        };
-
-        mark_delivery_sent(db, event, rule, job_id.as_str()).await?;
-        Ok(NotificationOutcome::Sent {
-            template: rule.template,
-            job_id,
-        })
     }
 
     async fn load_order(
@@ -203,31 +210,67 @@ fn metadata(event: &DomainEventEnvelope, rule: &NotificationRule) -> Metadata {
 }
 
 enum DeliveryClaim {
-    New,
-    Pending,
+    /// This attempt now owns the delivery and must enqueue it.
+    Claimed { token: String },
+    /// Another attempt owns an unexpired claim.
+    Busy,
+    /// The delivery was already completed.
     Sent,
 }
 
+/// Atomically claims `(event_id, template)` for this attempt.
+///
+/// The insert claims a new row in one statement. For an existing row the
+/// conditional update only succeeds when it is still `pending` or when a
+/// previous `claimed` row's lease has expired, and it replaces the owner
+/// token. A concurrent attempt can therefore never share ownership.
 async fn claim_delivery(
     db: &StoreDatabase,
     event: &DomainEventEnvelope,
     rule: &NotificationRule,
 ) -> Result<DeliveryClaim, sqlx::Error> {
     let now = now_timestamp();
+    let token = EventId::new().as_str().to_owned();
     let inserted = sqlx::query(
         "INSERT OR IGNORE INTO notification_deliveries
-         (id, event_id, event_type, template, status, attempts, created_at)
-         VALUES (?, ?, ?, ?, 'pending', 0, ?)",
+         (id, event_id, event_type, template, status, attempts, created_at,
+          claim_token, claimed_at)
+         VALUES (?, ?, ?, ?, 'claimed', 0, ?, ?, ?)",
     )
     .bind(EventId::new().as_str())
     .bind(event.id.as_str())
     .bind(&event.event_type)
     .bind(rule.template)
     .bind(now)
+    .bind(&token)
+    .bind(now)
     .execute(db.pool())
     .await?;
     if inserted.rows_affected() > 0 {
-        return Ok(DeliveryClaim::New);
+        return Ok(DeliveryClaim::Claimed { token });
+    }
+
+    let lease_cutoff = now.saturating_sub(CLAIM_LEASE_SECONDS);
+    let claimed = sqlx::query(
+        "UPDATE notification_deliveries
+         SET status = 'claimed', claim_token = ?, claimed_at = ?,
+             attempts = attempts + 1, event_type = ?
+         WHERE event_id = ? AND template = ?
+           AND (
+               status = 'pending'
+               OR (status = 'claimed' AND (claimed_at IS NULL OR claimed_at <= ?))
+           )",
+    )
+    .bind(&token)
+    .bind(now)
+    .bind(&event.event_type)
+    .bind(event.id.as_str())
+    .bind(rule.template)
+    .bind(lease_cutoff)
+    .execute(db.pool())
+    .await?;
+    if claimed.rows_affected() == 1 {
+        return Ok(DeliveryClaim::Claimed { token });
     }
 
     let status: Option<String> = sqlx::query_scalar(
@@ -237,23 +280,13 @@ async fn claim_delivery(
     .bind(rule.template)
     .fetch_optional(db.pool())
     .await?;
-    if status.as_deref() == Some("sent") {
-        return Ok(DeliveryClaim::Sent);
+    match status.as_deref() {
+        Some("sent") => Ok(DeliveryClaim::Sent),
+        // An unexpired claim, or a row that changed between the update and
+        // this lookup, is owned by another attempt.
+        Some(_) => Ok(DeliveryClaim::Busy),
+        None => Err(sqlx::Error::RowNotFound),
     }
-
-    // A previous attempt claimed the row but never marked it sent (for example,
-    // the process crashed before enqueueing). Allow delivery to be retried.
-    sqlx::query(
-        "UPDATE notification_deliveries
-         SET attempts = attempts + 1, event_type = ?
-         WHERE event_id = ? AND template = ? AND status = 'pending'",
-    )
-    .bind(&event.event_type)
-    .bind(event.id.as_str())
-    .bind(rule.template)
-    .execute(db.pool())
-    .await?;
-    Ok(DeliveryClaim::Pending)
 }
 
 async fn mark_delivery_sent(
@@ -261,18 +294,25 @@ async fn mark_delivery_sent(
     event: &DomainEventEnvelope,
     rule: &NotificationRule,
     job_id: &str,
+    token: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE notification_deliveries
-         SET status = 'sent', job_id = ?, sent_at = ?, attempts = attempts + 1
-         WHERE event_id = ? AND template = ? AND status = 'pending'",
+         SET status = 'sent', job_id = ?, sent_at = ?, attempts = attempts + 1,
+             claim_token = NULL, claimed_at = NULL
+         WHERE event_id = ? AND template = ?
+           AND status = 'claimed' AND claim_token = ?",
     )
     .bind(job_id)
     .bind(now_timestamp())
     .bind(event.id.as_str())
     .bind(rule.template)
+    .bind(token)
     .execute(db.pool())
     .await?;
+    if result.rows_affected() != 1 {
+        return Err(sqlx::Error::RowNotFound);
+    }
     Ok(())
 }
 
@@ -280,13 +320,18 @@ async fn release_claim(
     db: &StoreDatabase,
     event: &DomainEventEnvelope,
     rule: &NotificationRule,
+    token: &str,
 ) -> Result<(), sqlx::Error> {
+    // Delete only this attempt's row. A concurrent attempt has a different
+    // token, so it cannot be released or resurrected by this call.
     sqlx::query(
         "DELETE FROM notification_deliveries
-         WHERE event_id = ? AND template = ? AND status = 'pending'",
+         WHERE event_id = ? AND template = ?
+           AND status = 'claimed' AND claim_token = ?",
     )
     .bind(event.id.as_str())
     .bind(rule.template)
+    .bind(token)
     .execute(db.pool())
     .await?;
     Ok(())

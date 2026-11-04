@@ -12,7 +12,7 @@ use fastcart_kernel::{
     OrderEditId, OrderId, ProductId, RefundId, ReturnId, StoreId, Timestamp, VariantId,
     now_timestamp, validate_length, validate_metadata, validate_quantity,
 };
-use sqlx::SqliteConnection;
+use sqlx::{Row, SqliteConnection};
 
 use crate::after_sales::{
     AfterSalesFulfillment, AfterSalesFulfillmentItem, ClaimItemStatus, ClaimStatus,
@@ -325,7 +325,9 @@ impl OrderService {
             }
             let existing = fetch_order_item(&mut tx, order_id, &item.order_item_id).await?;
             let returned = sum_active_returns(&mut tx, &item.order_item_id).await?;
-            let available = existing.quantity - returned;
+            let claimed = sum_active_claims(&mut tx, &item.order_item_id).await?;
+            let exchanged = sum_active_exchange_inbound(&mut tx, &item.order_item_id).await?;
+            let available = existing.quantity - returned - claimed - exchanged;
             if item.quantity > available {
                 return Err(AppError::conflict(format!(
                     "cannot return {} of item {}: only {} remain available",
@@ -366,6 +368,14 @@ impl OrderService {
             .await?;
         }
 
+        self.append_audit(
+            &mut tx,
+            "order.return_created",
+            "order_return",
+            return_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str()}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_return(order_id, &return_id).await
     }
@@ -417,6 +427,30 @@ impl OrderService {
                 "return refund link changed concurrently",
             ));
         }
+        let refunded_amount: Option<i64> =
+            sqlx::query_scalar("SELECT amount FROM order_refunds WHERE id = ?")
+                .bind(refund_id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let currency_code: String =
+            sqlx::query_scalar("SELECT currency_code FROM orders WHERE id = ?")
+                .bind(order_id.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.return_refunded",
+            "order_return",
+            return_id.as_str(),
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "refunded_amount": refunded_amount,
+                "currency_code": currency_code,
+            }),
+        )
+        .await?;
         append_after_sales_event(
             &mut tx,
             self.database().store_id(),
@@ -470,6 +504,7 @@ impl OrderService {
             )));
         }
         let now = now_timestamp();
+        let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let updated = sqlx::query(
             "UPDATE order_returns
              SET status = ?, requested_at = ?, updated_at = ?
@@ -481,7 +516,7 @@ impl OrderService {
         .bind(return_id.as_str())
         .bind(order_id.as_str())
         .bind(current.status.as_str())
-        .execute(self.database().pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
         if updated.rows_affected() == 0 {
@@ -489,6 +524,15 @@ impl OrderService {
                 "return status changed concurrently".to_owned(),
             ));
         }
+        self.append_audit(
+            &mut tx,
+            "order.return_requested",
+            "order_return",
+            return_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str()}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         self.load_return(order_id, return_id).await
     }
 
@@ -628,11 +672,16 @@ impl OrderService {
 
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let mut fully_written_off = true;
+        let mut changed = false;
+        let mut reversed_units = 0_i64;
         for item in &current.items {
             let increment = increments
                 .get(item.order_item_id.as_str())
                 .copied()
                 .unwrap_or(0);
+            if increment > 0 {
+                changed = true;
+            }
             let written_off = item.written_off_quantity + increment;
             if written_off < item.received_quantity {
                 fully_written_off = false;
@@ -664,6 +713,19 @@ impl OrderService {
                     "return item changed concurrently".to_owned(),
                 ));
             }
+            if increment > 0 {
+                // Written-off units are received but not resold, so reverse
+                // the stock that receiving placed back on the shelf.
+                reversed_units += reverse_return_restock_for_write_off(
+                    &mut tx,
+                    return_id,
+                    &item.order_item_id,
+                    written_off,
+                    increment,
+                    now,
+                )
+                .await?;
+            }
         }
 
         let next = if fully_written_off {
@@ -671,6 +733,7 @@ impl OrderService {
         } else {
             current.status
         };
+        changed |= next != current.status;
         let written_off_at = if next == ReturnStatus::WrittenOff {
             Some(current.written_off_at.unwrap_or(now))
         } else {
@@ -696,6 +759,20 @@ impl OrderService {
             ));
         }
 
+        if changed {
+            self.append_audit(
+                &mut tx,
+                "order.return_written_off",
+                "order_return",
+                return_id.as_str(),
+                serde_json::json!({
+                    "order_id": order_id.as_str(),
+                    "status": next.as_str(),
+                    "reversed_units": reversed_units,
+                }),
+            )
+            .await?;
+        }
         tx.commit().await.map_err(database_error)?;
         self.load_return(order_id, return_id).await
     }
@@ -705,6 +782,17 @@ impl OrderService {
         &self,
         order_id: &OrderId,
         return_id: &ReturnId,
+    ) -> Result<OrderReturn, AppError> {
+        self.cancel_return_with_reason(order_id, return_id, None)
+            .await
+    }
+
+    /// Cancels a return and records the caller-supplied reason in the audit log.
+    pub async fn cancel_return_with_reason(
+        &self,
+        order_id: &OrderId,
+        return_id: &ReturnId,
+        reason: Option<&str>,
     ) -> Result<OrderReturn, AppError> {
         let current = self.load_return(order_id, return_id).await?;
         if current.status == ReturnStatus::Canceled {
@@ -744,6 +832,14 @@ impl OrderService {
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.return_canceled",
+            "order_return",
+            return_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str(), "reason": reason}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_return(order_id, return_id).await
     }
@@ -846,7 +942,8 @@ impl OrderService {
             let existing = fetch_order_item(&mut tx, order_id, &item.order_item_id).await?;
             let returned = sum_active_returns(&mut tx, &item.order_item_id).await?;
             let claimed = sum_active_claims(&mut tx, &item.order_item_id).await?;
-            let available = existing.quantity - returned - claimed;
+            let exchanged = sum_active_exchange_inbound(&mut tx, &item.order_item_id).await?;
+            let available = existing.quantity - returned - claimed - exchanged;
             if item.quantity > available {
                 return Err(AppError::conflict(format!(
                     "cannot claim {} of item {}: only {} remain available",
@@ -896,6 +993,14 @@ impl OrderService {
             .map_err(database_error)?;
         }
 
+        self.append_audit(
+            &mut tx,
+            "order.claim_created",
+            "order_claim",
+            claim_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str()}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_claim(order_id, &claim_id).await
     }
@@ -945,6 +1050,30 @@ impl OrderService {
         if updated.rows_affected() == 0 {
             return Err(AppError::conflict("claim refund link changed concurrently"));
         }
+        let refunded_amount: Option<i64> =
+            sqlx::query_scalar("SELECT amount FROM order_refunds WHERE id = ?")
+                .bind(refund_id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        let currency_code: String =
+            sqlx::query_scalar("SELECT currency_code FROM orders WHERE id = ?")
+                .bind(order_id.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.claim_refunded",
+            "order_claim",
+            claim_id.as_str(),
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "refunded_amount": refunded_amount,
+                "currency_code": currency_code,
+            }),
+        )
+        .await?;
         append_after_sales_event(
             &mut tx,
             self.database().store_id(),
@@ -1024,6 +1153,14 @@ impl OrderService {
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.claim_accepted",
+            "order_claim",
+            claim_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str()}),
+        )
+        .await?;
         append_after_sales_event(
             &mut tx,
             self.database().store_id(),
@@ -1044,6 +1181,17 @@ impl OrderService {
         &self,
         order_id: &OrderId,
         claim_id: &ClaimId,
+    ) -> Result<OrderClaim, AppError> {
+        self.cancel_claim_with_reason(order_id, claim_id, None)
+            .await
+    }
+
+    /// Cancels a claim and records the caller-supplied reason in the audit log.
+    pub async fn cancel_claim_with_reason(
+        &self,
+        order_id: &OrderId,
+        claim_id: &ClaimId,
+        reason: Option<&str>,
     ) -> Result<OrderClaim, AppError> {
         let current = self.load_claim(order_id, claim_id).await?;
         if current.status == ClaimStatus::Canceled {
@@ -1083,6 +1231,14 @@ impl OrderService {
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.claim_canceled",
+            "order_claim",
+            claim_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str(), "reason": reason}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_claim(order_id, claim_id).await
     }
@@ -1243,6 +1399,14 @@ impl OrderService {
             .await?;
         }
 
+        self.append_audit(
+            &mut tx,
+            "order.exchange_created",
+            "order_exchange",
+            exchange_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str()}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_exchange(order_id, &exchange_id).await
     }
@@ -1343,6 +1507,17 @@ impl OrderService {
         order_id: &OrderId,
         exchange_id: &ExchangeId,
     ) -> Result<OrderExchange, AppError> {
+        self.cancel_exchange_with_reason(order_id, exchange_id, None)
+            .await
+    }
+
+    /// Cancels an exchange and records the caller-supplied reason in the audit log.
+    pub async fn cancel_exchange_with_reason(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &ExchangeId,
+        reason: Option<&str>,
+    ) -> Result<OrderExchange, AppError> {
         let current = self.load_exchange(order_id, exchange_id).await?;
         if current.status == ExchangeStatus::Canceled {
             return Ok(current);
@@ -1383,6 +1558,14 @@ impl OrderService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.exchange_canceled",
+            "order_exchange",
+            exchange_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str(), "reason": reason}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_exchange(order_id, exchange_id).await
     }
@@ -1457,6 +1640,28 @@ impl OrderService {
         &self,
         input: CreateAfterSalesFulfillmentInput,
     ) -> Result<AfterSalesFulfillment, AppError> {
+        self.create_after_sales_fulfillment_inner(input, None).await
+    }
+
+    /// Persists an after-sales fulfillment and records the workflow audit entry
+    /// in the same transaction.
+    ///
+    /// `consumed_units` is the replacement stock committed by the caller for
+    /// this fulfillment and is preserved in the audit payload.
+    pub async fn create_after_sales_fulfillment_audited(
+        &self,
+        input: CreateAfterSalesFulfillmentInput,
+        consumed_units: i64,
+    ) -> Result<AfterSalesFulfillment, AppError> {
+        self.create_after_sales_fulfillment_inner(input, Some(consumed_units))
+            .await
+    }
+
+    async fn create_after_sales_fulfillment_inner(
+        &self,
+        input: CreateAfterSalesFulfillmentInput,
+        audit_consumed_units: Option<i64>,
+    ) -> Result<AfterSalesFulfillment, AppError> {
         match (&input.claim_id, &input.exchange_id) {
             (Some(_), None) | (None, Some(_)) => {}
             _ => {
@@ -1512,7 +1717,7 @@ impl OrderService {
         let id = FulfillmentId::new();
         let now = now_timestamp();
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO after_sales_fulfillments
                 (id, order_id, claim_id, exchange_id, status, provider_id,
                  provider_fulfillment_id, provider_data, tracking_numbers, metadata,
@@ -1538,8 +1743,27 @@ impl OrderService {
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        .await;
+        if let Err(error) = inserted {
+            if is_unique_violation(&error) {
+                // A concurrent runner won the race between the lookup above
+                // and this insert. Roll back our partial writes and return the
+                // winner's fulfillment.
+                tx.rollback().await.map_err(database_error)?;
+                let existing = match (&input.claim_id, &input.exchange_id) {
+                    (Some(claim_id), None) => {
+                        self.claim_fulfillment(&input.order_id, claim_id).await?
+                    }
+                    (None, Some(exchange_id)) => {
+                        self.exchange_fulfillment(&input.order_id, exchange_id)
+                            .await?
+                    }
+                    _ => None,
+                };
+                return existing.ok_or_else(|| database_error(error));
+            }
+            return Err(database_error(error));
+        }
 
         for item in &input.items {
             sqlx::query(
@@ -1575,6 +1799,31 @@ impl OrderService {
             }),
         )
         .await?;
+
+        if let Some(consumed_units) = audit_consumed_units {
+            let (action, resource_type, resource_id) = match (&input.claim_id, &input.exchange_id) {
+                (Some(claim_id), None) => {
+                    ("order.claim_fulfilled", "order_claim", claim_id.as_str())
+                }
+                (None, Some(exchange_id)) => (
+                    "order.exchange_fulfilled",
+                    "order_exchange",
+                    exchange_id.as_str(),
+                ),
+                _ => unreachable!("validated above"),
+            };
+            self.append_audit(
+                &mut tx,
+                action,
+                resource_type,
+                resource_id,
+                serde_json::json!({
+                    "order_id": input.order_id.as_str(),
+                    "consumed_units": consumed_units,
+                }),
+            )
+            .await?;
+        }
 
         tx.commit().await.map_err(database_error)?;
         self.load_after_sales_fulfillment(&input.order_id, &id)
@@ -1825,6 +2074,14 @@ impl OrderService {
             .map_err(database_error)?;
         }
 
+        self.append_audit(
+            &mut tx,
+            "order.edit_created",
+            "order_edit",
+            edit_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str()}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_order_edit(order_id, &edit_id).await
     }
@@ -2023,6 +2280,17 @@ impl OrderService {
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.edit_confirmed",
+            "order_edit",
+            edit_id.as_str(),
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "after_total": next_total,
+            }),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_order_edit(order_id, edit_id).await
     }
@@ -2032,6 +2300,17 @@ impl OrderService {
         &self,
         order_id: &OrderId,
         edit_id: &OrderEditId,
+    ) -> Result<OrderEdit, AppError> {
+        self.cancel_order_edit_with_reason(order_id, edit_id, None)
+            .await
+    }
+
+    /// Cancels a draft order edit and records the supplied reason in the audit log.
+    pub async fn cancel_order_edit_with_reason(
+        &self,
+        order_id: &OrderId,
+        edit_id: &OrderEditId,
+        reason: Option<&str>,
     ) -> Result<OrderEdit, AppError> {
         let current = self.load_order_edit(order_id, edit_id).await?;
         if current.status == OrderEditStatus::Canceled {
@@ -2071,6 +2350,14 @@ impl OrderService {
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.edit_canceled",
+            "order_edit",
+            edit_id.as_str(),
+            serde_json::json!({"order_id": order_id.as_str(), "reason": reason}),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         self.load_order_edit(order_id, edit_id).await
     }
@@ -2131,6 +2418,116 @@ impl OrderService {
 // -------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|database| database.is_unique_violation())
+}
+
+/// Reverses the restock for units written off on a returned order line.
+///
+/// A compensating movement is written only when receiving actually restocked
+/// the line, and only once per written-off unit. The returned count is the
+/// number of units taken back out of stock.
+async fn reverse_return_restock_for_write_off(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    return_id: &ReturnId,
+    order_item_id: &LineItemId,
+    written_off_quantity: i64,
+    increment: i64,
+    now: Timestamp,
+) -> Result<i64, AppError> {
+    let restock_prefix = format!(
+        "return-restock:{}:{}:%",
+        return_id.as_str(),
+        order_item_id.as_str()
+    );
+    let restocked: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(quantity_delta), 0) FROM inventory_movements \
+         WHERE reason = 'return_restock' AND reference LIKE ?",
+    )
+    .bind(&restock_prefix)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    if restocked <= 0 {
+        return Ok(0);
+    }
+    let write_off_prefix = format!(
+        "return-writeoff:{}:{}:%",
+        return_id.as_str(),
+        order_item_id.as_str()
+    );
+    let already_reversed: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(-quantity_delta), 0) FROM inventory_movements \
+         WHERE reason = 'return_writeoff' AND reference LIKE ?",
+    )
+    .bind(&write_off_prefix)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let reversible = restocked.saturating_sub(already_reversed);
+    let quantity = increment.min(reversible);
+    if quantity <= 0 {
+        return Ok(0);
+    }
+    let movement = sqlx::query(
+        "SELECT inventory_item_id, location_id FROM inventory_movements \
+         WHERE reason = 'return_restock' AND reference LIKE ? \
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(&restock_prefix)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let Some(movement) = movement else {
+        return Ok(0);
+    };
+    let item_id: String = movement
+        .try_get("inventory_item_id")
+        .map_err(database_error)?;
+    let location_id: String = movement.try_get("location_id").map_err(database_error)?;
+    let reference = format!(
+        "return-writeoff:{}:{}:{}",
+        return_id.as_str(),
+        order_item_id.as_str(),
+        written_off_quantity
+    );
+    sqlx::query(
+        "INSERT INTO inventory_movements \
+         (id, inventory_item_id, location_id, quantity_delta, reason, reference, \
+          actor_id, metadata, created_at) \
+         VALUES (?, ?, ?, ?, 'return_writeoff', ?, NULL, '{}', ?)",
+    )
+    .bind(format!("imvt_{}", EventId::new().as_str()))
+    .bind(&item_id)
+    .bind(&location_id)
+    .bind(-quantity)
+    .bind(&reference)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let affected = sqlx::query(
+        "UPDATE inventory_levels \
+         SET stocked_quantity = stocked_quantity - ?, updated_at = ? \
+         WHERE inventory_item_id = ? AND location_id = ?",
+    )
+    .bind(quantity)
+    .bind(now)
+    .bind(&item_id)
+    .bind(&location_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    if affected.rows_affected() != 1 {
+        return Err(AppError::conflict(
+            "inventory level no longer matches the write-off reversal",
+        ));
+    }
+    Ok(quantity)
+}
 
 async fn fetch_order_item(
     executor: &mut SqliteConnection,
@@ -3143,6 +3540,82 @@ mod tests {
             .await
             .unwrap_err();
         assert!(missing_line.is_not_found());
+    }
+
+    #[tokio::test]
+    async fn a_claimed_unit_cannot_also_be_returned() {
+        let service = service().await;
+        let order = order(&service, 1).await;
+        service
+            .create_claim(
+                &order.id,
+                CreateClaimInput {
+                    reason: None,
+                    metadata: fastcart_kernel::Metadata::default(),
+                    items: vec![ClaimItemInput {
+                        order_item_id: order.items[0].id.clone(),
+                        quantity: 1,
+                        item_type: ClaimItemType::Refund,
+                        replacement_variant_id: None,
+                        reason: None,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+
+        let error = service
+            .create_return(&order.id, return_input(&order, 1))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn an_exchanged_inbound_unit_cannot_also_be_claimed() {
+        let service = service().await;
+        let order = order(&service, 1).await;
+        service
+            .create_exchange(
+                &order.id,
+                CreateExchangeInput {
+                    reason: None,
+                    metadata: fastcart_kernel::Metadata::default(),
+                    inbound_items: vec![ExchangeItemInput {
+                        order_item_id: order.items[0].id.clone(),
+                        quantity: 1,
+                        replacement_variant_id: None,
+                        reason: None,
+                    }],
+                    outbound_items: vec![ExchangeItemInput {
+                        order_item_id: order.items[0].id.clone(),
+                        quantity: 1,
+                        replacement_variant_id: Some(VariantId::new()),
+                        reason: None,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+
+        let error = service
+            .create_claim(
+                &order.id,
+                CreateClaimInput {
+                    reason: None,
+                    metadata: fastcart_kernel::Metadata::default(),
+                    items: vec![ClaimItemInput {
+                        order_item_id: order.items[0].id.clone(),
+                        quantity: 1,
+                        item_type: ClaimItemType::Refund,
+                        replacement_variant_id: None,
+                        reason: None,
+                    }],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
     }
 }
 

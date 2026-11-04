@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS notification_channel_deliveries (
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'queued', 'sent', 'failed', 'skipped')),
     job_id TEXT,
+    claimed_at INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
     response_status INTEGER,
     response_body TEXT,

@@ -71,6 +71,10 @@ fn store_layers(
     router: Router<Arc<AppContext>>,
 ) -> Router<Arc<AppContext>> {
     router
+        .layer(middleware::from_fn_with_state(
+            context.clone(),
+            super::storefront_context_invalidation_middleware,
+        ))
         .layer(middleware::from_fn(publishable_key_middleware))
         .layer(middleware::from_fn(customer_auth_middleware))
         .layer(middleware::from_fn_with_state(

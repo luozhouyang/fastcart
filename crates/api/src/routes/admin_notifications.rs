@@ -21,7 +21,7 @@ use serde_json::Value;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::{StoreDb, record_store_audit};
+use super::StoreDb;
 use crate::state::AppContext;
 
 /// Builds the admin notification routes.
@@ -235,7 +235,6 @@ async fn list_channels(
     responses((status = 201, body = NotificationChannelDto))
 )]
 async fn create_channel(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateNotificationChannelRequest>,
@@ -248,6 +247,7 @@ async fn create_channel(
         request.config
     };
     let channel = NotificationChannelService::new()
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_channel(
             &db,
             CreateChannelInput {
@@ -261,19 +261,6 @@ async fn create_channel(
             },
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "notification_channel.created",
-        "notification_channel",
-        channel.id.as_str(),
-        serde_json::json!({
-            "kind": channel.kind.as_str(),
-            "events": channel.events,
-            "endpoint_url_masked": channel.endpoint_url_masked,
-        }),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(channel_dto(&channel))))
 }
 
@@ -307,7 +294,6 @@ async fn get_channel(
     responses((status = 200, body = NotificationChannelDto))
 )]
 async fn update_channel(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -323,6 +309,7 @@ async fn update_channel(
         }
     });
     let channel = NotificationChannelService::new()
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .update_channel(
             &db,
             &NotificationChannelId::from_string(id),
@@ -336,15 +323,6 @@ async fn update_channel(
             },
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "notification_channel.updated",
-        "notification_channel",
-        channel.id.as_str(),
-        serde_json::json!({"events": channel.events, "is_active": channel.is_active}),
-    )
-    .await;
     Ok(Json(channel_dto(&channel)))
 }
 
@@ -357,7 +335,6 @@ async fn update_channel(
     responses((status = 204))
 )]
 async fn delete_channel(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -365,17 +342,9 @@ async fn delete_channel(
     require_permission(&actor, "settings.write")?;
     let channel_id = NotificationChannelId::from_string(id);
     NotificationChannelService::new()
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .delete_channel(&db, &channel_id)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "notification_channel.deleted",
-        "notification_channel",
-        channel_id.as_str(),
-        serde_json::json!({}),
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -396,17 +365,9 @@ async fn test_channel(
     require_permission(&actor, "settings.write")?;
     let channel_id = NotificationChannelId::from_string(id);
     let result: ChannelTestResult = NotificationChannelService::new()
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .test_channel(&db, &channel_id, &render_context(&context))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "notification_channel.tested",
-        "notification_channel",
-        channel_id.as_str(),
-        serde_json::json!({"ok": result.ok, "status": result.status}),
-    )
-    .await;
     Ok(Json(TestChannelResponse {
         ok: result.ok,
         status: result.status,

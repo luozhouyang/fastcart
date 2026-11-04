@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use fastcart_infrastructure::{JobQueue, NewJob, StoreDatabase, database_error};
+use fastcart_infrastructure::{AuditActor, JobQueue, NewJob, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, DomainEventEnvelope, EventId, JobId, NotificationChannelId, NotificationDeliveryId,
     OrderId, Timestamp, now_timestamp,
@@ -287,6 +287,7 @@ pub struct NotificationChannelService {
     adapters: HashMap<ChannelKind, Arc<dyn ChannelAdapter>>,
     client: reqwest::Client,
     allow_local_endpoints: bool,
+    audit_actor: Option<String>,
 }
 
 impl NotificationChannelService {
@@ -303,7 +304,38 @@ impl NotificationChannelService {
                 .build()
                 .expect("the notification channel HTTP client configuration is valid"),
             allow_local_endpoints: false,
+            audit_actor: None,
         }
+    }
+
+    /// Records channel mutations in the store audit outbox.
+    ///
+    /// When an actor is set, every mutating method appends its audit entry in
+    /// the same transaction as the change, so a crash cannot separate them.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit_actor = actor_id;
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        db: &StoreDatabase,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: Value,
+    ) -> Result<(), AppError> {
+        let Some(actor_id) = self.audit_actor.as_deref() else {
+            return Ok(());
+        };
+        AuditActor::new(actor_id, db.store_id().as_str())
+            .append(&mut **tx, action, resource_type, resource_id, data)
+            .await
+            .map_err(database_error)?;
+        Ok(())
     }
 
     /// Allows plain-HTTP loopback endpoints. Tests and local development only.
@@ -361,6 +393,7 @@ impl NotificationChannelService {
 
         let id = NotificationChannelId::new();
         let now = now_timestamp();
+        let mut tx = db.begin().await?;
         sqlx::query(
             "INSERT INTO notification_channels
              (id, kind, name, endpoint_url, signing_secret, events, config, is_active,
@@ -377,9 +410,23 @@ impl NotificationChannelService {
         .bind(i64::from(input.is_active))
         .bind(now)
         .bind(now)
-        .execute(db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            db,
+            &mut tx,
+            "notification_channel.created",
+            "notification_channel",
+            id.as_str(),
+            json!({
+                "kind": input.kind.as_str(),
+                "events": events,
+                "endpoint_url_masked": mask_endpoint_url(&endpoint_url),
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.get_channel(db, &id).await
     }
@@ -417,7 +464,14 @@ impl NotificationChannelService {
             None => current.config()?,
         };
         let is_active = input.is_active.unwrap_or(current.is_active != 0);
+        let changed = name != current.name
+            || endpoint_url != current.endpoint_url
+            || signing_secret != current.signing_secret
+            || events != current.events()?
+            || config != current.config()?
+            || is_active != (current.is_active != 0);
 
+        let mut tx = db.begin().await?;
         sqlx::query(
             "UPDATE notification_channels
              SET name = ?, endpoint_url = ?, signing_secret = ?, events = ?,
@@ -432,9 +486,21 @@ impl NotificationChannelService {
         .bind(i64::from(is_active))
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if changed {
+            self.append_audit(
+                db,
+                &mut tx,
+                "notification_channel.updated",
+                "notification_channel",
+                id.as_str(),
+                json!({"events": events, "is_active": is_active}),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
 
         self.get_channel(db, id).await
     }
@@ -446,6 +512,7 @@ impl NotificationChannelService {
         id: &NotificationChannelId,
     ) -> Result<(), AppError> {
         let now = now_timestamp();
+        let mut tx = db.begin().await?;
         let result = sqlx::query(
             "UPDATE notification_channels
              SET deleted_at = ?, updated_at = ?
@@ -454,12 +521,22 @@ impl NotificationChannelService {
         .bind(now)
         .bind(now)
         .bind(id.as_str())
-        .execute(db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("notification channel", id));
         }
+        self.append_audit(
+            db,
+            &mut tx,
+            "notification_channel.deleted",
+            "notification_channel",
+            id.as_str(),
+            json!({}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -553,50 +630,27 @@ impl NotificationChannelService {
             };
 
             let channel_id = NotificationChannelId::from_string(row.id.clone());
-            let now = now_timestamp();
-            let candidate_id = NotificationDeliveryId::new();
-            let inserted = sqlx::query(
-                "INSERT OR IGNORE INTO notification_channel_deliveries
-                 (id, channel_id, event_id, event_type, status, attempts, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
-            )
-            .bind(candidate_id.as_str())
-            .bind(channel_id.as_str())
-            .bind(event.id.as_str())
-            .bind(&event.event_type)
-            .bind(now)
-            .bind(now)
-            .execute(db.pool())
-            .await
-            .map_err(database_error)?;
-
-            let delivery_id = if inserted.rows_affected() > 0 {
-                candidate_id
-            } else {
-                let existing = sqlx::query_as::<_, DeliveryRow>(&format!(
-                    "SELECT {DELIVERY_COLUMNS} FROM notification_channel_deliveries
-                     WHERE channel_id = ? AND event_id = ?"
-                ))
-                .bind(channel_id.as_str())
-                .bind(event.id.as_str())
-                .fetch_optional(db.pool())
-                .await
-                .map_err(database_error)?
-                .ok_or_else(|| {
-                    AppError::internal("notification delivery claim disappeared during dispatch")
-                })?;
-                let status = DeliveryStatus::parse(&existing.status)?;
-                if matches!(status, DeliveryStatus::Queued | DeliveryStatus::Sent) {
+            let (delivery_id, job_id) = match claim_delivery_row(db, &channel_id, event).await? {
+                ChannelDeliveryClaim::Claimed {
+                    delivery_id,
+                    job_id,
+                } => (delivery_id, job_id),
+                ChannelDeliveryClaim::Duplicate => {
                     report.duplicates += 1;
                     continue;
                 }
-                NotificationDeliveryId::from_string(existing.id)
             };
 
             let message = match adapter.render(db, event, context).await {
                 Ok(message) => message,
                 Err(error) => {
-                    mark_delivery_failed(db, &delivery_id, &error.to_string()).await?;
+                    mark_delivery_failed(
+                        db,
+                        &delivery_id,
+                        Some(job_id.as_str()),
+                        &error.to_string(),
+                    )
+                    .await?;
                     report.failed += 1;
                     tracing::warn!(
                         channel_id = %channel_id,
@@ -611,46 +665,36 @@ impl NotificationChannelService {
             let payload = json!({
                 "channel_id": channel_id.as_str(),
                 "delivery_id": delivery_id.as_str(),
+                "job_id": job_id.as_str(),
                 "event_id": event.id.as_str(),
                 "event_type": event.event_type,
                 "message": message,
             });
-            let job = match queue
-                .enqueue(
+            // The job id was persisted in the atomic claim above, so the queued
+            // row and the delivery row always reference the same job.
+            if let Err(error) = queue
+                .enqueue_with_id(
+                    &job_id,
                     NewJob::new(SEND_CHANNEL_NOTIFICATION_JOB_TYPE, payload)
                         .with_priority(CHANNEL_PRIORITY),
                 )
                 .await
             {
-                Ok(job) => job,
-                Err(error) => {
-                    mark_delivery_failed(
-                        db,
-                        &delivery_id,
-                        "notification channel job could not be enqueued",
-                    )
-                    .await?;
-                    tracing::warn!(
-                        channel_id = %channel_id,
-                        event_id = %event.id,
-                        event_type = %event.event_type,
-                        "notification channel job enqueue failed"
-                    );
-                    return Err(AppError::database(error.to_string()));
-                }
-            };
-
-            sqlx::query(
-                "UPDATE notification_channel_deliveries
-                 SET status = 'queued', job_id = ?, last_error = NULL, updated_at = ?
-                 WHERE id = ?",
-            )
-            .bind(&job.id)
-            .bind(now_timestamp())
-            .bind(delivery_id.as_str())
-            .execute(db.pool())
-            .await
-            .map_err(database_error)?;
+                mark_delivery_failed(
+                    db,
+                    &delivery_id,
+                    Some(job_id.as_str()),
+                    "notification channel job could not be enqueued",
+                )
+                .await?;
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    event_id = %event.id,
+                    event_type = %event.event_type,
+                    "notification channel job enqueue failed"
+                );
+                return Err(AppError::database(error.to_string()));
+            }
             report.queued += 1;
         }
 
@@ -670,6 +714,7 @@ impl NotificationChannelService {
         let channel_id = NotificationChannelId::from_string(payload_string(payload, "channel_id")?);
         let delivery_id =
             NotificationDeliveryId::from_string(payload_string(payload, "delivery_id")?);
+        let job_id = payload_string(payload, "job_id")?;
         let _event_id = payload_string(payload, "event_id")?;
         let _event_type = payload_string(payload, "event_type")?;
         let message = payload
@@ -685,20 +730,45 @@ impl NotificationChannelService {
             ChannelError::Permanent("notification delivery status is invalid".to_owned())
         })?;
         match status {
+            // Sent, skipped and failed are terminal: a replayed or retried job
+            // must not send another message or revive the delivery.
             DeliveryStatus::Sent => return Ok(ChannelJobOutcome::Sent),
             DeliveryStatus::Skipped => return Ok(ChannelJobOutcome::Skipped),
-            DeliveryStatus::Pending | DeliveryStatus::Queued | DeliveryStatus::Failed => {}
+            DeliveryStatus::Failed => return Ok(ChannelJobOutcome::Failed),
+            DeliveryStatus::Pending | DeliveryStatus::Queued => {}
+        }
+        if delivery.job_id.as_deref() != Some(job_id) {
+            // A stale job from an earlier claim must neither send nor mutate
+            // the row, which may now belong to a newer job.
+            tracing::warn!(
+                delivery_id = %delivery_id,
+                job_id = %job_id,
+                "ignoring stale notification channel job"
+            );
+            return Ok(ChannelJobOutcome::Failed);
         }
 
         let channel = load_channel_row_including_deleted(db, &channel_id)
             .await
             .map_err(|error| retryable_db("channel lookup failed", &error))?;
         let Some(channel) = channel else {
-            mark_delivery_skipped(db, &delivery_id, "notification channel does not exist").await?;
+            mark_delivery_skipped(
+                db,
+                &delivery_id,
+                Some(job_id),
+                "notification channel does not exist",
+            )
+            .await?;
             return Ok(ChannelJobOutcome::Skipped);
         };
         if channel.deleted_at.is_some() || channel.is_active == 0 {
-            mark_delivery_skipped(db, &delivery_id, "notification channel is inactive").await?;
+            mark_delivery_skipped(
+                db,
+                &delivery_id,
+                Some(job_id),
+                "notification channel is inactive",
+            )
+            .await?;
             return Ok(ChannelJobOutcome::Skipped);
         }
 
@@ -718,13 +788,14 @@ impl NotificationChannelService {
                      SET status = 'sent', response_status = ?, response_body = ?,
                          last_error = NULL, sent_at = ?, updated_at = ?,
                          attempts = attempts + 1
-                     WHERE id = ?",
+                     WHERE id = ? AND job_id = ?",
                 )
                 .bind(result.status)
                 .bind(result.body.as_deref())
                 .bind(now)
                 .bind(now)
                 .bind(delivery_id.as_str())
+                .bind(job_id)
                 .execute(db.pool())
                 .await
                 .map_err(|error| retryable_db("delivery update failed", &error))?;
@@ -743,20 +814,25 @@ impl NotificationChannelService {
             }
             Err(ChannelError::Retryable(message)) => {
                 let now = now_timestamp();
-                sqlx::query(
-                    "UPDATE notification_channel_deliveries
-                     SET status = 'queued', response_status = ?, response_body = ?,
+                // On the last attempt keep a terminal state so the delivery
+                // does not remain queued forever.
+                let exhausted = job_will_exhaust(db, job_id).await;
+                let status = if exhausted { "failed" } else { "queued" };
+                let query = "UPDATE notification_channel_deliveries
+                     SET status = ?, response_status = ?, response_body = ?,
                          last_error = ?, updated_at = ?, attempts = attempts + 1
-                     WHERE id = ?",
-                )
-                .bind(result.status)
-                .bind(result.body.as_deref())
-                .bind(&message)
-                .bind(now)
-                .bind(delivery_id.as_str())
-                .execute(db.pool())
-                .await
-                .map_err(|error| retryable_db("delivery update failed", &error))?;
+                     WHERE id = ? AND job_id = ?";
+                sqlx::query(query)
+                    .bind(status)
+                    .bind(result.status)
+                    .bind(result.body.as_deref())
+                    .bind(&message)
+                    .bind(now)
+                    .bind(delivery_id.as_str())
+                    .bind(job_id)
+                    .execute(db.pool())
+                    .await
+                    .map_err(|error| retryable_db("delivery update failed", &error))?;
                 update_channel_error(db, &channel_id, &message).await?;
                 Err(ChannelError::Retryable(message))
             }
@@ -766,13 +842,14 @@ impl NotificationChannelService {
                     "UPDATE notification_channel_deliveries
                      SET status = 'failed', response_status = ?, response_body = ?,
                          last_error = ?, updated_at = ?, attempts = attempts + 1
-                     WHERE id = ?",
+                     WHERE id = ? AND job_id = ?",
                 )
                 .bind(result.status)
                 .bind(result.body.as_deref())
                 .bind(&message)
                 .bind(now)
                 .bind(delivery_id.as_str())
+                .bind(job_id)
                 .execute(db.pool())
                 .await
                 .map_err(|error| retryable_db("delivery update failed", &error))?;
@@ -814,6 +891,7 @@ impl NotificationChannelService {
 
         match &result.result {
             Ok(()) => {
+                let mut tx = db.begin().await?;
                 sqlx::query(
                     "UPDATE notification_channels
                      SET last_success_at = ?, last_error = NULL, updated_at = ?
@@ -822,9 +900,19 @@ impl NotificationChannelService {
                 .bind(now)
                 .bind(now)
                 .bind(id.as_str())
-                .execute(db.pool())
+                .execute(&mut *tx)
                 .await
                 .map_err(database_error)?;
+                self.append_audit(
+                    db,
+                    &mut tx,
+                    "notification_channel.tested",
+                    "notification_channel",
+                    id.as_str(),
+                    json!({"ok": true, "status": result.status}),
+                )
+                .await?;
+                tx.commit().await.map_err(database_error)?;
                 Ok(ChannelTestResult {
                     ok: true,
                     status: result.status,
@@ -832,6 +920,7 @@ impl NotificationChannelService {
                 })
             }
             Err(error) => {
+                let mut tx = db.begin().await?;
                 sqlx::query(
                     "UPDATE notification_channels SET last_error = ?, updated_at = ?
                      WHERE id = ?",
@@ -839,9 +928,19 @@ impl NotificationChannelService {
                 .bind(error.to_string())
                 .bind(now)
                 .bind(id.as_str())
-                .execute(db.pool())
+                .execute(&mut *tx)
                 .await
                 .map_err(database_error)?;
+                self.append_audit(
+                    db,
+                    &mut tx,
+                    "notification_channel.tested",
+                    "notification_channel",
+                    id.as_str(),
+                    json!({"ok": false, "status": result.status}),
+                )
+                .await?;
+                tx.commit().await.map_err(database_error)?;
                 Ok(ChannelTestResult {
                     ok: false,
                     status: result.status,
@@ -1085,42 +1184,142 @@ async fn update_channel_error(
     Ok(())
 }
 
-async fn mark_delivery_failed(
+enum ChannelDeliveryClaim {
+    /// The caller now owns the delivery row and may enqueue its job.
+    Claimed {
+        delivery_id: NotificationDeliveryId,
+        job_id: JobId,
+    },
+    /// Another attempt already queued, sent or skipped this delivery.
+    Duplicate,
+}
+
+/// Atomically claims `(channel_id, event_id)` before a job is enqueued.
+///
+/// The insert is idempotent thanks to the unique constraint. The claim itself
+/// is a conditional update: only one dispatcher can move a `pending` or
+/// `failed` row to `queued`, and the winning `job_id` is persisted before the
+/// job exists. A crash after this point leaves a `queued` row whose job may be
+/// missing; replays see it as a duplicate instead of enqueueing another copy.
+async fn claim_delivery_row(
     db: &StoreDatabase,
-    id: &NotificationDeliveryId,
-    error: &str,
-) -> Result<(), AppError> {
+    channel_id: &NotificationChannelId,
+    event: &DomainEventEnvelope,
+) -> Result<ChannelDeliveryClaim, AppError> {
+    let now = now_timestamp();
     sqlx::query(
-        "UPDATE notification_channel_deliveries
-         SET status = 'failed', last_error = ?, updated_at = ?
-         WHERE id = ?",
+        "INSERT OR IGNORE INTO notification_channel_deliveries
+         (id, channel_id, event_id, event_type, status, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
     )
-    .bind(error)
-    .bind(now_timestamp())
-    .bind(id.as_str())
+    .bind(NotificationDeliveryId::new().as_str())
+    .bind(channel_id.as_str())
+    .bind(event.id.as_str())
+    .bind(&event.event_type)
+    .bind(now)
+    .bind(now)
     .execute(db.pool())
     .await
     .map_err(database_error)?;
+
+    let delivery_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM notification_channel_deliveries
+         WHERE channel_id = ? AND event_id = ?",
+    )
+    .bind(channel_id.as_str())
+    .bind(event.id.as_str())
+    .fetch_optional(db.pool())
+    .await
+    .map_err(database_error)?;
+    let delivery_id = delivery_id.ok_or_else(|| {
+        AppError::internal("notification delivery claim disappeared during dispatch")
+    })?;
+
+    let job_id = JobId::new();
+    let claimed = sqlx::query(
+        "UPDATE notification_channel_deliveries
+         SET status = 'queued', job_id = ?, claimed_at = ?, last_error = NULL, updated_at = ?
+         WHERE id = ? AND status IN ('pending', 'failed')",
+    )
+    .bind(job_id.as_str())
+    .bind(now)
+    .bind(now)
+    .bind(&delivery_id)
+    .execute(db.pool())
+    .await
+    .map_err(database_error)?;
+    if claimed.rows_affected() == 1 {
+        return Ok(ChannelDeliveryClaim::Claimed {
+            delivery_id: NotificationDeliveryId::from_string(delivery_id),
+            job_id,
+        });
+    }
+    Ok(ChannelDeliveryClaim::Duplicate)
+}
+
+async fn mark_delivery_failed(
+    db: &StoreDatabase,
+    id: &NotificationDeliveryId,
+    job_id: Option<&str>,
+    error: &str,
+) -> Result<(), AppError> {
+    let now = now_timestamp();
+    let query = if job_id.is_some() {
+        "UPDATE notification_channel_deliveries
+         SET status = 'failed', job_id = NULL, claimed_at = NULL, last_error = ?, updated_at = ?
+         WHERE id = ? AND job_id = ?"
+    } else {
+        "UPDATE notification_channel_deliveries
+         SET status = 'failed', job_id = NULL, claimed_at = NULL, last_error = ?, updated_at = ?
+         WHERE id = ?"
+    };
+    let mut query = sqlx::query(query).bind(error).bind(now).bind(id.as_str());
+    if let Some(job_id) = job_id {
+        query = query.bind(job_id);
+    }
+    query.execute(db.pool()).await.map_err(database_error)?;
     Ok(())
 }
 
 async fn mark_delivery_skipped(
     db: &StoreDatabase,
     id: &NotificationDeliveryId,
+    job_id: Option<&str>,
     reason: &str,
 ) -> Result<(), ChannelError> {
-    sqlx::query(
+    let now = now_timestamp();
+    let query = if job_id.is_some() {
         "UPDATE notification_channel_deliveries
          SET status = 'skipped', last_error = ?, updated_at = ?
-         WHERE id = ?",
-    )
-    .bind(reason)
-    .bind(now_timestamp())
-    .bind(id.as_str())
-    .execute(db.pool())
-    .await
-    .map_err(|error| retryable_db("delivery update failed", &database_error(error)))?;
+         WHERE id = ? AND job_id = ?"
+    } else {
+        "UPDATE notification_channel_deliveries
+         SET status = 'skipped', last_error = ?, updated_at = ?
+         WHERE id = ?"
+    };
+    let mut query = sqlx::query(query).bind(reason).bind(now).bind(id.as_str());
+    if let Some(job_id) = job_id {
+        query = query.bind(job_id);
+    }
+    query
+        .execute(db.pool())
+        .await
+        .map_err(|error| retryable_db("delivery update failed", &database_error(error)))?;
     Ok(())
+}
+
+/// Returns true when the current attempt is the job's last one.
+///
+/// The job queue increments its attempt counter after this handler returns, so
+/// `attempts + 1 >= max_attempts` means this failure will exhaust the job.
+async fn job_will_exhaust(db: &StoreDatabase, job_id: &str) -> bool {
+    sqlx::query_as::<_, (i64, i64)>("SELECT attempts, max_attempts FROM jobs WHERE id = ?")
+        .bind(job_id)
+        .fetch_optional(db.pool())
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|(attempts, max_attempts)| attempts.saturating_add(1) >= max_attempts)
 }
 
 async fn load_delivery_row(
@@ -1362,7 +1561,7 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::post;
     use axum::serve;
-    use fastcart_infrastructure::{JobQueue, StoreDatabase, jobs::status};
+    use fastcart_infrastructure::{JobQueue, StoreDatabase, fetch_pending_audits, jobs::status};
     use fastcart_kernel::{DomainEventEnvelope, StoreId};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
@@ -1508,6 +1707,130 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_dispatches_enqueue_one_job() {
+        let db = database().await;
+        let queue = JobQueue::new(db.pool().clone());
+        let service = service();
+        let (url, _mock) = spawn_mock(vec![]).await;
+        let channel = create_channel(&service, &db, url, vec!["order.placed"]).await;
+        let event = order_event();
+
+        let render_context = context();
+        let (first, second) = tokio::join!(
+            service.dispatch(&db, &queue, &event, &render_context),
+            service.dispatch(&db, &queue, &event, &render_context),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.queued + second.queued, 1);
+        assert_eq!(first.duplicates + second.duplicates, 1);
+        assert_eq!(queue.count_by_status(status::PENDING).await.unwrap(), 1);
+        assert_eq!(
+            service
+                .list_deliveries(&db, &channel.id, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_job_id_does_not_send_or_mutate_the_delivery() {
+        let db = database().await;
+        let queue = JobQueue::new(db.pool().clone());
+        let service = service();
+        let (url, mock) = spawn_mock(vec![]).await;
+        let channel = create_channel(&service, &db, url, vec!["order.placed"]).await;
+        service
+            .dispatch(&db, &queue, &order_event(), &context())
+            .await
+            .unwrap();
+
+        let claimed = queue.claim("worker", 10).await.unwrap();
+        let job_id = claimed[0].id.clone();
+        let mut payload = claimed[0].json_payload();
+        payload["job_id"] = json!("stale-job-id");
+
+        let outcome = service.process_job(&db, &payload).await.unwrap();
+        assert_eq!(outcome, ChannelJobOutcome::Failed);
+        assert!(mock.captured.lock().unwrap().is_empty());
+
+        let delivery = &service.list_deliveries(&db, &channel.id, 10).await.unwrap()[0];
+        assert_eq!(delivery.status, DeliveryStatus::Queued);
+        assert_eq!(delivery.attempts, 0);
+        assert_eq!(
+            delivery.job_id.as_ref().map(ToString::to_string),
+            Some(job_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_delivery_is_not_sent_again() {
+        let db = database().await;
+        let queue = JobQueue::new(db.pool().clone());
+        let service = service();
+        let (url, mock) = spawn_mock(vec![(
+            200,
+            r#"{"code":19022,"msg":"ip not allowed"}"#.to_owned(),
+        )])
+        .await;
+        let channel = create_channel(&service, &db, url, vec!["order.placed"]).await;
+        service
+            .dispatch(&db, &queue, &order_event(), &context())
+            .await
+            .unwrap();
+
+        let claimed = queue.claim("worker", 10).await.unwrap();
+        let payload = claimed[0].json_payload();
+        assert_eq!(
+            service.process_job(&db, &payload).await.unwrap(),
+            ChannelJobOutcome::Failed
+        );
+        assert_eq!(
+            service.process_job(&db, &payload).await.unwrap(),
+            ChannelJobOutcome::Failed
+        );
+        assert_eq!(mock.captured.lock().unwrap().len(), 1);
+        let delivery = &service.list_deliveries(&db, &channel.id, 10).await.unwrap()[0];
+        assert_eq!(delivery.status, DeliveryStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_retry_marks_the_delivery_failed() {
+        let db = database().await;
+        let queue = JobQueue::new(db.pool().clone());
+        let service = service();
+        let (url, _mock) = spawn_mock(vec![
+            (500, "temporary failure".to_owned()),
+            (500, "temporary failure".to_owned()),
+        ])
+        .await;
+        let channel = create_channel(&service, &db, url, vec!["order.placed"]).await;
+        service
+            .dispatch(&db, &queue, &order_event(), &context())
+            .await
+            .unwrap();
+
+        let claimed = queue.claim("worker", 10).await.unwrap();
+        let job = &claimed[0];
+        sqlx::query("UPDATE jobs SET attempts = max_attempts - 1 WHERE id = ?")
+            .bind(&job.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let outcome = service.process_job(&db, &job.json_payload()).await;
+        assert!(matches!(outcome, Err(ChannelError::Retryable(_))));
+        let delivery = &service.list_deliveries(&db, &channel.id, 10).await.unwrap()[0];
+        assert_eq!(delivery.status, DeliveryStatus::Failed);
+        assert!(delivery.last_error.is_some());
+
+        assert!(!queue.fail(&job.id, "exhausted", "worker").await.unwrap());
+        assert_eq!(queue.count_by_status(status::FAILED).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1837,5 +2160,34 @@ mod tests {
         let remaining = service.list_deliveries(&db, &channel.id, 10).await.unwrap();
         let statuses: Vec<DeliveryStatus> = remaining.iter().map(|row| row.status).collect();
         assert_eq!(statuses, vec![DeliveryStatus::Sent, DeliveryStatus::Queued]);
+    }
+
+    #[tokio::test]
+    async fn mutations_append_audit_entries_and_skip_noops() {
+        let db = database().await;
+        let service = service().with_audit_actor(Some("user_1".to_owned()));
+
+        let channel = service.create_channel(&db, valid_input()).await.unwrap();
+        let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "notification_channel.created");
+        assert_eq!(audits[0].actor_id.as_deref(), Some("user_1"));
+        assert!(audits[0].processed_at.is_none());
+
+        // An update that resolves to the current values is a no-op.
+        service
+            .update_channel(&db, &channel.id, UpdateChannelInput::default())
+            .await
+            .unwrap();
+        assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 1);
+
+        service.delete_channel(&db, &channel.id).await.unwrap();
+        let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[1].action, "notification_channel.deleted");
+
+        // Deleting an already deleted channel is a no-op error.
+        assert!(service.delete_channel(&db, &channel.id).await.is_err());
+        assert_eq!(fetch_pending_audits(db.pool(), 10).await.unwrap().len(), 2);
     }
 }

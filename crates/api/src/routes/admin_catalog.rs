@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use fastcart_http::extractors::ApiQuery;
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::{StoreDb, record_store_audit};
+use super::StoreDb;
 use crate::dto::{PageResponse, VariantDto};
 use crate::state::AppContext;
 
@@ -793,7 +793,6 @@ async fn update_product(
     responses((status = 204))
 )]
 async fn delete_product(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -801,17 +800,9 @@ async fn delete_product(
     authorize(&actor, "products.write")?;
     let product_id = ProductId::from_string(id);
     CatalogService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .delete_product(product_id.as_str())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "product.deleted",
-        "product",
-        product_id.as_str(),
-        serde_json::Value::Null,
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -845,7 +836,6 @@ async fn publish_product(
     responses((status = 200, body = Product))
 )]
 async fn archive_product(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -853,17 +843,9 @@ async fn archive_product(
     authorize(&actor, "products.write")?;
     let product_id = ProductId::from_string(id);
     let product = CatalogService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .archive_product(product_id.as_str())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "product.archived",
-        "product",
-        product_id.as_str(),
-        serde_json::Value::Null,
-    )
-    .await;
     Ok(Json(product))
 }
 
@@ -878,7 +860,6 @@ async fn archive_product(
     responses((status = 200, body = Product))
 )]
 async fn set_product_sales_channels(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -886,20 +867,12 @@ async fn set_product_sales_channels(
 ) -> ApiResult<Json<Product>> {
     authorize(&actor, "products.write")?;
     let product_id = ProductId::from_string(id);
-    let service = CatalogService::new(db);
+    let service =
+        CatalogService::new(db).with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     service
         .set_product_sales_channels(product_id.as_str(), &request.sales_channel_ids)
         .await?;
     let product = service.get_product(product_id.as_str()).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "product.sales_channels_updated",
-        "product",
-        product_id.as_str(),
-        serde_json::json!({"sales_channel_ids": request.sales_channel_ids}),
-    )
-    .await;
     Ok(Json(product))
 }
 
@@ -1546,7 +1519,7 @@ async fn get_settings(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
 ) -> ApiResult<Json<BTreeMap<String, String>>> {
-    authorize(&actor, "settings.read")?;
+    authorize(&actor, "settings.write")?;
     let settings = StoreService::new(db).get_all_settings().await?;
     Ok(Json(settings))
 }
@@ -1567,9 +1540,8 @@ async fn update_settings(
 ) -> ApiResult<Json<BTreeMap<String, String>>> {
     authorize(&actor, "settings.write")?;
     let service = StoreService::new(db);
-    for (key, value) in &request.values {
-        service.set_setting(key, value).await?;
-    }
+    let values = request.values.into_iter().collect::<Vec<_>>();
+    service.set_settings(&values).await?;
     let settings = service.get_all_settings().await?;
     Ok(Json(settings))
 }
@@ -1587,7 +1559,7 @@ async fn get_setting(
     StoreDb(db): StoreDb,
     Path(key): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    authorize(&actor, "settings.read")?;
+    authorize(&actor, "settings.write")?;
     let value = StoreService::new(db)
         .get_setting(&key)
         .await?

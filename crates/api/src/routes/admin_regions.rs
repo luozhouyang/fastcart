@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::{StoreDb, record_store_audit};
+use super::StoreDb;
 use crate::dto::{PageInfo, PageResponse};
 use crate::state::AppContext;
 
@@ -238,13 +238,13 @@ async fn get_region(
     responses((status = 201, body = RegionDto))
 )]
 async fn create_region(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateRegionRequest>,
 ) -> ApiResult<(StatusCode, Json<RegionDto>)> {
     authorize(&actor, "settings.write")?;
     let region = RegionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_region(CreateRegionInput {
             name: request.name,
             currency_code: request.currency_code,
@@ -255,15 +255,6 @@ async fn create_region(
             metadata: request.metadata,
         })
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "region.created",
-        "region",
-        &region.id,
-        serde_json::json!({"name": region.name, "is_default": region.is_default}),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(RegionDto::from(region))))
 }
 
@@ -277,7 +268,6 @@ async fn create_region(
     responses((status = 200, body = RegionDto))
 )]
 async fn update_region(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -285,6 +275,7 @@ async fn update_region(
 ) -> ApiResult<Json<RegionDto>> {
     authorize(&actor, "settings.write")?;
     let region = RegionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .update_region(
             &id,
             UpdateRegionInput {
@@ -298,15 +289,6 @@ async fn update_region(
             },
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "region.updated",
-        "region",
-        &region.id,
-        serde_json::json!({"name": region.name, "is_default": region.is_default}),
-    )
-    .await;
     Ok(Json(RegionDto::from(region)))
 }
 
@@ -319,22 +301,15 @@ async fn update_region(
     responses((status = 204))
 )]
 async fn delete_region(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "settings.write")?;
-    RegionService::new(db).delete_region(&id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "region.deleted",
-        "region",
-        &id,
-        serde_json::Value::Null,
-    )
-    .await;
+    RegionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .delete_region(&id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -367,27 +342,18 @@ async fn list_keys(
     responses((status = 201, body = CreatedPublishableKeyDto))
 )]
 async fn create_key(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreatePublishableKeyRequest>,
 ) -> ApiResult<(StatusCode, Json<CreatedPublishableKeyDto>)> {
     authorize(&actor, "settings.write")?;
     let created: CreatedPublishableApiKey = RegionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_publishable_key(CreatePublishableApiKeyInput {
             title: request.title,
             sales_channel_ids: request.sales_channel_ids,
         })
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "publishable_key.created",
-        "publishable_api_key",
-        &created.key.id,
-        serde_json::json!({"sales_channel_ids": created.key.sales_channel_ids}),
-    )
-    .await;
     Ok((
         StatusCode::CREATED,
         Json(CreatedPublishableKeyDto {
@@ -406,21 +372,14 @@ async fn create_key(
     responses((status = 204))
 )]
 async fn revoke_key(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "settings.write")?;
-    RegionService::new(db).revoke_publishable_key(&id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "publishable_key.revoked",
-        "publishable_api_key",
-        &id,
-        serde_json::Value::Null,
-    )
-    .await;
+    RegionService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .revoke_publishable_key(&id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }

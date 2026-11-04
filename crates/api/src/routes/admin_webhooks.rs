@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use fastcart_http::extractors::ApiQuery;
@@ -21,7 +21,7 @@ use fastcart_module_webhook::{
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::{StoreDb, record_store_audit};
+use super::StoreDb;
 
 /// Builds the admin webhook routes.
 pub fn router() -> Router<Arc<crate::state::AppContext>> {
@@ -171,15 +171,13 @@ async fn list_endpoints(
     responses((status = 201, body = CreatedWebhookDto))
 )]
 async fn create_endpoint(
-    State(context): State<Arc<crate::state::AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateWebhookRequest>,
 ) -> ApiResult<(StatusCode, Json<CreatedWebhookDto>)> {
     require_permission(&actor, "settings.write")?;
-    let url = request.url.clone();
-    let events = request.events.clone();
     let created = WebhookService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_endpoint(CreateWebhookEndpointInput {
             url: request.url,
             events: request.events,
@@ -187,15 +185,6 @@ async fn create_endpoint(
             metadata: request.metadata,
         })
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "webhook.created",
-        "webhook_endpoint",
-        created.endpoint.id.as_str(),
-        serde_json::json!({"url": url, "events": events}),
-    )
-    .await;
     Ok((
         StatusCode::CREATED,
         Json(CreatedWebhookDto {
@@ -235,7 +224,6 @@ async fn get_endpoint(
     responses((status = 200, body = WebhookEndpointDto))
 )]
 async fn update_endpoint(
-    State(context): State<Arc<crate::state::AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -243,6 +231,7 @@ async fn update_endpoint(
 ) -> ApiResult<Json<WebhookEndpointDto>> {
     require_permission(&actor, "settings.write")?;
     let endpoint = WebhookService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .update_endpoint(
             &WebhookId::from_string(id),
             UpdateWebhookEndpointInput {
@@ -252,19 +241,6 @@ async fn update_endpoint(
             },
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "webhook.updated",
-        "webhook_endpoint",
-        endpoint.id.as_str(),
-        serde_json::json!({
-            "url": endpoint.url.clone(),
-            "events": endpoint.events.clone(),
-            "is_active": endpoint.is_active,
-        }),
-    )
-    .await;
     Ok(Json(endpoint_dto(&endpoint)))
 }
 
@@ -277,7 +253,6 @@ async fn update_endpoint(
     responses((status = 204))
 )]
 async fn delete_endpoint(
-    State(context): State<Arc<crate::state::AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -285,17 +260,9 @@ async fn delete_endpoint(
     require_permission(&actor, "settings.write")?;
     let endpoint_id = WebhookId::from_string(id);
     WebhookService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .delete_endpoint(&endpoint_id)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "webhook.deleted",
-        "webhook_endpoint",
-        endpoint_id.as_str(),
-        serde_json::Value::Null,
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -308,23 +275,16 @@ async fn delete_endpoint(
     responses((status = 200, body = RotatedSecretDto))
 )]
 async fn rotate_secret(
-    State(context): State<Arc<crate::state::AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<Json<RotatedSecretDto>> {
     require_permission(&actor, "settings.write")?;
     let endpoint_id = WebhookId::from_string(id);
-    let secret = WebhookService::new(db).rotate_secret(&endpoint_id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "webhook.secret_rotated",
-        "webhook_endpoint",
-        endpoint_id.as_str(),
-        serde_json::Value::Null,
-    )
-    .await;
+    let secret = WebhookService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+        .rotate_secret(&endpoint_id)
+        .await?;
     Ok(Json(RotatedSecretDto { secret }))
 }
 

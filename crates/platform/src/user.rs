@@ -188,6 +188,36 @@ impl UserRow {
 const USER_COLUMNS: &str =
     "id, email, first_name, last_name, status, email_verified_at, metadata, created_at, updated_at";
 
+const AUDIT_INSERT: &str = "INSERT OR IGNORE INTO platform_audit_logs
+     (id, actor_id, store_id, action, resource_type, resource_id, data, ip_address, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+fn unique_violation(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(database_error) if database_error.is_unique_violation()
+    )
+}
+
+/// Counts active owners in a store other than `membership_id` through `tx`.
+async fn store_has_other_active_owner(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    store_id: &StoreId,
+    membership_id: &str,
+) -> PlatformResult<bool> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT m.id) FROM store_memberships m
+         JOIN membership_roles mr ON mr.membership_id = m.id
+         JOIN roles r ON r.id = mr.role_id
+         WHERE m.store_id = ? AND m.id != ? AND m.status = 'active' AND r.name = 'owner'",
+    )
+    .bind(store_id.as_str())
+    .bind(membership_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(count > 0)
+}
+
 impl PlatformStore {
     /// Creates a user and credential atomically.
     pub async fn create_user_with_credential(
@@ -200,7 +230,7 @@ impl PlatformStore {
             .map_err(|error| PlatformError::InvalidInput(error.to_string()))?;
         let id = UserId::new();
         let now = now_timestamp();
-        let mut transaction = self.pool().begin().await?;
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
         let existing: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE email = ?")
             .bind(&email)
             .fetch_optional(&mut *transaction)
@@ -208,7 +238,7 @@ impl PlatformStore {
         if existing.is_some() {
             return Err(PlatformError::EmailConflict(email));
         }
-        sqlx::query(
+        let insert = sqlx::query(
             "INSERT INTO users
              (id, email, first_name, last_name, status, email_verified_at, metadata,
               created_at, updated_at)
@@ -221,7 +251,14 @@ impl PlatformStore {
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
-        .await?;
+        .await;
+        if let Err(error) = insert {
+            return Err(if unique_violation(&error) {
+                PlatformError::EmailConflict(email)
+            } else {
+                error.into()
+            });
+        }
         sqlx::query(
             "INSERT INTO user_credentials (id, user_id, provider_id, password_hash,
              created_at, updated_at) VALUES (?, ?, 'emailpass', ?, ?, ?)",
@@ -232,6 +269,21 @@ impl PlatformStore {
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
+        .await?;
+        let audit_id = format!("audit_{}", uuid::Uuid::now_v7().simple());
+        Self::append_audit_tx(
+            &mut transaction,
+            &audit_id,
+            &NewAudit {
+                actor_id: self.audit_actor.clone(),
+                store_id: None,
+                action: "user.created".to_owned(),
+                resource_type: Some("user".to_owned()),
+                resource_id: Some(id.to_string()),
+                data: serde_json::json!({"email": &email, "status": "active"}),
+                ip_address: None,
+            },
+        )
         .await?;
         transaction.commit().await?;
         self.get_user(&id)
@@ -312,12 +364,16 @@ impl PlatformStore {
 
     /// Marks a user's email as verified.
     pub async fn verify_user_email(&self, user_id: &UserId) -> PlatformResult<()> {
-        sqlx::query("UPDATE users SET email_verified_at = ?, updated_at = ? WHERE id = ?")
-            .bind(now_timestamp())
-            .bind(now_timestamp())
-            .bind(user_id.as_str())
-            .execute(self.pool())
-            .await?;
+        let result =
+            sqlx::query("UPDATE users SET email_verified_at = ?, updated_at = ? WHERE id = ?")
+                .bind(now_timestamp())
+                .bind(now_timestamp())
+                .bind(user_id.as_str())
+                .execute(self.pool())
+                .await?;
+        if result.rows_affected() == 0 {
+            return Err(PlatformError::NotFound(format!("user {user_id}")));
+        }
         Ok(())
     }
 
@@ -355,7 +411,15 @@ impl PlatformStore {
         roles: &[&str],
     ) -> PlatformResult<Membership> {
         let now = now_timestamp();
-        let mut transaction = self.pool().begin().await?;
+        // Duplicate role names must not violate the membership_roles primary key
+        // and must not produce duplicate audit entries.
+        let roles: Vec<&str> = roles
+            .iter()
+            .copied()
+            .collect::<BTreeSet<&str>>()
+            .into_iter()
+            .collect();
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT id FROM store_memberships WHERE user_id = ? AND store_id = ?",
         )
@@ -368,7 +432,7 @@ impl PlatformStore {
             Some(id) => id,
             None => {
                 let id = format!("mem_{}", uuid::Uuid::now_v7().simple());
-                sqlx::query(
+                let insert = sqlx::query(
                     "INSERT INTO store_memberships
                      (id, user_id, store_id, status, created_at, updated_at)
                      VALUES (?, ?, ?, 'active', ?, ?)",
@@ -379,10 +443,58 @@ impl PlatformStore {
                 .bind(now)
                 .bind(now)
                 .execute(&mut *transaction)
-                .await?;
+                .await;
+                if let Err(error) = insert {
+                    return Err(if unique_violation(&error) {
+                        PlatformError::Conflict(
+                            "membership already exists for this user and store".to_owned(),
+                        )
+                    } else {
+                        error.into()
+                    });
+                }
                 id
             }
         };
+
+        // Resolve every role before mutating so unknown roles abort the
+        // transaction without partial role changes.
+        let mut role_ids = Vec::with_capacity(roles.len());
+        for role in &roles {
+            let role_id: Option<String> = sqlx::query_scalar("SELECT id FROM roles WHERE name = ?")
+                .bind(*role)
+                .fetch_optional(&mut *transaction)
+                .await?;
+            let Some(role_id) = role_id else {
+                return Err(PlatformError::InvalidInput(format!("unknown role: {role}")));
+            };
+            role_ids.push(role_id);
+        }
+
+        // Removing the owner role from the last active owner would leave the
+        // store administrable by nobody. The count runs in the same immediate
+        // transaction as the replacement below, so it cannot race.
+        if !roles.contains(&"owner") {
+            let was_active_owner: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM store_memberships m
+                    JOIN membership_roles mr ON mr.membership_id = m.id
+                    JOIN roles r ON r.id = mr.role_id
+                    WHERE m.id = ? AND m.status = 'active' AND r.name = 'owner'
+                )",
+            )
+            .bind(&membership_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if was_active_owner
+                && !store_has_other_active_owner(&mut transaction, store_id, &membership_id).await?
+            {
+                return Err(PlatformError::Conflict(
+                    "cannot remove the last owner of a store".to_owned(),
+                ));
+            }
+        }
+
         sqlx::query("UPDATE store_memberships SET status = 'active', updated_at = ? WHERE id = ?")
             .bind(now)
             .bind(&membership_id)
@@ -393,20 +505,28 @@ impl PlatformStore {
             .bind(&membership_id)
             .execute(&mut *transaction)
             .await?;
-        for role in roles {
-            let role_id: Option<String> = sqlx::query_scalar("SELECT id FROM roles WHERE name = ?")
-                .bind(role)
-                .fetch_optional(&mut *transaction)
-                .await?;
-            let Some(role_id) = role_id else {
-                return Err(PlatformError::InvalidInput(format!("unknown role: {role}")));
-            };
+        for role_id in &role_ids {
             sqlx::query("INSERT INTO membership_roles (membership_id, role_id) VALUES (?, ?)")
                 .bind(&membership_id)
                 .bind(role_id)
                 .execute(&mut *transaction)
                 .await?;
         }
+        let audit_id = format!("audit_{}", uuid::Uuid::now_v7().simple());
+        Self::append_audit_tx(
+            &mut transaction,
+            &audit_id,
+            &NewAudit {
+                actor_id: self.audit_actor.clone(),
+                store_id: Some(store_id.to_string()),
+                action: "membership.upserted".to_owned(),
+                resource_type: Some("membership".to_owned()),
+                resource_id: Some(membership_id.clone()),
+                data: serde_json::json!({"roles": roles, "status": "active"}),
+                ip_address: None,
+            },
+        )
+        .await?;
         transaction.commit().await?;
         self.get_membership(user_id, store_id)
             .await?
@@ -479,18 +599,63 @@ impl PlatformStore {
         user_id: &UserId,
         store_id: &StoreId,
     ) -> PlatformResult<()> {
-        let result = sqlx::query(
-            "UPDATE store_memberships SET status = 'revoked', updated_at = ?
-             WHERE user_id = ? AND store_id = ?",
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let row = sqlx::query(
+            "SELECT id, status FROM store_memberships WHERE user_id = ? AND store_id = ?",
         )
-        .bind(now_timestamp())
         .bind(user_id.as_str())
         .bind(store_id.as_str())
-        .execute(self.pool())
+        .fetch_optional(&mut *transaction)
         .await?;
-        if result.rows_affected() == 0 {
+        let Some(row) = row else {
             return Err(PlatformError::NotFound("membership".to_owned()));
+        };
+        let membership_id: String = row.try_get("id")?;
+        let status: String = row.try_get("status")?;
+
+        // The owner check and the revocation share one immediate transaction,
+        // so no concurrent revocation can remove the last two owners.
+        if status == "active" {
+            let is_owner: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM membership_roles mr
+                    JOIN roles r ON r.id = mr.role_id
+                    WHERE mr.membership_id = ? AND r.name = 'owner'
+                )",
+            )
+            .bind(&membership_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if is_owner
+                && !store_has_other_active_owner(&mut transaction, store_id, &membership_id).await?
+            {
+                return Err(PlatformError::Conflict(
+                    "cannot remove the last owner of a store".to_owned(),
+                ));
+            }
         }
+
+        sqlx::query("UPDATE store_memberships SET status = 'revoked', updated_at = ? WHERE id = ?")
+            .bind(now_timestamp())
+            .bind(&membership_id)
+            .execute(&mut *transaction)
+            .await?;
+        let audit_id = format!("audit_{}", uuid::Uuid::now_v7().simple());
+        Self::append_audit_tx(
+            &mut transaction,
+            &audit_id,
+            &NewAudit {
+                actor_id: self.audit_actor.clone(),
+                store_id: Some(store_id.to_string()),
+                action: "membership.removed".to_owned(),
+                resource_type: Some("membership".to_owned()),
+                resource_id: Some(membership_id),
+                data: serde_json::json!({"status": "revoked"}),
+                ip_address: None,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -561,22 +726,42 @@ impl PlatformStore {
     /// retries idempotent when delivery succeeds but the outbox row is not
     /// marked processed.
     pub async fn record_audit_with_id(&self, id: &str, entry: &NewAudit) -> PlatformResult<()> {
-        sqlx::query(
-            "INSERT OR IGNORE INTO platform_audit_logs
-             (id, actor_id, store_id, action, resource_type, resource_id, data, ip_address, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(id)
-        .bind(entry.actor_id.as_deref())
-        .bind(entry.store_id.as_deref())
-        .bind(&entry.action)
-        .bind(entry.resource_type.as_deref())
-        .bind(entry.resource_id.as_deref())
-        .bind(entry.data.to_string())
-        .bind(entry.ip_address.as_deref())
-        .bind(now_timestamp())
-        .execute(self.pool())
-        .await?;
+        sqlx::query(AUDIT_INSERT)
+            .bind(id)
+            .bind(entry.actor_id.as_deref())
+            .bind(entry.store_id.as_deref())
+            .bind(&entry.action)
+            .bind(entry.resource_type.as_deref())
+            .bind(entry.resource_id.as_deref())
+            .bind(entry.data.to_string())
+            .bind(entry.ip_address.as_deref())
+            .bind(now_timestamp())
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Appends an audit record inside a mutation transaction.
+    ///
+    /// Uses the same insert-or-ignore semantics as [`Self::record_audit_with_id`]
+    /// so a mutation and its audit row commit or roll back together.
+    async fn append_audit_tx(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &str,
+        entry: &NewAudit,
+    ) -> PlatformResult<()> {
+        sqlx::query(AUDIT_INSERT)
+            .bind(id)
+            .bind(entry.actor_id.as_deref())
+            .bind(entry.store_id.as_deref())
+            .bind(&entry.action)
+            .bind(entry.resource_type.as_deref())
+            .bind(entry.resource_id.as_deref())
+            .bind(entry.data.to_string())
+            .bind(entry.ip_address.as_deref())
+            .bind(now_timestamp())
+            .execute(&mut **transaction)
+            .await?;
         Ok(())
     }
 }
@@ -815,5 +1000,151 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(logs.len(), 1, "outbox retries must not duplicate rows");
+    }
+
+    #[tokio::test]
+    async fn duplicate_roles_are_deduplicated_and_audited_once() {
+        let (platform, user_id, store_id) = fixture().await;
+        let audited = platform
+            .clone()
+            .with_audit_actor(Some("admin_1".to_owned()));
+
+        let membership = audited
+            .upsert_membership(&user_id, &store_id, &["owner", "owner"])
+            .await
+            .unwrap();
+        assert_eq!(membership.roles, vec!["owner"]);
+
+        let role_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM membership_roles WHERE membership_id = ?")
+                .bind(&membership.id)
+                .fetch_one(audited.pool())
+                .await
+                .unwrap();
+        assert_eq!(role_rows, 1);
+
+        let logs = audited
+            .list_audit_logs(Some(&store_id), Pagination::default())
+            .await
+            .unwrap();
+        let upserts = logs
+            .iter()
+            .filter(|log| log.action == "membership.upserted")
+            .count();
+        assert_eq!(upserts, 1, "one mutation must produce one audit row");
+    }
+
+    #[tokio::test]
+    async fn last_owner_cannot_be_demoted_or_removed() {
+        let (platform, owner_id, store_id) = fixture().await;
+        platform
+            .upsert_membership(&owner_id, &store_id, &["owner"])
+            .await
+            .unwrap();
+
+        let demote = platform
+            .upsert_membership(&owner_id, &store_id, &["admin"])
+            .await
+            .unwrap_err();
+        assert!(matches!(demote, crate::PlatformError::Conflict(_)));
+        assert_eq!(
+            platform
+                .get_membership(&owner_id, &store_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .roles,
+            vec!["owner"]
+        );
+
+        let remove = platform
+            .revoke_membership(&owner_id, &store_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(remove, crate::PlatformError::Conflict(_)));
+
+        let second = platform
+            .create_user_with_credential(CreateUserInput::new("second@example.com"), "hash")
+            .await
+            .unwrap();
+        platform
+            .upsert_membership(&second.id, &store_id, &["owner"])
+            .await
+            .unwrap();
+
+        // With a second owner present the first can be demoted and removed.
+        platform
+            .upsert_membership(&owner_id, &store_id, &["admin"])
+            .await
+            .unwrap();
+        platform
+            .revoke_membership(&owner_id, &store_id)
+            .await
+            .unwrap();
+
+        // The second owner is now the last one and is protected again.
+        let remove_last = platform
+            .revoke_membership(&second.id, &store_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(remove_last, crate::PlatformError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn rbac_mutations_append_audits_without_secrets() {
+        let (platform, _, store_id) = fixture().await;
+        let audited = platform
+            .clone()
+            .with_audit_actor(Some("admin_1".to_owned()));
+        let credential_hash = "credential-secret-value";
+
+        let created = audited
+            .create_user_with_credential(
+                CreateUserInput::new("member@example.com"),
+                credential_hash,
+            )
+            .await
+            .unwrap();
+        audited
+            .upsert_membership(&created.id, &store_id, &["admin", "admin"])
+            .await
+            .unwrap();
+        audited
+            .revoke_membership(&created.id, &store_id)
+            .await
+            .unwrap();
+
+        let logs = audited
+            .list_audit_logs(None, Pagination::default())
+            .await
+            .unwrap();
+        let actor_logs: Vec<_> = logs
+            .iter()
+            .filter(|log| log.actor_id.as_deref() == Some("admin_1"))
+            .collect();
+        assert_eq!(actor_logs.len(), 3);
+        for action in ["user.created", "membership.upserted", "membership.removed"] {
+            assert!(
+                actor_logs.iter().any(|log| log.action == action),
+                "missing audit action {action}"
+            );
+        }
+        for log in actor_logs {
+            let record = serde_json::to_string(log).unwrap();
+            assert!(
+                !record.contains(credential_hash),
+                "audit rows must never contain credential material"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn verifying_an_unknown_user_is_not_found() {
+        let platform = PlatformStore::in_memory().await.unwrap();
+        let error = platform
+            .verify_user_email(&fastcart_kernel::UserId::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, crate::PlatformError::NotFound(_)));
     }
 }

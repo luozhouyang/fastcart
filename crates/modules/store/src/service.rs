@@ -10,6 +10,7 @@ use fastcart_kernel::{
 };
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
+use sqlx::{Sqlite, Transaction};
 
 use crate::domain::{CreateSalesChannelInput, SalesChannel, UpdateSalesChannelInput};
 
@@ -22,6 +23,32 @@ pub const MAX_SALES_CHANNEL_NAME_LENGTH: usize = 200;
 
 const SALES_CHANNEL_COLUMNS: &str =
     "id, name, description, is_disabled, metadata, created_at, updated_at";
+
+/// Substrings that mark a setting value as sensitive.
+///
+/// This is the single source of truth for which keys may leave the admin
+/// surface: service methods such as [`StoreService::public_settings`] and the
+/// HTTP routes both use it. Matching is case-insensitive and intentionally
+/// conservative; non-matching keys keep their previous public behaviour.
+const SECRET_SETTING_MARKERS: &[&str] = &[
+    "secret",
+    "password",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+    "credential",
+];
+
+/// Returns true when a setting key names a value that must not be exposed
+/// through public endpoints.
+#[must_use]
+pub fn is_secret_setting_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    SECRET_SETTING_MARKERS
+        .iter()
+        .any(|marker| key.contains(marker))
+}
 
 /// Store-level settings and sales-channel operations.
 #[derive(Clone, Debug)]
@@ -47,26 +74,12 @@ impl StoreService {
 
     /// Creates or replaces a setting after validating the key and value.
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<(), AppError> {
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(AppError::validation("setting key must not be empty"));
-        }
-        if key.chars().count() > MAX_SETTING_KEY_LENGTH {
-            return Err(AppError::validation(format!(
-                "setting key must not exceed {MAX_SETTING_KEY_LENGTH} characters"
-            )));
-        }
-        if value.len() > MAX_SETTING_VALUE_BYTES {
-            return Err(AppError::validation(format!(
-                "setting value must not exceed {MAX_SETTING_VALUE_BYTES} bytes"
-            )));
-        }
-
+        validate_setting(key, value)?;
         sqlx::query(
             "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         )
-        .bind(key)
+        .bind(key.trim())
         .bind(value)
         .bind(now_timestamp())
         .execute(self.db.pool())
@@ -75,7 +88,36 @@ impl StoreService {
         Ok(())
     }
 
+    /// Validates every key/value first, then upserts the whole batch in one
+    /// transaction so a failure cannot leave a partially updated set.
+    pub async fn set_settings(&self, values: &[(String, String)]) -> Result<(), AppError> {
+        for (key, value) in values {
+            validate_setting(key, value)?;
+        }
+        let mut transaction = self.db.begin().await?;
+        let now = now_timestamp();
+        for (key, value) in values {
+            sqlx::query(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, \
+                 updated_at = excluded.updated_at",
+            )
+            .bind(key.trim())
+            .bind(value)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+        }
+        transaction.commit().await.map_err(database_error)?;
+        Ok(())
+    }
+
     /// Returns every setting ordered by key.
+    ///
+    /// Administrative callers use this to read the complete configuration,
+    /// including secret values. Public callers must use
+    /// [`Self::public_settings`].
     pub async fn get_all_settings(&self) -> Result<BTreeMap<String, String>, AppError> {
         let rows = sqlx::query("SELECT key, value FROM settings ORDER BY key")
             .fetch_all(self.db.pool())
@@ -87,6 +129,14 @@ impl StoreService {
             let value: String = row.try_get("value").map_err(database_error)?;
             settings.insert(key, value);
         }
+        Ok(settings)
+    }
+
+    /// Returns settings safe to expose publicly, omitting secret keys as
+    /// classified by [`is_secret_setting_key`].
+    pub async fn public_settings(&self) -> Result<BTreeMap<String, String>, AppError> {
+        let mut settings = self.get_all_settings().await?;
+        settings.retain(|key, _| !is_secret_setting_key(key));
         Ok(settings)
     }
 
@@ -107,11 +157,12 @@ impl StoreService {
     ) -> Result<SalesChannel, AppError> {
         let name = validate_channel_name(&input.name)?;
         validate_metadata(&input.metadata)?;
-        self.ensure_channel_name_available(&name, None).await?;
 
         let id = new_sales_channel_id();
         let now = now_timestamp();
         let description = normalize_optional(input.description);
+        let mut transaction = self.db.begin().await?;
+        ensure_channel_name_available_tx(&mut transaction, &name, None).await?;
         sqlx::query(
             "INSERT INTO sales_channels \
              (id, name, description, is_disabled, metadata, created_at, updated_at) \
@@ -123,9 +174,10 @@ impl StoreService {
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *transaction)
         .await
         .map_err(|error| unique_or_database(error, "sales channel name already exists"))?;
+        transaction.commit().await.map_err(database_error)?;
 
         self.get_sales_channel(&id).await
     }
@@ -182,9 +234,6 @@ impl StoreService {
             Some(value) => validate_channel_name(&value)?,
             None => existing.name.clone(),
         };
-        if name != existing.name {
-            self.ensure_channel_name_available(&name, Some(id)).await?;
-        }
         let description = match input.description {
             Some(value) => normalize_optional(Some(value)),
             None => existing.description.clone(),
@@ -197,7 +246,9 @@ impl StoreService {
             None => existing.metadata.clone(),
         };
 
-        sqlx::query(
+        let mut transaction = self.db.begin().await?;
+        ensure_channel_name_available_tx(&mut transaction, &name, Some(id)).await?;
+        let affected = sqlx::query(
             "UPDATE sales_channels SET name = ?, description = ?, metadata = ?, updated_at = ? \
              WHERE id = ?",
         )
@@ -206,9 +257,14 @@ impl StoreService {
         .bind(metadata.to_json_string())
         .bind(now_timestamp())
         .bind(id)
-        .execute(self.db.pool())
+        .execute(&mut *transaction)
         .await
-        .map_err(|error| unique_or_database(error, "sales channel name already exists"))?;
+        .map_err(|error| unique_or_database(error, "sales channel name already exists"))?
+        .rows_affected();
+        if affected == 0 {
+            return Err(AppError::not_found("sales channel", id));
+        }
+        transaction.commit().await.map_err(database_error)?;
 
         self.get_sales_channel(id).await
     }
@@ -241,34 +297,52 @@ impl StoreService {
         }
         self.get_sales_channel(id).await
     }
+}
 
-    async fn ensure_channel_name_available(
-        &self,
-        name: &str,
-        exclude_id: Option<&str>,
-    ) -> Result<(), AppError> {
-        let count: i64 = match exclude_id {
-            Some(exclude_id) => {
-                sqlx::query_scalar("SELECT COUNT(*) FROM sales_channels WHERE name = ? AND id <> ?")
-                    .bind(name)
-                    .bind(exclude_id)
-                    .fetch_one(self.db.pool())
-                    .await
-                    .map_err(database_error)?
-            }
-            None => sqlx::query_scalar("SELECT COUNT(*) FROM sales_channels WHERE name = ?")
-                .bind(name)
-                .fetch_one(self.db.pool())
-                .await
-                .map_err(database_error)?,
-        };
-        if count > 0 {
-            return Err(AppError::conflict(format!(
-                "sales channel name already exists: {name}"
-            )));
-        }
-        Ok(())
+fn validate_setting(key: &str, value: &str) -> Result<(), AppError> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(AppError::validation("setting key must not be empty"));
     }
+    if key.chars().count() > MAX_SETTING_KEY_LENGTH {
+        return Err(AppError::validation(format!(
+            "setting key must not exceed {MAX_SETTING_KEY_LENGTH} characters"
+        )));
+    }
+    if value.len() > MAX_SETTING_VALUE_BYTES {
+        return Err(AppError::validation(format!(
+            "setting value must not exceed {MAX_SETTING_VALUE_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+async fn ensure_channel_name_available_tx(
+    transaction: &mut Transaction<'_, Sqlite>,
+    name: &str,
+    exclude_id: Option<&str>,
+) -> Result<(), AppError> {
+    let count: i64 = match exclude_id {
+        Some(exclude_id) => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_channels WHERE name = ? AND id <> ?")
+                .bind(name)
+                .bind(exclude_id)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(database_error)?
+        }
+        None => sqlx::query_scalar("SELECT COUNT(*) FROM sales_channels WHERE name = ?")
+            .bind(name)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(database_error)?,
+    };
+    if count > 0 {
+        return Err(AppError::conflict(format!(
+            "sales channel name already exists: {name}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_channel_name(value: &str) -> Result<String, AppError> {

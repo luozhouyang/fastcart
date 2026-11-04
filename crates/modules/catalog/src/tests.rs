@@ -1,6 +1,6 @@
 //! Catalog-module tests.
 
-use fastcart_infrastructure::StoreDatabase;
+use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
 use fastcart_kernel::{AppError, Metadata, Pagination, StoreId};
 
 use crate::{
@@ -234,6 +234,62 @@ async fn creates_multi_variant_products_with_options() {
                 .any(|value| value.id == variant.option_value_ids[0])
         );
     }
+}
+
+#[tokio::test]
+async fn updating_options_preserves_existing_variant_links() {
+    let service = service().await;
+    let product = service
+        .create_product(CreateProductInput {
+            title: "Shirt".to_owned(),
+            options: vec![CreateOptionInput {
+                title: "Size".to_owned(),
+                values: vec!["S".to_owned(), "M".to_owned()],
+                ..Default::default()
+            }],
+            variants: vec![CreateVariantInput {
+                title: "Small".to_owned(),
+                sku: Some("SHIRT-S".to_owned()),
+                option_values: vec![VariantOptionInput {
+                    option_title: "Size".to_owned(),
+                    value: "S".to_owned(),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let value_id = product.options[0].values[0].id.clone();
+    assert_eq!(product.variants[0].option_value_ids, vec![value_id.clone()]);
+
+    // Replacing the option set without resubmitting variants must keep the
+    // existing option-value identifiers so the variant links stay valid.
+    let updated = service
+        .update_product(
+            &product.id,
+            UpdateProductInput {
+                options: Some(vec![CreateOptionInput {
+                    title: "Size".to_owned(),
+                    values: vec!["S".to_owned(), "M".to_owned(), "L".to_owned()],
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated.options.len(), 1);
+    assert_eq!(updated.options[0].values[0].id, value_id);
+    assert_eq!(updated.variants.len(), 1);
+    assert_eq!(updated.variants[0].option_value_ids, vec![value_id.clone()]);
+    assert!(
+        updated.options[0]
+            .values
+            .iter()
+            .any(|value| value.id == value_id)
+    );
 }
 
 #[tokio::test]
@@ -1196,6 +1252,41 @@ async fn add_remove_and_reorder_images() {
 }
 
 #[tokio::test]
+async fn reordering_images_rejects_duplicates_and_foreign_ids() {
+    let service = service().await;
+    let first = service
+        .create_product(CreateProductInput {
+            images: vec![
+                "https://example.com/a.jpg".to_owned(),
+                "https://example.com/b.jpg".to_owned(),
+            ],
+            ..product_input("First")
+        })
+        .await
+        .unwrap();
+    let second = service
+        .create_product(CreateProductInput {
+            images: vec!["https://example.com/c.jpg".to_owned()],
+            ..product_input("Second")
+        })
+        .await
+        .unwrap();
+
+    let first_id = first.images[0].id.clone();
+    let error = service
+        .reorder_images(&first.id, &[first_id.clone(), first_id])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)));
+
+    let error = service
+        .reorder_images(&first.id, &[second.images[0].id.clone()])
+        .await
+        .unwrap_err();
+    assert!(error.is_not_found());
+}
+
+#[tokio::test]
 async fn images_can_target_a_variant() {
     let service = service().await;
     let product = basic_product(&service, "Variant Image", "VI-1").await;
@@ -1456,6 +1547,51 @@ async fn insert_sales_channel(db: &StoreDatabase, id: &str) {
     .execute(db.pool())
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn audited_mutations_append_outbox_rows_once() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("in-memory store database");
+    let service = CatalogService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+    let product = basic_product(&service, "Audited", "AUD-1").await;
+    insert_sales_channel(&db, "sc_audit").await;
+
+    service.archive_product(&product.id).await.unwrap();
+    // Archiving an already archived product is a no-op.
+    service.archive_product(&product.id).await.unwrap();
+    service
+        .set_product_sales_channels(&product.id, &["sc_audit".to_owned()])
+        .await
+        .unwrap();
+    // Replacing the same channel set is a no-op.
+    service
+        .set_product_sales_channels(&product.id, &["sc_audit".to_owned()])
+        .await
+        .unwrap();
+    service.delete_product(&product.id).await.unwrap();
+    // A repeat delete fails and must not append another row.
+    assert!(service.delete_product(&product.id).await.is_err());
+
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert_eq!(
+        audits
+            .iter()
+            .map(|audit| audit.action.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "product.archived",
+            "product.sales_channels_updated",
+            "product.deleted"
+        ]
+    );
+    assert!(audits.iter().all(|audit| audit.processed_at.is_none()));
+    assert!(
+        audits
+            .iter()
+            .all(|audit| audit.actor_id.as_deref() == Some("user_1"))
+    );
 }
 
 #[tokio::test]

@@ -20,7 +20,7 @@ pub use engine::{
     WorkflowExecutionDetail, WorkflowExecutionFilter, WorkflowStep, WorkflowStepRecord, status,
 };
 pub use maintenance::{
-    MaintenanceReport, RetentionReport, cleanup_inquiry_files, cleanup_retention, run_maintenance,
-    run_maintenance_with_notifications, run_maintenance_with_options,
-    run_outbox_and_notification_jobs,
+    MaintenanceReport, RetentionReport, cleanup_asset_purges, cleanup_inquiry_files,
+    cleanup_retention, run_maintenance, run_maintenance_with_notifications,
+    run_maintenance_with_options, run_outbox_and_notification_jobs,
 };

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::{StoreDb, record_store_audit};
+use super::StoreDb;
 use crate::dto::PageResponse;
 use crate::state::AppContext;
 
@@ -194,28 +194,19 @@ async fn list_forms(
     responses((status = 201, body = InquiryForm))
 )]
 async fn create_form(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateInquiryFormRequest>,
 ) -> ApiResult<(StatusCode, Json<InquiryForm>)> {
     authorize(&actor, "settings.write")?;
     let form = InquiryFormService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .create_form(CreateInquiryFormInput {
             name: request.name,
             handle: request.handle,
             description: request.description,
         })
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "inquiry_form.created",
-        "inquiry_form",
-        form.id.as_str(),
-        serde_json::json!({"handle": form.handle}),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(form)))
 }
 
@@ -258,7 +249,6 @@ async fn get_form(
     responses((status = 200, body = InquiryForm))
 )]
 async fn update_form(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -266,6 +256,7 @@ async fn update_form(
 ) -> ApiResult<Json<InquiryForm>> {
     authorize(&actor, "settings.write")?;
     let form = InquiryFormService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .update_form(
             &InquiryFormId::from_string(id),
             UpdateInquiryFormInput {
@@ -274,15 +265,6 @@ async fn update_form(
             },
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "inquiry_form.updated",
-        "inquiry_form",
-        form.id.as_str(),
-        serde_json::json!({}),
-    )
-    .await;
     Ok(Json(form))
 }
 
@@ -295,24 +277,15 @@ async fn update_form(
     responses((status = 200, body = InquiryForm))
 )]
 async fn archive_form(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<Json<InquiryForm>> {
     authorize(&actor, "settings.write")?;
     let form = InquiryFormService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .archive(&InquiryFormId::from_string(id))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "inquiry_form.archived",
-        "inquiry_form",
-        form.id.as_str(),
-        serde_json::json!({}),
-    )
-    .await;
     Ok(Json(form))
 }
 
@@ -326,7 +299,6 @@ async fn archive_form(
     responses((status = 200, body = InquiryFormRevision))
 )]
 async fn save_draft(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -334,6 +306,7 @@ async fn save_draft(
 ) -> ApiResult<Json<InquiryFormRevision>> {
     authorize(&actor, "settings.write")?;
     let revision = InquiryFormService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .save_draft(
             &InquiryFormId::from_string(id),
             SaveInquiryDraftInput {
@@ -343,15 +316,6 @@ async fn save_draft(
             },
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "inquiry_form.draft_saved",
-        "inquiry_form_revision",
-        revision.id.as_str(),
-        serde_json::json!({"version": revision.version}),
-    )
-    .await;
     Ok(Json(revision))
 }
 
@@ -365,7 +329,6 @@ async fn save_draft(
     responses((status = 200, body = InquiryForm))
 )]
 async fn publish_form(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -373,17 +336,9 @@ async fn publish_form(
 ) -> ApiResult<Json<InquiryForm>> {
     authorize(&actor, "settings.write")?;
     let form = InquiryFormService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .publish(&InquiryFormId::from_string(id), request.version)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "inquiry_form.published",
-        "inquiry_form",
-        form.id.as_str(),
-        serde_json::json!({"version": form.published_version}),
-    )
-    .await;
     Ok(Json(form))
 }
 
@@ -396,24 +351,15 @@ async fn publish_form(
     responses((status = 200, body = InquiryForm))
 )]
 async fn publish_version(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, version)): Path<(String, i64)>,
 ) -> ApiResult<Json<InquiryForm>> {
     authorize(&actor, "settings.write")?;
     let form = InquiryFormService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .publish(&InquiryFormId::from_string(id), Some(version))
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "inquiry_form.published",
-        "inquiry_form",
-        form.id.as_str(),
-        serde_json::json!({"version": version}),
-    )
-    .await;
     Ok(Json(form))
 }
 
@@ -530,7 +476,6 @@ async fn get_inquiry(
     responses((status = 200, body = Inquiry))
 )]
 async fn update_status(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -540,20 +485,12 @@ async fn update_status(
     let status = InquiryStatus::parse(&request.status)
         .ok_or_else(|| ApiError::new(AppError::validation("invalid inquiry status")))?;
     let inquiry = InquiryService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
         .update_status(
             &InquiryId::from_string(id),
             UpdateInquiryStatusInput { status },
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "inquiry.status_changed",
-        "inquiry",
-        inquiry.id.as_str(),
-        serde_json::json!({"status": inquiry.status.as_str()}),
-    )
-    .await;
     Ok(Json(inquiry))
 }
 

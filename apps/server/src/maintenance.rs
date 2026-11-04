@@ -54,6 +54,12 @@ pub async fn maintenance_loop(context: Arc<AppContext>) {
                 context.storage.as_ref(),
             )
             .await;
+            let asset_purges = fastcart_workflows::cleanup_asset_purges(
+                &context.platform,
+                &context.databases,
+                context.storage.as_ref(),
+            )
+            .await;
             let retention = fastcart_workflows::cleanup_retention(
                 &context.platform,
                 &context.databases,
@@ -64,6 +70,7 @@ pub async fn maintenance_loop(context: Arc<AppContext>) {
             .await;
             if report != fastcart_workflows::MaintenanceReport::default()
                 || expired_files > 0
+                || asset_purges > 0
                 || retention != fastcart_workflows::RetentionReport::default()
             {
                 tracing::info!(
@@ -80,6 +87,7 @@ pub async fn maintenance_loop(context: Arc<AppContext>) {
                     channel_notifications_duplicates = report.channel_notifications_duplicates,
                     channel_notifications_failed = report.channel_notifications_failed,
                     inquiry_files_expired = expired_files,
+                    asset_purges_processed = asset_purges,
                     inquiries_deleted = retention.inquiries_deleted,
                     deliveries_deleted = retention.deliveries_deleted,
                     retention_failures = retention.failures,

@@ -153,6 +153,13 @@ impl AuthService {
         self
     }
 
+    /// Sets the acting user recorded on platform mutations performed here.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.platform = self.platform.with_audit_actor(actor_id);
+        self
+    }
+
     /// Returns the platform store.
     #[must_use]
     pub fn platform(&self) -> &PlatformStore {

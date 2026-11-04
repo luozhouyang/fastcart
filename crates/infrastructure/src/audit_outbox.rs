@@ -27,6 +27,69 @@ pub struct NewAuditOutbox {
     pub data: serde_json::Value,
 }
 
+/// Acting administrator and store scope for a mutation audit.
+///
+/// Services receive this from their `with_audit_actor` builder and append the
+/// audit row inside the same transaction as the business write. Keeping the
+/// scope in one value avoids repeating the store id at every call site.
+#[derive(Clone, Debug)]
+pub struct AuditActor {
+    actor_id: String,
+    store_id: String,
+}
+
+impl AuditActor {
+    /// Creates an audit actor for one store.
+    #[must_use]
+    pub fn new(actor_id: impl Into<String>, store_id: impl Into<String>) -> Self {
+        Self {
+            actor_id: actor_id.into(),
+            store_id: store_id.into(),
+        }
+    }
+
+    /// Acting user identifier.
+    #[must_use]
+    pub fn actor_id(&self) -> &str {
+        &self.actor_id
+    }
+
+    /// Store scope.
+    #[must_use]
+    pub fn store_id(&self) -> &str {
+        &self.store_id
+    }
+
+    /// Appends an audit row through the caller's transaction.
+    ///
+    /// Passing the service transaction makes the audit atomic with the
+    /// mutation; a rolled-back mutation leaves no audit row behind.
+    pub async fn append<'e, E>(
+        &self,
+        executor: E,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: serde_json::Value,
+    ) -> Result<String, sqlx::Error>
+    where
+        E: Executor<'e, Database = Sqlite>,
+    {
+        append_audit_outbox(
+            executor,
+            &NewAuditOutbox {
+                actor_id: Some(self.actor_id.clone()),
+                store_id: Some(self.store_id.clone()),
+                action: action.to_owned(),
+                resource_type: Some(resource_type.to_owned()),
+                resource_id: Some(resource_id.to_owned()),
+                data,
+            },
+        )
+        .await
+    }
+}
+
 /// A persisted audit outbox row.
 #[derive(Clone, Debug, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct AuditOutboxRecord {
@@ -96,7 +159,7 @@ pub async fn fetch_pending_audits(
                 created_at, attempts, last_error, processed_at
          FROM audit_outbox
          WHERE processed_at IS NULL
-         ORDER BY created_at ASC
+         ORDER BY created_at ASC, id ASC
          LIMIT ?",
     )
     .bind(limit.clamp(1, 1000))

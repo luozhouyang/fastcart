@@ -12,13 +12,27 @@ use crate::migrations::{open_memory_database, open_platform_database};
 #[derive(Clone, Debug)]
 pub struct PlatformStore {
     pool: SqlitePool,
+    pub(crate) audit_actor: Option<String>,
 }
 
 impl PlatformStore {
     /// Wraps an already-migrated pool.
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            audit_actor: None,
+        }
+    }
+
+    /// Sets the acting user recorded on platform mutations.
+    ///
+    /// The actor is carried on the clone returned by the builder, so a shared
+    /// handle is never mutated.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit_actor = actor_id;
+        self
     }
 
     /// Opens and migrates the platform database at `path`.

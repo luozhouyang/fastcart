@@ -110,6 +110,7 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
     data.insert(
         fastcart_storefront::page::RESERVED_CONTEXT_KEY.to_owned(),
         build_context_data(
+            &context,
             &database,
             request.headers(),
             &store,
@@ -316,7 +317,9 @@ pub(crate) fn compile_page(
 /// The authenticated customer and their active cart are resolved from
 /// store-scoped cookies. Lookup failures degrade to anonymous/null context
 /// rather than failing the render: a theme must always receive a stable shape.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_context_data(
+    context: &AppContext,
     db: &StoreDatabase,
     headers: &HeaderMap,
     store: &fastcart_platform::Store,
@@ -327,30 +330,23 @@ pub(crate) async fn build_context_data(
 ) -> serde_json::Value {
     let cookies = parse_cookies(headers);
     let customer = match cookies.get(CUSTOMER_SESSION_COOKIE) {
-        Some(token) => match CustomerService::new(db.clone())
-            .session_customer(token)
-            .await
-        {
-            Ok(customer) => customer,
-            Err(error) => {
-                tracing::warn!(error = %error, "could not resolve customer session context");
-                None
-            }
-        },
+        Some(token) => resolve_context_customer(context, db, store.id.as_str(), token).await,
         None => None,
     };
     let cart = resolve_context_cart(
+        context,
         db,
+        store.id.as_str(),
         cookies.get(CART_ID_COOKIE).map(String::as_str),
-        customer.as_ref(),
+        customer.as_deref(),
     )
     .await;
     let customer = customer.map(|customer| {
         json!({
             "id": customer.id.as_str(),
-            "email": customer.email,
-            "first_name": customer.first_name,
-            "last_name": customer.last_name,
+            "email": customer.email.clone(),
+            "first_name": customer.first_name.clone(),
+            "last_name": customer.last_name.clone(),
         })
     });
     json!({
@@ -373,43 +369,103 @@ pub(crate) async fn build_context_data(
     })
 }
 
+/// Resolves the customer for a session token, reusing a short-lived cache entry.
+///
+/// The cache key contains a SHA-256 digest of the token so raw credentials are
+/// not retained. A logout or revocation may stay invisible for at most the
+/// context cache TTL; explicit invalidation closes that window on the logout
+/// path.
+async fn resolve_context_customer(
+    context: &AppContext,
+    db: &StoreDatabase,
+    store_id: &str,
+    token: &str,
+) -> Option<Arc<fastcart_module_customer::Customer>> {
+    let key = format!("{store_id}:customer:{}", token_digest(token));
+    if let Some(cached) = context.storefront_customer_cache.get(&key).await {
+        return cached;
+    }
+    let customer = match CustomerService::new(db.clone())
+        .session_customer(token)
+        .await
+    {
+        Ok(customer) => customer.map(Arc::new),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not resolve customer session context");
+            None
+        }
+    };
+    context
+        .storefront_customer_cache
+        .insert(key, customer.clone())
+        .await;
+    customer
+}
+
 /// Resolves the active cart for the request context.
 ///
 /// An authenticated customer's newest open cart wins. Guests may present a
 /// cart id cookie, but only for a guest cart; a customer-scoped cart must never
 /// be exposed by guessing an identifier.
 async fn resolve_context_cart(
+    context: &AppContext,
     db: &StoreDatabase,
+    store_id: &str,
     cookie: Option<&str>,
     customer: Option<&fastcart_module_customer::Customer>,
 ) -> serde_json::Value {
     let service = CartService::new(db.clone());
     let mut cart = None;
     if let Some(customer) = customer {
-        match service.active_cart_for_customer(&customer.id).await {
-            Ok(found) => cart = found,
-            Err(error) => {
-                tracing::warn!(error = %error, "could not resolve customer cart context");
+        let key = format!("{store_id}:customer-cart:{}", customer.id.as_str());
+        cart = match context.storefront_cart_cache.get(&key).await {
+            Some(cached) => cached,
+            None => {
+                let found = match service.active_cart_for_customer(&customer.id).await {
+                    Ok(found) => found.map(Arc::new),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "could not resolve customer cart context");
+                        None
+                    }
+                };
+                context
+                    .storefront_cart_cache
+                    .insert(key, found.clone())
+                    .await;
+                found
             }
-        }
+        };
     }
     if cart.is_none()
         && let Some(id) = cookie
     {
-        match service.get_cart(&CartId::from_string(id)).await {
-            Ok(found) => {
-                let belongs = match (&found.customer_id, customer) {
-                    (None, _) => true,
-                    (Some(owner), Some(customer)) => owner == &customer.id,
-                    (Some(_), None) => false,
+        let key = format!("{store_id}:cart:{id}");
+        let found = match context.storefront_cart_cache.get(&key).await {
+            Some(cached) => cached,
+            None => {
+                let found = match service.get_cart(&CartId::from_string(id)).await {
+                    Ok(found) => Some(Arc::new(found)),
+                    Err(error) if error.is_not_found() => None,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "could not resolve cart cookie context");
+                        None
+                    }
                 };
-                if belongs && found.status == fastcart_module_cart::CartStatus::Open {
-                    cart = Some(found);
-                }
+                context
+                    .storefront_cart_cache
+                    .insert(key, found.clone())
+                    .await;
+                found
             }
-            Err(error) if error.is_not_found() => {}
-            Err(error) => {
-                tracing::warn!(error = %error, "could not resolve cart cookie context");
+        };
+        if let Some(found) = found {
+            let belongs = match (&found.customer_id, customer) {
+                (None, _) => true,
+                (Some(owner), Some(customer)) => owner == &customer.id,
+                (Some(_), None) => false,
+            };
+            if belongs && found.status == fastcart_module_cart::CartStatus::Open {
+                cart = Some(found);
             }
         }
     }
@@ -423,6 +479,15 @@ async fn resolve_context_cart(
             "total": cart.totals.total,
         })
     })
+}
+
+/// Hashes a session token for use in a cache key without retaining the token.
+fn token_digest(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn is_published_page(page: &Page) -> bool {

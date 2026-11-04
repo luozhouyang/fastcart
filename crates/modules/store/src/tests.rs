@@ -1,12 +1,12 @@
 //! Store-module tests.
 
-use fastcart_infrastructure::StoreDatabase;
+use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
 use fastcart_kernel::{Metadata, Pagination, StoreId};
 
 use crate::{
     CreatePublishableApiKeyInput, CreateRegionInput, CreateSalesChannelInput,
     MAX_SETTING_KEY_LENGTH, MAX_SETTING_VALUE_BYTES, RegionService, StoreService,
-    UpdateRegionInput, UpdateSalesChannelInput,
+    UpdateRegionInput, UpdateSalesChannelInput, is_secret_setting_key,
 };
 
 async fn service() -> StoreService {
@@ -97,6 +97,71 @@ async fn deletes_existing_and_missing_settings() {
 }
 
 #[tokio::test]
+async fn public_settings_omit_secrets_while_admin_reads_see_them() {
+    let service = service().await;
+    service.set_setting("store.name", "Fastcart").await.unwrap();
+    service
+        .set_setting("jwt_private_key", "super-secret")
+        .await
+        .unwrap();
+    service
+        .set_setting("stripe_secret_key", "sk_test")
+        .await
+        .unwrap();
+
+    let public = service.public_settings().await.unwrap();
+    assert_eq!(
+        public.get("store.name").map(String::as_str),
+        Some("Fastcart")
+    );
+    assert!(!public.contains_key("jwt_private_key"));
+    assert!(!public.contains_key("stripe_secret_key"));
+
+    let admin = service.get_all_settings().await.unwrap();
+    assert_eq!(
+        admin.get("jwt_private_key").map(String::as_str),
+        Some("super-secret")
+    );
+    assert_eq!(
+        service
+            .get_setting("jwt_private_key")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("super-secret")
+    );
+    assert!(is_secret_setting_key("jwt_private_key"));
+    assert!(is_secret_setting_key("PASSWORD_RESET_TTL"));
+    assert!(!is_secret_setting_key("store.name"));
+    assert!(!is_secret_setting_key("currency_code"));
+}
+
+#[tokio::test]
+async fn multi_key_settings_updates_are_atomic() {
+    let service = service().await;
+    let error = service
+        .set_settings(&[
+            ("a".to_owned(), "1".to_owned()),
+            ("   ".to_owned(), "2".to_owned()),
+        ])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, fastcart_kernel::AppError::Validation(_)));
+    assert!(service.get_all_settings().await.unwrap().is_empty());
+
+    service
+        .set_settings(&[
+            ("a".to_owned(), "1".to_owned()),
+            ("b".to_owned(), "2".to_owned()),
+        ])
+        .await
+        .unwrap();
+    let all = service.get_all_settings().await.unwrap();
+    assert_eq!(all.get("a").map(String::as_str), Some("1"));
+    assert_eq!(all.get("b").map(String::as_str), Some("2"));
+}
+
+#[tokio::test]
 async fn creates_and_reads_a_sales_channel() {
     let service = service().await;
     let channel = service
@@ -140,6 +205,35 @@ async fn duplicate_sales_channel_names_conflict() {
         .await
         .unwrap_err();
     assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn renaming_a_sales_channel_to_an_existing_name_conflicts() {
+    let service = service().await;
+    service
+        .create_sales_channel(channel_input("Web"))
+        .await
+        .unwrap();
+    let other = service
+        .create_sales_channel(channel_input("POS"))
+        .await
+        .unwrap();
+
+    let error = service
+        .update_sales_channel(
+            &other.id,
+            UpdateSalesChannelInput {
+                name: Some("Web".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
+    assert_eq!(
+        service.get_sales_channel(&other.id).await.unwrap().name,
+        "POS"
+    );
 }
 
 #[tokio::test]
@@ -334,6 +428,84 @@ async fn regions_validate_currency_country_and_default_switching() {
 }
 
 #[tokio::test]
+async fn region_update_default_switch_succeeds_under_partial_index() {
+    let service = regions().await;
+    let first = service
+        .create_region(CreateRegionInput {
+            name: "United States".to_owned(),
+            currency_code: "USD".to_owned(),
+            countries: vec!["US".to_owned()],
+            is_default: true,
+            ..CreateRegionInput::default()
+        })
+        .await
+        .unwrap();
+    let second = service
+        .create_region(CreateRegionInput {
+            name: "Europe".to_owned(),
+            currency_code: "EUR".to_owned(),
+            countries: vec!["DE".to_owned()],
+            is_default: false,
+            ..CreateRegionInput::default()
+        })
+        .await
+        .unwrap();
+
+    let promoted = service
+        .update_region(
+            &second.id,
+            UpdateRegionInput {
+                is_default: Some(true),
+                ..UpdateRegionInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(promoted.is_default);
+    let default = service.default_region().await.unwrap().unwrap();
+    assert_eq!(default.id, second.id);
+    assert!(!service.get_region(&first.id).await.unwrap().is_default);
+}
+
+#[tokio::test]
+async fn noop_region_update_does_not_append_audit() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("in-memory store database");
+    let service = RegionService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+    let region = service
+        .create_region(CreateRegionInput {
+            name: "United States".to_owned(),
+            currency_code: "USD".to_owned(),
+            countries: vec!["US".to_owned()],
+            ..CreateRegionInput::default()
+        })
+        .await
+        .unwrap();
+
+    // Nothing supplied means nothing changes, so no audit row is appended.
+    service
+        .update_region(&region.id, UpdateRegionInput::default())
+        .await
+        .unwrap();
+    // Supplying the existing values is also a no-op.
+    service
+        .update_region(
+            &region.id,
+            UpdateRegionInput {
+                name: Some(region.name.clone()),
+                ..UpdateRegionInput::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].action, "region.created");
+}
+
+#[tokio::test]
 async fn publishable_keys_are_scoped_and_revocable() {
     let db = StoreDatabase::in_memory(StoreId::new())
         .await
@@ -366,5 +538,80 @@ async fn publishable_keys_are_scoped_and_revocable() {
             .authenticate_publishable_key(&created.token)
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn audited_mutations_append_outbox_rows_once() {
+    let db = StoreDatabase::in_memory(StoreId::new())
+        .await
+        .expect("in-memory store database");
+    let channel = StoreService::new(db.clone())
+        .create_sales_channel(channel_input("Web"))
+        .await
+        .unwrap();
+    let service = RegionService::new(db.clone()).with_audit_actor(Some("user_1".to_owned()));
+
+    let region = service
+        .create_region(CreateRegionInput {
+            name: "United States".to_owned(),
+            currency_code: "USD".to_owned(),
+            countries: vec!["US".to_owned()],
+            ..CreateRegionInput::default()
+        })
+        .await
+        .unwrap();
+    service
+        .update_region(
+            &region.id,
+            UpdateRegionInput {
+                name: Some("USA".to_owned()),
+                ..UpdateRegionInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    service.delete_region(&region.id).await.unwrap();
+    // A repeat delete fails and must not append another row.
+    assert!(service.delete_region(&region.id).await.is_err());
+
+    let created = service
+        .create_publishable_key(CreatePublishableApiKeyInput {
+            title: "Storefront".to_owned(),
+            sales_channel_ids: vec![channel.id.clone()],
+        })
+        .await
+        .unwrap();
+    service
+        .revoke_publishable_key(&created.key.id)
+        .await
+        .unwrap();
+    // A repeat revoke fails and must not append another row.
+    assert!(
+        service
+            .revoke_publishable_key(&created.key.id)
+            .await
+            .is_err()
+    );
+
+    let audits = fetch_pending_audits(db.pool(), 10).await.unwrap();
+    assert_eq!(
+        audits
+            .iter()
+            .map(|audit| audit.action.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "region.created",
+            "region.updated",
+            "region.deleted",
+            "publishable_key.created",
+            "publishable_key.revoked"
+        ]
+    );
+    assert!(audits.iter().all(|audit| audit.processed_at.is_none()));
+    assert!(
+        audits
+            .iter()
+            .all(|audit| audit.actor_id.as_deref() == Some("user_1"))
     );
 }
