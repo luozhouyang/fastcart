@@ -606,12 +606,12 @@ pub(crate) fn validate_window(
     ends_at: Option<i64>,
     resource: &str,
 ) -> Result<(), AppError> {
-    if let (Some(start), Some(end)) = (starts_at, ends_at) {
-        if start >= end {
-            return Err(AppError::validation(format!(
-                "{resource} starts_at must be before ends_at"
-            )));
-        }
+    if let (Some(start), Some(end)) = (starts_at, ends_at)
+        && start >= end
+    {
+        return Err(AppError::validation(format!(
+            "{resource} starts_at must be before ends_at"
+        )));
     }
     Ok(())
 }

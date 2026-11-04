@@ -1054,10 +1054,9 @@ fn step_context(
         if matches!(
             step.status.as_str(),
             status::step::SUCCEEDED | status::step::COMPENSATED | status::step::COMPENSATION_FAILED
-        ) {
-            if let Some(output) = &step.output {
-                outputs.insert(step.name.clone(), parse_json(output));
-            }
+        ) && let Some(output) = &step.output
+        {
+            outputs.insert(step.name.clone(), parse_json(output));
         }
     }
     StepContext {

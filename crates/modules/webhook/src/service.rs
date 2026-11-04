@@ -762,12 +762,12 @@ fn validate_public_host(host: &str) -> Result<(), AppError> {
             "webhook url must not target a local host",
         ));
     }
-    if let Ok(ip) = normalized.parse::<IpAddr>() {
-        if is_forbidden_ip(ip) {
-            return Err(AppError::validation(
-                "webhook url must not target a private or local address",
-            ));
-        }
+    if let Ok(ip) = normalized.parse::<IpAddr>()
+        && is_forbidden_ip(ip)
+    {
+        return Err(AppError::validation(
+            "webhook url must not target a private or local address",
+        ));
     }
     Ok(())
 }

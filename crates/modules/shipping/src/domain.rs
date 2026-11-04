@@ -278,12 +278,12 @@ pub fn validate_subtotal_range(
     for bound in [min_subtotal, max_subtotal].into_iter().flatten() {
         validate_non_negative_amount(bound, "subtotal bound")?;
     }
-    if let (Some(minimum), Some(maximum)) = (min_subtotal, max_subtotal) {
-        if minimum > maximum {
-            return Err(AppError::validation(
-                "min_subtotal must not exceed max_subtotal",
-            ));
-        }
+    if let (Some(minimum), Some(maximum)) = (min_subtotal, max_subtotal)
+        && minimum > maximum
+    {
+        return Err(AppError::validation(
+            "min_subtotal must not exceed max_subtotal",
+        ));
     }
     Ok(())
 }

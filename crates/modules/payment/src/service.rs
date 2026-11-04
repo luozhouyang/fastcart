@@ -401,10 +401,10 @@ impl PaymentService {
         } else {
             None
         };
-        if let Some(existing) = existing.as_ref() {
-            if RefundStatus::parse(&existing.status) != Some(RefundStatus::Failed) {
-                return Ok(refund_from_row(existing.clone()));
-            }
+        if let Some(existing) = existing.as_ref()
+            && RefundStatus::parse(&existing.status) != Some(RefundStatus::Failed)
+        {
+            return Ok(refund_from_row(existing.clone()));
         }
 
         let provider = self
@@ -624,10 +624,9 @@ impl PaymentService {
             if error
                 .as_database_error()
                 .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
+                && let Some(existing) = self.find_webhook(provider_id, &event.event_id).await?
             {
-                if let Some(existing) = self.find_webhook(provider_id, &event.event_id).await? {
-                    return Ok(existing);
-                }
+                return Ok(existing);
             }
             return Err(database_error(error));
         }
@@ -1044,18 +1043,18 @@ impl PaymentService {
             .await
             .map_err(database_error)?;
         }
-        if payment_id.is_none() {
-            if let Some(provider_payment_id) = provider_payment_id.as_deref() {
-                payment_id = sqlx::query_scalar::<_, String>(
-                    "SELECT id FROM payments WHERE provider = ? AND provider_payment_id = ? \
+        if payment_id.is_none()
+            && let Some(provider_payment_id) = provider_payment_id.as_deref()
+        {
+            payment_id = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM payments WHERE provider = ? AND provider_payment_id = ? \
                      LIMIT 1",
-                )
-                .bind(provider)
-                .bind(provider_payment_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(database_error)?;
-            }
+            )
+            .bind(provider)
+            .bind(provider_payment_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
         }
         if let Some(payment_id) = payment_id {
             let amount: i64 = sqlx::query_scalar("SELECT amount FROM payments WHERE id = ?")

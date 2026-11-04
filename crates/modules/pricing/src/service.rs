@@ -374,12 +374,11 @@ impl PricingService {
                 min_quantity,
             )
             .await?
+            && found_id != id
         {
-            if found_id != id {
-                return Err(AppError::conflict(
-                    "a price already exists for the same scope",
-                ));
-            }
+            return Err(AppError::conflict(
+                "a price already exists for the same scope",
+            ));
         }
 
         let now = now_timestamp();

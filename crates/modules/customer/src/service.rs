@@ -279,17 +279,17 @@ impl CustomerService {
                 return Ok(customer);
             }
             let mut changed = false;
-            if customer.first_name.is_none() {
-                if let Some(name) = first_name {
-                    customer.first_name = Some(name);
-                    changed = true;
-                }
+            if customer.first_name.is_none()
+                && let Some(name) = first_name
+            {
+                customer.first_name = Some(name);
+                changed = true;
             }
-            if customer.last_name.is_none() {
-                if let Some(name) = last_name {
-                    customer.last_name = Some(name);
-                    changed = true;
-                }
+            if customer.last_name.is_none()
+                && let Some(name) = last_name
+            {
+                customer.last_name = Some(name);
+                changed = true;
             }
             if !changed {
                 return Ok(customer);
@@ -674,12 +674,12 @@ impl CustomerService {
         .fetch_optional(self.db.pool())
         .await
         .map_err(database_error)?;
-        if let Some(existing) = &existing {
-            if existing.deleted_at.is_some() || existing.has_account != 0 {
-                return Err(AppError::conflict(
-                    "an account with this email already exists",
-                ));
-            }
+        if let Some(existing) = &existing
+            && (existing.deleted_at.is_some() || existing.has_account != 0)
+        {
+            return Err(AppError::conflict(
+                "an account with this email already exists",
+            ));
         }
 
         let password_hash = hash_password(&input.password)?;
@@ -1635,10 +1635,10 @@ fn invalid_auth_token() -> AppError {
 }
 
 fn conflict_or_database(error: sqlx::Error, message: &'static str) -> AppError {
-    if let sqlx::Error::Database(database) = &error {
-        if database.is_unique_violation() {
-            return AppError::conflict(message);
-        }
+    if let sqlx::Error::Database(database) = &error
+        && database.is_unique_violation()
+    {
+        return AppError::conflict(message);
     }
     database_error(error)
 }

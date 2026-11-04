@@ -362,10 +362,10 @@ impl OrderService {
     /// Item `subtotal` and `total` inputs are optional and are derived from
     /// `unit_price * quantity`, discount and tax when omitted.
     pub async fn create_order(&self, input: CreateOrderInput) -> Result<Order, AppError> {
-        if let Some(key) = input.idempotency_key.as_deref() {
-            if let Some(existing) = self.find_order_id_by_key(key).await? {
-                return self.load_order(&existing).await;
-            }
+        if let Some(key) = input.idempotency_key.as_deref()
+            && let Some(existing) = self.find_order_id_by_key(key).await?
+        {
+            return self.load_order(&existing).await;
         }
 
         let resolved = resolve_order(input)?;

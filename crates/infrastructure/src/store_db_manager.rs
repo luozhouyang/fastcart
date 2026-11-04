@@ -231,10 +231,10 @@ impl StoreDatabaseManager {
         destination: impl AsRef<Path>,
     ) -> Result<BackupManifest> {
         let destination = destination.as_ref();
-        if let Some(parent) = destination.parent() {
-            if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
+        if let Some(parent) = destination.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent).await?;
         }
         if destination.exists() {
             tokio::fs::remove_file(destination).await?;

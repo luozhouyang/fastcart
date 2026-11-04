@@ -1837,12 +1837,12 @@ async fn insert_variants_tx(
 ) -> Result<(), AppError> {
     let mut seen_skus = HashSet::new();
     for variant in variants {
-        if let Some(sku) = normalize_optional(variant.sku.clone()) {
-            if !seen_skus.insert(sku.to_lowercase()) {
-                return Err(AppError::conflict(format!(
-                    "duplicate variant sku in input: {sku}"
-                )));
-            }
+        if let Some(sku) = normalize_optional(variant.sku.clone())
+            && !seen_skus.insert(sku.to_lowercase())
+        {
+            return Err(AppError::conflict(format!(
+                "duplicate variant sku in input: {sku}"
+            )));
         }
         insert_variant_tx(tx, product_id, variant, option_map).await?;
     }
@@ -1928,11 +1928,11 @@ async fn update_variant_tx(
         Some(value) => normalize_optional(Some(value.to_owned())),
         None => existing.sku.clone(),
     };
-    if sku != existing.sku {
-        if let Some(sku) = sku.as_deref() {
-            validate_length(sku, "variant sku", MAX_SKU_LENGTH)?;
-            ensure_sku_available_tx(tx, sku, Some(variant_id)).await?;
-        }
+    if sku != existing.sku
+        && let Some(sku) = sku.as_deref()
+    {
+        validate_length(sku, "variant sku", MAX_SKU_LENGTH)?;
+        ensure_sku_available_tx(tx, sku, Some(variant_id)).await?;
     }
     let barcode = match input.barcode.as_deref() {
         Some(value) => normalize_optional(Some(value.to_owned())),
@@ -2671,12 +2671,12 @@ fn normalize_key(value: &str) -> String {
 }
 
 fn validate_weight(weight: Option<f64>) -> Result<(), AppError> {
-    if let Some(weight) = weight {
-        if !weight.is_finite() || weight < 0.0 {
-            return Err(AppError::validation(
-                "weight must be a finite, non-negative number",
-            ));
-        }
+    if let Some(weight) = weight
+        && (!weight.is_finite() || weight < 0.0)
+    {
+        return Err(AppError::validation(
+            "weight must be a finite, non-negative number",
+        ));
     }
     Ok(())
 }
@@ -2687,12 +2687,12 @@ fn validate_dimensions(dimensions: Dimensions) -> Result<(), AppError> {
         (dimensions.height, "height"),
         (dimensions.width, "width"),
     ] {
-        if let Some(value) = value {
-            if !value.is_finite() || value < 0.0 {
-                return Err(AppError::validation(format!(
-                    "{field} must be a finite, non-negative number"
-                )));
-            }
+        if let Some(value) = value
+            && (!value.is_finite() || value < 0.0)
+        {
+            return Err(AppError::validation(format!(
+                "{field} must be a finite, non-negative number"
+            )));
         }
     }
     Ok(())

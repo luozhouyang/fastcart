@@ -91,14 +91,13 @@ fn row_to_rate(row: &SqliteRow) -> Result<TaxRate, AppError> {
 }
 
 fn pick_rate(rates: &[TaxRate], category_id: Option<&TaxCategoryId>) -> Option<TaxRate> {
-    if let Some(category_id) = category_id {
-        if let Some(rate) = rates
+    if let Some(category_id) = category_id
+        && let Some(rate) = rates
             .iter()
             .filter(|rate| rate.tax_category_id.as_ref() == Some(category_id))
             .min_by(|left, right| left.id.as_str().cmp(right.id.as_str()))
-        {
-            return Some(rate.clone());
-        }
+    {
+        return Some(rate.clone());
     }
     if let Some(rate) = rates
         .iter()
@@ -597,13 +596,12 @@ impl TaxService {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut ordered = Vec::new();
-        if province_code.is_some() {
-            if let Some(region) = regions
+        if province_code.is_some()
+            && let Some(region) = regions
                 .iter()
                 .find(|region| region.province_code == province_code)
-            {
-                ordered.push(region.clone());
-            }
+        {
+            ordered.push(region.clone());
         }
         if let Some(region) = regions.iter().find(|region| region.province_code.is_none()) {
             ordered.push(region.clone());

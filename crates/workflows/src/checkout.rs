@@ -190,8 +190,8 @@ impl CheckoutWorkflow {
                 });
             }
         }
-        if !reservation_lines.is_empty() {
-            if let Err(error) = self
+        if !reservation_lines.is_empty()
+            && let Err(error) = self
                 .inventory
                 .reserve(
                     reservation_lines,
@@ -199,17 +199,16 @@ impl CheckoutWorkflow {
                     RESERVATION_TTL_SECONDS,
                 )
                 .await
-            {
-                let _ = self
-                    .checkout
-                    .transition(
-                        &checkout.id,
-                        CheckoutStatus::Failed,
-                        Some(&error.to_string()),
-                    )
-                    .await;
-                return Err(error);
-            }
+        {
+            let _ = self
+                .checkout
+                .transition(
+                    &checkout.id,
+                    CheckoutStatus::Failed,
+                    Some(&error.to_string()),
+                )
+                .await;
+            return Err(error);
         }
 
         let checkout = self
@@ -530,12 +529,12 @@ impl CheckoutWorkflow {
             }
         }
 
-        if cart.status == fastcart_module_cart::CartStatus::Open {
-            if let Err(error) = self.carts.complete_cart(&cart.id).await {
-                let latest = self.carts.get_cart(&cart.id).await?;
-                if latest.status != fastcart_module_cart::CartStatus::Completed {
-                    return Err(error);
-                }
+        if cart.status == fastcart_module_cart::CartStatus::Open
+            && let Err(error) = self.carts.complete_cart(&cart.id).await
+        {
+            let latest = self.carts.get_cart(&cart.id).await?;
+            if latest.status != fastcart_module_cart::CartStatus::Completed {
+                return Err(error);
             }
         }
         Ok(order)

@@ -481,12 +481,12 @@ impl PlatformStore {
             .get_store(id)
             .await?
             .ok_or_else(|| PlatformError::StoreNotFound(id.to_string()))?;
-        if let Some(name) = input.name.as_deref() {
-            if name.trim().is_empty() || name.chars().count() > 120 {
-                return Err(PlatformError::InvalidInput(
-                    "store name must be between 1 and 120 characters".to_owned(),
-                ));
-            }
+        if let Some(name) = input.name.as_deref()
+            && (name.trim().is_empty() || name.chars().count() > 120)
+        {
+            return Err(PlatformError::InvalidInput(
+                "store name must be between 1 and 120 characters".to_owned(),
+            ));
         }
         if let Some(locale) = input.locale.as_deref() {
             Locale::new(locale)?;

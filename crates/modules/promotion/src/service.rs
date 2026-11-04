@@ -746,8 +746,8 @@ impl PromotionService {
         }
         let usage_currency = currency_code.map(|code| code.trim().to_ascii_uppercase());
         let now = now_timestamp();
-        if let Some(order_id) = order_id {
-            if let Some(existing) = sqlx::query_as::<_, PromotionUsageRow>(
+        if let Some(order_id) = order_id
+            && let Some(existing) = sqlx::query_as::<_, PromotionUsageRow>(
                 "SELECT id, promotion_id, coupon_id, customer_id, order_id, created_at
                  FROM promotion_usage WHERE promotion_id = ? AND order_id = ?",
             )
@@ -756,9 +756,8 @@ impl PromotionService {
             .fetch_optional(self.db.pool())
             .await
             .map_err(database_error)?
-            {
-                return Ok(existing.into_usage());
-            }
+        {
+            return Ok(existing.into_usage());
         }
         let mut transaction = self.db.begin().await.map_err(AppError::from)?;
 
@@ -995,10 +994,10 @@ impl PromotionService {
                 .fetch_optional(self.db.pool())
                 .await
                 .map_err(database_error)?;
-        if let Some(existing) = existing {
-            if exclude_id != Some(existing.as_str()) {
-                return Err(AppError::conflict("promotion code is already in use"));
-            }
+        if let Some(existing) = existing
+            && exclude_id != Some(existing.as_str())
+        {
+            return Err(AppError::conflict("promotion code is already in use"));
         }
         Ok(())
     }
@@ -1013,10 +1012,10 @@ impl PromotionService {
             .fetch_optional(self.db.pool())
             .await
             .map_err(database_error)?;
-        if let Some(existing) = existing {
-            if exclude_id != Some(existing.as_str()) {
-                return Err(AppError::conflict("coupon code is already in use"));
-            }
+        if let Some(existing) = existing
+            && exclude_id != Some(existing.as_str())
+        {
+            return Err(AppError::conflict("coupon code is already in use"));
         }
         Ok(())
     }

@@ -1669,12 +1669,12 @@ impl OrderService {
         let mut resolved = Vec::with_capacity(input.items.len());
         for item in &input.items {
             let line = resolve_edit_item(&mut tx, order_id, item).await?;
-            if let Some(order_item_id) = &line.order_item_id {
-                if !seen.insert(order_item_id.as_str().to_owned()) {
-                    return Err(AppError::validation(
-                        "an order edit must not touch the same order item twice",
-                    ));
-                }
+            if let Some(order_item_id) = &line.order_item_id
+                && !seen.insert(order_item_id.as_str().to_owned())
+            {
+                return Err(AppError::validation(
+                    "an order edit must not touch the same order item twice",
+                ));
             }
             resolved.push(line);
         }
@@ -2313,13 +2313,13 @@ async fn resolve_edit_item(
                 AppError::validation("remove and update edit items require an order_item_id")
             })?;
             let existing = fetch_order_item(executor, order_id, order_item_id).await?;
-            if let Some(before) = input.before_quantity {
-                if before != existing.quantity {
-                    return Err(AppError::conflict(format!(
-                        "item {} has quantity {}, not the provided before_quantity {}",
-                        order_item_id, existing.quantity, before
-                    )));
-                }
+            if let Some(before) = input.before_quantity
+                && before != existing.quantity
+            {
+                return Err(AppError::conflict(format!(
+                    "item {} has quantity {}, not the provided before_quantity {}",
+                    order_item_id, existing.quantity, before
+                )));
             }
             if input.action == OrderEditAction::Remove && input.after_quantity != 0 {
                 return Err(AppError::validation(

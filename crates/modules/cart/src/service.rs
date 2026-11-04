@@ -354,12 +354,12 @@ impl CartService {
         email: Option<String>,
     ) -> Result<Cart, AppError> {
         let row = self.ensure_open(cart_id).await?;
-        if let Some(existing) = row.customer_id.as_deref() {
-            if existing != customer_id.as_str() {
-                return Err(AppError::conflict(
-                    "cart already belongs to a different customer",
-                ));
-            }
+        if let Some(existing) = row.customer_id.as_deref()
+            && existing != customer_id.as_str()
+        {
+            return Err(AppError::conflict(
+                "cart already belongs to a different customer",
+            ));
         }
 
         let email = match email {
