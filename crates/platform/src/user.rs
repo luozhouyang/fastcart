@@ -549,21 +549,31 @@ impl PlatformStore {
         )
     }
 
-    /// Appends an audit record.
+    /// Appends an audit record with a generated identifier.
     pub async fn record_audit(&self, entry: NewAudit) -> PlatformResult<()> {
+        let id = format!("audit_{}", uuid::Uuid::now_v7().simple());
+        self.record_audit_with_id(&id, &entry).await
+    }
+
+    /// Appends an audit record under a caller-chosen identifier.
+    ///
+    /// Re-delivering the same identifier is ignored, which makes outbox
+    /// retries idempotent when delivery succeeds but the outbox row is not
+    /// marked processed.
+    pub async fn record_audit_with_id(&self, id: &str, entry: &NewAudit) -> PlatformResult<()> {
         sqlx::query(
-            "INSERT INTO platform_audit_logs
+            "INSERT OR IGNORE INTO platform_audit_logs
              (id, actor_id, store_id, action, resource_type, resource_id, data, ip_address, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(format!("audit_{}", uuid::Uuid::now_v7().simple()))
-        .bind(entry.actor_id)
-        .bind(entry.store_id)
-        .bind(entry.action)
-        .bind(entry.resource_type)
-        .bind(entry.resource_id)
+        .bind(id)
+        .bind(entry.actor_id.as_deref())
+        .bind(entry.store_id.as_deref())
+        .bind(&entry.action)
+        .bind(entry.resource_type.as_deref())
+        .bind(entry.resource_id.as_deref())
         .bind(entry.data.to_string())
-        .bind(entry.ip_address)
+        .bind(entry.ip_address.as_deref())
         .bind(now_timestamp())
         .execute(self.pool())
         .await?;
@@ -777,5 +787,33 @@ mod tests {
             .unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].action, "store.created");
+    }
+
+    #[tokio::test]
+    async fn audit_redelivery_with_the_same_id_is_ignored() {
+        let (platform, _, store_id) = fixture().await;
+        let entry = NewAudit {
+            actor_id: Some("user_1".to_owned()),
+            store_id: Some(store_id.to_string()),
+            action: "page.updated".to_owned(),
+            resource_type: Some("page".to_owned()),
+            resource_id: Some("page_1".to_owned()),
+            data: serde_json::json!({"revision": 2}),
+            ip_address: None,
+        };
+        platform
+            .record_audit_with_id("audit_delivery_1", &entry)
+            .await
+            .unwrap();
+        platform
+            .record_audit_with_id("audit_delivery_1", &entry)
+            .await
+            .unwrap();
+
+        let logs = platform
+            .list_audit_logs(Some(&store_id), Pagination::default())
+            .await
+            .unwrap();
+        assert_eq!(logs.len(), 1, "outbox retries must not duplicate rows");
     }
 }

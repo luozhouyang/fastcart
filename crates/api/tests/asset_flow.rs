@@ -100,6 +100,10 @@ async fn fixture() -> Fixture {
 }
 
 fn multipart_body(boundary: &str, filename: &str, alt: Option<&str>) -> Vec<u8> {
+    multipart_body_with(boundary, filename, PNG, alt)
+}
+
+fn multipart_body_with(boundary: &str, filename: &str, bytes: &[u8], alt: Option<&str>) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(
         format!(
@@ -107,7 +111,7 @@ fn multipart_body(boundary: &str, filename: &str, alt: Option<&str>) -> Vec<u8> 
         )
         .as_bytes(),
     );
-    body.extend_from_slice(PNG);
+    body.extend_from_slice(bytes);
     body.extend_from_slice(b"\r\n");
     if let Some(alt) = alt {
         body.extend_from_slice(
@@ -334,4 +338,36 @@ async fn upload_rejects_unsupported_media() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(String::from_utf8_lossy(&bytes).contains("unsupported file type"));
+}
+
+#[tokio::test]
+async fn media_uploads_use_the_larger_body_limit() {
+    let fixture = fixture().await;
+    let admin_cookie = fixture.admin_cookie();
+    let boundary = "fastcart-test-boundary";
+    // Larger than the 2 MiB JSON body limit but below the asset cap.
+    let mut bytes = PNG.to_vec();
+    bytes.resize(3 * 1024 * 1024, 0);
+
+    let (status, body, _) = raw_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/assets",
+        Some(&format!("multipart/form-data; boundary={boundary}")),
+        multipart_body_with(boundary, "large.png", &bytes, None),
+        &[
+            ("cookie", admin_cookie.as_str()),
+            ("x-csrf-token", fixture.csrf.as_str()),
+            ("x-store-id", fixture.store_id.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let asset: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(asset["size_bytes"], 3 * 1024 * 1024);
 }

@@ -299,11 +299,14 @@ fn parse_page_revision_origin(value: &str) -> ApiResult<PageRevisionOrigin> {
 }
 
 /// Builds a content service bound to the active theme editor manifest.
-async fn content_service(db: StoreDatabase) -> ApiResult<ContentService> {
+///
+/// The actor is recorded by the service inside each mutation transaction, so
+/// content audits are atomic with the change and never need a second write.
+async fn content_service(db: StoreDatabase, actor_id: Option<String>) -> ApiResult<ContentService> {
     let editor_manifest = ThemeService::new(db.clone())
         .active_editor_manifest()
         .await?;
-    Ok(ContentService::with_editor_manifest(db, editor_manifest))
+    Ok(ContentService::with_editor_manifest(db, editor_manifest).with_audit_actor(actor_id))
 }
 
 /// Returns the authenticated actor identifier, when one is available.
@@ -354,26 +357,15 @@ async fn list_pages(
     responses((status = 201, body = Page))
 )]
 async fn create_page(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(input): ApiJson<CreatePageRequest>,
 ) -> ApiResult<(StatusCode, Json<Page>)> {
     authorize(&actor, "themes.write")?;
-    let page = content_service(db).await?.create_page(input.into()).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "page.created",
-        "page",
-        page.id.as_str(),
-        serde_json::json!({
-            "revision": page.revision,
-            "status": page.status.as_str(),
-            "page_type": page.page_type.clone(),
-        }),
-    )
-    .await;
+    let page = content_service(db, actor_id(&actor))
+        .await?
+        .create_page(input.into())
+        .await?;
     Ok((StatusCode::CREATED, Json(page)))
 }
 
@@ -406,7 +398,6 @@ async fn get_page(
     responses((status = 200, body = Page))
 )]
 async fn update_page(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -415,25 +406,11 @@ async fn update_page(
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
     let mut input = UpdatePageInput::try_from(input)?;
-    let origin = input.origin.unwrap_or(PageRevisionOrigin::Manual);
     input.created_by = actor_id(&actor);
-    let page = content_service(db)
+    let page = content_service(db, actor_id(&actor))
         .await?
         .update_page(&page_id, input)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "page.updated",
-        "page",
-        page.id.as_str(),
-        serde_json::json!({
-            "revision": page.revision,
-            "status": page.status.as_str(),
-            "origin": origin.as_str(),
-        }),
-    )
-    .await;
     Ok(Json(page))
 }
 
@@ -446,28 +423,16 @@ async fn update_page(
     responses((status = 204))
 )]
 async fn delete_page(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    // The service returns the row it soft-deleted inside the same transaction,
-    // so the audit records the revision that was actually removed.
-    let page = ContentService::new(db).delete_page(&page_id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "page.deleted",
-        "page",
-        page.id.as_str(),
-        serde_json::json!({
-            "revision": page.revision,
-            "status": page.status.as_str(),
-        }),
-    )
-    .await;
+    content_service(db, actor_id(&actor))
+        .await?
+        .delete_page(&page_id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -480,7 +445,6 @@ async fn delete_page(
     responses((status = 200, body = Page))
 )]
 async fn publish_page(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -488,29 +452,10 @@ async fn publish_page(
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
     let created_by = actor_id(&actor);
-    let service = content_service(db).await?;
-    let before = service.get_page(&page_id).await?;
-    let page = service
+    let page = content_service(db, created_by.clone())
+        .await?
         .publish_page_as(&page_id, created_by.as_deref(), PageRevisionOrigin::Manual)
         .await?;
-    // Publishing an already published, unchanged page is idempotent and does
-    // not bump the revision. Auditing that request would be a no-op entry.
-    if page.revision != before.revision {
-        record_store_audit(
-            &context,
-            &actor,
-            "page.published",
-            "page",
-            page.id.as_str(),
-            serde_json::json!({
-                "revision": page.revision,
-                "status": page.status.as_str(),
-                "origin": PageRevisionOrigin::Manual.as_str(),
-                "kind": "published",
-            }),
-        )
-        .await;
-    }
     Ok(Json(page))
 }
 
@@ -523,30 +468,16 @@ async fn publish_page(
     responses((status = 200, body = Page))
 )]
 async fn unpublish_page(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Page>> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    let service = content_service(db).await?;
-    let before = service.get_page(&page_id).await?;
-    let page = service.unpublish_page(&page_id).await?;
-    if page.revision != before.revision {
-        record_store_audit(
-            &context,
-            &actor,
-            "page.unpublished",
-            "page",
-            page.id.as_str(),
-            serde_json::json!({
-                "revision": page.revision,
-                "status": page.status.as_str(),
-            }),
-        )
-        .await;
-    }
+    let page = content_service(db, actor_id(&actor))
+        .await?
+        .unpublish_page(&page_id)
+        .await?;
     Ok(Json(page))
 }
 
@@ -559,31 +490,16 @@ async fn unpublish_page(
     responses((status = 200, body = Page))
 )]
 async fn archive_page(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Page>> {
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
-    let service = content_service(db).await?;
-    let before = service.get_page(&page_id).await?;
-    let page = service.archive_page(&page_id).await?;
-    // Archiving an already archived page is idempotent.
-    if page.revision != before.revision {
-        record_store_audit(
-            &context,
-            &actor,
-            "page.archived",
-            "page",
-            page.id.as_str(),
-            serde_json::json!({
-                "revision": page.revision,
-                "status": page.status.as_str(),
-            }),
-        )
-        .await;
-    }
+    let page = content_service(db, actor_id(&actor))
+        .await?
+        .archive_page(&page_id)
+        .await?;
     Ok(Json(page))
 }
 
@@ -774,7 +690,6 @@ struct RestorePageVersionQuery {
     responses((status = 200, body = Page))
 )]
 async fn restore_page_version(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, version)): Path<(String, i64)>,
@@ -783,7 +698,7 @@ async fn restore_page_version(
     authorize(&actor, "themes.write")?;
     let page_id = PageId::from_string(id);
     let created_by = actor_id(&actor);
-    let page = content_service(db)
+    let page = content_service(db, created_by.clone())
         .await?
         .restore_version_as(
             &page_id,
@@ -793,20 +708,6 @@ async fn restore_page_version(
             PageRevisionOrigin::Manual,
         )
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "page.restored",
-        "page",
-        page.id.as_str(),
-        serde_json::json!({
-            "revision": page.revision,
-            "version": version,
-            "origin": PageRevisionOrigin::Manual.as_str(),
-            "kind": "draft",
-        }),
-    )
-    .await;
     Ok(Json(page))
 }
 
@@ -844,27 +745,15 @@ async fn list_navigations(
     responses((status = 201, body = Navigation))
 )]
 async fn create_navigation(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(input): ApiJson<CreateNavigationRequest>,
 ) -> ApiResult<(StatusCode, Json<Navigation>)> {
     authorize(&actor, "themes.write")?;
-    let navigation = ContentService::new(db)
+    let navigation = content_service(db, actor_id(&actor))
+        .await?
         .create_navigation(input.into())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "navigation.created",
-        "navigation",
-        navigation.id.as_str(),
-        serde_json::json!({
-            "handle": navigation.handle,
-            "name": navigation.name,
-        }),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(navigation)))
 }
 
@@ -899,7 +788,6 @@ async fn get_navigation(
     responses((status = 200, body = Navigation))
 )]
 async fn update_navigation(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -907,21 +795,10 @@ async fn update_navigation(
 ) -> ApiResult<Json<Navigation>> {
     authorize(&actor, "themes.write")?;
     let navigation_id = NavigationId::from_string(id);
-    let navigation = ContentService::new(db)
+    let navigation = content_service(db, actor_id(&actor))
+        .await?
         .update_navigation(&navigation_id, input.into())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "navigation.updated",
-        "navigation",
-        navigation.id.as_str(),
-        serde_json::json!({
-            "handle": navigation.handle,
-            "name": navigation.name,
-        }),
-    )
-    .await;
     Ok(Json(navigation))
 }
 
@@ -934,25 +811,16 @@ async fn update_navigation(
     responses((status = 204))
 )]
 async fn delete_navigation(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "themes.write")?;
     let navigation_id = NavigationId::from_string(id);
-    ContentService::new(db)
+    content_service(db, actor_id(&actor))
+        .await?
         .delete_navigation(&navigation_id)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "navigation.deleted",
-        "navigation",
-        navigation_id.as_str(),
-        serde_json::json!({}),
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -987,7 +855,6 @@ async fn get_navigation_tree(
     responses((status = 201, body = NavigationItem))
 )]
 async fn add_navigation_item(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -995,21 +862,10 @@ async fn add_navigation_item(
 ) -> ApiResult<(StatusCode, Json<NavigationItem>)> {
     authorize(&actor, "themes.write")?;
     let navigation_id = NavigationId::from_string(id);
-    let item = ContentService::new(db)
+    let item = content_service(db, actor_id(&actor))
+        .await?
         .add_navigation_item(&navigation_id, input.into())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "navigation_item.created",
-        "navigation_item",
-        &item.id,
-        serde_json::json!({
-            "navigation_id": navigation_id.as_str(),
-            "title": item.title,
-        }),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(item)))
 }
 
@@ -1023,28 +879,16 @@ async fn add_navigation_item(
     responses((status = 200, body = NavigationItem))
 )]
 async fn update_navigation_item(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(item_id): Path<String>,
     ApiJson(input): ApiJson<NavigationItemRequest>,
 ) -> ApiResult<Json<NavigationItem>> {
     authorize(&actor, "themes.write")?;
-    let item = ContentService::new(db)
+    let item = content_service(db, actor_id(&actor))
+        .await?
         .update_navigation_item(&item_id, input.into())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "navigation_item.updated",
-        "navigation_item",
-        &item.id,
-        serde_json::json!({
-            "navigation_id": item.navigation_id.as_str(),
-            "title": item.title,
-        }),
-    )
-    .await;
     Ok(Json(item))
 }
 
@@ -1057,24 +901,15 @@ async fn update_navigation_item(
     responses((status = 204))
 )]
 async fn delete_navigation_item(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(item_id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "themes.write")?;
-    ContentService::new(db)
+    content_service(db, actor_id(&actor))
+        .await?
         .remove_navigation_item(&item_id)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "navigation_item.deleted",
-        "navigation_item",
-        &item_id,
-        serde_json::json!({}),
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1088,7 +923,6 @@ async fn delete_navigation_item(
     responses((status = 200, body = Vec<NavigationItem>))
 )]
 async fn reorder_navigation_items(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -1096,18 +930,10 @@ async fn reorder_navigation_items(
 ) -> ApiResult<Json<Vec<NavigationItem>>> {
     authorize(&actor, "themes.write")?;
     let navigation_id = NavigationId::from_string(id);
-    let items = ContentService::new(db)
+    let items = content_service(db, actor_id(&actor))
+        .await?
         .reorder_navigation_items(&navigation_id, &request.item_ids)
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "navigation.items_reordered",
-        "navigation",
-        navigation_id.as_str(),
-        serde_json::json!({ "item_ids": request.item_ids }),
-    )
-    .await;
     Ok(Json(items))
 }
 
@@ -1145,28 +971,15 @@ async fn list_redirects(
     responses((status = 201, body = Redirect))
 )]
 async fn create_redirect(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     ApiJson(input): ApiJson<CreateRedirectRequest>,
 ) -> ApiResult<(StatusCode, Json<Redirect>)> {
     authorize(&actor, "themes.write")?;
-    let redirect = ContentService::new(db)
+    let redirect = content_service(db, actor_id(&actor))
+        .await?
         .create_redirect(input.into())
         .await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "redirect.created",
-        "redirect",
-        &redirect.id,
-        serde_json::json!({
-            "from_path": redirect.from_path,
-            "to_path": redirect.to_path,
-            "status_code": redirect.status_code,
-        }),
-    )
-    .await;
     Ok((StatusCode::CREATED, Json(redirect)))
 }
 
@@ -1197,27 +1010,15 @@ async fn get_redirect(
     responses((status = 204))
 )]
 async fn delete_redirect(
-    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     authorize(&actor, "themes.write")?;
-    let service = ContentService::new(db);
-    let redirect = service.get_redirect(&id).await?;
-    service.delete_redirect(&id).await?;
-    record_store_audit(
-        &context,
-        &actor,
-        "redirect.deleted",
-        "redirect",
-        &redirect.id,
-        serde_json::json!({
-            "from_path": redirect.from_path,
-            "to_path": redirect.to_path,
-        }),
-    )
-    .await;
+    content_service(db, actor_id(&actor))
+        .await?
+        .delete_redirect(&id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

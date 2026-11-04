@@ -25,6 +25,8 @@ backup_dir = "./data/backups"
 [storage]
 provider = "local"
 root = "./data/assets"
+# Hard cap for one media-library asset upload (bytes).
+max_upload_bytes = 104857600
 
 [inquiries]
 # Hard cap for one uploaded attachment.

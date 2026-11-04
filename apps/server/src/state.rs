@@ -97,6 +97,7 @@ impl AppState {
                 .clone()
                 .filter(|url| !url.is_empty()),
             storage_root: config.storage.root.clone(),
+            max_asset_upload_bytes: config.storage.max_upload_bytes,
             max_upload_bytes: config.inquiries.max_upload_bytes,
             upload_ttl_seconds: config.inquiries.upload_ttl_seconds,
             inquiry_retention_days: config.inquiries.retention_days,

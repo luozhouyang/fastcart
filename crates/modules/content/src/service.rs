@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_infrastructure::{NewAuditOutbox, StoreDatabase, append_audit_outbox, database_error};
 use fastcart_kernel::{
     AppError, Metadata, NavigationId, PageId, PageResult, Pagination, now_timestamp,
     validate_handle, validate_length, validate_metadata,
@@ -32,6 +32,7 @@ const NAVIGATION_ITEM_COLUMNS: &str = "id, navigation_id, parent_id, title, url,
 pub struct ContentService {
     db: StoreDatabase,
     editor_manifest: Option<ThemeEditorManifest>,
+    audit_actor: Option<String>,
 }
 
 impl ContentService {
@@ -42,6 +43,7 @@ impl ContentService {
         Self {
             db,
             editor_manifest: None,
+            audit_actor: None,
         }
     }
 
@@ -55,7 +57,44 @@ impl ContentService {
         Self {
             db,
             editor_manifest,
+            audit_actor: None,
         }
+    }
+
+    /// Records content mutations in the store audit outbox.
+    ///
+    /// When an actor is set, every mutating method appends its audit entry in
+    /// the same transaction as the change, so a crash cannot separate them.
+    #[must_use]
+    pub fn with_audit_actor(mut self, actor_id: Option<String>) -> Self {
+        self.audit_actor = actor_id;
+        self
+    }
+
+    /// Appends one audit entry to the outbox inside a mutation transaction.
+    async fn append_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        data: Value,
+    ) -> Result<(), AppError> {
+        let Some(actor_id) = self.audit_actor.as_deref() else {
+            return Ok(());
+        };
+        let entry = NewAuditOutbox {
+            actor_id: Some(actor_id.to_owned()),
+            store_id: Some(self.db.store_id().as_str().to_owned()),
+            action: action.to_owned(),
+            resource_type: Some(resource_type.to_owned()),
+            resource_id: Some(resource_id.to_owned()),
+            data,
+        };
+        append_audit_outbox(&mut **tx, &entry)
+            .await
+            .map_err(database_error)?;
+        Ok(())
     }
 
     /// Validates a page body structurally and, when a manifest is available,
@@ -100,6 +139,7 @@ impl ContentService {
         let now = now_timestamp();
         let body_json = serialize_json(&body, "body")?;
         let seo_json = serialize_json(&seo, "seo")?;
+        let mut tx = self.db.begin().await?;
         sqlx::query(
             "INSERT INTO pages (id, title, handle, status, page_type, body, published_body, \
              published_title, published_handle, published_page_type, published_seo, \
@@ -117,9 +157,22 @@ impl ContentService {
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|error| unique_conflict(error, "page handle already exists"))?;
+        self.append_audit(
+            &mut tx,
+            "page.created",
+            "page",
+            id.as_str(),
+            serde_json::json!({
+                "revision": 1,
+                "status": PageStatus::Draft.as_str(),
+                "page_type": page_type,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.get_page(&id).await
     }
@@ -414,9 +467,9 @@ impl ContentService {
             return Err(revision_conflict(existing.revision));
         }
 
+        let revision_origin = origin.unwrap_or(PageRevisionOrigin::Manual);
         if body_changed {
             let next_version = next_page_version(&mut tx, id).await?;
-            let origin = origin.unwrap_or(PageRevisionOrigin::Manual);
             insert_page_version(
                 &mut tx,
                 id,
@@ -424,11 +477,24 @@ impl ContentService {
                 &body_json,
                 created_by.as_deref(),
                 PageVersionKind::Draft,
-                origin,
+                revision_origin,
                 now,
             )
             .await?;
         }
+
+        self.append_audit(
+            &mut tx,
+            "page.updated",
+            "page",
+            id.as_str(),
+            serde_json::json!({
+                "revision": existing.revision.saturating_add(1),
+                "status": existing.status,
+                "origin": revision_origin.as_str(),
+            }),
+        )
+        .await?;
 
         tx.commit().await.map_err(database_error)?;
         self.get_page(id).await
@@ -463,6 +529,17 @@ impl ContentService {
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("page", id));
         }
+        self.append_audit(
+            &mut tx,
+            "page.deleted",
+            "page",
+            id.as_str(),
+            serde_json::json!({
+                "revision": row.revision,
+                "status": row.status,
+            }),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
 
         let mut page = row.into_page();
@@ -547,6 +624,20 @@ impl ContentService {
         )
         .await?;
 
+        self.append_audit(
+            &mut tx,
+            "page.published",
+            "page",
+            id.as_str(),
+            serde_json::json!({
+                "revision": row.revision.saturating_add(1),
+                "status": PageStatus::Published.as_str(),
+                "origin": origin.as_str(),
+                "kind": "published",
+            }),
+        )
+        .await?;
+
         tx.commit().await.map_err(database_error)?;
         self.get_page(id).await
     }
@@ -556,11 +647,19 @@ impl ContentService {
     /// Drafts are returned unchanged, while archived pages are a conflict. The
     /// last published body is retained for auditing and re-publication.
     pub async fn unpublish_page(&self, id: &PageId) -> Result<Page, AppError> {
-        let row = self.fetch_page_row(id, false).await?;
+        let mut tx = self.db.begin().await?;
+        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ? AND deleted_at IS NULL");
+        let row = sqlx::query_as::<_, PageRow>(&sql)
+            .bind(id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("page", id))?;
         if row.status == PageStatus::Archived.as_str() {
             return Err(AppError::conflict("cannot unpublish an archived page"));
         }
         if row.status != PageStatus::Published.as_str() {
+            tx.commit().await.map_err(database_error)?;
             return Ok(row.into_page());
         }
         sqlx::query(
@@ -569,9 +668,21 @@ impl ContentService {
         )
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "page.unpublished",
+            "page",
+            id.as_str(),
+            serde_json::json!({
+                "revision": row.revision.saturating_add(1),
+                "status": PageStatus::Draft.as_str(),
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         self.get_page(id).await
     }
 
@@ -580,8 +691,16 @@ impl ContentService {
     /// Archiving an already archived page is idempotent and does not bump the
     /// revision. The last published body is retained.
     pub async fn archive_page(&self, id: &PageId) -> Result<Page, AppError> {
-        let row = self.fetch_page_row(id, false).await?;
+        let mut tx = self.db.begin().await?;
+        let sql = format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ? AND deleted_at IS NULL");
+        let row = sqlx::query_as::<_, PageRow>(&sql)
+            .bind(id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("page", id))?;
         if row.status == PageStatus::Archived.as_str() {
+            tx.commit().await.map_err(database_error)?;
             return Ok(row.into_page());
         }
         sqlx::query(
@@ -590,9 +709,21 @@ impl ContentService {
         )
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "page.archived",
+            "page",
+            id.as_str(),
+            serde_json::json!({
+                "revision": row.revision.saturating_add(1),
+                "status": PageStatus::Archived.as_str(),
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         self.get_page(id).await
     }
 
@@ -709,6 +840,19 @@ impl ContentService {
         )
         .await?;
 
+        self.append_audit(
+            &mut tx,
+            "page.restored",
+            "page",
+            page_id.as_str(),
+            serde_json::json!({
+                "version": version,
+                "revision": existing.revision.saturating_add(1),
+                "origin": origin.as_str(),
+            }),
+        )
+        .await?;
+
         tx.commit().await.map_err(database_error)?;
         self.get_page(page_id).await
     }
@@ -732,6 +876,7 @@ impl ContentService {
 
         let id = NavigationId::new();
         let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
         sqlx::query(
             "INSERT INTO navigations (id, name, handle, metadata, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -742,9 +887,18 @@ impl ContentService {
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "navigation.created",
+            "navigation",
+            id.as_str(),
+            serde_json::json!({ "handle": handle, "name": name }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.get_navigation(&id).await
     }
@@ -891,6 +1045,7 @@ impl ContentService {
         };
         validate_metadata(&metadata)?;
 
+        let mut tx = self.db.begin().await?;
         sqlx::query(
             "UPDATE navigations SET name = ?, handle = ?, metadata = ?, updated_at = ? \
              WHERE id = ?",
@@ -900,23 +1055,46 @@ impl ContentService {
         .bind(metadata.to_json_string())
         .bind(now_timestamp())
         .bind(id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "navigation.updated",
+            "navigation",
+            id.as_str(),
+            serde_json::json!({ "handle": handle, "name": name }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.get_navigation(id).await
     }
 
     /// Deletes a navigation and, through foreign keys, all of its items.
     pub async fn delete_navigation(&self, id: &NavigationId) -> Result<(), AppError> {
-        let result = sqlx::query("DELETE FROM navigations WHERE id = ?")
+        let mut tx = self.db.begin().await?;
+        let sql = format!("SELECT {NAVIGATION_COLUMNS} FROM navigations WHERE id = ?");
+        let row = sqlx::query_as::<_, NavigationRow>(&sql)
             .bind(id.as_str())
-            .execute(self.db.pool())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("navigation", id))?;
+        sqlx::query("DELETE FROM navigations WHERE id = ?")
+            .bind(id.as_str())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
-        if result.rows_affected() == 0 {
-            return Err(AppError::not_found("navigation", id));
-        }
+        self.append_audit(
+            &mut tx,
+            "navigation.deleted",
+            "navigation",
+            id.as_str(),
+            serde_json::json!({ "handle": row.handle, "name": row.name }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -938,6 +1116,7 @@ impl ContentService {
         validate_metadata(&input.metadata)?;
 
         let id = generate_id("nitem");
+        let mut tx = self.db.begin().await?;
         sqlx::query(
             "INSERT INTO navigation_items \
              (id, navigation_id, parent_id, title, url, rank, metadata) \
@@ -950,9 +1129,21 @@ impl ContentService {
         .bind(&url)
         .bind(rank)
         .bind(input.metadata.to_json_string())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "navigation_item.created",
+            "navigation_item",
+            &id,
+            serde_json::json!({
+                "navigation_id": navigation_id.as_str(),
+                "title": title,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.fetch_navigation_item(&id).await
     }
@@ -975,6 +1166,7 @@ impl ContentService {
         }
         validate_metadata(&input.metadata)?;
 
+        let mut tx = self.db.begin().await?;
         sqlx::query(
             "UPDATE navigation_items SET parent_id = ?, title = ?, url = ?, rank = ?, \
              metadata = ? WHERE id = ?",
@@ -985,23 +1177,52 @@ impl ContentService {
         .bind(rank)
         .bind(input.metadata.to_json_string())
         .bind(item_id)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "navigation_item.updated",
+            "navigation_item",
+            item_id,
+            serde_json::json!({
+                "navigation_id": navigation_id.as_str(),
+                "title": title,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.fetch_navigation_item(item_id).await
     }
 
     /// Deletes an item and, through foreign keys, all descendant items.
     pub async fn remove_navigation_item(&self, item_id: &str) -> Result<(), AppError> {
-        let result = sqlx::query("DELETE FROM navigation_items WHERE id = ?")
+        let mut tx = self.db.begin().await?;
+        let sql = format!("SELECT {NAVIGATION_ITEM_COLUMNS} FROM navigation_items WHERE id = ?");
+        let row = sqlx::query_as::<_, NavigationItemRow>(&sql)
             .bind(item_id)
-            .execute(self.db.pool())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("navigation item", item_id))?;
+        sqlx::query("DELETE FROM navigation_items WHERE id = ?")
+            .bind(item_id)
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
-        if result.rows_affected() == 0 {
-            return Err(AppError::not_found("navigation item", item_id));
-        }
+        self.append_audit(
+            &mut tx,
+            "navigation_item.deleted",
+            "navigation_item",
+            item_id,
+            serde_json::json!({
+                "navigation_id": row.navigation_id,
+                "title": row.title,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
@@ -1047,6 +1268,14 @@ impl ContentService {
                 .await
                 .map_err(database_error)?;
         }
+        self.append_audit(
+            &mut tx,
+            "navigation.items_reordered",
+            "navigation",
+            navigation_id.as_str(),
+            serde_json::json!({ "item_ids": item_ids }),
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
 
         self.items_for_navigation(navigation_id).await
@@ -1064,10 +1293,11 @@ impl ContentService {
         let status_code = input.status_code.unwrap_or(301);
         validate_redirect_status(status_code)?;
 
+        let mut tx = self.db.begin().await?;
         let existing: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM redirects WHERE from_path = ?")
                 .bind(&from_path)
-                .fetch_one(self.db.pool())
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(database_error)?;
         if existing > 0 {
@@ -1087,9 +1317,22 @@ impl ContentService {
         .bind(&to_path)
         .bind(status_code)
         .bind(now)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "redirect.created",
+            "redirect",
+            &id,
+            serde_json::json!({
+                "from_path": from_path,
+                "to_path": to_path,
+                "status_code": status_code,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
 
         self.get_redirect(&id).await
     }
@@ -1146,14 +1389,33 @@ impl ContentService {
 
     /// Deletes a redirect.
     pub async fn delete_redirect(&self, id: &str) -> Result<(), AppError> {
-        let result = sqlx::query("DELETE FROM redirects WHERE id = ?")
+        let mut tx = self.db.begin().await?;
+        let row = sqlx::query_as::<_, RedirectRow>(
+            "SELECT id, from_path, to_path, status_code, created_at FROM redirects \
+             WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("redirect", id))?;
+        sqlx::query("DELETE FROM redirects WHERE id = ?")
             .bind(id)
-            .execute(self.db.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
-        if result.rows_affected() == 0 {
-            return Err(AppError::not_found("redirect", id));
-        }
+        self.append_audit(
+            &mut tx,
+            "redirect.deleted",
+            "redirect",
+            id,
+            serde_json::json!({
+                "from_path": row.from_path,
+                "to_path": row.to_path,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 

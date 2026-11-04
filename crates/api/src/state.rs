@@ -64,6 +64,8 @@ pub struct ApiConfig {
     pub admin_base_url: Option<String>,
     /// Root directory backing the default local object storage adapter.
     pub storage_root: PathBuf,
+    /// Hard cap for one media-library asset upload.
+    pub max_asset_upload_bytes: usize,
     /// Hard cap for one inquiry attachment upload.
     pub max_upload_bytes: usize,
     /// Lifetime of a pending inquiry attachment upload.
@@ -93,6 +95,7 @@ impl Default for ApiConfig {
             themes_root: PathBuf::from("./themes"),
             admin_base_url: None,
             storage_root: PathBuf::from("./data/assets"),
+            max_asset_upload_bytes: 100 * 1024 * 1024,
             max_upload_bytes: 25 * 1024 * 1024,
             upload_ttl_seconds: 3_600,
             inquiry_retention_days: 365,

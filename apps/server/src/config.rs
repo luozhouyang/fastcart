@@ -115,6 +115,8 @@ pub struct StorageConfig {
     pub provider: String,
     /// Local storage root.
     pub root: PathBuf,
+    /// Hard cap for one media-library asset upload.
+    pub max_upload_bytes: usize,
 }
 
 impl Default for StorageConfig {
@@ -122,6 +124,7 @@ impl Default for StorageConfig {
         Self {
             provider: "local".to_owned(),
             root: PathBuf::from("./data/assets"),
+            max_upload_bytes: 100 * 1024 * 1024,
         }
     }
 }
@@ -394,6 +397,11 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_ADMIN_BASE_URL") {
             self.server.admin_base_url = Some(value);
         }
+        if let Ok(value) = env::var("FASTCART_ASSET_MAX_UPLOAD_BYTES") {
+            self.storage.max_upload_bytes = value
+                .parse()
+                .context("FASTCART_ASSET_MAX_UPLOAD_BYTES must be a number")?;
+        }
         if let Ok(value) = env::var("FASTCART_INQUIRY_MAX_UPLOAD_BYTES") {
             self.inquiries.max_upload_bytes = value
                 .parse()
@@ -511,6 +519,9 @@ impl Config {
         }
         if self.inquiries.max_upload_bytes == 0 {
             bail!("inquiries.max_upload_bytes must be greater than zero");
+        }
+        if self.storage.max_upload_bytes == 0 {
+            bail!("storage.max_upload_bytes must be greater than zero");
         }
         if self.inquiries.upload_ttl_seconds <= 0 {
             bail!("inquiries.upload_ttl_seconds must be greater than zero");

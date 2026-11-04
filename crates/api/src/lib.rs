@@ -68,12 +68,18 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
         .fallback(routes::storefront::render)
         .with_state(context.clone());
     let upload = routes::store::upload_router(&context).with_state(context.clone());
+    let asset_upload = routes::admin::upload_router(&context).with_state(context.clone());
 
-    // JSON endpoints keep the small limit; attachment uploads are merged as a
-    // separate router carrying the larger multipart limit.
+    // JSON endpoints keep the small limit; attachments and media uploads are
+    // merged as separate routers carrying their larger multipart limits.
     let router = with_common_layers(router, &context, context.config.max_body_bytes);
     let upload = with_common_layers(upload, &context, context.config.max_upload_bytes);
-    router.merge(upload)
+    let asset_upload = with_common_layers(
+        asset_upload,
+        &context,
+        context.config.max_asset_upload_bytes,
+    );
+    router.merge(upload).merge(asset_upload)
 }
 
 /// Applies the middleware shared by the main and upload routers.

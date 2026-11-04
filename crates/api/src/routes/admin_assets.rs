@@ -11,7 +11,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use fastcart_http::extractors::ApiQuery;
 use fastcart_http::{AdminActor, ApiError, ApiResult};
 use fastcart_kernel::{ActorContext, AppError, Pagination};
@@ -28,8 +28,16 @@ use crate::state::AppContext;
 /// Builds the routes for this namespace.
 pub fn router() -> Router<Arc<AppContext>> {
     Router::new()
-        .route("/assets", get(list_assets).post(upload_asset))
+        .route("/assets", get(list_assets))
         .route("/assets/{id}", get(get_asset).delete(delete_asset))
+}
+
+/// Builds the upload router mounted with its own multipart body limit.
+///
+/// The absolute path is used because the router is merged into the root router
+/// outside the common JSON body limit.
+pub fn upload_router() -> Router<Arc<AppContext>> {
+    Router::new().route("/api/v1/admin/assets", post(upload_asset))
 }
 
 /// Builds the documented admin media routes for OpenAPI generation.
@@ -145,12 +153,13 @@ async fn upload_asset(
                         "uploaded file must not be empty",
                     )));
                 }
-                if bytes.len() > context.config.max_upload_bytes
-                    || i64::try_from(bytes.len()).unwrap_or(i64::MAX) > MAX_SIZE_BYTES
-                {
+                let limit = context
+                    .config
+                    .max_asset_upload_bytes
+                    .min(usize::try_from(MAX_SIZE_BYTES).unwrap_or(usize::MAX));
+                if bytes.len() > limit {
                     return Err(ApiError::new(AppError::validation(format!(
-                        "uploaded file must not exceed {} bytes",
-                        context.config.max_upload_bytes.min(MAX_SIZE_BYTES as usize)
+                        "uploaded file must not exceed {limit} bytes"
                     ))));
                 }
                 let Some(content_type) = sniff_content_type(&bytes) else {

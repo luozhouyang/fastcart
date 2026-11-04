@@ -32,27 +32,55 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
             fastcart_http::admin_auth_middleware,
         ));
 
-    let scoped = Router::new()
-        .merge(super::admin_assets::router())
-        .merge(super::admin_campaigns::router())
-        .merge(super::admin_catalog::router())
-        .merge(super::admin_content::router())
-        .merge(super::admin_customers::router())
-        .merge(super::admin_data_sources::router())
-        .merge(super::admin_inventory::router())
-        .merge(super::admin_inquiry::router())
-        .merge(super::admin_notifications::router())
-        .merge(super::admin_orders::router())
-        .merge(super::admin_payments::router())
-        .merge(super::admin_pricing::router())
-        .merge(super::admin_promotions::router())
-        .merge(super::admin_regions::router())
-        .merge(super::admin_shipping::router())
-        .merge(super::admin_tax::router())
-        .merge(super::admin_theme::router())
-        .merge(super::admin_webhooks::router())
-        .merge(super::admin_workflows::router())
-        .fallback(not_implemented)
+    let scoped = scoped_layers(
+        context,
+        Router::new()
+            .merge(super::admin_assets::router())
+            .merge(super::admin_campaigns::router())
+            .merge(super::admin_catalog::router())
+            .merge(super::admin_content::router())
+            .merge(super::admin_customers::router())
+            .merge(super::admin_data_sources::router())
+            .merge(super::admin_inventory::router())
+            .merge(super::admin_inquiry::router())
+            .merge(super::admin_notifications::router())
+            .merge(super::admin_orders::router())
+            .merge(super::admin_payments::router())
+            .merge(super::admin_pricing::router())
+            .merge(super::admin_promotions::router())
+            .merge(super::admin_regions::router())
+            .merge(super::admin_shipping::router())
+            .merge(super::admin_tax::router())
+            .merge(super::admin_theme::router())
+            .merge(super::admin_webhooks::router())
+            .merge(super::admin_workflows::router())
+            .fallback(not_implemented),
+    );
+
+    public.merge(authenticated).merge(scoped)
+}
+
+/// Builds the media upload router mounted with its own body limit.
+///
+/// The route carries its full path because it is merged into the root router
+/// after the common JSON body limit has been applied.
+pub fn upload_router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
+    scoped_layers(
+        context,
+        super::admin_assets::upload_router()
+            // `Multipart` uses Axum's extractor limit (2 MiB by default), which
+            // is separate from the outer `RequestBodyLimitLayer`.
+            .layer(axum::extract::DefaultBodyLimit::max(
+                context.config.max_asset_upload_bytes,
+            )),
+    )
+}
+
+fn scoped_layers(
+    context: &Arc<AppContext>,
+    router: Router<Arc<AppContext>>,
+) -> Router<Arc<AppContext>> {
+    router
         .layer(middleware::from_fn_with_state(
             StoreDbState {
                 databases: context.databases.clone(),
@@ -65,9 +93,7 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
                 require_store: true,
             },
             fastcart_http::admin_auth_middleware,
-        ));
-
-    public.merge(authenticated).merge(scoped)
+        ))
 }
 
 /// Builds the documented admin routes for OpenAPI generation.

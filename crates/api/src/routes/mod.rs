@@ -126,7 +126,11 @@ pub async fn record_store_audit(
         data,
         ip_address: None,
     };
-    match context.platform.record_audit(entry).await {
+    match context
+        .platform
+        .record_audit_with_id(&outbox_id, &entry)
+        .await
+    {
         Ok(()) => {
             if let Err(error) = mark_audit_processed(database.pool(), &outbox_id).await {
                 tracing::warn!(error = %error, action, "failed to mark store audit delivered");

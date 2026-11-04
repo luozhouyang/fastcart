@@ -220,7 +220,9 @@ pub async fn run_maintenance_with_notifications(
                                 .unwrap_or(serde_json::Value::Null),
                             ip_address: None,
                         };
-                        match platform.record_audit(entry).await {
+                        // The outbox id is the platform audit id, so a retry
+                        // after a failed "mark processed" cannot duplicate.
+                        match platform.record_audit_with_id(&record.id, &entry).await {
                             Ok(()) => {
                                 match mark_audit_processed(database.pool(), &record.id).await {
                                     Ok(()) => {
@@ -228,9 +230,9 @@ pub async fn run_maintenance_with_notifications(
                                         report.audits_dispatched += 1;
                                     }
                                     Err(error) => {
-                                        // Delivery succeeded; a failed mark
-                                        // only causes a harmless duplicate on
-                                        // the next sweep.
+                                        // Delivery is idempotent by id, so this
+                                        // only causes a harmless redelivery
+                                        // attempt on the next sweep.
                                         tracing::warn!(store_id = %store.id, audit_id = %record.id, error = %error, "audit processed marking failed");
                                         report.failures += 1;
                                     }
