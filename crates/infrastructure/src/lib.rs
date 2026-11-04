@@ -5,6 +5,8 @@
 
 use fastcart_kernel::AppError;
 
+/// Durable store-level audit outbox.
+pub mod audit_outbox;
 /// In-process caching with store-aware keys.
 pub mod cache;
 /// SQLite connections, transactions and health checks.
@@ -18,6 +20,10 @@ pub mod storage;
 /// Per-store connection pools and migration coordination.
 pub mod store_db_manager;
 
+pub use audit_outbox::{
+    AuditOutboxRecord, NewAuditOutbox, append_audit_outbox, fetch_pending_audits,
+    mark_audit_failed, mark_audit_processed,
+};
 pub use cache::StoreCache;
 pub use database::{DatabaseHealth, DatabaseOptions, connect_memory, connect_sqlite};
 pub use event_bus::{

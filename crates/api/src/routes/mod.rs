@@ -45,7 +45,9 @@ use axum::response::Response;
 use fastcart_http::{
     ApiError, ApiResult, CSRF_HEADER, CUSTOMER_CSRF_COOKIE, CUSTOMER_SESSION_COOKIE, parse_cookies,
 };
-use fastcart_infrastructure::{StoreDatabase, StoreDatabaseManager};
+use fastcart_infrastructure::{
+    NewAuditOutbox, StoreDatabase, StoreDatabaseManager, append_audit_outbox, mark_audit_processed,
+};
 use fastcart_kernel::{ActorContext, AppError, StoreContext, StoreId};
 use fastcart_module_cart::Cart;
 use fastcart_module_customer::CustomerService;
@@ -56,8 +58,11 @@ use crate::state::AppContext;
 
 /// Appends an auditable store-scoped admin action.
 ///
-/// Auditing is best-effort: a logging failure must not fail the business
-/// operation that already completed.
+/// Store-scoped actions are first written to the store's durable `audit_outbox`
+/// and then delivered to the platform audit log immediately. If delivery or the
+/// outbox write fails, the business operation still succeeds and maintenance
+/// retries any row left pending. Platform-scope actions (no store id) are
+/// written directly. Audit payloads are never logged.
 pub async fn record_store_audit(
     context: &AppContext,
     actor: &ActorContext,
@@ -66,17 +71,72 @@ pub async fn record_store_audit(
     resource_id: &str,
     data: serde_json::Value,
 ) {
+    let actor_id = actor.user_id.as_ref().map(ToString::to_string);
+
+    let Some(store_id) = actor.store_id.clone() else {
+        let entry = NewAudit {
+            actor_id,
+            store_id: None,
+            action: action.to_owned(),
+            resource_type: Some(resource_type.to_owned()),
+            resource_id: Some(resource_id.to_owned()),
+            data,
+            ip_address: None,
+        };
+        if let Err(error) = context.platform.record_audit(entry).await {
+            tracing::warn!(error = %error, action, "failed to write store audit log");
+        }
+        return;
+    };
+
+    // Resolve the store pool once; a failed open leaves no audit row, matching
+    // the previous best-effort contract for an unreachable store.
+    let database = match context.databases.database(&store_id).await {
+        Ok(database) => database,
+        Err(error) => {
+            tracing::warn!(error = %error, action, "failed to open store database for audit log");
+            return;
+        }
+    };
+
+    let outbox_entry = NewAuditOutbox {
+        actor_id: actor_id.clone(),
+        store_id: Some(store_id.to_string()),
+        action: action.to_owned(),
+        resource_type: Some(resource_type.to_owned()),
+        resource_id: Some(resource_id.to_owned()),
+        data: data.clone(),
+    };
+    let outbox_id = match append_audit_outbox(database.pool(), &outbox_entry).await {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::warn!(error = %error, action, "failed to persist store audit log");
+            return;
+        }
+    };
+
     let entry = NewAudit {
-        actor_id: actor.user_id.as_ref().map(ToString::to_string),
-        store_id: actor.store_id.as_ref().map(ToString::to_string),
+        actor_id,
+        store_id: Some(store_id.to_string()),
         action: action.to_owned(),
         resource_type: Some(resource_type.to_owned()),
         resource_id: Some(resource_id.to_owned()),
         data,
         ip_address: None,
     };
-    if let Err(error) = context.platform.record_audit(entry).await {
-        tracing::warn!(error = %error, action, "failed to write store audit log");
+    match context.platform.record_audit(entry).await {
+        Ok(()) => {
+            if let Err(error) = mark_audit_processed(database.pool(), &outbox_id).await {
+                tracing::warn!(error = %error, action, "failed to mark store audit delivered");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                action,
+                "failed to deliver store audit; queued for maintenance retry"
+            );
+        }
     }
 }
 
