@@ -6,7 +6,7 @@ use fastcart_kernel::{AppError, Metadata, Pagination, StoreId};
 use crate::{
     CatalogService, CreateCategoryInput, CreateCollectionInput, CreateImageInput,
     CreateOptionInput, CreateProductInput, CreateVariantInput, Dimensions, ProductFilter,
-    ProductStatus, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput,
+    ProductSort, ProductStatus, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput,
     UpdateVariantInput, VariantOptionInput,
 };
 
@@ -1650,4 +1650,42 @@ async fn filters_and_searches_products_by_sales_channel() {
             .id,
         web.id
     );
+}
+
+#[tokio::test]
+async fn storefront_sorting_orders_products() {
+    let service = service().await;
+    basic_product(&service, "Beta", "SORT-B").await;
+    basic_product(&service, "Alpha", "SORT-A").await;
+    basic_product(&service, "Gamma", "SORT-G").await;
+
+    let ascending = service
+        .list_products_sorted(
+            ProductFilter::default(),
+            Some(ProductSort::TitleAsc),
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    let titles: Vec<&str> = ascending
+        .data
+        .iter()
+        .map(|product| product.title.as_str())
+        .collect();
+    assert_eq!(titles, ["Alpha", "Beta", "Gamma"]);
+
+    let descending = service
+        .list_products_sorted(
+            ProductFilter::default(),
+            Some(ProductSort::TitleDesc),
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    let titles: Vec<&str> = descending
+        .data
+        .iter()
+        .map(|product| product.title.as_str())
+        .collect();
+    assert_eq!(titles, ["Gamma", "Beta", "Alpha"]);
 }

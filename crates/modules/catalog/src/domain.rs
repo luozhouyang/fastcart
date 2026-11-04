@@ -60,7 +60,45 @@ pub struct Dimensions {
     pub width: Option<f64>,
 }
 
-/// A sellable catalog product.
+/// Ordering options for storefront product queries.
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductSort {
+    /// Title, ascending.
+    TitleAsc,
+    /// Title, descending.
+    TitleDesc,
+    /// Creation time, oldest first.
+    CreatedAtAsc,
+    /// Creation time, newest first.
+    CreatedAtDesc,
+}
+
+impl ProductSort {
+    /// Parses a stable sort name.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "title_asc" => Some(Self::TitleAsc),
+            "title_desc" => Some(Self::TitleDesc),
+            "created_at_asc" => Some(Self::CreatedAtAsc),
+            "created_at_desc" => Some(Self::CreatedAtDesc),
+            _ => None,
+        }
+    }
+
+    /// Returns the SQL ordering expression for the products table alias `p`.
+    #[must_use]
+    pub fn order_by(self) -> &'static str {
+        match self {
+            Self::TitleAsc => "p.title ASC, p.id ASC",
+            Self::TitleDesc => "p.title DESC, p.id ASC",
+            Self::CreatedAtAsc => "p.created_at ASC, p.id ASC",
+            Self::CreatedAtDesc => "p.created_at DESC, p.id ASC",
+        }
+    }
+}
+
 #[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Product {
     /// Product identifier.

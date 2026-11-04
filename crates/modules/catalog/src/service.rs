@@ -15,8 +15,8 @@ use sqlx::sqlite::{Sqlite, SqliteRow};
 use crate::domain::{
     Category, Collection, CreateCategoryInput, CreateCollectionInput, CreateImageInput,
     CreateOptionInput, CreateProductInput, CreateVariantInput, Dimensions, Product, ProductFilter,
-    ProductImage, ProductOption, ProductOptionValue, ProductStatus, ProductVariant, Tag,
-    UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput, UpdateVariantInput,
+    ProductImage, ProductOption, ProductOptionValue, ProductSort, ProductStatus, ProductVariant,
+    Tag, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput, UpdateVariantInput,
 };
 
 /// Maximum product, variant, option or category title length.
@@ -307,8 +307,19 @@ impl CatalogService {
         filter: ProductFilter,
         pagination: Pagination,
     ) -> Result<PageResult<Product>, AppError> {
+        self.list_products_sorted(filter, None, pagination).await
+    }
+
+    /// Lists products with an optional storefront ordering.
+    pub async fn list_products_sorted(
+        &self,
+        filter: ProductFilter,
+        sort: Option<ProductSort>,
+        pagination: Pagination,
+    ) -> Result<PageResult<Product>, AppError> {
         let pagination = checked_pagination(pagination)?;
         let (where_clause, binds) = product_filter_clause(&filter);
+        let order_by = sort.map_or("p.created_at ASC, p.id ASC", ProductSort::order_by);
 
         let count_sql = format!("SELECT COUNT(*) FROM products p WHERE {where_clause}");
         let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
@@ -322,7 +333,7 @@ impl CatalogService {
 
         let list_sql = format!(
             "SELECT {PRODUCT_COLUMNS} FROM products p WHERE {where_clause} \
-             ORDER BY p.created_at ASC, p.id ASC LIMIT ? OFFSET ?"
+             ORDER BY {order_by} LIMIT ? OFFSET ?"
         );
         let mut list_query = sqlx::query(&list_sql);
         for bind in &binds {

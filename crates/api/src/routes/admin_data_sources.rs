@@ -14,7 +14,7 @@ use axum::routing::get;
 use fastcart_http::extractors::ApiQuery;
 use fastcart_http::{AdminActor, ApiError, ApiResult};
 use fastcart_kernel::{ActorContext, AppError, Pagination};
-use fastcart_module_catalog::{CatalogService, ProductFilter, ProductStatus};
+use fastcart_module_catalog::{CatalogService, ProductFilter, ProductSort, ProductStatus};
 use fastcart_module_content::ContentService;
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
@@ -70,6 +70,9 @@ struct DataSourceQuery {
     /// Restrict product queries to active products. Defaults to `true`.
     #[serde(default)]
     published: Option<bool>,
+    /// Product ordering: title_asc, title_desc, created_at_asc or created_at_desc.
+    #[serde(default)]
+    sort: Option<String>,
 }
 
 /// Lists candidate records for one data source.
@@ -110,6 +113,15 @@ async fn list_data_source(
         "product" | "product_list" | "search" => {
             authorize(&actor, "products.read")?;
             let published = query.published.unwrap_or(true);
+            let sort = query
+                .sort
+                .as_deref()
+                .map(|value| {
+                    ProductSort::parse(value).ok_or_else(|| {
+                        ApiError::validation(format!("invalid product sort: {value}"))
+                    })
+                })
+                .transpose()?;
             let filter = ProductFilter {
                 status: published.then_some(ProductStatus::Active),
                 collection_id: query.collection_id,
@@ -119,7 +131,7 @@ async fn list_data_source(
                 ..ProductFilter::default()
             };
             let page = CatalogService::new(db)
-                .list_products(filter, pagination)
+                .list_products_sorted(filter, sort, pagination)
                 .await?;
             let items = page
                 .data

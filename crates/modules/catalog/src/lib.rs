@@ -13,8 +13,8 @@ mod tests;
 pub use domain::{
     Category, Collection, CreateCategoryInput, CreateCollectionInput, CreateImageInput,
     CreateOptionInput, CreateProductInput, CreateVariantInput, Dimensions, Product, ProductFilter,
-    ProductImage, ProductOption, ProductOptionValue, ProductStatus, ProductVariant, Tag,
-    UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput, UpdateVariantInput,
+    ProductImage, ProductOption, ProductOptionValue, ProductSort, ProductStatus, ProductVariant,
+    Tag, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput, UpdateVariantInput,
     VariantOptionInput,
 };
 pub use service::{
