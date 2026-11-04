@@ -7,6 +7,7 @@
 pub mod domain;
 pub mod provider;
 pub mod service;
+pub mod stripe;
 
 pub use domain::{
     CreatePaymentSessionInput, ListPaymentsFilter, Payment, PaymentAttempt, PaymentSession,
@@ -18,3 +19,4 @@ pub use provider::{
     VerifiedWebhook,
 };
 pub use service::PaymentService;
+pub use stripe::{StripeProvider, map_payment_intent_status, signature_header};

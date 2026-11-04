@@ -169,6 +169,10 @@ impl Default for StorefrontConfig {
 pub struct PaymentsConfig {
     /// Shared secret used to verify manual/sandbox webhook signatures.
     pub webhook_secret: Option<String>,
+    /// Stripe secret API key.
+    pub stripe_secret_key: Option<String>,
+    /// Stripe webhook signing secret.
+    pub stripe_webhook_secret: Option<String>,
 }
 
 /// Transactional email settings.
@@ -291,6 +295,12 @@ impl Config {
         }
         if let Ok(value) = env::var("FASTCART_PAYMENT_WEBHOOK_SECRET") {
             self.payments.webhook_secret = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_STRIPE_SECRET_KEY") {
+            self.payments.stripe_secret_key = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_STRIPE_WEBHOOK_SECRET") {
+            self.payments.stripe_webhook_secret = Some(value);
         }
         if let Ok(value) = env::var("FASTCART_STOREFRONT_ENABLED") {
             self.storefront.enabled = value

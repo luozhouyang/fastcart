@@ -68,6 +68,16 @@ impl AppState {
                 .webhook_secret
                 .clone()
                 .filter(|secret| !secret.is_empty()),
+            stripe_secret_key: config
+                .payments
+                .stripe_secret_key
+                .clone()
+                .filter(|secret| !secret.is_empty()),
+            stripe_webhook_secret: config
+                .payments
+                .stripe_webhook_secret
+                .clone()
+                .filter(|secret| !secret.is_empty()),
             storefront_timeout_ms: config.storefront.request_timeout_ms,
             internal_fetch_secret: config
                 .storefront

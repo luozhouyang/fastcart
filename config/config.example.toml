@@ -42,6 +42,10 @@ worker_count = 2
 [payments]
 # Shared secret for manual/sandbox webhook signatures (x-manual-signature).
 # webhook_secret = ""
+# Stripe is registered only when both values are present. Prefer supplying
+# these through FASTCART_STRIPE_SECRET_KEY and FASTCART_STRIPE_WEBHOOK_SECRET.
+# stripe_secret_key = "sk_test_..."
+# stripe_webhook_secret = "whsec_..."
 
 [email]
 # "log" keeps messages in the process log, "smtp" uses lettre, "resend" uses

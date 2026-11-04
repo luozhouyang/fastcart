@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# `webhook-events` references resources gated behind the crate's `full`
+# feature, so it must be enabled for the workspace feature set to compile.
+async-stripe = { workspace = true, features = ["full"] }
 async-trait.workspace = true
 hex.workspace = true
 hmac.workspace = true

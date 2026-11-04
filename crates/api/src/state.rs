@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use fastcart_email::EmailService;
 use fastcart_http::{Metrics, RateLimiter};
 use fastcart_infrastructure::{EventBus, StoreCache, StoreDatabaseManager};
-use fastcart_module_payment::{ManualProvider, ProviderRegistry};
+use fastcart_module_payment::{ManualProvider, ProviderRegistry, StripeProvider};
 use fastcart_platform::{AuthService, PlatformStore, StoreProvisioningService, StoreResolver};
 use fastcart_runtime_api::StorefrontRuntime;
 
@@ -30,6 +30,13 @@ pub struct ApiConfig {
     pub backup_dir: PathBuf,
     /// Shared secret used to verify sandbox/manual payment webhooks.
     pub manual_payment_secret: Option<String>,
+    /// Stripe secret API key.
+    ///
+    /// The Stripe provider is only registered when this and
+    /// [`Self::stripe_webhook_secret`] are both configured.
+    pub stripe_secret_key: Option<String>,
+    /// Stripe webhook signing secret.
+    pub stripe_webhook_secret: Option<String>,
     /// Timeout applied to storefront SSR render requests in milliseconds.
     pub storefront_timeout_ms: u64,
     /// Optional shared secret required by the internal storefront HTTP surface.
@@ -49,6 +56,8 @@ impl Default for ApiConfig {
             max_body_bytes: 2 * 1024 * 1024,
             backup_dir: PathBuf::from("./data/backups"),
             manual_payment_secret: None,
+            stripe_secret_key: None,
+            stripe_webhook_secret: None,
             storefront_timeout_ms: 10_000,
             internal_fetch_secret: None,
         }
@@ -117,6 +126,7 @@ impl AppContext {
         if let Err(error) = payment_providers.register(std::sync::Arc::new(provider)) {
             tracing::warn!(error = %error, "failed to register the manual payment provider");
         }
+        register_stripe_provider(&payment_providers, &config);
         Self {
             config,
             platform,
@@ -150,5 +160,38 @@ impl AppContext {
     pub fn with_email(mut self, email: EmailService) -> Self {
         self.email = email;
         self
+    }
+}
+
+/// Registers the Stripe provider when both credentials are present.
+fn register_stripe_provider(registry: &ProviderRegistry, config: &ApiConfig) {
+    let secret_key = config
+        .stripe_secret_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let webhook_secret = config
+        .stripe_webhook_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (secret_key, webhook_secret) {
+        (Some(secret_key), Some(webhook_secret)) => {
+            let provider = StripeProvider::new(secret_key, Some(webhook_secret.to_owned()));
+            if let Err(error) = registry.register(std::sync::Arc::new(provider)) {
+                tracing::warn!(error = %error, "failed to register the Stripe payment provider");
+            }
+        }
+        (Some(_), None) => {
+            tracing::warn!(
+                "FASTCART_STRIPE_WEBHOOK_SECRET is not configured; the Stripe payment provider is disabled"
+            );
+        }
+        (None, Some(_)) => {
+            tracing::warn!(
+                "FASTCART_STRIPE_SECRET_KEY is not configured; the Stripe payment provider is disabled"
+            );
+        }
+        (None, None) => {}
     }
 }

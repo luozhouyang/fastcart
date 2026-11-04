@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use fastcart_infrastructure::{StoreDatabase, append_outbox_event, database_error};
 use fastcart_kernel::{
-    AppError, CartId, CheckoutId, CurrencyCode, DomainEventEnvelope, OrderId, PageResult,
+    AppError, CartId, CheckoutId, CurrencyCode, DomainEventEnvelope, Metadata, OrderId, PageResult,
     PaymentAttemptId, PaymentId, PaymentSessionId, RefundId, WebhookId, now_timestamp,
     validate_metadata, validate_non_negative_amount,
 };
@@ -81,12 +81,28 @@ impl PaymentService {
         let currency_code = currency.as_str().to_owned();
 
         let session_id = PaymentSessionId::new();
+        // Providers receive the identifiers they need to correlate callbacks
+        // with local carts, checkouts and orders.
+        let mut provider_metadata = input.metadata.clone();
+        provider_metadata.insert("session_id", Value::String(session_id.as_str().to_owned()));
+        if let Some(cart_id) = input.cart_id.as_ref() {
+            provider_metadata.insert("cart_id", Value::String(cart_id.as_str().to_owned()));
+        }
+        if let Some(checkout_id) = input.checkout_id.as_ref() {
+            provider_metadata.insert(
+                "checkout_id",
+                Value::String(checkout_id.as_str().to_owned()),
+            );
+        }
+        if let Some(order_id) = input.order_id.as_ref() {
+            provider_metadata.insert("order_id", Value::String(order_id.as_str().to_owned()));
+        }
         let provider_session = provider
             .create_session(CreateProviderSession {
                 reference: session_id.as_str().to_owned(),
                 amount: input.amount,
                 currency_code: currency_code.clone(),
-                metadata: input.metadata.clone(),
+                metadata: provider_metadata,
             })
             .await?;
         if !matches!(
@@ -98,6 +114,10 @@ impl PaymentService {
             ));
         }
 
+        // Provider data may contain a client secret needed by the storefront.
+        // Return it to the caller but keep it out of the persisted record.
+        let (stored_data, returned_data) =
+            merge_provider_session_data(&input.metadata, &provider_session.data);
         let now = now_timestamp();
         let session = PaymentSession {
             id: session_id.clone(),
@@ -109,7 +129,7 @@ impl PaymentService {
             amount: input.amount,
             currency_code: currency_code.clone(),
             status: provider_session.status,
-            data: input.metadata,
+            data: stored_data,
             created_at: now,
             updated_at: now,
         };
@@ -128,7 +148,10 @@ impl PaymentService {
         insert_session(&mut tx, &session).await?;
         insert_attempt(&mut tx, &attempt).await?;
         tx.commit().await.map_err(database_error)?;
-        Ok(session)
+        Ok(PaymentSession {
+            data: returned_data,
+            ..session
+        })
     }
 
     /// Captures a payment session, returning the existing payment when the
@@ -270,20 +293,23 @@ impl PaymentService {
         }
         insert_payment(&mut tx, &payment).await?;
         insert_attempt(&mut tx, &attempt).await?;
-        let event = DomainEventEnvelope::new(
-            "payment.captured",
-            Some(self.db.store_id().clone()),
-            serde_json::json!({
-                "payment_id": payment.id.as_str(),
-                "order_id": payment.order_id.as_ref().map(OrderId::as_str),
-                "amount": payment.amount,
-                "currency_code": payment.currency_code,
-                "provider": payment.provider,
-            }),
-        );
-        append_outbox_event(&mut *tx, &event)
-            .await
-            .map_err(database_error)?;
+        // Checkout captures before the order exists. In that case a later
+        // `assign_order` emits the captured event once the order identifier is
+        // known, so consumers never receive a payment event without an order.
+        if let Some(order_id) = payment.order_id.as_ref() {
+            append_payment_event(
+                &mut tx,
+                self.db.store_id(),
+                "payment.captured",
+                order_id,
+                payment.amount,
+                &payment.currency_code,
+                &payment.provider,
+                Some(payment.id.as_str()),
+                None,
+            )
+            .await?;
+        }
         tx.commit().await.map_err(database_error)?;
         Ok(payment)
     }
@@ -298,19 +324,32 @@ impl PaymentService {
         payment_id: &str,
         order_id: &OrderId,
     ) -> Result<Payment, AppError> {
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let result = sqlx::query(
             "UPDATE payments SET order_id = ?, updated_at = ?
-             WHERE id = ? AND (order_id IS NULL OR order_id = ?)",
+             WHERE id = ? AND order_id IS NULL",
         )
         .bind(order_id.as_str())
-        .bind(now_timestamp())
+        .bind(now)
         .bind(payment_id)
-        .bind(order_id.as_str())
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
-        let payment = self.get_payment(payment_id).await?;
+        let row = sqlx::query_as::<_, PaymentRow>(
+            "SELECT id, order_id, provider, provider_payment_id, amount, currency_code, \
+             status, captured_at, metadata, created_at, updated_at \
+             FROM payments WHERE id = ?",
+        )
+        .bind(payment_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let payment = row
+            .map(payment_from_row)
+            .ok_or_else(|| AppError::not_found("payment", payment_id))?;
         if result.rows_affected() == 0 {
+            tx.commit().await.map_err(database_error)?;
             if payment.order_id.as_ref() == Some(order_id) {
                 return Ok(payment);
             }
@@ -318,6 +357,23 @@ impl PaymentService {
                 "payment is already assigned to another order",
             ));
         }
+        // The payment was captured before the order existed; this is the first
+        // point at which the captured event can identify its order.
+        if matches!(payment.status, PaymentStatus::Captured) {
+            append_payment_event(
+                &mut tx,
+                self.db.store_id(),
+                "payment.captured",
+                order_id,
+                payment.amount,
+                &payment.currency_code,
+                &payment.provider,
+                Some(payment.id.as_str()),
+                None,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
         Ok(payment)
     }
 
@@ -868,6 +924,22 @@ impl PaymentService {
         .await
         .map_err(database_error)?;
         insert_attempt(&mut tx, &attempt).await?;
+        if status == PaymentStatus::Failed
+            && let Some(order_id) = session.order_id.as_ref()
+        {
+            append_payment_event(
+                &mut tx,
+                self.db.store_id(),
+                "payment.failed",
+                order_id,
+                session.amount,
+                &session.currency_code,
+                &session.provider,
+                None,
+                error,
+            )
+            .await?;
+        }
         tx.commit().await.map_err(database_error)?;
 
         Ok(PaymentSession {
@@ -897,7 +969,7 @@ impl PaymentService {
             created_at: now,
         };
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE payment_sessions SET status = 'failed', data = ?, updated_at = ? \
              WHERE id = ? AND status IN ('pending', 'requires_action', 'authorized')",
         )
@@ -908,6 +980,22 @@ impl PaymentService {
         .await
         .map_err(database_error)?;
         insert_attempt(&mut tx, &attempt).await?;
+        if updated.rows_affected() > 0
+            && let Some(order_id) = session.order_id.as_ref()
+        {
+            append_payment_event(
+                &mut tx,
+                self.db.store_id(),
+                "payment.failed",
+                order_id,
+                session.amount,
+                &session.currency_code,
+                &session.provider,
+                None,
+                Some(message),
+            )
+            .await?;
+        }
         tx.commit().await.map_err(database_error)?;
         Ok(())
     }
@@ -940,6 +1028,10 @@ impl PaymentService {
                 self.apply_payment_event(provider, &event.data, true).await
             }
             "payment.failed" => self.apply_payment_event(provider, &event.data, false).await,
+            "payment.canceled" => {
+                self.apply_payment_canceled_event(provider, &event.data)
+                    .await
+            }
             "refund.succeeded" => self.apply_refund_event(provider, &event.data).await,
             _ => Ok(()),
         }
@@ -955,8 +1047,9 @@ impl PaymentService {
         let provider_session_id = string_field(data, &["provider_session_id", "session_id"]);
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let mut transitioned = false;
         if let Some(provider_payment_id) = provider_payment_id.as_deref() {
-            if succeeded {
+            let updated = if succeeded {
                 sqlx::query(
                     "UPDATE payments SET status = 'captured', \
                      captured_at = COALESCE(captured_at, ?), updated_at = ? \
@@ -969,7 +1062,7 @@ impl PaymentService {
                 .bind(provider_payment_id)
                 .execute(&mut *tx)
                 .await
-                .map_err(database_error)?;
+                .map_err(database_error)?
             } else {
                 sqlx::query(
                     "UPDATE payments SET status = 'failed', updated_at = ? \
@@ -981,11 +1074,12 @@ impl PaymentService {
                 .bind(provider_payment_id)
                 .execute(&mut *tx)
                 .await
-                .map_err(database_error)?;
-            }
+                .map_err(database_error)?
+            };
+            transitioned |= updated.rows_affected() > 0;
         }
         if let Some(provider_session_id) = provider_session_id.as_deref() {
-            if succeeded {
+            let updated = if succeeded {
                 sqlx::query(
                     "UPDATE payment_sessions SET status = 'captured', updated_at = ? \
                      WHERE provider = ? AND provider_session_id = ? \
@@ -996,7 +1090,7 @@ impl PaymentService {
                 .bind(provider_session_id)
                 .execute(&mut *tx)
                 .await
-                .map_err(database_error)?;
+                .map_err(database_error)?
             } else {
                 sqlx::query(
                     "UPDATE payment_sessions SET status = 'failed', updated_at = ? \
@@ -1008,8 +1102,77 @@ impl PaymentService {
                 .bind(provider_session_id)
                 .execute(&mut *tx)
                 .await
-                .map_err(database_error)?;
-            }
+                .map_err(database_error)?
+            };
+            transitioned |= updated.rows_affected() > 0;
+        }
+        // Provider webhooks are the only capture path for asynchronous payment
+        // methods. Emit the same domain event the synchronous capture emits so
+        // notifications and outbox consumers observe exactly one transition.
+        if transitioned
+            && let Some((order_id, amount, currency)) = payment_order_target(
+                &mut tx,
+                provider,
+                provider_payment_id.as_deref(),
+                provider_session_id.as_deref(),
+            )
+            .await?
+        {
+            append_payment_event(
+                &mut tx,
+                self.db.store_id(),
+                if succeeded {
+                    "payment.captured"
+                } else {
+                    "payment.failed"
+                },
+                &order_id,
+                amount,
+                &currency,
+                provider,
+                None,
+                None,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(())
+    }
+
+    async fn apply_payment_canceled_event(
+        &self,
+        provider: &str,
+        data: &Value,
+    ) -> Result<(), AppError> {
+        let provider_payment_id = string_field(data, &["provider_payment_id", "payment_id"]);
+        let provider_session_id = string_field(data, &["provider_session_id", "session_id"]);
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        if let Some(provider_payment_id) = provider_payment_id.as_deref() {
+            sqlx::query(
+                "UPDATE payments SET status = 'canceled', updated_at = ? \
+                 WHERE provider = ? AND provider_payment_id = ? \
+                 AND status IN ('pending', 'requires_action', 'authorized')",
+            )
+            .bind(now)
+            .bind(provider)
+            .bind(provider_payment_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
+        if let Some(provider_session_id) = provider_session_id.as_deref() {
+            sqlx::query(
+                "UPDATE payment_sessions SET status = 'canceled', updated_at = ? \
+                 WHERE provider = ? AND provider_session_id = ? \
+                 AND status IN ('pending', 'requires_action', 'authorized')",
+            )
+            .bind(now)
+            .bind(provider)
+            .bind(provider_session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
         }
         tx.commit().await.map_err(database_error)?;
         Ok(())
@@ -1098,6 +1261,107 @@ fn string_field(data: &Value, keys: &[&str]) -> Option<String> {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     })
+}
+
+/// Appends one payment lifecycle event inside the caller's transaction.
+#[allow(clippy::too_many_arguments)]
+async fn append_payment_event(
+    tx: &mut Transaction<'_, Sqlite>,
+    store_id: &fastcart_kernel::StoreId,
+    event_type: &str,
+    order_id: &OrderId,
+    amount: i64,
+    currency_code: &str,
+    provider: &str,
+    payment_id: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(), AppError> {
+    let event = DomainEventEnvelope::new(
+        event_type,
+        Some(store_id.clone()),
+        serde_json::json!({
+            "payment_id": payment_id,
+            "order_id": order_id.as_str(),
+            "amount": amount,
+            "currency_code": currency_code,
+            "provider": provider,
+            "reason": reason,
+        }),
+    );
+    append_outbox_event(&mut **tx, &event)
+        .await
+        .map_err(database_error)
+}
+
+/// Resolves the order, amount and currency a webhook event applies to.
+///
+/// Provider events identify the payment or session, not the order, so the
+/// association is read back after applying the state transition.
+async fn payment_order_target(
+    tx: &mut Transaction<'_, Sqlite>,
+    provider: &str,
+    provider_payment_id: Option<&str>,
+    provider_session_id: Option<&str>,
+) -> Result<Option<(OrderId, i64, String)>, AppError> {
+    if let Some(provider_payment_id) = provider_payment_id {
+        let row = sqlx::query_as::<_, (Option<String>, i64, String)>(
+            "SELECT order_id, amount, currency_code FROM payments \
+             WHERE provider = ? AND provider_payment_id = ? LIMIT 1",
+        )
+        .bind(provider)
+        .bind(provider_payment_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        if let Some((Some(order_id), amount, currency_code)) = row {
+            return Ok(Some((
+                OrderId::from_string(order_id),
+                amount,
+                currency_code,
+            )));
+        }
+    }
+    if let Some(provider_session_id) = provider_session_id {
+        let row = sqlx::query_as::<_, (Option<String>, i64, String)>(
+            "SELECT order_id, amount, currency_code FROM payment_sessions \
+             WHERE provider = ? AND provider_session_id = ? LIMIT 1",
+        )
+        .bind(provider)
+        .bind(provider_session_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        if let Some((Some(order_id), amount, currency_code)) = row {
+            return Ok(Some((
+                OrderId::from_string(order_id),
+                amount,
+                currency_code,
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Merges provider session data into the session record.
+///
+/// The first value is persisted; the second is returned to the caller and may
+/// contain transient secrets such as a PaymentIntent client secret.
+fn merge_provider_session_data(base: &Metadata, provider_data: &Value) -> (Metadata, Metadata) {
+    let mut stored = base.clone();
+    let mut returned = base.clone();
+    if let Value::Object(values) = provider_data {
+        for (key, value) in values {
+            if !is_sensitive_provider_data_key(key) {
+                stored.insert(key.clone(), value.clone());
+            }
+            returned.insert(key.clone(), value.clone());
+        }
+    }
+    (stored, returned)
+}
+
+fn is_sensitive_provider_data_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("client_secret") || key.eq_ignore_ascii_case("secret")
 }
 
 #[derive(sqlx::FromRow)]
