@@ -17,12 +17,12 @@ use fastcart_kernel::{
 };
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::{
-    ClaimItemInput, CreateClaimInput, CreateExchangeInput, CreateOrderEditInput, CreateReturnInput,
-    ExchangeItemInput, FulfillmentInput, FulfillmentItemInput, Order, OrderClaim, OrderEdit,
-    OrderEditItemInput, OrderExchange, OrderFilter, OrderItem, OrderRefund, OrderReturn,
-    OrderService, OrderStatus, OrderStatusHistory, PaymentStatus, ReceiveReturnInput,
-    ReceiveReturnItemInput, RefundInput, ReturnItemInput, WriteOffReturnInput,
-    WriteOffReturnItemInput,
+    AfterSalesFulfillment, ClaimItemInput, CreateClaimInput, CreateExchangeInput,
+    CreateOrderEditInput, CreateReturnInput, ExchangeItemInput, FulfillmentInput,
+    FulfillmentItemInput, Order, OrderClaim, OrderEdit, OrderEditItemInput, OrderExchange,
+    OrderFilter, OrderItem, OrderRefund, OrderReturn, OrderService, OrderStatus,
+    OrderStatusHistory, PaymentStatus, ReceiveReturnInput, ReceiveReturnItemInput, RefundInput,
+    ReturnItemInput, WriteOffReturnInput, WriteOffReturnItemInput,
 };
 use fastcart_module_payment::{PaymentService, Refund};
 use fastcart_module_shipping::{
@@ -84,6 +84,10 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/orders/{id}/claims", get(list_claims).post(create_claim))
         .route("/orders/{id}/claims/{claim_id}", get(get_claim))
         .route("/orders/{id}/claims/{claim_id}/accept", post(accept_claim))
+        .route(
+            "/orders/{id}/claims/{claim_id}/fulfill",
+            post(fulfill_claim),
+        )
         .route("/orders/{id}/claims/{claim_id}/refund", post(refund_claim))
         .route("/orders/{id}/claims/{claim_id}/cancel", post(cancel_claim))
         .route(
@@ -94,6 +98,10 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route(
             "/orders/{id}/exchanges/{exchange_id}/accept",
             post(accept_exchange),
+        )
+        .route(
+            "/orders/{id}/exchanges/{exchange_id}/fulfill",
+            post(fulfill_exchange),
         )
         .route(
             "/orders/{id}/exchanges/{exchange_id}/cancel",
@@ -185,6 +193,43 @@ pub struct ClaimRefundResponse {
     pub order_refund: Option<OrderRefund>,
     /// Provider-side refund, when one was attempted.
     pub provider_refund: Option<Refund>,
+}
+
+/// Request body for fulfilling an accepted claim or exchange.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct FulfillAfterSalesRequest {
+    /// Registered fulfillment provider; defaults to `manual`.
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    /// Tracking numbers for the replacement shipment.
+    #[serde(default)]
+    pub tracking_numbers: Vec<String>,
+}
+
+/// Result of fulfilling a claim's replacement lines.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ClaimFulfillmentResponse {
+    /// Order after the fulfillment.
+    pub order: Order,
+    /// Accepted claim the replacement belongs to.
+    pub claim: OrderClaim,
+    /// Persisted after-sales fulfillment, when replacement lines existed.
+    pub fulfillment: Option<AfterSalesFulfillment>,
+    /// Replacement units consumed from inventory.
+    pub consumed_units: i64,
+}
+
+/// Result of fulfilling an exchange's outbound lines.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ExchangeFulfillmentResponse {
+    /// Order after the fulfillment.
+    pub order: Order,
+    /// Accepted exchange the replacement belongs to.
+    pub exchange: OrderExchange,
+    /// Persisted after-sales fulfillment, when outbound lines existed.
+    pub fulfillment: Option<AfterSalesFulfillment>,
+    /// Replacement units consumed from inventory.
+    pub consumed_units: i64,
 }
 
 // -------------------------------------------------------------------------
@@ -1159,19 +1204,115 @@ async fn accept_exchange(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let exchange_id = ExchangeId::from_string(exchange_id);
-    let exchange = OrderService::new(db)
-        .accept_exchange(&id, &exchange_id)
-        .await?;
+    let workflow = AfterSalesWorkflow::with_shipping_providers(
+        db.clone(),
+        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+        context.shipping_providers.clone(),
+    );
+    let result = workflow.accept_exchange(&id, &exchange_id).await?;
     record_store_audit(
         &context,
         &actor,
         "order.exchange_accepted",
         "order_exchange",
-        exchange.id.as_str(),
-        serde_json::json!({"order_id": id.as_str()}),
+        result.exchange.id.as_str(),
+        serde_json::json!({
+            "order_id": id.as_str(),
+            "restocked_units": result.restocked_units,
+        }),
     )
     .await;
-    Ok(Json(exchange))
+    Ok(Json(result.exchange))
+}
+
+async fn fulfill_claim(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, claim_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<FulfillAfterSalesRequest>,
+) -> ApiResult<Json<ClaimFulfillmentResponse>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let id = OrderId::from_string(id);
+    let claim_id = ClaimId::from_string(claim_id);
+    let workflow = AfterSalesWorkflow::with_shipping_providers(
+        db.clone(),
+        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+        context.shipping_providers.clone(),
+    );
+    let result = workflow
+        .fulfill_claim(
+            &id,
+            &claim_id,
+            request.provider_id.as_deref().unwrap_or("manual"),
+            request.tracking_numbers,
+        )
+        .await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "order.claim_fulfilled",
+        "order_claim",
+        result.claim.id.as_str(),
+        serde_json::json!({
+            "order_id": id.as_str(),
+            "consumed_units": result.consumed_units,
+        }),
+    )
+    .await;
+    Ok(Json(ClaimFulfillmentResponse {
+        order: result.order,
+        claim: result.claim,
+        fulfillment: result.fulfillment,
+        consumed_units: result.consumed_units,
+    }))
+}
+
+async fn fulfill_exchange(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, exchange_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<FulfillAfterSalesRequest>,
+) -> ApiResult<Json<ExchangeFulfillmentResponse>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let id = OrderId::from_string(id);
+    let exchange_id = ExchangeId::from_string(exchange_id);
+    let workflow = AfterSalesWorkflow::with_shipping_providers(
+        db.clone(),
+        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+        context.shipping_providers.clone(),
+    );
+    let result = workflow
+        .fulfill_exchange(
+            &id,
+            &exchange_id,
+            request.provider_id.as_deref().unwrap_or("manual"),
+            request.tracking_numbers,
+        )
+        .await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "order.exchange_fulfilled",
+        "order_exchange",
+        result.exchange.id.as_str(),
+        serde_json::json!({
+            "order_id": id.as_str(),
+            "consumed_units": result.consumed_units,
+        }),
+    )
+    .await;
+    Ok(Json(ExchangeFulfillmentResponse {
+        order: result.order,
+        exchange: result.exchange,
+        fulfillment: result.fulfillment,
+        consumed_units: result.consumed_units,
+    }))
 }
 
 async fn cancel_exchange(

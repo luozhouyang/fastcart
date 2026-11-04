@@ -95,6 +95,8 @@ use crate::state::AppContext;
     fastcart_module_inventory::InventoryMovement,
     fastcart_module_inventory::InventoryReservation,
     fastcart_module_inventory::ReservationStatus,
+    fastcart_module_order::AfterSalesFulfillment,
+    fastcart_module_order::AfterSalesFulfillmentItem,
     fastcart_module_order::FulfillmentStatus,
     fastcart_module_order::Order,
     fastcart_module_order::OrderAdjustment,
@@ -272,7 +274,10 @@ use crate::state::AppContext;
     crate::routes::admin_inventory::TransferResponse,
     crate::routes::admin_inventory::UpdateLocationRequest,
     crate::routes::admin_orders::CancelOrderRequest,
+    crate::routes::admin_orders::ClaimFulfillmentResponse,
     crate::routes::admin_orders::ClaimRefundResponse,
+    crate::routes::admin_orders::ExchangeFulfillmentResponse,
+    crate::routes::admin_orders::FulfillAfterSalesRequest,
     crate::routes::admin_orders::FulfillOrderRequest,
     crate::routes::admin_orders::FulfillmentItemRequest,
     crate::routes::admin_orders::RefundOrderRequest,
@@ -1739,6 +1744,13 @@ fn admin_order_routes() -> Vec<Route> {
             ok(Schema::Ref("OrderClaim")),
         ),
         post(
+            "/api/v1/admin/orders/{id}/claims/{claim_id}/fulfill",
+            "Fulfill the replacement lines of a claim",
+            Auth::Admin,
+            Some("FulfillAfterSalesRequest"),
+            ok(Schema::Ref("ClaimFulfillmentResponse")),
+        ),
+        post(
             "/api/v1/admin/orders/{id}/claims/{claim_id}/refund",
             "Refund an accepted order claim",
             Auth::Admin,
@@ -1779,6 +1791,13 @@ fn admin_order_routes() -> Vec<Route> {
             Auth::Admin,
             None,
             ok(Schema::Ref("OrderExchange")),
+        ),
+        post(
+            "/api/v1/admin/orders/{id}/exchanges/{exchange_id}/fulfill",
+            "Fulfill the outbound lines of an exchange",
+            Auth::Admin,
+            Some("FulfillAfterSalesRequest"),
+            ok(Schema::Ref("ExchangeFulfillmentResponse")),
         ),
         post(
             "/api/v1/admin/orders/{id}/exchanges/{exchange_id}/cancel",
@@ -3505,12 +3524,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 162);
+        assert_eq!(count("/api/v1/admin"), 164);
         assert_eq!(count("/api/v1/store"), 42);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/internal/storefront"), 42);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 271);
+        assert_eq!(paths.len(), 273);
 
         for key in [
             "/api/v1/platform/stores",
@@ -3618,7 +3637,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 374);
+        assert_eq!(operation_count, 376);
     }
 
     #[test]
