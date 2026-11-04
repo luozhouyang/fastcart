@@ -16,7 +16,7 @@ tokio::task_local! {
 pub type ApiResult<T> = Result<T, ApiError>;
 
 /// An application error rendered as the platform error envelope.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ApiError {
     error: AppError,
 }
@@ -80,13 +80,15 @@ impl IntoResponse for ApiError {
             other => other.to_string(),
         };
         let request_id = REQUEST_ID.try_with(Clone::clone).ok();
-        let body = Json(json!({
-            "error": {
-                "code": self.error.code(),
-                "message": public_message,
-                "request_id": request_id,
-            }
-        }));
+        let mut error = json!({
+            "code": self.error.code(),
+            "message": public_message,
+            "request_id": request_id,
+        });
+        if let AppError::ConflictDetails { details, .. } = &self.error {
+            error["details"] = details.clone();
+        }
+        let body = Json(json!({ "error": error }));
         (status, body).into_response()
     }
 }
@@ -95,7 +97,7 @@ fn status_for(error: &AppError) -> StatusCode {
     match error {
         AppError::Validation(_) => StatusCode::BAD_REQUEST,
         AppError::NotFound(_) => StatusCode::NOT_FOUND,
-        AppError::Conflict(_) => StatusCode::CONFLICT,
+        AppError::Conflict(_) | AppError::ConflictDetails { .. } => StatusCode::CONFLICT,
         AppError::Unauthorized => StatusCode::UNAUTHORIZED,
         AppError::Forbidden => StatusCode::FORBIDDEN,
         AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -125,10 +127,18 @@ mod tests {
         Err(ApiError::new(AppError::Database("secret details".into())))
     }
 
+    async fn conflicted() -> ApiResult<()> {
+        Err(ApiError::new(AppError::conflict_details(
+            "stale revision",
+            serde_json::json!({ "current_revision": 7 }),
+        )))
+    }
+
     fn app() -> Router {
         Router::new()
             .route("/missing", get(failing))
             .route("/internal", get(internal))
+            .route("/conflict", get(conflicted))
     }
 
     #[tokio::test]
@@ -152,6 +162,24 @@ mod tests {
                 .unwrap()
                 .contains("prod_1")
         );
+    }
+
+    #[tokio::test]
+    async fn renders_structured_conflict_details() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/conflict")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "CONFLICT");
+        assert_eq!(value["error"]["details"]["current_revision"], 7);
     }
 
     #[tokio::test]

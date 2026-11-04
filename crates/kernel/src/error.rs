@@ -25,7 +25,7 @@ pub enum KernelError {
 ///
 /// Presentation layers map these variants to stable API error codes. Database
 /// and provider details must not be forwarded to clients verbatim.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AppError {
     /// Input failed validation.
     #[error("{0}")]
@@ -36,6 +36,15 @@ pub enum AppError {
     /// The request conflicts with current state.
     #[error("{0}")]
     Conflict(String),
+    /// The request conflicts with current state and carries machine-readable
+    /// details such as the current revision.
+    #[error("{message}")]
+    ConflictDetails {
+        /// Human-readable conflict message.
+        message: String,
+        /// Machine-readable conflict information.
+        details: serde_json::Value,
+    },
     /// The caller is not authenticated.
     #[error("unauthorized")]
     Unauthorized,
@@ -66,7 +75,7 @@ impl AppError {
         match self {
             Self::Validation(_) => "VALIDATION_ERROR",
             Self::NotFound(_) => "NOT_FOUND",
-            Self::Conflict(_) => "CONFLICT",
+            Self::Conflict(_) | Self::ConflictDetails { .. } => "CONFLICT",
             Self::Unauthorized => "UNAUTHORIZED",
             Self::Forbidden => "FORBIDDEN",
             Self::RateLimited => "RATE_LIMITED",
@@ -90,6 +99,14 @@ impl AppError {
     /// Creates a conflict error.
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::Conflict(message.into())
+    }
+
+    /// Creates a conflict error with structured details for clients.
+    pub fn conflict_details(message: impl Into<String>, details: serde_json::Value) -> Self {
+        Self::ConflictDetails {
+            message: message.into(),
+            details,
+        }
     }
 
     /// Creates a database error.
