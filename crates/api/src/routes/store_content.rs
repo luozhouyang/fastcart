@@ -11,6 +11,8 @@ use axum::routing::get;
 use fastcart_http::{ApiError, ApiResult};
 use fastcart_kernel::AppError;
 use fastcart_module_content::{ContentService, PageStatus};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::{NavigationResponse, StorePageResponse};
@@ -23,6 +25,20 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/navigation/{handle}", get(get_navigation))
 }
 
+/// Builds the documented public content routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(get_page))
+        .routes(routes!(get_navigation))
+}
+
+#[utoipa::path(
+    get,
+    path = "/pages/{handle}",
+    tag = "Store",
+    summary = "Get a published content page",
+    responses((status = 200, body = StorePageResponse))
+)]
 async fn get_page(
     StoreDb(db): StoreDb,
     Path(handle): Path<String>,
@@ -34,6 +50,13 @@ async fn get_page(
     Ok(Json(StorePageResponse { page }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/navigation/{handle}",
+    tag = "Store",
+    summary = "Get a navigation tree",
+    responses((status = 200, body = NavigationResponse))
+)]
 async fn get_navigation(
     StoreDb(db): StoreDb,
     Path(handle): Path<String>,

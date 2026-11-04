@@ -215,10 +215,10 @@ pub async fn authorize_store(
     if !member && permissions.is_empty() {
         return Err(ApiError::new(AppError::Forbidden));
     }
-    if let Some(permission) = permission {
-        if !permissions.contains(permission) {
-            return Err(ApiError::new(AppError::Forbidden));
-        }
+    if let Some(permission) = permission
+        && !permissions.contains(permission)
+    {
+        return Err(ApiError::new(AppError::Forbidden));
     }
     Ok(permissions)
 }

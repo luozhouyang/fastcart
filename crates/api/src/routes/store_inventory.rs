@@ -11,6 +11,8 @@ use fastcart_kernel::{AppError, CountryCode, VariantId};
 use fastcart_module_catalog::CatalogService;
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_shipping::ShippingService;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::{ShippingOptionsResponse, VariantAvailabilityResponse};
@@ -21,6 +23,13 @@ pub fn router() -> Router<Arc<AppContext>> {
     Router::new()
         .route("/products/{handle}/availability", get(product_availability))
         .route("/shipping/options", get(shipping_options))
+}
+
+/// Builds the documented storefront availability and shipping routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(product_availability))
+        .routes(routes!(shipping_options))
 }
 
 #[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
@@ -35,6 +44,13 @@ pub struct VariantAvailability {
     pub allow_backorder: bool,
 }
 
+#[utoipa::path(
+    get,
+    path = "/products/{handle}/availability",
+    tag = "Store",
+    summary = "Get variant availability for a product",
+    responses((status = 200, body = VariantAvailabilityResponse))
+)]
 async fn product_availability(
     State(_context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,
@@ -64,7 +80,8 @@ async fn product_availability(
     }))
 }
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ShippingOptionsQuery {
     /// Destination country.
     pub country_code: String,
@@ -72,6 +89,14 @@ pub struct ShippingOptionsQuery {
     pub subtotal: Option<i64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/shipping/options",
+    tag = "Store",
+    summary = "List shipping options for a destination",
+    params(ShippingOptionsQuery),
+    responses((status = 200, body = ShippingOptionsResponse))
+)]
 async fn shipping_options(
     State(_context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,

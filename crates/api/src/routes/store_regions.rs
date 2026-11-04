@@ -8,6 +8,8 @@ use axum::extract::Path;
 use axum::routing::get;
 use fastcart_http::{ApiResult, PaginationQuery};
 use fastcart_module_store::RegionService;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::{RegionListResponse, RegionResponse};
@@ -20,6 +22,21 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/regions/{id}", get(get_region))
 }
 
+/// Builds the documented public region routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_regions))
+        .routes(routes!(get_region))
+}
+
+#[utoipa::path(
+    get,
+    path = "/regions",
+    tag = "Store",
+    summary = "List storefront regions",
+    params(PaginationQuery),
+    responses((status = 200, body = RegionListResponse))
+)]
 async fn list_regions(
     StoreDb(db): StoreDb,
     PaginationQuery { limit, offset }: PaginationQuery,
@@ -29,6 +46,13 @@ async fn list_regions(
     Ok(Json(RegionListResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/regions/{id}",
+    tag = "Store",
+    summary = "Get a storefront region",
+    responses((status = 200, body = RegionResponse))
+)]
 async fn get_region(
     StoreDb(db): StoreDb,
     Path(id): Path<String>,

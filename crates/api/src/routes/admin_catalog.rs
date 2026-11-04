@@ -28,6 +28,8 @@ use fastcart_module_store::{
     CreateSalesChannelInput, SalesChannel, StoreService, UpdateSalesChannelInput,
 };
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{StoreDb, record_store_audit};
 use crate::dto::{PageResponse, VariantDto};
@@ -123,12 +125,51 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/sales-channels/{id}/enable", post(enable_sales_channel))
 }
 
+/// Builds the documented admin catalog routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_products, create_product))
+        .routes(routes!(get_product, update_product, delete_product))
+        .routes(routes!(publish_product))
+        .routes(routes!(archive_product))
+        .routes(routes!(create_variant))
+        .routes(routes!(set_product_sales_channels))
+        .routes(routes!(get_variant, update_variant, delete_variant))
+        .routes(routes!(list_images, add_image))
+        .routes(routes!(remove_image))
+        .routes(routes!(reorder_images))
+        .routes(routes!(list_categories, create_category))
+        .routes(routes!(get_category, update_category, delete_category))
+        .routes(routes!(list_collections, create_collection))
+        .routes(routes!(
+            get_collection,
+            update_collection,
+            delete_collection
+        ))
+        .routes(routes!(publish_collection))
+        .routes(routes!(unpublish_collection))
+        .routes(routes!(add_collection_products))
+        .routes(routes!(remove_collection_product))
+        .routes(routes!(list_tags, create_tag))
+        .routes(routes!(attach_tag))
+        .routes(routes!(detach_tag))
+        .routes(routes!(search_products))
+        .routes(routes!(reindex))
+        .routes(routes!(get_settings, update_settings))
+        .routes(routes!(get_setting, set_setting, delete_setting))
+        .routes(routes!(list_sales_channels, create_sales_channel))
+        .routes(routes!(get_sales_channel, update_sales_channel))
+        .routes(routes!(disable_sales_channel))
+        .routes(routes!(enable_sales_channel))
+}
+
 // -------------------------------------------------------------------------
 // Request shapes
 // -------------------------------------------------------------------------
 
 /// Query parameters for administrative product listing.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ProductListQuery {
     #[serde(default)]
     status: Option<String>,
@@ -145,14 +186,16 @@ struct ProductListQuery {
 }
 
 /// Query parameters for category listing.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct CategoryListQuery {
     #[serde(default)]
     parent_id: Option<String>,
 }
 
 /// Query parameters for administrative product search.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct SearchQuery {
     q: String,
 }
@@ -639,6 +682,15 @@ async fn resolve_tag_value(service: &CatalogService, tag_id: &str) -> ApiResult<
 // Products
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/catalog/products",
+    tag = "Admin",
+    summary = "List products",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, ProductListQuery),
+    responses((status = 200, body = PageResponse<Product>))
+)]
 async fn list_products(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -667,6 +719,15 @@ async fn list_products(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/products",
+    tag = "Admin",
+    summary = "Create a product",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateProductRequest,
+    responses((status = 201, body = Product))
+)]
 async fn create_product(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -679,6 +740,14 @@ async fn create_product(
     Ok((StatusCode::CREATED, Json(product)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/catalog/products/{id}",
+    tag = "Admin",
+    summary = "Get a product",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Product))
+)]
 async fn get_product(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -692,6 +761,15 @@ async fn get_product(
     Ok(Json(product))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/catalog/products/{id}",
+    tag = "Admin",
+    summary = "Update a product",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateProductRequest,
+    responses((status = 200, body = Product))
+)]
 async fn update_product(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -706,6 +784,14 @@ async fn update_product(
     Ok(Json(product))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/catalog/products/{id}",
+    tag = "Admin",
+    summary = "Delete a product",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_product(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -729,6 +815,14 @@ async fn delete_product(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/products/{id}/publish",
+    tag = "Admin",
+    summary = "Publish a product",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Product))
+)]
 async fn publish_product(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -742,6 +836,14 @@ async fn publish_product(
     Ok(Json(product))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/products/{id}/archive",
+    tag = "Admin",
+    summary = "Archive a product",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Product))
+)]
 async fn archive_product(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -766,6 +868,15 @@ async fn archive_product(
 }
 
 /// Replaces the sales channels a product is published to.
+#[utoipa::path(
+    post,
+    path = "/products/{id}/sales-channels",
+    tag = "Admin",
+    summary = "Replace the sales channels a product is published to",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = ProductSalesChannelsRequest,
+    responses((status = 200, body = Product))
+)]
 async fn set_product_sales_channels(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -796,6 +907,15 @@ async fn set_product_sales_channels(
 // Variants
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    post,
+    path = "/catalog/products/{id}/variants",
+    tag = "Admin",
+    summary = "Create a product variant",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateVariantRequest,
+    responses((status = 201, body = VariantDto))
+)]
 async fn create_variant(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -810,6 +930,14 @@ async fn create_variant(
     Ok((StatusCode::CREATED, Json(variant.into())))
 }
 
+#[utoipa::path(
+    get,
+    path = "/catalog/variants/{id}",
+    tag = "Admin",
+    summary = "Get a variant",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = VariantDto))
+)]
 async fn get_variant(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -823,6 +951,15 @@ async fn get_variant(
     Ok(Json(variant.into()))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/catalog/variants/{id}",
+    tag = "Admin",
+    summary = "Update a variant",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateVariantRequest,
+    responses((status = 200, body = VariantDto))
+)]
 async fn update_variant(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -837,6 +974,14 @@ async fn update_variant(
     Ok(Json(variant.into()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/catalog/variants/{id}",
+    tag = "Admin",
+    summary = "Delete a variant",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_variant(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -854,6 +999,14 @@ async fn delete_variant(
 // Images
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/catalog/products/{id}/images",
+    tag = "Admin",
+    summary = "List product images",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<ProductImage>))
+)]
 async fn list_images(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -867,6 +1020,15 @@ async fn list_images(
     Ok(Json(images))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/products/{id}/images",
+    tag = "Admin",
+    summary = "Add a product image",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateImageRequest,
+    responses((status = 201, body = ProductImage))
+)]
 async fn add_image(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -881,6 +1043,14 @@ async fn add_image(
     Ok((StatusCode::CREATED, Json(image)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/catalog/images/{id}",
+    tag = "Admin",
+    summary = "Remove a product image",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn remove_image(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -894,6 +1064,15 @@ async fn remove_image(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/products/{id}/images/reorder",
+    tag = "Admin",
+    summary = "Reorder product images",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = ImageReorderRequest,
+    responses((status = 200, body = Vec<ProductImage>))
+)]
 async fn reorder_images(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -912,6 +1091,15 @@ async fn reorder_images(
 // Categories
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/catalog/categories",
+    tag = "Admin",
+    summary = "List categories",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, CategoryListQuery),
+    responses((status = 200, body = PageResponse<Category>))
+)]
 async fn list_categories(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -926,6 +1114,15 @@ async fn list_categories(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/categories",
+    tag = "Admin",
+    summary = "Create a category",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateCategoryRequest,
+    responses((status = 201, body = Category))
+)]
 async fn create_category(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -938,6 +1135,14 @@ async fn create_category(
     Ok((StatusCode::CREATED, Json(category)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/catalog/categories/{id}",
+    tag = "Admin",
+    summary = "Get a category",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Category))
+)]
 async fn get_category(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -951,6 +1156,15 @@ async fn get_category(
     Ok(Json(category))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/catalog/categories/{id}",
+    tag = "Admin",
+    summary = "Update a category",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateCategoryRequest,
+    responses((status = 200, body = Category))
+)]
 async fn update_category(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -965,6 +1179,14 @@ async fn update_category(
     Ok(Json(category))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/catalog/categories/{id}",
+    tag = "Admin",
+    summary = "Delete a category",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_category(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -982,6 +1204,15 @@ async fn delete_category(
 // Collections
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/catalog/collections",
+    tag = "Admin",
+    summary = "List collections",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<Collection>))
+)]
 async fn list_collections(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -993,6 +1224,15 @@ async fn list_collections(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/collections",
+    tag = "Admin",
+    summary = "Create a collection",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateCollectionRequest,
+    responses((status = 201, body = Collection))
+)]
 async fn create_collection(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1005,6 +1245,14 @@ async fn create_collection(
     Ok((StatusCode::CREATED, Json(collection)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/catalog/collections/{id}",
+    tag = "Admin",
+    summary = "Get a collection",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Collection))
+)]
 async fn get_collection(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1018,6 +1266,15 @@ async fn get_collection(
     Ok(Json(collection))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/catalog/collections/{id}",
+    tag = "Admin",
+    summary = "Update a collection",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateCollectionRequest,
+    responses((status = 200, body = Collection))
+)]
 async fn update_collection(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1032,6 +1289,14 @@ async fn update_collection(
     Ok(Json(collection))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/catalog/collections/{id}",
+    tag = "Admin",
+    summary = "Delete a collection",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_collection(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1042,6 +1307,14 @@ async fn delete_collection(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/collections/{id}/publish",
+    tag = "Admin",
+    summary = "Publish a collection",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Collection))
+)]
 async fn publish_collection(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1055,6 +1328,14 @@ async fn publish_collection(
     Ok(Json(collection))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/collections/{id}/unpublish",
+    tag = "Admin",
+    summary = "Unpublish a collection",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Collection))
+)]
 async fn unpublish_collection(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1068,6 +1349,15 @@ async fn unpublish_collection(
     Ok(Json(collection))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/collections/{id}/products",
+    tag = "Admin",
+    summary = "Add products to a collection",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CollectionProductsRequest,
+    responses((status = 204))
+)]
 async fn add_collection_products(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1086,6 +1376,14 @@ async fn add_collection_products(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/catalog/collections/{id}/products/{product_id}",
+    tag = "Admin",
+    summary = "Remove a product from a collection",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn remove_collection_product(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1104,6 +1402,15 @@ async fn remove_collection_product(
 // Tags
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/catalog/tags",
+    tag = "Admin",
+    summary = "List tags",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<Tag>))
+)]
 async fn list_tags(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1115,6 +1422,15 @@ async fn list_tags(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/tags",
+    tag = "Admin",
+    summary = "Create a tag",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = TagRequest,
+    responses((status = 201, body = Tag))
+)]
 async fn create_tag(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1125,6 +1441,15 @@ async fn create_tag(
     Ok((StatusCode::CREATED, Json(tag)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/products/{id}/tags",
+    tag = "Admin",
+    summary = "Attach a tag to a product",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = ProductTagRequest,
+    responses((status = 200, body = Tag))
+)]
 async fn attach_tag(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1139,6 +1464,14 @@ async fn attach_tag(
     Ok(Json(tag))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/catalog/products/{id}/tags/{tag_id}",
+    tag = "Admin",
+    summary = "Detach a tag from a product",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn detach_tag(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1157,6 +1490,15 @@ async fn detach_tag(
 // Search
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/catalog/search",
+    tag = "Admin",
+    summary = "Search products as an administrator",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, SearchQuery),
+    responses((status = 200, body = PageResponse<Product>))
+)]
 async fn search_products(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1171,6 +1513,14 @@ async fn search_products(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/catalog/reindex",
+    tag = "Admin",
+    summary = "Reindex the product search catalog",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ReindexResponse))
+)]
 async fn reindex(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1184,6 +1534,14 @@ async fn reindex(
 // Settings
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/settings",
+    tag = "Admin",
+    summary = "Get all store settings",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = BTreeMap<String, String>))
+)]
 async fn get_settings(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1193,6 +1551,15 @@ async fn get_settings(
     Ok(Json(settings))
 }
 
+#[utoipa::path(
+    put,
+    path = "/settings",
+    tag = "Admin",
+    summary = "Update multiple store settings",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = SettingsRequest,
+    responses((status = 200, body = BTreeMap<String, String>))
+)]
 async fn update_settings(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1207,6 +1574,14 @@ async fn update_settings(
     Ok(Json(settings))
 }
 
+#[utoipa::path(
+    get,
+    path = "/settings/{key}",
+    tag = "Admin",
+    summary = "Get a store setting",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = serde_json::Value))
+)]
 async fn get_setting(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1220,6 +1595,15 @@ async fn get_setting(
     Ok(Json(serde_json::json!({ "key": key, "value": value })))
 }
 
+#[utoipa::path(
+    put,
+    path = "/settings/{key}",
+    tag = "Admin",
+    summary = "Set a store setting",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = SettingRequest,
+    responses((status = 200, body = serde_json::Value))
+)]
 async fn set_setting(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1234,6 +1618,14 @@ async fn set_setting(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/settings/{key}",
+    tag = "Admin",
+    summary = "Delete a store setting",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_setting(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1250,6 +1642,15 @@ async fn delete_setting(
 // Sales channels
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/sales-channels",
+    tag = "Admin",
+    summary = "List sales channels",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<SalesChannel>))
+)]
 async fn list_sales_channels(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1263,6 +1664,15 @@ async fn list_sales_channels(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/sales-channels",
+    tag = "Admin",
+    summary = "Create a sales channel",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateSalesChannelRequest,
+    responses((status = 201, body = SalesChannel))
+)]
 async fn create_sales_channel(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1275,6 +1685,14 @@ async fn create_sales_channel(
     Ok((StatusCode::CREATED, Json(channel)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/sales-channels/{id}",
+    tag = "Admin",
+    summary = "Get a sales channel",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = SalesChannel))
+)]
 async fn get_sales_channel(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1285,6 +1703,15 @@ async fn get_sales_channel(
     Ok(Json(channel))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/sales-channels/{id}",
+    tag = "Admin",
+    summary = "Update a sales channel",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateSalesChannelRequest,
+    responses((status = 200, body = SalesChannel))
+)]
 async fn update_sales_channel(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1298,6 +1725,14 @@ async fn update_sales_channel(
     Ok(Json(channel))
 }
 
+#[utoipa::path(
+    post,
+    path = "/sales-channels/{id}/disable",
+    tag = "Admin",
+    summary = "Disable a sales channel",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = SalesChannel))
+)]
 async fn disable_sales_channel(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -1308,6 +1743,14 @@ async fn disable_sales_channel(
     Ok(Json(channel))
 }
 
+#[utoipa::path(
+    post,
+    path = "/sales-channels/{id}/enable",
+    tag = "Admin",
+    summary = "Enable a sales channel",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = SalesChannel))
+)]
 async fn enable_sales_channel(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,

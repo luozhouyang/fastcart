@@ -36,7 +36,8 @@ pub struct PageInfo {
 }
 
 /// Paginated API response.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(bound = "T: utoipa::ToSchema")]
 pub struct PageResponse<T> {
     /// Page records.
     pub data: Vec<T>,

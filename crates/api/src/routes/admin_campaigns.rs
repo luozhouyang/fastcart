@@ -13,6 +13,8 @@ use fastcart_module_promotion::{
     Campaign, CampaignBudgetType, CreateCampaignInput, PromotionService, UpdateCampaignInput,
 };
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{StoreDb, record_store_audit};
 use crate::dto::{PageInfo, PageResponse};
@@ -36,6 +38,15 @@ pub fn router() -> Router<Arc<AppContext>> {
             "/campaigns/{id}/promotions/{promotion_id}",
             delete(unlink_promotion),
         )
+}
+
+/// Builds the documented campaign routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_campaigns, create_campaign))
+        .routes(routes!(get_campaign, update_campaign, delete_campaign))
+        .routes(routes!(list_promotions, link_promotion))
+        .routes(routes!(unlink_promotion))
 }
 
 /// Campaign response body.
@@ -142,6 +153,15 @@ fn authorize(actor: &ActorContext, permission: &str) -> ApiResult<()> {
     actor.require_permission(permission).map_err(ApiError::new)
 }
 
+#[utoipa::path(
+    get,
+    path = "/campaigns",
+    tag = "Admin",
+    summary = "List campaigns",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<CampaignDto>))
+)]
 async fn list_campaigns(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -160,6 +180,14 @@ async fn list_campaigns(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/campaigns/{id}",
+    tag = "Admin",
+    summary = "Get a campaign",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = CampaignDto))
+)]
 async fn get_campaign(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -171,6 +199,15 @@ async fn get_campaign(
     )))
 }
 
+#[utoipa::path(
+    post,
+    path = "/campaigns",
+    tag = "Admin",
+    summary = "Create a campaign",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateCampaignRequest,
+    responses((status = 201, body = CampaignDto))
+)]
 async fn create_campaign(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -202,6 +239,15 @@ async fn create_campaign(
     Ok((StatusCode::CREATED, Json(CampaignDto::from(campaign))))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/campaigns/{id}",
+    tag = "Admin",
+    summary = "Update a campaign",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateCampaignRequest,
+    responses((status = 200, body = CampaignDto))
+)]
 async fn update_campaign(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -237,6 +283,14 @@ async fn update_campaign(
     Ok(Json(CampaignDto::from(campaign)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/campaigns/{id}",
+    tag = "Admin",
+    summary = "Delete a campaign",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_campaign(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -257,6 +311,14 @@ async fn delete_campaign(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/campaigns/{id}/promotions",
+    tag = "Admin",
+    summary = "List promotions linked to a campaign",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<String>))
+)]
 async fn list_promotions(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -270,6 +332,15 @@ async fn list_promotions(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/campaigns/{id}/promotions",
+    tag = "Admin",
+    summary = "Link a promotion to a campaign",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = LinkPromotionRequest,
+    responses((status = 204))
+)]
 async fn link_promotion(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -293,6 +364,14 @@ async fn link_promotion(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/campaigns/{id}/promotions/{promotion_id}",
+    tag = "Admin",
+    summary = "Unlink a promotion from a campaign",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn unlink_promotion(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

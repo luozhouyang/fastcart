@@ -15,6 +15,8 @@ use fastcart_kernel::{ActorContext, AppError, ThemeId};
 use fastcart_module_theme::{RegisterThemeInput, ThemeService, UpdateThemeSettingsInput};
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{StoreDb, record_store_audit};
 use crate::dto::{PageResponse, ThemeDto, ThemeManifestDto};
@@ -29,6 +31,17 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/themes/{id}", get(get_theme).delete(delete_theme))
         .route("/themes/{id}/settings", patch(update_theme_settings))
         .route("/themes/{id}/activate", post(activate_theme))
+}
+
+/// Builds the documented admin theme routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_themes, register_theme))
+        .routes(routes!(get_active_theme))
+        .routes(routes!(rollback_theme))
+        .routes(routes!(get_theme, delete_theme))
+        .routes(routes!(update_theme_settings))
+        .routes(routes!(activate_theme))
 }
 
 /// Enforces a permission at the handler boundary.
@@ -72,6 +85,15 @@ impl From<UpdateThemeSettingsRequest> for UpdateThemeSettingsInput {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/themes",
+    tag = "Admin",
+    summary = "List registered themes",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<ThemeDto>))
+)]
 async fn list_themes(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -83,6 +105,15 @@ async fn list_themes(
     Ok(Json(PageResponse::from_page(page.map(ThemeDto::from))))
 }
 
+#[utoipa::path(
+    post,
+    path = "/themes",
+    tag = "Admin",
+    summary = "Register a theme",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = RegisterThemeRequest,
+    responses((status = 201, body = ThemeDto))
+)]
 async fn register_theme(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -107,6 +138,14 @@ async fn register_theme(
     Ok((StatusCode::CREATED, Json(ThemeDto::from(theme))))
 }
 
+#[utoipa::path(
+    get,
+    path = "/themes/{id}",
+    tag = "Admin",
+    summary = "Get a theme",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ThemeDto))
+)]
 async fn get_theme(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -117,6 +156,14 @@ async fn get_theme(
     Ok(Json(ThemeDto::from(theme)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/themes/active",
+    tag = "Admin",
+    summary = "Get the active theme",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ThemeDto))
+)]
 async fn get_active_theme(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -129,6 +176,15 @@ async fn get_active_theme(
     Ok(Json(ThemeDto::from(theme)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/themes/{id}/settings",
+    tag = "Admin",
+    summary = "Replace theme settings",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateThemeSettingsRequest,
+    responses((status = 200, body = ThemeDto))
+)]
 async fn update_theme_settings(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -152,6 +208,14 @@ async fn update_theme_settings(
     Ok(Json(ThemeDto::from(theme)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/themes/{id}/activate",
+    tag = "Admin",
+    summary = "Activate a theme",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ThemeDto))
+)]
 async fn activate_theme(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -174,6 +238,14 @@ async fn activate_theme(
     Ok(Json(ThemeDto::from(theme)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/themes/rollback",
+    tag = "Admin",
+    summary = "Roll back to the previous theme",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ThemeDto))
+)]
 async fn rollback_theme(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -193,6 +265,14 @@ async fn rollback_theme(
     Ok(Json(ThemeDto::from(theme)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/themes/{id}",
+    tag = "Admin",
+    summary = "Delete a theme",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_theme(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

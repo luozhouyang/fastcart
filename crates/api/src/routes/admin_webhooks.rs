@@ -18,6 +18,8 @@ use fastcart_module_webhook::{
     CreateWebhookEndpointInput, UpdateWebhookEndpointInput, WebhookDelivery, WebhookEndpoint,
     WebhookService,
 };
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{StoreDb, record_store_audit};
 
@@ -36,6 +38,16 @@ pub fn router() -> Router<Arc<crate::state::AppContext>> {
         .route("/webhook-deliveries/{id}/replay", post(replay_delivery))
 }
 
+/// Builds the documented admin webhook routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<crate::state::AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_endpoints, create_endpoint))
+        .routes(routes!(get_endpoint, update_endpoint, delete_endpoint))
+        .routes(routes!(rotate_secret))
+        .routes(routes!(list_deliveries))
+        .routes(routes!(replay_delivery))
+}
+
 #[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct CreateWebhookRequest {
     url: String,
@@ -51,7 +63,8 @@ pub struct UpdateWebhookRequest {
     is_active: Option<bool>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct DeliveriesQuery {
     limit: Option<i64>,
 }
@@ -81,7 +94,7 @@ pub struct RotatedSecretDto {
     secret: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
 struct WebhookDeliveryDto {
     id: String,
     endpoint_id: String,
@@ -131,6 +144,14 @@ fn delivery_dto(delivery: &WebhookDelivery) -> WebhookDeliveryDto {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/webhooks",
+    tag = "Admin",
+    summary = "List webhook endpoints",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<WebhookEndpointDto>))
+)]
 async fn list_endpoints(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -140,6 +161,15 @@ async fn list_endpoints(
     Ok(Json(endpoints.iter().map(endpoint_dto).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/webhooks",
+    tag = "Admin",
+    summary = "Create a webhook endpoint",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateWebhookRequest,
+    responses((status = 201, body = CreatedWebhookDto))
+)]
 async fn create_endpoint(
     State(context): State<Arc<crate::state::AppContext>>,
     AdminActor(actor): AdminActor,
@@ -175,6 +205,14 @@ async fn create_endpoint(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/webhooks/{id}",
+    tag = "Admin",
+    summary = "Get a webhook endpoint",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = WebhookEndpointDto))
+)]
 async fn get_endpoint(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -187,6 +225,15 @@ async fn get_endpoint(
     Ok(Json(endpoint_dto(&endpoint)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/webhooks/{id}",
+    tag = "Admin",
+    summary = "Update a webhook endpoint",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateWebhookRequest,
+    responses((status = 200, body = WebhookEndpointDto))
+)]
 async fn update_endpoint(
     State(context): State<Arc<crate::state::AppContext>>,
     AdminActor(actor): AdminActor,
@@ -221,6 +268,14 @@ async fn update_endpoint(
     Ok(Json(endpoint_dto(&endpoint)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/webhooks/{id}",
+    tag = "Admin",
+    summary = "Delete a webhook endpoint",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_endpoint(
     State(context): State<Arc<crate::state::AppContext>>,
     AdminActor(actor): AdminActor,
@@ -244,6 +299,14 @@ async fn delete_endpoint(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/webhooks/{id}/rotate-secret",
+    tag = "Admin",
+    summary = "Rotate a webhook signing secret",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = RotatedSecretDto))
+)]
 async fn rotate_secret(
     State(context): State<Arc<crate::state::AppContext>>,
     AdminActor(actor): AdminActor,
@@ -265,6 +328,15 @@ async fn rotate_secret(
     Ok(Json(RotatedSecretDto { secret }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/webhooks/{id}/deliveries",
+    tag = "Admin",
+    summary = "List webhook deliveries",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(DeliveriesQuery),
+    responses((status = 200, body = Vec<WebhookDeliveryDto>))
+)]
 async fn list_deliveries(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -278,6 +350,14 @@ async fn list_deliveries(
     Ok(Json(deliveries.iter().map(delivery_dto).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/webhook-deliveries/{id}/replay",
+    tag = "Admin",
+    summary = "Replay a webhook delivery",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = WebhookDeliveryDto))
+)]
 async fn replay_delivery(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,

@@ -15,6 +15,8 @@ use fastcart_module_promotion::{
     PromotionStatus, PromotionType, UpdateCouponInput, UpdatePromotionInput,
 };
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::dto::PageResponse;
 use crate::routes::StoreDb;
@@ -42,8 +44,28 @@ pub fn router() -> Router<Arc<AppContext>> {
         )
 }
 
+/// Builds the documented routes for this namespace.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_promotions, create_promotion))
+        .routes(routes!(get_promotion, update_promotion, delete_promotion))
+        .routes(routes!(promotion_usage))
+        .routes(routes!(list_coupons, create_coupon))
+        .routes(routes!(validate_coupon))
+        .routes(routes!(get_coupon, update_coupon, delete_coupon))
+}
+
 // Promotions
 
+#[utoipa::path(
+    get,
+    path = "/promotions",
+    tag = "Admin",
+    summary = "List promotions",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, PromotionListQuery),
+    responses((status = 200, body = PageResponse<Promotion>))
+)]
 async fn list_promotions(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -59,6 +81,15 @@ async fn list_promotions(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/promotions",
+    tag = "Admin",
+    summary = "Create a promotion",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreatePromotionRequest,
+    responses((status = 201, body = Promotion))
+)]
 async fn create_promotion(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -72,6 +103,14 @@ async fn create_promotion(
     Ok((StatusCode::CREATED, Json(promotion)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/promotions/{id}",
+    tag = "Admin",
+    summary = "Get a promotion",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Promotion))
+)]
 async fn get_promotion(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -83,6 +122,15 @@ async fn get_promotion(
     Ok(Json(promotion))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/promotions/{id}",
+    tag = "Admin",
+    summary = "Update a promotion",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdatePromotionRequest,
+    responses((status = 200, body = Promotion))
+)]
 async fn update_promotion(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -97,6 +145,14 @@ async fn update_promotion(
     Ok(Json(promotion))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/promotions/{id}",
+    tag = "Admin",
+    summary = "Delete a promotion",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_promotion(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -108,6 +164,14 @@ async fn delete_promotion(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/promotions/{id}/usage",
+    tag = "Admin",
+    summary = "Get promotion usage",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = PromotionUsageResponse))
+)]
 async fn promotion_usage(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -121,6 +185,15 @@ async fn promotion_usage(
 
 // Coupons
 
+#[utoipa::path(
+    get,
+    path = "/coupons",
+    tag = "Admin",
+    summary = "List coupons",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, CouponListQuery),
+    responses((status = 200, body = PageResponse<Coupon>))
+)]
 async fn list_coupons(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -136,6 +209,15 @@ async fn list_coupons(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/coupons",
+    tag = "Admin",
+    summary = "Create a coupon",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateCouponRequest,
+    responses((status = 201, body = Coupon))
+)]
 async fn create_coupon(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -149,6 +231,14 @@ async fn create_coupon(
     Ok((StatusCode::CREATED, Json(coupon)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/coupons/{id}",
+    tag = "Admin",
+    summary = "Get a coupon",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Coupon))
+)]
 async fn get_coupon(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -160,6 +250,15 @@ async fn get_coupon(
     Ok(Json(coupon))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/coupons/{id}",
+    tag = "Admin",
+    summary = "Update a coupon",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateCouponRequest,
+    responses((status = 200, body = Coupon))
+)]
 async fn update_coupon(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -174,6 +273,14 @@ async fn update_coupon(
     Ok(Json(coupon))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/coupons/{id}",
+    tag = "Admin",
+    summary = "Delete a coupon",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_coupon(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -185,6 +292,15 @@ async fn delete_coupon(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/coupons/validate",
+    tag = "Admin",
+    summary = "Validate a coupon",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = ValidateCouponRequest,
+    responses((status = 200, body = CouponValidationResponse))
+)]
 async fn validate_coupon(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -218,7 +334,8 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct PromotionListQuery {
     status: Option<PromotionStatus>,
     is_automatic: Option<bool>,
@@ -322,7 +439,8 @@ impl UpdatePromotionRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct CouponListQuery {
     promotion_id: Option<String>,
 }
@@ -397,7 +515,7 @@ pub struct CouponValidationResponse {
     coupon: Option<Coupon>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct PromotionUsageResponse {
     usage_count: i64,
 }

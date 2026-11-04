@@ -13,6 +13,8 @@ use fastcart_workflows::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::{PageInfo, PageResponse};
@@ -23,6 +25,13 @@ pub fn router() -> Router<Arc<AppContext>> {
     Router::new()
         .route("/workflows-executions", get(list_executions))
         .route("/workflows-executions/{id}", get(get_execution))
+}
+
+/// Builds the documented admin workflow routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_executions))
+        .routes(routes!(get_execution))
 }
 
 /// A workflow step checkpoint.
@@ -142,6 +151,15 @@ fn authorize(actor: &ActorContext) -> ApiResult<()> {
         .map_err(ApiError::new)
 }
 
+#[utoipa::path(
+    get,
+    path = "/workflows-executions",
+    tag = "Admin",
+    summary = "List workflow executions",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<WorkflowExecutionDto>))
+)]
 async fn list_executions(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -167,6 +185,14 @@ async fn list_executions(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/workflows-executions/{id}",
+    tag = "Admin",
+    summary = "Get a workflow execution",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = WorkflowExecutionDto))
+)]
 async fn get_execution(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

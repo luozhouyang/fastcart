@@ -30,6 +30,8 @@ use fastcart_module_shipping::{
 };
 use fastcart_workflows::AfterSalesWorkflow;
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{StoreDb, record_store_audit};
 use crate::dto::{
@@ -122,11 +124,48 @@ pub fn router() -> Router<Arc<AppContext>> {
         )
 }
 
+/// Builds the documented routes for this namespace.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_orders))
+        .routes(routes!(get_order))
+        .routes(routes!(get_order_by_number))
+        .routes(routes!(confirm_order))
+        .routes(routes!(process_order))
+        .routes(routes!(cancel_order))
+        .routes(routes!(fulfill_order))
+        .routes(routes!(order_history))
+        .routes(routes!(list_refunds, create_refund))
+        .routes(routes!(list_returns, create_return))
+        .routes(routes!(get_return))
+        .routes(routes!(request_return))
+        .routes(routes!(receive_return))
+        .routes(routes!(refund_return))
+        .routes(routes!(write_off_return))
+        .routes(routes!(cancel_return))
+        .routes(routes!(list_claims, create_claim))
+        .routes(routes!(get_claim))
+        .routes(routes!(accept_claim))
+        .routes(routes!(fulfill_claim))
+        .routes(routes!(refund_claim))
+        .routes(routes!(cancel_claim))
+        .routes(routes!(list_exchanges, create_exchange))
+        .routes(routes!(get_exchange))
+        .routes(routes!(accept_exchange))
+        .routes(routes!(fulfill_exchange))
+        .routes(routes!(cancel_exchange))
+        .routes(routes!(list_order_edits, create_order_edit))
+        .routes(routes!(get_order_edit))
+        .routes(routes!(confirm_order_edit))
+        .routes(routes!(cancel_order_edit))
+}
+
 // -------------------------------------------------------------------------
 // Requests
 // -------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct OrderListQuery {
     status: Option<OrderStatus>,
     payment_status: Option<PaymentStatus>,
@@ -485,6 +524,15 @@ fn map_edit_input(request: CreateOrderEditRequest) -> CreateOrderEditInput {
 // Queries
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/orders",
+    tag = "Admin",
+    summary = "List orders",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, OrderListQuery),
+    responses((status = 200, body = PageResponse<Order>))
+)]
 async fn list_orders(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -502,6 +550,14 @@ async fn list_orders(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}",
+    tag = "Admin",
+    summary = "Get an order",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Order))
+)]
 async fn get_order(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -515,6 +571,14 @@ async fn get_order(
     Ok(Json(OrderService::new(db).get(&id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/orders/by-number/{display_number}",
+    tag = "Admin",
+    summary = "Get an order by display number",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Order))
+)]
 async fn get_order_by_number(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -535,6 +599,14 @@ async fn get_order_by_number(
 // Lifecycle transitions
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/confirm",
+    tag = "Admin",
+    summary = "Confirm an order",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Order))
+)]
 async fn confirm_order(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -558,6 +630,14 @@ async fn confirm_order(
     Ok(Json(order))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/process",
+    tag = "Admin",
+    summary = "Start processing an order",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Order))
+)]
 async fn process_order(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -581,6 +661,15 @@ async fn process_order(
     Ok(Json(order))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/cancel",
+    tag = "Admin",
+    summary = "Cancel an order and restock inventory",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CancelOrderRequest,
+    responses((status = 200, body = Order))
+)]
 async fn cancel_order(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -616,6 +705,15 @@ async fn cancel_order(
     Ok(Json(order))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/fulfill",
+    tag = "Admin",
+    summary = "Fulfill an order",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = FulfillOrderRequest,
+    responses((status = 200, body = Order))
+)]
 async fn fulfill_order(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -697,6 +795,14 @@ async fn fulfill_order(
     Ok(Json(order))
 }
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/history",
+    tag = "Admin",
+    summary = "List order status history",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<OrderStatusHistory>))
+)]
 async fn order_history(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -714,6 +820,15 @@ async fn order_history(
 // Refunds
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/refunds",
+    tag = "Admin",
+    summary = "Refund an order payment",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = RefundOrderRequest,
+    responses((status = 200, body = Order))
+)]
 async fn create_refund(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -765,6 +880,14 @@ async fn create_refund(
     Ok(Json(order))
 }
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/refunds",
+    tag = "Admin",
+    summary = "List order refunds",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<OrderRefund>))
+)]
 async fn list_refunds(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -783,6 +906,14 @@ async fn list_refunds(
 // Returns
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/returns",
+    tag = "Admin",
+    summary = "List order returns",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<OrderReturn>))
+)]
 async fn list_returns(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -796,6 +927,14 @@ async fn list_returns(
     Ok(Json(OrderService::new(db).list_returns(&id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/returns/{return_id}",
+    tag = "Admin",
+    summary = "Get an order return",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = OrderReturn))
+)]
 async fn get_return(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -812,6 +951,15 @@ async fn get_return(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/returns",
+    tag = "Admin",
+    summary = "Create an order return",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateReturnRequest,
+    responses((status = 201, body = OrderReturn))
+)]
 async fn create_return(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -838,6 +986,14 @@ async fn create_return(
     Ok((StatusCode::CREATED, Json(order_return)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/returns/{return_id}/request",
+    tag = "Admin",
+    summary = "Request an order return",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = OrderReturn))
+)]
 async fn request_return(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -864,6 +1020,15 @@ async fn request_return(
     Ok(Json(order_return))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/returns/{return_id}/receive",
+    tag = "Admin",
+    summary = "Receive an order return and restock received items",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = ReceiveReturnRequest,
+    responses((status = 200, body = OrderReturn))
+)]
 async fn receive_return(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -900,6 +1065,15 @@ async fn receive_return(
     Ok(Json(order_return))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/returns/{return_id}/refund",
+    tag = "Admin",
+    summary = "Refund an order return",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CancelAfterSaleRequest,
+    responses((status = 200, body = ReturnRefundResponse))
+)]
 async fn refund_return(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -941,6 +1115,15 @@ async fn refund_return(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/returns/{return_id}/write-off",
+    tag = "Admin",
+    summary = "Write off an order return",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = WriteOffReturnRequest,
+    responses((status = 200, body = OrderReturn))
+)]
 async fn write_off_return(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -971,6 +1154,15 @@ async fn write_off_return(
     Ok(Json(order_return))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/returns/{return_id}/cancel",
+    tag = "Admin",
+    summary = "Cancel an order return",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CancelAfterSaleRequest,
+    responses((status = 200, body = OrderReturn))
+)]
 async fn cancel_return(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1000,6 +1192,14 @@ async fn cancel_return(
 // Claims
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/claims",
+    tag = "Admin",
+    summary = "List order claims",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<OrderClaim>))
+)]
 async fn list_claims(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1013,6 +1213,14 @@ async fn list_claims(
     Ok(Json(OrderService::new(db).list_claims(&id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/claims/{claim_id}",
+    tag = "Admin",
+    summary = "Get an order claim",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = OrderClaim))
+)]
 async fn get_claim(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1027,6 +1235,15 @@ async fn get_claim(
     Ok(Json(OrderService::new(db).get_claim(&id, &claim_id).await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/claims",
+    tag = "Admin",
+    summary = "Create an order claim",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateClaimRequest,
+    responses((status = 201, body = OrderClaim))
+)]
 async fn create_claim(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1053,6 +1270,14 @@ async fn create_claim(
     Ok((StatusCode::CREATED, Json(claim)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/claims/{claim_id}/accept",
+    tag = "Admin",
+    summary = "Accept an order claim",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = OrderClaim))
+)]
 async fn accept_claim(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1077,6 +1302,15 @@ async fn accept_claim(
     Ok(Json(claim))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/claims/{claim_id}/refund",
+    tag = "Admin",
+    summary = "Refund an accepted order claim",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CancelAfterSaleRequest,
+    responses((status = 200, body = ClaimRefundResponse))
+)]
 async fn refund_claim(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1118,6 +1352,15 @@ async fn refund_claim(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/claims/{claim_id}/cancel",
+    tag = "Admin",
+    summary = "Cancel an order claim",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CancelAfterSaleRequest,
+    responses((status = 200, body = OrderClaim))
+)]
 async fn cancel_claim(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1147,6 +1390,14 @@ async fn cancel_claim(
 // Exchanges
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/exchanges",
+    tag = "Admin",
+    summary = "List order exchanges",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<OrderExchange>))
+)]
 async fn list_exchanges(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1160,6 +1411,14 @@ async fn list_exchanges(
     Ok(Json(OrderService::new(db).list_exchanges(&id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/exchanges/{exchange_id}",
+    tag = "Admin",
+    summary = "Get an order exchange",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = OrderExchange))
+)]
 async fn get_exchange(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1178,6 +1437,15 @@ async fn get_exchange(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/exchanges",
+    tag = "Admin",
+    summary = "Create an order exchange",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateExchangeRequest,
+    responses((status = 201, body = OrderExchange))
+)]
 async fn create_exchange(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1204,6 +1472,14 @@ async fn create_exchange(
     Ok((StatusCode::CREATED, Json(exchange)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/exchanges/{exchange_id}/accept",
+    tag = "Admin",
+    summary = "Accept an order exchange",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = OrderExchange))
+)]
 async fn accept_exchange(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1236,6 +1512,15 @@ async fn accept_exchange(
     Ok(Json(result.exchange))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/claims/{claim_id}/fulfill",
+    tag = "Admin",
+    summary = "Fulfill the replacement lines of a claim",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = FulfillAfterSalesRequest,
+    responses((status = 200, body = ClaimFulfillmentResponse))
+)]
 async fn fulfill_claim(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1281,6 +1566,15 @@ async fn fulfill_claim(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/exchanges/{exchange_id}/fulfill",
+    tag = "Admin",
+    summary = "Fulfill the outbound lines of an exchange",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = FulfillAfterSalesRequest,
+    responses((status = 200, body = ExchangeFulfillmentResponse))
+)]
 async fn fulfill_exchange(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1326,6 +1620,15 @@ async fn fulfill_exchange(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/exchanges/{exchange_id}/cancel",
+    tag = "Admin",
+    summary = "Cancel an order exchange",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CancelAfterSaleRequest,
+    responses((status = 200, body = OrderExchange))
+)]
 async fn cancel_exchange(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1357,6 +1660,14 @@ async fn cancel_exchange(
 // Order edits
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/edits",
+    tag = "Admin",
+    summary = "List order edits",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<OrderEdit>))
+)]
 async fn list_order_edits(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1370,6 +1681,14 @@ async fn list_order_edits(
     Ok(Json(OrderService::new(db).list_order_edits(&id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/orders/{id}/edits/{edit_id}",
+    tag = "Admin",
+    summary = "Get an order edit",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = OrderEdit))
+)]
 async fn get_order_edit(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1386,6 +1705,15 @@ async fn get_order_edit(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/edits",
+    tag = "Admin",
+    summary = "Create an order edit",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateOrderEditRequest,
+    responses((status = 201, body = OrderEdit))
+)]
 async fn create_order_edit(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1412,6 +1740,14 @@ async fn create_order_edit(
     Ok((StatusCode::CREATED, Json(edit)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/edits/{edit_id}/confirm",
+    tag = "Admin",
+    summary = "Confirm an order edit",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = OrderEdit))
+)]
 async fn confirm_order_edit(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -1438,6 +1774,15 @@ async fn confirm_order_edit(
     Ok(Json(edit))
 }
 
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/edits/{edit_id}/cancel",
+    tag = "Admin",
+    summary = "Cancel an order edit",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CancelAfterSaleRequest,
+    responses((status = 200, body = OrderEdit))
+)]
 async fn cancel_order_edit(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

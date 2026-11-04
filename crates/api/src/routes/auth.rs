@@ -13,11 +13,36 @@ use fastcart_http::{
 };
 use fastcart_kernel::{AppError, normalize_email, now_timestamp};
 use fastcart_platform::{CreateUserInput, CreatedSession, User};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::dto::{LoginRequest, LoginResponse, MeResponse, SetupRequest, UserDto};
 use crate::state::AppContext;
 
+/// Builds the documented shared authentication routes.
+///
+/// These handlers are mounted under both the platform and admin namespaces.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(login))
+        .routes(routes!(logout))
+        .routes(routes!(me))
+}
+
+/// Builds the documented first-run setup route.
+pub fn setup_openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new().routes(routes!(setup))
+}
+
 /// Authenticates a platform or store administrator.
+#[utoipa::path(
+    post,
+    path = "/auth/login",
+    tag = "Platform",
+    summary = "Log in a platform administrator",
+    request_body = LoginRequest,
+    responses((status = 200, body = LoginResponse))
+)]
 pub async fn login(
     State(context): State<Arc<AppContext>>,
     ApiJson(request): ApiJson<LoginRequest>,
@@ -35,6 +60,14 @@ pub async fn login(
 /// Creates the first platform user and logs them in.
 ///
 /// This endpoint is only available before the first user exists.
+#[utoipa::path(
+    post,
+    path = "/auth/setup",
+    tag = "Platform",
+    summary = "Create the first platform administrator",
+    request_body = SetupRequest,
+    responses((status = 200, body = LoginResponse))
+)]
 pub async fn setup(
     State(context): State<Arc<AppContext>>,
     ApiJson(request): ApiJson<SetupRequest>,
@@ -58,6 +91,14 @@ pub async fn setup(
 }
 
 /// Revokes the current session and clears cookies.
+#[utoipa::path(
+    post,
+    path = "/auth/logout",
+    tag = "Platform",
+    summary = "Log out the current platform session",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 pub async fn logout(
     State(context): State<Arc<AppContext>>,
     Extension(SessionToken(token)): Extension<SessionToken>,
@@ -76,6 +117,14 @@ pub async fn logout(
 }
 
 /// Returns the authenticated actor.
+#[utoipa::path(
+    get,
+    path = "/auth/me",
+    tag = "Platform",
+    summary = "Describe the authenticated platform actor",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = MeResponse))
+)]
 pub async fn me(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

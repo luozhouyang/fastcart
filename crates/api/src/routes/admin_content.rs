@@ -20,6 +20,8 @@ use fastcart_module_content::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::PageResponse;
@@ -71,8 +73,33 @@ pub fn router() -> Router<Arc<AppContext>> {
         )
 }
 
+/// Builds the documented admin content routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_pages, create_page))
+        .routes(routes!(get_page, update_page, delete_page))
+        .routes(routes!(publish_page))
+        .routes(routes!(unpublish_page))
+        .routes(routes!(archive_page))
+        .routes(routes!(list_page_versions))
+        .routes(routes!(restore_page_version))
+        .routes(routes!(list_navigations, create_navigation))
+        .routes(routes!(
+            get_navigation,
+            update_navigation,
+            delete_navigation
+        ))
+        .routes(routes!(get_navigation_tree))
+        .routes(routes!(add_navigation_item))
+        .routes(routes!(update_navigation_item, delete_navigation_item))
+        .routes(routes!(reorder_navigation_items))
+        .routes(routes!(list_redirects, create_redirect))
+        .routes(routes!(get_redirect, delete_redirect))
+}
+
 /// Query parameters for administrative page listing.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct PageListQuery {
     #[serde(default)]
     status: Option<String>,
@@ -264,6 +291,15 @@ async fn resolve_redirect(service: &ContentService, id: &str) -> ApiResult<Redir
 // Pages
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/content/pages",
+    tag = "Admin",
+    summary = "List content pages",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, PageListQuery),
+    responses((status = 200, body = PageResponse<Page>))
+)]
 async fn list_pages(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -279,6 +315,15 @@ async fn list_pages(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/pages",
+    tag = "Admin",
+    summary = "Create a content page",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreatePageRequest,
+    responses((status = 201, body = Page))
+)]
 async fn create_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -289,6 +334,14 @@ async fn create_page(
     Ok((StatusCode::CREATED, Json(page)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/content/pages/{id}",
+    tag = "Admin",
+    summary = "Get a content page",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Page))
+)]
 async fn get_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -300,6 +353,15 @@ async fn get_page(
     Ok(Json(page))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/content/pages/{id}",
+    tag = "Admin",
+    summary = "Update a content page",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdatePageRequest,
+    responses((status = 200, body = Page))
+)]
 async fn update_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -314,6 +376,14 @@ async fn update_page(
     Ok(Json(page))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/content/pages/{id}",
+    tag = "Admin",
+    summary = "Delete a content page",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -325,6 +395,14 @@ async fn delete_page(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/pages/{id}/publish",
+    tag = "Admin",
+    summary = "Publish a content page",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Page))
+)]
 async fn publish_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -336,6 +414,14 @@ async fn publish_page(
     Ok(Json(page))
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/pages/{id}/unpublish",
+    tag = "Admin",
+    summary = "Unpublish a content page",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Page))
+)]
 async fn unpublish_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -347,6 +433,14 @@ async fn unpublish_page(
     Ok(Json(page))
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/pages/{id}/archive",
+    tag = "Admin",
+    summary = "Archive a content page",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Page))
+)]
 async fn archive_page(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -358,6 +452,14 @@ async fn archive_page(
     Ok(Json(page))
 }
 
+#[utoipa::path(
+    get,
+    path = "/content/pages/{id}/versions",
+    tag = "Admin",
+    summary = "List page versions",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<PageVersion>))
+)]
 async fn list_page_versions(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -369,6 +471,14 @@ async fn list_page_versions(
     Ok(Json(versions))
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/pages/{id}/versions/{version}/restore",
+    tag = "Admin",
+    summary = "Restore a page version",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Page))
+)]
 async fn restore_page_version(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -386,6 +496,15 @@ async fn restore_page_version(
 // Navigation
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/content/navigations",
+    tag = "Admin",
+    summary = "List navigations",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<Navigation>))
+)]
 async fn list_navigations(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -397,6 +516,15 @@ async fn list_navigations(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/navigations",
+    tag = "Admin",
+    summary = "Create a navigation",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateNavigationRequest,
+    responses((status = 201, body = Navigation))
+)]
 async fn create_navigation(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -409,6 +537,14 @@ async fn create_navigation(
     Ok((StatusCode::CREATED, Json(navigation)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/content/navigations/{id}",
+    tag = "Admin",
+    summary = "Get a navigation",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Navigation))
+)]
 async fn get_navigation(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -422,6 +558,15 @@ async fn get_navigation(
     Ok(Json(navigation))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/content/navigations/{id}",
+    tag = "Admin",
+    summary = "Update a navigation",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateNavigationRequest,
+    responses((status = 200, body = Navigation))
+)]
 async fn update_navigation(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -436,6 +581,14 @@ async fn update_navigation(
     Ok(Json(navigation))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/content/navigations/{id}",
+    tag = "Admin",
+    summary = "Delete a navigation",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_navigation(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -449,6 +602,14 @@ async fn delete_navigation(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/content/navigations/{id}/tree",
+    tag = "Admin",
+    summary = "Get a navigation tree",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = NavigationTree))
+)]
 async fn get_navigation_tree(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -462,6 +623,15 @@ async fn get_navigation_tree(
     Ok(Json(tree))
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/navigations/{id}/items",
+    tag = "Admin",
+    summary = "Add a navigation item",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = NavigationItemRequest,
+    responses((status = 201, body = NavigationItem))
+)]
 async fn add_navigation_item(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -476,6 +646,15 @@ async fn add_navigation_item(
     Ok((StatusCode::CREATED, Json(item)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/content/navigation-items/{item_id}",
+    tag = "Admin",
+    summary = "Update a navigation item",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = NavigationItemRequest,
+    responses((status = 200, body = NavigationItem))
+)]
 async fn update_navigation_item(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -489,6 +668,14 @@ async fn update_navigation_item(
     Ok(Json(item))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/content/navigation-items/{item_id}",
+    tag = "Admin",
+    summary = "Delete a navigation item",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_navigation_item(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -501,6 +688,15 @@ async fn delete_navigation_item(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/navigations/{id}/items/reorder",
+    tag = "Admin",
+    summary = "Reorder navigation items",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = NavigationItemReorderRequest,
+    responses((status = 200, body = Vec<NavigationItem>))
+)]
 async fn reorder_navigation_items(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -519,6 +715,15 @@ async fn reorder_navigation_items(
 // Redirects
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/content/redirects",
+    tag = "Admin",
+    summary = "List redirects",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<Redirect>))
+)]
 async fn list_redirects(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -530,6 +735,15 @@ async fn list_redirects(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/content/redirects",
+    tag = "Admin",
+    summary = "Create a redirect",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateRedirectRequest,
+    responses((status = 201, body = Redirect))
+)]
 async fn create_redirect(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -542,6 +756,14 @@ async fn create_redirect(
     Ok((StatusCode::CREATED, Json(redirect)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/content/redirects/{id}",
+    tag = "Admin",
+    summary = "Get a redirect",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Redirect))
+)]
 async fn get_redirect(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -552,6 +774,14 @@ async fn get_redirect(
     Ok(Json(redirect))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/content/redirects/{id}",
+    tag = "Admin",
+    summary = "Delete a redirect",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_redirect(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,

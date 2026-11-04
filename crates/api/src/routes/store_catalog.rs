@@ -19,6 +19,8 @@ use fastcart_module_catalog::{CatalogService, Product, ProductFilter, ProductSta
 use fastcart_module_pricing::{PriceContext, PriceListType, PricingService};
 use fastcart_module_store::{RegionService, StoreService};
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{PublishableKeyContext, StoreDb};
 use crate::dto::{
@@ -38,8 +40,20 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/settings/public", get(public_settings))
 }
 
+/// Builds the documented public catalog routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_products))
+        .routes(routes!(get_product))
+        .routes(routes!(list_categories))
+        .routes(routes!(list_collections))
+        .routes(routes!(search))
+        .routes(routes!(public_settings))
+}
+
 /// Query parameters accepted by the storefront product listing.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ProductQuery {
     /// Page size.
     limit: Option<i64>,
@@ -64,7 +78,8 @@ struct ProductQuery {
 }
 
 /// Query parameters accepted by storefront search.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct SearchQuery {
     /// Search terms.
     q: Option<String>,
@@ -102,6 +117,14 @@ pub struct StoreProduct {
     pub calculated_price: Option<CalculatedPrice>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/products",
+    tag = "Store",
+    summary = "List published products",
+    params(ProductQuery),
+    responses((status = 200, body = ProductListResponse))
+)]
 async fn list_products(
     StoreDb(db): StoreDb,
     publishable_key: Option<Extension<PublishableKeyContext>>,
@@ -124,6 +147,14 @@ async fn list_products(
     Ok(Json(ProductListResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/products/{handle}",
+    tag = "Store",
+    summary = "Get a published product by handle",
+    params(ProductQuery),
+    responses((status = 200, body = ProductResponse))
+)]
 async fn get_product(
     StoreDb(db): StoreDb,
     publishable_key: Option<Extension<PublishableKeyContext>>,
@@ -143,6 +174,14 @@ async fn get_product(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/categories",
+    tag = "Store",
+    summary = "List published categories",
+    params(PaginationQuery),
+    responses((status = 200, body = CategoryListResponse))
+)]
 async fn list_categories(
     StoreDb(db): StoreDb,
     PaginationQuery { limit, offset }: PaginationQuery,
@@ -154,6 +193,14 @@ async fn list_categories(
     Ok(Json(CategoryListResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/collections",
+    tag = "Store",
+    summary = "List published collections",
+    params(PaginationQuery),
+    responses((status = 200, body = CollectionListResponse))
+)]
 async fn list_collections(
     StoreDb(db): StoreDb,
     PaginationQuery { limit, offset }: PaginationQuery,
@@ -165,6 +212,14 @@ async fn list_collections(
     Ok(Json(CollectionListResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/search",
+    tag = "Store",
+    summary = "Search published products",
+    params(SearchQuery),
+    responses((status = 200, body = ProductSearchResponse))
+)]
 async fn search(
     StoreDb(db): StoreDb,
     publishable_key: Option<Extension<PublishableKeyContext>>,
@@ -193,6 +248,13 @@ async fn search(
 /// Unlike the collection endpoints, settings have no Medusa envelope: the
 /// payload is an arbitrary map of public keys to string values, so wrapping it
 /// would add a layer without a stable resource name.
+#[utoipa::path(
+    get,
+    path = "/settings/public",
+    tag = "Store",
+    summary = "Get public store settings",
+    responses((status = 200, body = BTreeMap<String, String>))
+)]
 async fn public_settings(StoreDb(db): StoreDb) -> ApiResult<Json<BTreeMap<String, String>>> {
     let settings = StoreService::new(db).get_all_settings().await?;
     let public = settings

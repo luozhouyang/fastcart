@@ -25,6 +25,8 @@ use fastcart_module_inventory::InventoryService;
 use fastcart_module_payment::PaymentService;
 use fastcart_module_store::StoreService;
 use fastcart_workflows::{CartContext, CartWorkflow, CheckoutWorkflow, CreateCheckoutRequest};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{StoreDb, ensure_cart_access};
 use crate::dto::{
@@ -56,6 +58,26 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/checkouts/{checkout_id}/complete", post(complete_checkout))
         .route("/checkouts/{checkout_id}/cancel", post(cancel_checkout))
         .route("/checkouts/{checkout_id}/history", get(checkout_history))
+}
+
+/// Builds the documented cart and checkout routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(create_cart))
+        .routes(routes!(get_cart))
+        .routes(routes!(add_item, clear_items))
+        .routes(routes!(update_item, remove_item))
+        .routes(routes!(set_email))
+        .routes(routes!(attach_customer))
+        .routes(routes!(set_address))
+        .routes(routes!(set_shipping_method))
+        .routes(routes!(apply_discount))
+        .routes(routes!(remove_discount))
+        .routes(routes!(create_checkout))
+        .routes(routes!(get_checkout))
+        .routes(routes!(complete_checkout))
+        .routes(routes!(cancel_checkout))
+        .routes(routes!(checkout_history))
 }
 
 #[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -181,6 +203,15 @@ pub struct CompleteCheckoutRequest {
     pub province_code: Option<String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/carts",
+    tag = "Store",
+    summary = "Create a cart",
+    request_body = CreateCartRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 201, body = CartResponse))
+)]
 async fn create_cart(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -217,6 +248,14 @@ async fn create_cart(
     Ok((StatusCode::CREATED, Json(CartResponse { cart })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/carts/{cart_id}",
+    tag = "Store",
+    summary = "Get a cart",
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn get_cart(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -230,6 +269,15 @@ async fn get_cart(
     Ok(Json(CartResponse { cart }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/carts/{cart_id}/items",
+    tag = "Store",
+    summary = "Add an item to a cart",
+    request_body = AddItemRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn add_item(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -260,6 +308,16 @@ async fn add_item(
     Ok(Json(CartResponse { cart }))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/carts/{cart_id}/items/{item_id}",
+    tag = "Store",
+    summary = "Update a cart item quantity",
+    params(DestinationQuery),
+    request_body = UpdateItemRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn update_item(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -288,6 +346,15 @@ async fn update_item(
     }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/carts/{cart_id}/items/{item_id}",
+    tag = "Store",
+    summary = "Remove a cart item",
+    params(DestinationQuery),
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn remove_item(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -309,6 +376,15 @@ async fn remove_item(
     }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/carts/{cart_id}/items",
+    tag = "Store",
+    summary = "Clear cart items",
+    params(DestinationQuery),
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn clear_items(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -327,6 +403,15 @@ async fn clear_items(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/carts/{cart_id}/email",
+    tag = "Store",
+    summary = "Set the cart contact email",
+    request_body = SetEmailRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn set_email(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -346,6 +431,14 @@ async fn set_email(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/carts/{cart_id}/customer",
+    tag = "Store",
+    summary = "Attach the authenticated customer to a cart",
+    security(("customerSession" = [])),
+    responses((status = 200, body = CartResponse))
+)]
 async fn attach_customer(
     State(_context): State<Arc<AppContext>>,
     CustomerActor(actor): CustomerActor,
@@ -365,6 +458,15 @@ async fn attach_customer(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/carts/{cart_id}/addresses",
+    tag = "Store",
+    summary = "Set a cart shipping or billing address",
+    request_body = SetAddressRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn set_address(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -422,6 +524,15 @@ async fn set_address(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/carts/{cart_id}/shipping-method",
+    tag = "Store",
+    summary = "Set the cart shipping method",
+    request_body = SetShippingMethodRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn set_shipping_method(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -451,6 +562,16 @@ async fn set_shipping_method(
     Ok(Json(CartResponse { cart }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/carts/{cart_id}/discounts",
+    tag = "Store",
+    summary = "Apply a discount code to a cart",
+    params(DestinationQuery),
+    request_body = DiscountRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn apply_discount(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -471,6 +592,15 @@ async fn apply_discount(
     }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/carts/{cart_id}/discounts/{code}",
+    tag = "Store",
+    summary = "Remove a discount code from a cart",
+    params(DestinationQuery),
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
 async fn remove_discount(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -488,6 +618,15 @@ async fn remove_discount(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/checkouts",
+    tag = "Store",
+    summary = "Create a checkout from a cart",
+    request_body = CreateCheckoutRequestDto,
+    security(("customerSession" = []), ()),
+    responses((status = 201, body = CheckoutResponse))
+)]
 async fn create_checkout(
     State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -519,6 +658,14 @@ async fn create_checkout(
     Ok((StatusCode::CREATED, Json(CheckoutResponse { checkout })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/checkouts/{checkout_id}",
+    tag = "Store",
+    summary = "Get a checkout",
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CheckoutResponse))
+)]
 async fn get_checkout(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -534,6 +681,15 @@ async fn get_checkout(
     Ok(Json(CheckoutResponse { checkout }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/checkouts/{checkout_id}/complete",
+    tag = "Store",
+    summary = "Complete a checkout",
+    request_body = CompleteCheckoutRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CheckoutCompleteResponse))
+)]
 async fn complete_checkout(
     State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -576,6 +732,14 @@ async fn complete_checkout(
     Ok(Json(CheckoutCompleteResponse::order(result.order)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/checkouts/{checkout_id}/cancel",
+    tag = "Store",
+    summary = "Cancel a checkout",
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CheckoutResponse))
+)]
 async fn cancel_checkout(
     State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -617,6 +781,14 @@ async fn cancel_checkout(
     Ok(Json(CheckoutResponse { checkout }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/checkouts/{checkout_id}/history",
+    tag = "Store",
+    summary = "List checkout state history",
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CheckoutHistoryResponse))
+)]
 async fn checkout_history(
     State(_context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
@@ -633,7 +805,8 @@ async fn checkout_history(
     }))
 }
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct DestinationQuery {
     /// Destination country.
     pub country_code: Option<String>,

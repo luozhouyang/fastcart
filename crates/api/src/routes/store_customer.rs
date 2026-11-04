@@ -27,6 +27,8 @@ use fastcart_module_customer::{
 };
 use fastcart_module_order::{OrderFilter, OrderService};
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::{
@@ -70,6 +72,25 @@ pub fn router() -> Router<Arc<AppContext>> {
             "/customers/password-reset/confirm",
             post(confirm_password_reset),
         )
+}
+
+/// Builds the documented public customer routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(register))
+        .routes(routes!(login))
+        .routes(routes!(logout))
+        .routes(routes!(me, update_me))
+        .routes(routes!(list_addresses, add_address))
+        .routes(routes!(update_address, remove_address))
+        .routes(routes!(list_orders))
+        .routes(routes!(get_own_order))
+        .routes(routes!(list_groups))
+        .routes(routes!(change_password))
+        .routes(routes!(request_email_verification))
+        .routes(routes!(confirm_email_verification))
+        .routes(routes!(request_password_reset))
+        .routes(routes!(confirm_password_reset))
 }
 
 /// Registration request body.
@@ -211,6 +232,14 @@ pub struct CustomerSessionResponse {
     expires_at: i64,
 }
 
+#[utoipa::path(
+    post,
+    path = "/customers",
+    tag = "Store",
+    summary = "Register a storefront customer",
+    request_body = RegisterRequest,
+    responses((status = 200, body = CustomerSessionResponse))
+)]
 async fn register(
     State(context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,
@@ -232,6 +261,14 @@ async fn register(
     session_response(&context, session)
 }
 
+#[utoipa::path(
+    post,
+    path = "/customers/login",
+    tag = "Store",
+    summary = "Log in a storefront customer",
+    request_body = CustomerLoginRequest,
+    responses((status = 200, body = CustomerSessionResponse))
+)]
 async fn login(
     State(context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,
@@ -249,6 +286,14 @@ async fn login(
     session_response(&context, session)
 }
 
+#[utoipa::path(
+    post,
+    path = "/customers/logout",
+    tag = "Store",
+    summary = "Log out the current storefront customer",
+    security(("customerSession" = [])),
+    responses((status = 204))
+)]
 async fn logout(
     State(context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,
@@ -266,6 +311,14 @@ async fn logout(
     Ok(response)
 }
 
+#[utoipa::path(
+    get,
+    path = "/customers/me",
+    tag = "Store",
+    summary = "Get the current customer",
+    security(("customerSession" = [])),
+    responses((status = 200, body = CustomerResponse))
+)]
 async fn me(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
@@ -277,6 +330,15 @@ async fn me(
     }))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/customers/me",
+    tag = "Store",
+    summary = "Update the current customer",
+    request_body = UpdateProfileRequest,
+    security(("customerSession" = [])),
+    responses((status = 200, body = CustomerResponse))
+)]
 async fn update_me(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
@@ -301,6 +363,14 @@ async fn update_me(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/customers/me/addresses",
+    tag = "Store",
+    summary = "List the current customer's addresses",
+    security(("customerSession" = [])),
+    responses((status = 200, body = CustomerAddressListResponse))
+)]
 async fn list_addresses(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
@@ -314,6 +384,15 @@ async fn list_addresses(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/customers/me/addresses",
+    tag = "Store",
+    summary = "Add an address for the current customer",
+    request_body = AddressRequest,
+    security(("customerSession" = [])),
+    responses((status = 201, body = CustomerAddressResponse))
+)]
 async fn add_address(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
@@ -331,6 +410,15 @@ async fn add_address(
     ))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/customers/me/addresses/{address_id}",
+    tag = "Store",
+    summary = "Update the current customer's address",
+    request_body = AddressRequest,
+    security(("customerSession" = [])),
+    responses((status = 200, body = CustomerAddressResponse))
+)]
 async fn update_address(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
@@ -352,6 +440,14 @@ async fn update_address(
     }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/customers/me/addresses/{address_id}",
+    tag = "Store",
+    summary = "Remove the current customer's address",
+    security(("customerSession" = [])),
+    responses((status = 204))
+)]
 async fn remove_address(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
@@ -364,6 +460,15 @@ async fn remove_address(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/customers/me/orders",
+    tag = "Store",
+    summary = "List the current customer's orders",
+    params(PaginationQuery),
+    security(("customerSession" = [])),
+    responses((status = 200, body = OrderListResponse))
+)]
 async fn list_orders(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
@@ -379,6 +484,14 @@ async fn list_orders(
     Ok(Json(OrderListResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/customers/me/groups",
+    tag = "Store",
+    summary = "List the current customer's groups",
+    security(("customerSession" = [])),
+    responses((status = 200, body = CustomerGroupsResponse))
+)]
 async fn list_groups(
     StoreDb(db): StoreDb,
     CustomerActor(actor): CustomerActor,
@@ -392,6 +505,15 @@ async fn list_groups(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/customers/me/password",
+    tag = "Store",
+    summary = "Change the current customer's password",
+    request_body = ChangePasswordRequest,
+    security(("customerSession" = [])),
+    responses((status = 204))
+)]
 async fn change_password(
     State(context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,
@@ -417,6 +539,14 @@ async fn change_password(
 /// The response is always the same 202 acknowledgement, whether or not the
 /// account exists or is already verified. Email delivery failures are logged
 /// and never change the response.
+#[utoipa::path(
+    post,
+    path = "/customers/email-verification/request",
+    tag = "Store",
+    summary = "Request a customer email-verification token",
+    request_body = EmailRequest,
+    responses((status = 202, body = AcceptedResponse))
+)]
 async fn request_email_verification(
     State(context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,
@@ -457,6 +587,14 @@ async fn request_email_verification(
 }
 
 /// Confirms an email-verification token.
+#[utoipa::path(
+    post,
+    path = "/customers/email-verification/confirm",
+    tag = "Store",
+    summary = "Confirm a customer email-verification token",
+    request_body = TokenRequest,
+    responses((status = 200, body = EmailVerifiedResponse))
+)]
 async fn confirm_email_verification(
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<TokenRequest>,
@@ -473,6 +611,14 @@ async fn confirm_email_verification(
 ///
 /// Unknown and guest emails do not create tokens. The response is always the
 /// same 202 acknowledgement and email failures are only logged.
+#[utoipa::path(
+    post,
+    path = "/customers/password-reset/request",
+    tag = "Store",
+    summary = "Request a customer password-reset token",
+    request_body = PasswordResetRequest,
+    responses((status = 202, body = AcceptedResponse))
+)]
 async fn request_password_reset(
     State(context): State<Arc<AppContext>>,
     StoreDb(db): StoreDb,
@@ -503,6 +649,14 @@ async fn request_password_reset(
 }
 
 /// Confirms a password-reset token and revokes every session.
+#[utoipa::path(
+    post,
+    path = "/customers/password-reset/confirm",
+    tag = "Store",
+    summary = "Confirm a customer password-reset token",
+    request_body = ResetPasswordRequest,
+    responses((status = 204))
+)]
 async fn confirm_password_reset(
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<ResetPasswordRequest>,
@@ -633,6 +787,14 @@ fn address_input(request: AddressRequest, existing: Option<&Address>) -> Address
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/customers/me/orders/{order_id}",
+    tag = "Store",
+    summary = "Get one of the current customer's orders",
+    security(("customerSession" = [])),
+    responses((status = 200, body = OrderResponse))
+)]
 async fn get_own_order(
     CustomerActor(actor): CustomerActor,
     StoreDb(db): StoreDb,

@@ -3,6 +3,8 @@
 use axum::Json;
 use axum::extract::{FromRequest, FromRequestParts, Query, Request};
 use axum::http::request::Parts;
+use utoipa::IntoParams;
+
 use fastcart_kernel::{ActorContext, Pagination, StoreContext};
 use serde::de::DeserializeOwned;
 
@@ -74,7 +76,8 @@ where
 }
 
 /// Offset/limit query parameters shared by list endpoints.
-#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PaginationQuery {
     /// Page size, 1-100.
     pub limit: Option<i64>,
@@ -125,6 +128,14 @@ where
 /// Query extractor with envelope errors.
 #[derive(Clone, Debug)]
 pub struct ApiQuery<T>(pub T);
+
+impl<T: IntoParams> IntoParams for ApiQuery<T> {
+    fn into_params(
+        parameter_in_provider: impl Fn() -> Option<utoipa::openapi::path::ParameterIn>,
+    ) -> Vec<utoipa::openapi::path::Parameter> {
+        T::into_params(parameter_in_provider)
+    }
+}
 
 impl<S, T> FromRequestParts<S> for ApiQuery<T>
 where

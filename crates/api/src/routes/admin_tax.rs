@@ -17,6 +17,8 @@ use fastcart_module_tax::{
     UpdateTaxRegionInput,
 };
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::dto::PageResponse;
 use crate::routes::StoreDb;
@@ -51,8 +53,29 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/tax/calculate", post(calculate))
 }
 
+/// Builds the documented tax routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_categories, create_category))
+        .routes(routes!(get_category, update_category, delete_category))
+        .routes(routes!(list_regions, create_region))
+        .routes(routes!(get_region, update_region, delete_region))
+        .routes(routes!(list_rates, create_rate))
+        .routes(routes!(get_rate, update_rate, delete_rate))
+        .routes(routes!(calculate))
+}
+
 // Categories
 
+#[utoipa::path(
+    get,
+    path = "/tax/categories",
+    tag = "Admin",
+    summary = "List tax categories",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<TaxCategory>))
+)]
 async fn list_categories(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -65,6 +88,15 @@ async fn list_categories(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/tax/categories",
+    tag = "Admin",
+    summary = "Create a tax category",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateTaxCategoryRequest,
+    responses((status = 201, body = TaxCategory))
+)]
 async fn create_category(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -78,6 +110,14 @@ async fn create_category(
     Ok((StatusCode::CREATED, Json(category)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/tax/categories/{id}",
+    tag = "Admin",
+    summary = "Get a tax category",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = TaxCategory))
+)]
 async fn get_category(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -90,6 +130,15 @@ async fn get_category(
     Ok(Json(category))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/tax/categories/{id}",
+    tag = "Admin",
+    summary = "Update a tax category",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateTaxCategoryRequest,
+    responses((status = 200, body = TaxCategory))
+)]
 async fn update_category(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -105,6 +154,14 @@ async fn update_category(
     Ok(Json(category))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/tax/categories/{id}",
+    tag = "Admin",
+    summary = "Delete a tax category",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_category(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -119,6 +176,15 @@ async fn delete_category(
 
 // Regions
 
+#[utoipa::path(
+    get,
+    path = "/tax/regions",
+    tag = "Admin",
+    summary = "List tax regions",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<TaxRegion>))
+)]
 async fn list_regions(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -131,6 +197,15 @@ async fn list_regions(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/tax/regions",
+    tag = "Admin",
+    summary = "Create a tax region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateTaxRegionRequest,
+    responses((status = 201, body = TaxRegion))
+)]
 async fn create_region(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -144,6 +219,14 @@ async fn create_region(
     Ok((StatusCode::CREATED, Json(region)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/tax/regions/{id}",
+    tag = "Admin",
+    summary = "Get a tax region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = TaxRegion))
+)]
 async fn get_region(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -156,6 +239,15 @@ async fn get_region(
     Ok(Json(region))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/tax/regions/{id}",
+    tag = "Admin",
+    summary = "Update a tax region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateTaxRegionRequest,
+    responses((status = 200, body = TaxRegion))
+)]
 async fn update_region(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -171,6 +263,14 @@ async fn update_region(
     Ok(Json(region))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/tax/regions/{id}",
+    tag = "Admin",
+    summary = "Delete a tax region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_region(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -185,6 +285,15 @@ async fn delete_region(
 
 // Rates
 
+#[utoipa::path(
+    get,
+    path = "/tax/rates",
+    tag = "Admin",
+    summary = "List tax rates for a region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(ListRatesQuery),
+    responses((status = 200, body = Vec<TaxRate>))
+)]
 async fn list_rates(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -197,6 +306,15 @@ async fn list_rates(
     Ok(Json(rates))
 }
 
+#[utoipa::path(
+    post,
+    path = "/tax/rates",
+    tag = "Admin",
+    summary = "Create a tax rate",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateTaxRateRequest,
+    responses((status = 201, body = TaxRate))
+)]
 async fn create_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -210,6 +328,14 @@ async fn create_rate(
     Ok((StatusCode::CREATED, Json(rate)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/tax/rates/{id}",
+    tag = "Admin",
+    summary = "Get a tax rate",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = TaxRate))
+)]
 async fn get_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -222,6 +348,15 @@ async fn get_rate(
     Ok(Json(rate))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/tax/rates/{id}",
+    tag = "Admin",
+    summary = "Update a tax rate",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateTaxRateRequest,
+    responses((status = 200, body = TaxRate))
+)]
 async fn update_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -237,6 +372,14 @@ async fn update_rate(
     Ok(Json(rate))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/tax/rates/{id}",
+    tag = "Admin",
+    summary = "Delete a tax rate",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -251,6 +394,15 @@ async fn delete_rate(
 
 // Calculation
 
+#[utoipa::path(
+    post,
+    path = "/tax/calculate",
+    tag = "Admin",
+    summary = "Calculate tax for a destination",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = TaxCalculateRequest,
+    responses((status = 200, body = TaxCalculationResponse))
+)]
 async fn calculate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -400,7 +552,8 @@ impl UpdateTaxRegionRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ListRatesQuery {
     region_id: String,
 }

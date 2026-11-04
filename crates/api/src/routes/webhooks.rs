@@ -17,6 +17,8 @@ use axum::middleware;
 use axum::routing::post;
 use fastcart_http::{ApiResult, StoreResolutionState};
 use fastcart_module_payment::{PaymentService, PaymentWebhookRecord};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{StoreDb, StoreDbState, store_database_middleware};
 use crate::state::AppContext;
@@ -39,6 +41,19 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
         ))
 }
 
+/// Builds the documented provider webhook routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new().routes(routes!(payment_webhook))
+}
+
+#[utoipa::path(
+    post,
+    path = "/payments/{provider}",
+    tag = "Webhooks",
+    summary = "Receive a payment provider webhook",
+    request_body = serde_json::Value,
+    responses((status = 200, body = PaymentWebhookRecord))
+)]
 async fn payment_webhook(
     State(context): State<Arc<AppContext>>,
     StoreDb(database): StoreDb,

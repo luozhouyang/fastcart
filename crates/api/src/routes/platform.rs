@@ -11,6 +11,8 @@ use axum::routing::{delete, get, post};
 use fastcart_http::{AdminActor, AdminAuthState, ApiError, ApiJson, ApiResult, PaginationQuery};
 use fastcart_kernel::{ActorContext, AppError, StoreId, UserId};
 use fastcart_platform::{CreateStoreInput, CreateUserInput, NewAudit, UpdateStoreInput};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::auth::{login, logout, me, setup};
 use super::{authorize_store, require_owner};
@@ -73,6 +75,39 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
     public.merge(authenticated)
 }
 
+/// Builds the documented platform routes.
+///
+/// Shared authentication handlers are documented by [`super::auth`] and are
+/// not repeated here.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_roles))
+        .routes(routes!(create_user))
+        .routes(routes!(list_api_tokens, create_api_token))
+        .routes(routes!(revoke_api_token))
+        .routes(routes!(list_stores, create_store))
+        .routes(routes!(get_store, update_store))
+        .routes(routes!(activate_store))
+        .routes(routes!(suspend_store))
+        .routes(routes!(resume_store))
+        .routes(routes!(provision_store))
+        .routes(routes!(delete_store))
+        .routes(routes!(list_domains, add_domain))
+        .routes(routes!(set_primary_domain))
+        .routes(routes!(remove_domain))
+        .routes(routes!(list_memberships, upsert_membership))
+        .routes(routes!(remove_membership))
+}
+
+#[utoipa::path(
+    get,
+    path = "/stores",
+    tag = "Platform",
+    summary = "List stores visible to the actor",
+    params(PaginationQuery),
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = PageResponse<StoreDto>))
+)]
 async fn list_stores(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -89,6 +124,15 @@ async fn list_stores(
     )))
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores",
+    tag = "Platform",
+    summary = "Create and provision a store",
+    request_body = CreateStoreRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 201, body = StoreDto))
+)]
 async fn create_store(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -126,6 +170,14 @@ async fn create_store(
     Ok((StatusCode::CREATED, Json(StoreDto::from(&store))))
 }
 
+#[utoipa::path(
+    get,
+    path = "/stores/{store_id}",
+    tag = "Platform",
+    summary = "Get a store",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = StoreDto))
+)]
 async fn get_store(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -141,6 +193,15 @@ async fn get_store(
     Ok(Json(StoreDto::from(&store)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/stores/{store_id}",
+    tag = "Platform",
+    summary = "Update a store",
+    request_body = UpdateStoreRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = StoreDto))
+)]
 async fn update_store(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -174,6 +235,14 @@ async fn update_store(
     Ok(Json(StoreDto::from(&store)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/activate",
+    tag = "Platform",
+    summary = "Activate a store",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = StoreDto))
+)]
 async fn activate_store(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -182,6 +251,14 @@ async fn activate_store(
     lifecycle(&context, &actor, &store_id, "activate").await
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/suspend",
+    tag = "Platform",
+    summary = "Suspend a store",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = StoreDto))
+)]
 async fn suspend_store(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -190,6 +267,14 @@ async fn suspend_store(
     lifecycle(&context, &actor, &store_id, "suspend").await
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/resume",
+    tag = "Platform",
+    summary = "Resume a suspended store",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = StoreDto))
+)]
 async fn resume_store(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -228,6 +313,14 @@ async fn lifecycle(
     Ok(Json(StoreDto::from(&store)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/provision",
+    tag = "Platform",
+    summary = "Provision store infrastructure",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ProvisioningResponse))
+)]
 async fn provision_store(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -248,6 +341,15 @@ async fn provision_store(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/delete",
+    tag = "Platform",
+    summary = "Delete a store",
+    request_body = DeleteStoreRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = StoreDto))
+)]
 async fn delete_store(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -285,6 +387,14 @@ async fn delete_store(
     Ok(Json(StoreDto::from(&store)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/stores/{store_id}/domains",
+    tag = "Platform",
+    summary = "List store domains",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<DomainDto>))
+)]
 async fn list_domains(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -296,6 +406,15 @@ async fn list_domains(
     Ok(Json(domains.iter().map(DomainDto::from).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/domains",
+    tag = "Platform",
+    summary = "Register a store domain",
+    request_body = DomainRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 201, body = DomainDto))
+)]
 async fn add_domain(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -312,6 +431,14 @@ async fn add_domain(
     Ok((StatusCode::CREATED, Json(DomainDto::from(&domain))))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/stores/{store_id}/domains/{hostname}",
+    tag = "Platform",
+    summary = "Remove a store domain",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn remove_domain(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -324,6 +451,15 @@ async fn remove_domain(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/domains/primary",
+    tag = "Platform",
+    summary = "Set the primary store domain",
+    request_body = PrimaryDomainRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = DomainDto))
+)]
 async fn set_primary_domain(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -340,6 +476,14 @@ async fn set_primary_domain(
     Ok(Json(DomainDto::from(&domain)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/stores/{store_id}/memberships",
+    tag = "Platform",
+    summary = "List store memberships",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<MembershipDto>))
+)]
 async fn list_memberships(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -351,6 +495,15 @@ async fn list_memberships(
     Ok(Json(memberships.iter().map(MembershipDto::from).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/memberships",
+    tag = "Platform",
+    summary = "Create or update a store membership",
+    request_body = MembershipRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 201, body = MembershipDto))
+)]
 async fn upsert_membership(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -374,6 +527,14 @@ async fn upsert_membership(
     Ok((StatusCode::CREATED, Json(MembershipDto::from(&membership))))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/stores/{store_id}/memberships/{user_id}",
+    tag = "Platform",
+    summary = "Remove a store membership",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn remove_membership(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -382,21 +543,20 @@ async fn remove_membership(
     let store_id = parse_store_id(&store_id)?;
     authorize_store(&context.platform, &actor, &store_id, Some("users.write")).await?;
     let user_id = UserId::from_string(user_id);
-    if let Some(membership) = context.platform.get_membership(&user_id, &store_id).await? {
-        if membership.roles.iter().any(|role| role == "owner") {
-            let memberships = context.platform.list_store_memberships(&store_id).await?;
-            let other_owners = memberships
-                .iter()
-                .filter(|membership| {
-                    membership.user_id != user_id
-                        && membership.roles.iter().any(|role| role == "owner")
-                })
-                .count();
-            if other_owners == 0 {
-                return Err(ApiError::new(AppError::Conflict(
-                    "cannot remove the last owner of a store".to_owned(),
-                )));
-            }
+    if let Some(membership) = context.platform.get_membership(&user_id, &store_id).await?
+        && membership.roles.iter().any(|role| role == "owner")
+    {
+        let memberships = context.platform.list_store_memberships(&store_id).await?;
+        let other_owners = memberships
+            .iter()
+            .filter(|membership| {
+                membership.user_id != user_id && membership.roles.iter().any(|role| role == "owner")
+            })
+            .count();
+        if other_owners == 0 {
+            return Err(ApiError::new(AppError::Conflict(
+                "cannot remove the last owner of a store".to_owned(),
+            )));
         }
     }
     context
@@ -406,6 +566,14 @@ async fn remove_membership(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/roles",
+    tag = "Platform",
+    summary = "List store roles",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<RoleDto>))
+)]
 async fn list_roles(
     State(context): State<Arc<AppContext>>,
     AdminActor(_actor): AdminActor,
@@ -419,6 +587,15 @@ async fn list_roles(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/users",
+    tag = "Platform",
+    summary = "Create a platform user",
+    request_body = CreateUserRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 201, body = UserDto))
+)]
 async fn create_user(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -482,6 +659,15 @@ async fn audit(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api-tokens",
+    tag = "Platform",
+    summary = "Create an API token",
+    request_body = CreateApiTokenRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 201, body = CreatedApiTokenResponse))
+)]
 async fn create_api_token(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -515,6 +701,14 @@ async fn create_api_token(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api-tokens",
+    tag = "Platform",
+    summary = "List API tokens",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<ApiTokenDto>))
+)]
 async fn list_api_tokens(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -524,6 +718,14 @@ async fn list_api_tokens(
     Ok(Json(tokens.iter().map(ApiTokenDto::from).collect()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api-tokens/{token_id}",
+    tag = "Platform",
+    summary = "Revoke an API token",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn revoke_api_token(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

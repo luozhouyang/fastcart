@@ -15,9 +15,11 @@ use fastcart_module_customer::{
     Address, AddressInput, CustomerService, CustomerStatus, UpdateCustomerInput,
 };
 use serde::Deserialize;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
-use crate::dto::{CustomerDto, CustomerGroupDto, PageResponse};
+use crate::dto::{CustomerAddressDto, CustomerDto, CustomerGroupDto, PageResponse};
 use crate::state::AppContext;
 
 /// Builds the routes for this namespace.
@@ -50,11 +52,25 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/customers/{id}/groups", get(list_customer_groups))
 }
 
+/// Builds the documented customer routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_customers))
+        .routes(routes!(get_customer, update_customer, delete_customer))
+        .routes(routes!(list_addresses, create_address))
+        .routes(routes!(update_address, delete_address))
+        .routes(routes!(list_groups, create_group))
+        .routes(routes!(add_group_customer))
+        .routes(routes!(remove_group_customer))
+        .routes(routes!(list_customer_groups))
+}
+
 // -------------------------------------------------------------------------
 // Requests
 // -------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct CustomerListQuery {
     query: Option<String>,
 }
@@ -136,6 +152,15 @@ fn map_address_input(request: AdminAddressRequest) -> AddressInput {
 // Customers
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/customers",
+    tag = "Admin",
+    summary = "List customers",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, CustomerListQuery),
+    responses((status = 200, body = PageResponse<CustomerDto>))
+)]
 async fn list_customers(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -153,6 +178,14 @@ async fn list_customers(
     Ok(Json(PageResponse::from_page(page).map(CustomerDto::from)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/customers/{id}",
+    tag = "Admin",
+    summary = "Get a customer",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = CustomerDto))
+)]
 async fn get_customer(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -167,6 +200,15 @@ async fn get_customer(
     Ok(Json(customer.into()))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/customers/{id}",
+    tag = "Admin",
+    summary = "Update a customer",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateCustomerRequest,
+    responses((status = 200, body = CustomerDto))
+)]
 async fn update_customer(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -184,6 +226,14 @@ async fn update_customer(
     Ok(Json(customer.into()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/customers/{id}",
+    tag = "Admin",
+    summary = "Delete a customer",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_customer(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -202,6 +252,14 @@ async fn delete_customer(
 // Addresses
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/customers/{id}/addresses",
+    tag = "Admin",
+    summary = "List customer addresses",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<CustomerAddressDto>))
+)]
 async fn list_addresses(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -215,6 +273,15 @@ async fn list_addresses(
     Ok(Json(CustomerService::new(db).list_addresses(&id).await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/customers/{id}/addresses",
+    tag = "Admin",
+    summary = "Add a customer address",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = AdminAddressRequest,
+    responses((status = 201, body = CustomerAddressDto))
+)]
 async fn create_address(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -232,6 +299,15 @@ async fn create_address(
     Ok((StatusCode::CREATED, Json(address)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/customers/{id}/addresses/{address_id}",
+    tag = "Admin",
+    summary = "Update a customer address",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = AdminAddressRequest,
+    responses((status = 200, body = CustomerAddressDto))
+)]
 async fn update_address(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -249,6 +325,14 @@ async fn update_address(
     Ok(Json(address))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/customers/{id}/addresses/{address_id}",
+    tag = "Admin",
+    summary = "Remove a customer address",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_address(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -269,6 +353,14 @@ async fn delete_address(
 // Customer groups
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/customer-groups",
+    tag = "Admin",
+    summary = "List customer groups",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<CustomerGroupDto>))
+)]
 async fn list_groups(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -281,6 +373,15 @@ async fn list_groups(
     Ok(Json(groups.into_iter().map(Into::into).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/customer-groups",
+    tag = "Admin",
+    summary = "Create a customer group",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateGroupRequest,
+    responses((status = 201, body = CustomerGroupDto))
+)]
 async fn create_group(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -296,6 +397,15 @@ async fn create_group(
     Ok((StatusCode::CREATED, Json(group.into())))
 }
 
+#[utoipa::path(
+    post,
+    path = "/customer-groups/{group_id}/customers",
+    tag = "Admin",
+    summary = "Assign a customer to a group",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = GroupCustomerRequest,
+    responses((status = 204, description = "No content"))
+)]
 async fn add_group_customer(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -312,6 +422,14 @@ async fn add_group_customer(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/customer-groups/{group_id}/customers/{customer_id}",
+    tag = "Admin",
+    summary = "Remove a customer from a group",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn remove_group_customer(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -328,6 +446,14 @@ async fn remove_group_customer(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/customers/{id}/groups",
+    tag = "Admin",
+    summary = "List a customer's groups",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<CustomerGroupDto>))
+)]
 async fn list_customer_groups(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

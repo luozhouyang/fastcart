@@ -19,6 +19,8 @@ use fastcart_module_pricing::{
     UpdatePriceInput, UpdatePriceListInput,
 };
 use serde::Deserialize;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::dto::PageResponse;
 use crate::routes::StoreDb;
@@ -52,8 +54,32 @@ pub fn router() -> Router<Arc<AppContext>> {
         )
 }
 
+/// Builds the documented pricing routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_price_lists, create_price_list))
+        .routes(routes!(
+            get_price_list,
+            update_price_list,
+            delete_price_list
+        ))
+        .routes(routes!(list_prices, create_price))
+        .routes(routes!(bulk_upsert_prices))
+        .routes(routes!(calculate_price, calculate_prices))
+        .routes(routes!(get_price, update_price, delete_price))
+}
+
 // Price lists
 
+#[utoipa::path(
+    get,
+    path = "/price-lists",
+    tag = "Admin",
+    summary = "List price lists",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<PriceList>))
+)]
 async fn list_price_lists(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -66,6 +92,15 @@ async fn list_price_lists(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/price-lists",
+    tag = "Admin",
+    summary = "Create a price list",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreatePriceListRequest,
+    responses((status = 201, body = PriceList))
+)]
 async fn create_price_list(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -78,6 +113,14 @@ async fn create_price_list(
     Ok((StatusCode::CREATED, Json(price_list)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/price-lists/{id}",
+    tag = "Admin",
+    summary = "Get a price list",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = PriceList))
+)]
 async fn get_price_list(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -89,6 +132,15 @@ async fn get_price_list(
     Ok(Json(price_list))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/price-lists/{id}",
+    tag = "Admin",
+    summary = "Update a price list",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdatePriceListRequest,
+    responses((status = 200, body = PriceList))
+)]
 async fn update_price_list(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -103,6 +155,14 @@ async fn update_price_list(
     Ok(Json(price_list))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/price-lists/{id}",
+    tag = "Admin",
+    summary = "Delete a price list",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_price_list(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -116,6 +176,15 @@ async fn delete_price_list(
 
 // Prices
 
+#[utoipa::path(
+    get,
+    path = "/prices",
+    tag = "Admin",
+    summary = "List prices",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, ListPricesQuery),
+    responses((status = 200, body = PageResponse<Price>))
+)]
 async fn list_prices(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -132,6 +201,15 @@ async fn list_prices(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/prices",
+    tag = "Admin",
+    summary = "Create a price",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = PriceRequest,
+    responses((status = 201, body = Price))
+)]
 async fn create_price(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -145,6 +223,14 @@ async fn create_price(
     Ok((StatusCode::CREATED, Json(price)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/prices/{id}",
+    tag = "Admin",
+    summary = "Get a price",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Price))
+)]
 async fn get_price(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -156,6 +242,15 @@ async fn get_price(
     Ok(Json(price))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/prices/{id}",
+    tag = "Admin",
+    summary = "Update a price",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdatePriceRequest,
+    responses((status = 200, body = Price))
+)]
 async fn update_price(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -170,6 +265,14 @@ async fn update_price(
     Ok(Json(price))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/prices/{id}",
+    tag = "Admin",
+    summary = "Delete a price",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_price(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -181,6 +284,15 @@ async fn delete_price(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/prices/bulk",
+    tag = "Admin",
+    summary = "Bulk upsert prices",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = BulkPricesRequest,
+    responses((status = 200, body = Vec<Price>))
+)]
 async fn bulk_upsert_prices(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -199,6 +311,15 @@ async fn bulk_upsert_prices(
 
 // Calculation
 
+#[utoipa::path(
+    get,
+    path = "/prices/calculate",
+    tag = "Admin",
+    summary = "Calculate a single variant price",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(CalculatePriceQuery),
+    responses((status = 200, body = Option<SelectedPrice>))
+)]
 async fn calculate_price(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -213,6 +334,15 @@ async fn calculate_price(
     Ok(Json(selected))
 }
 
+#[utoipa::path(
+    post,
+    path = "/prices/calculate",
+    tag = "Admin",
+    summary = "Calculate prices for several variants",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CalculatePricesRequest,
+    responses((status = 200, body = std::collections::BTreeMap<String, SelectedPrice>))
+)]
 async fn calculate_prices(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -319,7 +449,8 @@ impl UpdatePriceListRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ListPricesQuery {
     price_list_id: Option<String>,
     variant_id: Option<String>,
@@ -421,7 +552,8 @@ pub struct BulkPricesRequest {
     prices: Vec<PriceRequest>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct CalculatePriceQuery {
     variant_id: String,
     currency: String,

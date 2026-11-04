@@ -22,6 +22,8 @@ use fastcart_module_payment::{
     ListPaymentsFilter, Payment, PaymentAttempt, PaymentService, PaymentSession, PaymentStatus,
     PaymentWebhookRecord, Refund,
 };
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::PageResponse;
@@ -48,8 +50,24 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/payment-webhooks/{id}", get(get_webhook))
 }
 
+/// Builds the documented admin payment routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_payments))
+        .routes(routes!(get_payment))
+        .routes(routes!(list_refunds, create_refund))
+        .routes(routes!(get_payment_session))
+        .routes(routes!(capture_session))
+        .routes(routes!(cancel_session))
+        .routes(routes!(fail_session))
+        .routes(routes!(list_payment_attempts))
+        .routes(routes!(list_webhooks))
+        .routes(routes!(get_webhook))
+}
+
 /// Filter query accepted by the payment list endpoint.
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ListPaymentsQuery {
     /// Restricts results to one order.
     order_id: Option<String>,
@@ -81,7 +99,7 @@ pub struct FailSessionRequest {
 }
 
 /// HTTP representation of a captured payment.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
 struct PaymentDto {
     id: String,
     order_id: Option<String>,
@@ -97,7 +115,7 @@ struct PaymentDto {
 }
 
 /// HTTP representation of a payment session.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
 struct PaymentSessionDto {
     id: String,
     cart_id: Option<String>,
@@ -114,7 +132,7 @@ struct PaymentSessionDto {
 }
 
 /// HTTP representation of a payment attempt.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
 struct PaymentAttemptDto {
     id: String,
     payment_session_id: String,
@@ -143,7 +161,7 @@ pub struct RefundDto {
 }
 
 /// HTTP representation of a persisted webhook event.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
 struct PaymentWebhookDto {
     id: String,
     provider: String,
@@ -166,6 +184,15 @@ fn payment_service(context: &AppContext, db: &StoreDatabase) -> PaymentService {
     PaymentService::with_registry(db.clone(), context.payment_providers.clone())
 }
 
+#[utoipa::path(
+    get,
+    path = "/payments",
+    tag = "Admin",
+    summary = "List payments",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(ListPaymentsQuery),
+    responses((status = 200, body = PageResponse<PaymentDto>))
+)]
 async fn list_payments(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -197,6 +224,14 @@ async fn list_payments(
     )))
 }
 
+#[utoipa::path(
+    get,
+    path = "/payments/{id}",
+    tag = "Admin",
+    summary = "Get a payment",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = PaymentDto))
+)]
 async fn get_payment(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -209,6 +244,14 @@ async fn get_payment(
     Ok(Json(payment_dto(&payment)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/payments/{id}/refunds",
+    tag = "Admin",
+    summary = "List payment refunds",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<RefundDto>))
+)]
 async fn list_refunds(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -221,6 +264,15 @@ async fn list_refunds(
     Ok(Json(refunds.iter().map(refund_dto).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/payments/{id}/refunds",
+    tag = "Admin",
+    summary = "Create a payment refund",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateRefundRequest,
+    responses((status = 201, body = RefundDto))
+)]
 async fn create_refund(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -255,6 +307,14 @@ async fn create_refund(
     Ok((StatusCode::CREATED, Json(refund_dto(&refund))))
 }
 
+#[utoipa::path(
+    get,
+    path = "/payment-sessions/{id}",
+    tag = "Admin",
+    summary = "Get a payment session",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = PaymentSessionDto))
+)]
 async fn get_payment_session(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -267,6 +327,14 @@ async fn get_payment_session(
     Ok(Json(payment_session_dto(&session)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/payment-sessions/{id}/capture",
+    tag = "Admin",
+    summary = "Capture a payment session",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = PaymentDto))
+)]
 async fn capture_session(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -279,6 +347,14 @@ async fn capture_session(
     Ok(Json(payment_dto(&payment)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/payment-sessions/{id}/cancel",
+    tag = "Admin",
+    summary = "Cancel a payment session",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = PaymentSessionDto))
+)]
 async fn cancel_session(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -291,6 +367,15 @@ async fn cancel_session(
     Ok(Json(payment_session_dto(&session)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/payment-sessions/{id}/fail",
+    tag = "Admin",
+    summary = "Fail a payment session",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = FailSessionRequest,
+    responses((status = 200, body = PaymentSessionDto))
+)]
 async fn fail_session(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -307,6 +392,14 @@ async fn fail_session(
     Ok(Json(payment_session_dto(&session)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/payment-sessions/{id}/attempts",
+    tag = "Admin",
+    summary = "List payment attempts",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<PaymentAttemptDto>))
+)]
 async fn list_payment_attempts(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -319,6 +412,15 @@ async fn list_payment_attempts(
     Ok(Json(attempts.iter().map(payment_attempt_dto).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/payment-webhooks",
+    tag = "Admin",
+    summary = "List received payment webhooks",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<PaymentWebhookDto>))
+)]
 async fn list_webhooks(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -334,6 +436,14 @@ async fn list_webhooks(
     )))
 }
 
+#[utoipa::path(
+    get,
+    path = "/payment-webhooks/{id}",
+    tag = "Admin",
+    summary = "Get a received payment webhook",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = PaymentWebhookDto))
+)]
 async fn get_webhook(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

@@ -21,6 +21,8 @@ use fastcart_module_shipping::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::dto::PageResponse;
 use crate::routes::StoreDb;
@@ -75,8 +77,39 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/shipping/providers", get(list_providers))
 }
 
+/// Builds the documented shipping routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_profiles, create_profile))
+        .routes(routes!(get_profile, update_profile, delete_profile))
+        .routes(routes!(list_options, create_option))
+        .routes(routes!(list_options_for_destination))
+        .routes(routes!(get_option, update_option, delete_option))
+        .routes(routes!(list_rates, create_rate))
+        .routes(routes!(select_rate))
+        .routes(routes!(add_location))
+        .routes(routes!(remove_location))
+        .routes(routes!(get_rate, update_rate, delete_rate))
+        .routes(routes!(list_fulfillment_sets, create_fulfillment_set))
+        .routes(routes!(
+            get_fulfillment_set,
+            update_fulfillment_set,
+            delete_fulfillment_set
+        ))
+        .routes(routes!(list_providers))
+}
+
 // Fulfillment sets and providers
 
+#[utoipa::path(
+    get,
+    path = "/shipping/fulfillment-sets",
+    tag = "Admin",
+    summary = "List fulfillment sets",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<FulfillmentSet>))
+)]
 async fn list_fulfillment_sets(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -90,6 +123,15 @@ async fn list_fulfillment_sets(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/shipping/fulfillment-sets",
+    tag = "Admin",
+    summary = "Create a fulfillment set",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateFulfillmentSetRequest,
+    responses((status = 201, body = FulfillmentSet))
+)]
 async fn create_fulfillment_set(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -102,6 +144,14 @@ async fn create_fulfillment_set(
     Ok((StatusCode::CREATED, Json(set)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/shipping/fulfillment-sets/{id}",
+    tag = "Admin",
+    summary = "Get a fulfillment set",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = FulfillmentSet))
+)]
 async fn get_fulfillment_set(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -113,6 +163,15 @@ async fn get_fulfillment_set(
     ))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/shipping/fulfillment-sets/{id}",
+    tag = "Admin",
+    summary = "Update a fulfillment set",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateFulfillmentSetRequest,
+    responses((status = 200, body = FulfillmentSet))
+)]
 async fn update_fulfillment_set(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -127,6 +186,14 @@ async fn update_fulfillment_set(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/shipping/fulfillment-sets/{id}",
+    tag = "Admin",
+    summary = "Delete a fulfillment set",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_fulfillment_set(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -137,6 +204,14 @@ async fn delete_fulfillment_set(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/shipping/providers",
+    tag = "Admin",
+    summary = "List registered fulfillment providers",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<String>))
+)]
 async fn list_providers(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -154,6 +229,15 @@ async fn list_providers(
 
 // Profiles
 
+#[utoipa::path(
+    get,
+    path = "/shipping/profiles",
+    tag = "Admin",
+    summary = "List shipping profiles",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<ShippingProfile>))
+)]
 async fn list_profiles(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -166,6 +250,15 @@ async fn list_profiles(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/shipping/profiles",
+    tag = "Admin",
+    summary = "Create a shipping profile",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateShippingProfileRequest,
+    responses((status = 201, body = ShippingProfile))
+)]
 async fn create_profile(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -179,6 +272,14 @@ async fn create_profile(
     Ok((StatusCode::CREATED, Json(profile)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/shipping/profiles/{id}",
+    tag = "Admin",
+    summary = "Get a shipping profile",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ShippingProfile))
+)]
 async fn get_profile(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -191,6 +292,15 @@ async fn get_profile(
     Ok(Json(profile))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/shipping/profiles/{id}",
+    tag = "Admin",
+    summary = "Update a shipping profile",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateShippingProfileRequest,
+    responses((status = 200, body = ShippingProfile))
+)]
 async fn update_profile(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -206,6 +316,14 @@ async fn update_profile(
     Ok(Json(profile))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/shipping/profiles/{id}",
+    tag = "Admin",
+    summary = "Delete a shipping profile",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_profile(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -220,6 +338,15 @@ async fn delete_profile(
 
 // Options
 
+#[utoipa::path(
+    get,
+    path = "/shipping/options",
+    tag = "Admin",
+    summary = "List shipping options",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, ListOptionsQuery),
+    responses((status = 200, body = PageResponse<ShippingOption>))
+)]
 async fn list_options(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -242,6 +369,15 @@ async fn list_options(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/shipping/options",
+    tag = "Admin",
+    summary = "Create a shipping option",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateShippingOptionRequest,
+    responses((status = 201, body = ShippingOption))
+)]
 async fn create_option(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -256,6 +392,14 @@ async fn create_option(
     Ok((StatusCode::CREATED, Json(option)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/shipping/options/{id}",
+    tag = "Admin",
+    summary = "Get a shipping option",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ShippingOption))
+)]
 async fn get_option(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -268,6 +412,15 @@ async fn get_option(
     Ok(Json(option))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/shipping/options/{id}",
+    tag = "Admin",
+    summary = "Update a shipping option",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateShippingOptionRequest,
+    responses((status = 200, body = ShippingOption))
+)]
 async fn update_option(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -285,6 +438,14 @@ async fn update_option(
     Ok(Json(option))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/shipping/options/{id}",
+    tag = "Admin",
+    summary = "Delete a shipping option",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_option(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -299,6 +460,14 @@ async fn delete_option(
 
 // Rates
 
+#[utoipa::path(
+    get,
+    path = "/shipping/options/{id}/rates",
+    tag = "Admin",
+    summary = "List shipping rates",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<ShippingRate>))
+)]
 async fn list_rates(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -311,6 +480,15 @@ async fn list_rates(
     Ok(Json(rates))
 }
 
+#[utoipa::path(
+    post,
+    path = "/shipping/options/{id}/rates",
+    tag = "Admin",
+    summary = "Create a shipping rate",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateShippingRateRequest,
+    responses((status = 201, body = ShippingRate))
+)]
 async fn create_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -324,6 +502,14 @@ async fn create_rate(
     Ok((StatusCode::CREATED, Json(rate)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/shipping/rates/{id}",
+    tag = "Admin",
+    summary = "Get a shipping rate",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ShippingRate))
+)]
 async fn get_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -335,6 +521,15 @@ async fn get_rate(
     Ok(Json(rate))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/shipping/rates/{id}",
+    tag = "Admin",
+    summary = "Update a shipping rate",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateShippingRateRequest,
+    responses((status = 200, body = ShippingRate))
+)]
 async fn update_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -349,6 +544,14 @@ async fn update_rate(
     Ok(Json(rate))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/shipping/rates/{id}",
+    tag = "Admin",
+    summary = "Delete a shipping rate",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn delete_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -362,6 +565,15 @@ async fn delete_rate(
 
 // Locations
 
+#[utoipa::path(
+    post,
+    path = "/shipping/options/{id}/locations",
+    tag = "Admin",
+    summary = "Assign a location to a shipping option",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = AddLocationRequest,
+    responses((status = 204, description = "No content"))
+)]
 async fn add_location(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -377,6 +589,14 @@ async fn add_location(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/shipping/options/{id}/locations/{location_id}",
+    tag = "Admin",
+    summary = "Remove a location from a shipping option",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204, description = "No content"))
+)]
 async fn remove_location(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -393,6 +613,15 @@ async fn remove_location(
 
 // Resolution
 
+#[utoipa::path(
+    get,
+    path = "/shipping/options-list",
+    tag = "Admin",
+    summary = "List shipping options for a destination",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(DestinationOptionsQuery),
+    responses((status = 200, body = Vec<ResolvedShippingOption>))
+)]
 async fn list_options_for_destination(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -407,6 +636,15 @@ async fn list_options_for_destination(
     Ok(Json(options))
 }
 
+#[utoipa::path(
+    get,
+    path = "/shipping/options/{id}/rate",
+    tag = "Admin",
+    summary = "Select a shipping rate for a destination",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(SelectRateQuery),
+    responses((status = 200, body = Option<SelectedShippingRate>))
+)]
 async fn select_rate(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -497,7 +735,8 @@ impl UpdateShippingProfileRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ListOptionsQuery {
     profile_id: Option<String>,
 }
@@ -662,13 +901,15 @@ pub struct AddLocationRequest {
     location_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct DestinationOptionsQuery {
     country: String,
     subtotal: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct SelectRateQuery {
     country: String,
     province: Option<String>,

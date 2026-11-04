@@ -8,6 +8,8 @@ use axum::extract::State;
 use axum::middleware;
 use axum::routing::{get, post};
 use fastcart_http::{AdminActor, AdminAuthState, ApiError, ApiResult, PaginationQuery};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::auth::{login, logout, me};
 use super::{StoreDbState, actor_store_database_middleware, not_implemented};
@@ -64,6 +66,20 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
     public.merge(authenticated).merge(scoped)
 }
 
+/// Builds the documented admin routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new().routes(routes!(list_my_stores))
+}
+
+#[utoipa::path(
+    get,
+    path = "/stores",
+    tag = "Admin",
+    summary = "List stores available to the administrator",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<StoreDto>))
+)]
 async fn list_my_stores(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

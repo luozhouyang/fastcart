@@ -20,6 +20,8 @@ use fastcart_module_inventory::{
     ReservationReference, UpdateLocationInput,
 };
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::PageResponse;
@@ -59,6 +61,25 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/inventory/movements", get(list_movements))
 }
 
+/// Builds the documented inventory routes for OpenAPI generation.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_locations, create_location))
+        .routes(routes!(get_location, update_location))
+        .routes(routes!(list_items, create_item))
+        .routes(routes!(get_item))
+        .routes(routes!(get_item_by_variant))
+        .routes(routes!(list_levels))
+        .routes(routes!(get_availability))
+        .routes(routes!(create_adjustment))
+        .routes(routes!(create_transfer))
+        .routes(routes!(create_reservations))
+        .routes(routes!(release_reservations))
+        .routes(routes!(commit_reservations))
+        .routes(routes!(expire_reservations))
+        .routes(routes!(list_movements))
+}
+
 // -------------------------------------------------------------------------
 // Requests and responses
 // -------------------------------------------------------------------------
@@ -87,7 +108,8 @@ pub struct CreateItemRequest {
     metadata: Option<Metadata>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct LevelsQuery {
     item_id: Option<InventoryItemId>,
     location_id: Option<InventoryLocationId>,
@@ -139,7 +161,8 @@ pub struct CommitReservationsRequest {
     order_id: OrderId,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct MovementsQuery {
     item_id: InventoryItemId,
     limit: Option<usize>,
@@ -211,6 +234,15 @@ fn map_reservation_lines(lines: Vec<ReservationLineRequest>) -> Vec<ReservationL
 // Locations
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/inventory/locations",
+    tag = "Admin",
+    summary = "List inventory locations",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<InventoryLocation>))
+)]
 async fn list_locations(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -225,6 +257,15 @@ async fn list_locations(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/inventory/locations",
+    tag = "Admin",
+    summary = "Create an inventory location",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateLocationRequest,
+    responses((status = 201, body = InventoryLocation))
+)]
 async fn create_location(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -240,6 +281,14 @@ async fn create_location(
     Ok((StatusCode::CREATED, Json(location)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/inventory/locations/{id}",
+    tag = "Admin",
+    summary = "Get an inventory location",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = InventoryLocation))
+)]
 async fn get_location(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -253,6 +302,15 @@ async fn get_location(
     Ok(Json(InventoryService::new(db).get_location(&id).await?))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/inventory/locations/{id}",
+    tag = "Admin",
+    summary = "Update an inventory location",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateLocationRequest,
+    responses((status = 200, body = InventoryLocation))
+)]
 async fn update_location(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -274,6 +332,15 @@ async fn update_location(
 // Items
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/inventory/items",
+    tag = "Admin",
+    summary = "List inventory items",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<InventoryItem>))
+)]
 async fn list_items(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -288,6 +355,15 @@ async fn list_items(
     Ok(Json(PageResponse::from_page(page)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/inventory/items",
+    tag = "Admin",
+    summary = "Create an inventory item",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateItemRequest,
+    responses((status = 201, body = InventoryItem))
+)]
 async fn create_item(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -303,6 +379,14 @@ async fn create_item(
     Ok((StatusCode::CREATED, Json(item)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/inventory/items/{id}",
+    tag = "Admin",
+    summary = "Get an inventory item",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = InventoryItem))
+)]
 async fn get_item(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -316,6 +400,14 @@ async fn get_item(
     Ok(Json(InventoryService::new(db).get_item(&id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/inventory/items/by-variant/{variant_id}",
+    tag = "Admin",
+    summary = "Get an inventory item by variant",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = InventoryItem))
+)]
 async fn get_item_by_variant(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -337,6 +429,15 @@ async fn get_item_by_variant(
 // Levels, availability and movements
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/inventory/levels",
+    tag = "Admin",
+    summary = "List inventory levels",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(LevelsQuery),
+    responses((status = 200, body = Vec<InventoryLevel>))
+)]
 async fn list_levels(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -356,6 +457,14 @@ async fn list_levels(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/inventory/availability/{variant_id}",
+    tag = "Admin",
+    summary = "Get variant availability",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = AvailabilityResponse))
+)]
 async fn get_availability(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -375,6 +484,15 @@ async fn get_availability(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/inventory/movements",
+    tag = "Admin",
+    summary = "List inventory movements",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(MovementsQuery),
+    responses((status = 200, body = Vec<InventoryMovement>))
+)]
 async fn list_movements(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -395,6 +513,15 @@ async fn list_movements(
 // Stock changes
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    post,
+    path = "/inventory/adjustments",
+    tag = "Admin",
+    summary = "Adjust stock",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = AdjustmentRequest,
+    responses((status = 200, body = InventoryLevel))
+)]
 async fn create_adjustment(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -419,6 +546,15 @@ async fn create_adjustment(
     Ok(Json(level))
 }
 
+#[utoipa::path(
+    post,
+    path = "/inventory/transfers",
+    tag = "Admin",
+    summary = "Transfer stock between locations",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = TransferRequest,
+    responses((status = 200, body = TransferResponse))
+)]
 async fn create_transfer(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -445,6 +581,15 @@ async fn create_transfer(
 // Reservations
 // -------------------------------------------------------------------------
 
+#[utoipa::path(
+    post,
+    path = "/inventory/reservations",
+    tag = "Admin",
+    summary = "Reserve stock for a checkout",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = ReservationRequest,
+    responses((status = 201, body = Vec<InventoryReservation>))
+)]
 async fn create_reservations(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -464,6 +609,15 @@ async fn create_reservations(
     Ok((StatusCode::CREATED, Json(reservations)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/inventory/reservations/release",
+    tag = "Admin",
+    summary = "Release stock reservations",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = ReleaseReservationsRequest,
+    responses((status = 200, body = ReleasedResponse))
+)]
 async fn release_reservations(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -482,6 +636,15 @@ async fn release_reservations(
     Ok(Json(ReleasedResponse { released }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/inventory/reservations/commit",
+    tag = "Admin",
+    summary = "Commit stock reservations",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CommitReservationsRequest,
+    responses((status = 200, body = CommittedResponse))
+)]
 async fn commit_reservations(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -497,6 +660,14 @@ async fn commit_reservations(
     Ok(Json(CommittedResponse { committed }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/inventory/reservations/expire",
+    tag = "Admin",
+    summary = "Expire due stock reservations",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = ReleasedResponse))
+)]
 async fn expire_reservations(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

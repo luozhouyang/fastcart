@@ -14,6 +14,8 @@ use fastcart_module_store::{
     Region, RegionService, UpdateRegionInput,
 };
 use serde::{Deserialize, Serialize};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use super::{StoreDb, record_store_audit};
 use crate::dto::{PageInfo, PageResponse};
@@ -29,6 +31,15 @@ pub fn router() -> Router<Arc<AppContext>> {
         )
         .route("/publishable-api-keys", get(list_keys).post(create_key))
         .route("/publishable-api-keys/{id}", delete(revoke_key))
+}
+
+/// Builds the documented region and publishable-key routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_regions, create_region))
+        .routes(routes!(get_region, update_region, delete_region))
+        .routes(routes!(list_keys, create_key))
+        .routes(routes!(revoke_key))
 }
 
 /// Region response body.
@@ -170,6 +181,15 @@ fn authorize(actor: &ActorContext, permission: &str) -> ApiResult<()> {
     actor.require_permission(permission).map_err(ApiError::new)
 }
 
+#[utoipa::path(
+    get,
+    path = "/regions",
+    tag = "Admin",
+    summary = "List regions",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<RegionDto>))
+)]
 async fn list_regions(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -189,6 +209,14 @@ async fn list_regions(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/regions/{id}",
+    tag = "Admin",
+    summary = "Get a region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = RegionDto))
+)]
 async fn get_region(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -200,6 +228,15 @@ async fn get_region(
     )))
 }
 
+#[utoipa::path(
+    post,
+    path = "/regions",
+    tag = "Admin",
+    summary = "Create a region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateRegionRequest,
+    responses((status = 201, body = RegionDto))
+)]
 async fn create_region(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -230,6 +267,15 @@ async fn create_region(
     Ok((StatusCode::CREATED, Json(RegionDto::from(region))))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/regions/{id}",
+    tag = "Admin",
+    summary = "Update a region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateRegionRequest,
+    responses((status = 200, body = RegionDto))
+)]
 async fn update_region(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -264,6 +310,14 @@ async fn update_region(
     Ok(Json(RegionDto::from(region)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/regions/{id}",
+    tag = "Admin",
+    summary = "Delete a region",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn delete_region(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -284,6 +338,14 @@ async fn delete_region(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/publishable-api-keys",
+    tag = "Admin",
+    summary = "List publishable API keys",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<PublishableKeyDto>))
+)]
 async fn list_keys(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
@@ -295,6 +357,15 @@ async fn list_keys(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/publishable-api-keys",
+    tag = "Admin",
+    summary = "Create a publishable API key",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreatePublishableKeyRequest,
+    responses((status = 201, body = CreatedPublishableKeyDto))
+)]
 async fn create_key(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -326,6 +397,14 @@ async fn create_key(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/publishable-api-keys/{id}",
+    tag = "Admin",
+    summary = "Revoke a publishable API key",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
 async fn revoke_key(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,

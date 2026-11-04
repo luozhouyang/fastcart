@@ -22,6 +22,7 @@ uuid.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-kernel.workspace = true
 fastcart-platform.workspace = true
+utoipa.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
