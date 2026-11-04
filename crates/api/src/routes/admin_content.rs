@@ -45,6 +45,10 @@ pub fn router() -> Router<Arc<AppContext>> {
             "/content/pages/{id}/preview-token",
             post(create_preview_token),
         )
+        .route(
+            "/content/pages/{id}/preview-token/revoke",
+            post(revoke_preview_token),
+        )
         .route("/content/pages/{id}/versions", get(list_page_versions))
         .route(
             "/content/pages/{id}/versions/{version}/restore",
@@ -89,6 +93,7 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(unpublish_page))
         .routes(routes!(archive_page))
         .routes(routes!(create_preview_token))
+        .routes(routes!(revoke_preview_token))
         .routes(routes!(list_page_versions))
         .routes(routes!(restore_page_version))
         .routes(routes!(list_navigations, create_navigation))
@@ -592,6 +597,8 @@ pub struct PreviewTokenResponse {
     pub token: String,
     /// Unix timestamp when the token expires.
     pub expires_at: i64,
+    /// Identifier that can be revoked before the token expires.
+    pub jti: String,
 }
 
 #[utoipa::path(
@@ -629,7 +636,7 @@ async fn create_preview_token(
     if page.status == PageStatus::Archived {
         return Err(ApiError::not_found("page"));
     }
-    let (token, expires_at) = issue_preview_token(
+    let issued = issue_preview_token(
         secret,
         db.store_id().as_str(),
         page_id.as_str(),
@@ -643,7 +650,7 @@ async fn create_preview_token(
         "page.preview_token.issued",
         "page",
         page_id.as_str(),
-        serde_json::json!({ "expires_at": expires_at }),
+        serde_json::json!({ "expires_at": issued.expires_at, "jti": issued.jti }),
     )
     .await;
     // A response containing a bearer token must not be retained by browsers,
@@ -652,7 +659,76 @@ async fn create_preview_token(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     )];
-    Ok((headers, Json(PreviewTokenResponse { token, expires_at })))
+    Ok((
+        headers,
+        Json(PreviewTokenResponse {
+            token: issued.token,
+            expires_at: issued.expires_at,
+            jti: issued.jti,
+        }),
+    ))
+}
+
+/// Body of a preview-token revocation request.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct RevokePreviewTokenRequest {
+    /// Identifier returned when the token was issued.
+    pub jti: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/content/pages/{id}/preview-token/revoke",
+    tag = "Admin",
+    summary = "Revoke a draft preview token",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = RevokePreviewTokenRequest,
+    responses((status = 204))
+)]
+async fn revoke_preview_token(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+    ApiJson(input): ApiJson<RevokePreviewTokenRequest>,
+) -> ApiResult<StatusCode> {
+    authorize(&actor, "themes.write")?;
+    let page_id = PageId::from_string(id);
+    let jti = input.jti.trim();
+    if jti.is_empty() || jti.len() > 128 {
+        return Err(ApiError::validation(
+            "jti must be between 1 and 128 characters",
+        ));
+    }
+    // Only let an administrator of this store revoke against a page they can
+    // load; the jti itself is opaque and carries no page authority.
+    ContentService::new(db.clone()).get_page(&page_id).await?;
+    let now = now_timestamp();
+    sqlx::query("DELETE FROM preview_token_revocations WHERE expires_at <= ?")
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .map_err(fastcart_infrastructure::database_error)?;
+    sqlx::query(
+        "INSERT OR REPLACE INTO preview_token_revocations (jti, page_id, expires_at) \
+         VALUES (?, ?, ?)",
+    )
+    .bind(jti)
+    .bind(page_id.as_str())
+    .bind(now.saturating_add(crate::routes::preview::PREVIEW_TOKEN_TTL_SECONDS))
+    .execute(db.pool())
+    .await
+    .map_err(fastcart_infrastructure::database_error)?;
+    record_store_audit(
+        &context,
+        &actor,
+        "page.preview_token.revoked",
+        "page",
+        page_id.as_str(),
+        serde_json::json!({ "jti": jti }),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(

@@ -296,7 +296,7 @@ fn cookie_value(cookies: &[String], name: &str) -> Option<String> {
     })
 }
 
-async fn issue_token(fixture: &Fixture) -> (String, i64) {
+async fn issue_token(fixture: &Fixture) -> (String, i64, String) {
     let admin_cookie = fixture.admin_cookie();
     let (status, body, _) = request(
         &fixture.app,
@@ -316,15 +316,17 @@ async fn issue_token(fixture: &Fixture) -> (String, i64) {
     assert_eq!(status, StatusCode::OK, "{body}");
     let token = body["token"].as_str().expect("preview token").to_owned();
     let expires_at = body["expires_at"].as_i64().expect("expiry");
-    (token, expires_at)
+    let jti = body["jti"].as_str().expect("token identifier").to_owned();
+    (token, expires_at, jti)
 }
 
 #[tokio::test]
 async fn preview_token_renders_the_draft_page_through_the_runtime() {
     let fixture = fixture(Some(PREVIEW_SECRET)).await;
-    let (token, expires_at) = issue_token(&fixture).await;
+    let (token, expires_at, jti) = issue_token(&fixture).await;
     assert!(expires_at > now_timestamp());
     assert_eq!(token.matches('.').count(), 1);
+    assert_eq!(jti.len(), 32);
 
     let uri = format!("/preview/about?token={token}&x=1");
     let (status, body) = send_preview(&fixture.app, &uri).await;
@@ -351,23 +353,61 @@ async fn preview_token_renders_the_draft_page_through_the_runtime() {
 }
 
 #[tokio::test]
+async fn revoked_tokens_stop_rendering_immediately() {
+    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let (token, _, jti) = issue_token(&fixture).await;
+    let admin_cookie = fixture.admin_cookie();
+    let (status, body, _) = request(
+        &fixture.app,
+        "POST",
+        &format!(
+            "/api/v1/admin/content/pages/{}/preview-token/revoke",
+            fixture.page_id
+        ),
+        Some(json!({ "jti": jti })),
+        &[
+            ("cookie", admin_cookie.as_str()),
+            ("x-csrf-token", fixture.csrf.as_str()),
+            ("x-store-id", fixture.store_id.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body) = send_preview(&fixture.app, &format!("/preview/about?token={token}")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(
+        fixture.requests.lock().unwrap().is_empty(),
+        "revoked tokens must not reach the runtime"
+    );
+
+    // Revocation is per token: a newly issued preview still renders.
+    let (fresh, _, _) = issue_token(&fixture).await;
+    let (status, body) = send_preview(&fixture.app, &format!("/preview/about?token={fresh}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn invalid_tokens_are_rejected_without_invoking_the_runtime() {
     let fixture = fixture(Some(PREVIEW_SECRET)).await;
-    let (valid, _) = issue_token(&fixture).await;
+    let (valid, _, _) = issue_token(&fixture).await;
 
     let (payload, signature) = valid.split_once('.').expect("token shape");
     let mut bytes = signature.as_bytes().to_vec();
     bytes[0] = if bytes[0] == b'A' { b'B' } else { b'A' };
     let tampered = format!("{payload}.{}", String::from_utf8(bytes).unwrap());
-    let (expired, _) =
-        issue_preview_token(PREVIEW_SECRET, &fixture.store_id, &fixture.page_id, 0).unwrap();
-    let (wrong_store, _) = issue_preview_token(
+    let expired = issue_preview_token(PREVIEW_SECRET, &fixture.store_id, &fixture.page_id, 0)
+        .unwrap()
+        .token;
+    let wrong_store = issue_preview_token(
         PREVIEW_SECRET,
         "store_other",
         &fixture.page_id,
         now_timestamp(),
     )
-    .unwrap();
+    .unwrap()
+    .token;
 
     for token in [tampered, expired, wrong_store, "malformed".to_owned()] {
         let uri = format!("/preview/about?token={token}");
@@ -461,13 +501,14 @@ async fn archived_pages_cannot_be_previewed() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 
     // A token issued before archiving must stop rendering too.
-    let (token, _) = issue_preview_token(
+    let token = issue_preview_token(
         PREVIEW_SECRET,
         &fixture.store_id,
         &fixture.page_id,
         now_timestamp(),
     )
-    .unwrap();
+    .unwrap()
+    .token;
     let (status, body) = send_preview(&fixture.app, &format!("/preview/about?token={token}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(fixture.requests.lock().unwrap().is_empty());

@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fastcart_http::{ApiError, RequestId};
+use fastcart_infrastructure::{StoreDatabase, database_error};
 use fastcart_kernel::{AppError, CurrencyCode, PageId, StoreContext, now_timestamp};
 use fastcart_module_content::{ContentService, PageStatus};
 use fastcart_module_theme::ThemeService;
@@ -46,6 +47,8 @@ pub struct PreviewTokenPayload {
     pub store_id: String,
     /// Page the token grants access to.
     pub page_id: String,
+    /// Unique token identifier used for revocation.
+    pub jti: String,
     /// Unix expiry timestamp. The token is expired when `exp <= now`.
     pub exp: i64,
 }
@@ -76,14 +79,16 @@ pub(crate) struct PreviewQuery {
 
 /// Issues a signed preview token for one page.
 ///
-/// The returned expiry is `now + PREVIEW_TOKEN_TTL_SECONDS`. The secret is
-/// used as an HMAC-SHA256 key and is never included in the result.
+/// The returned expiry is `now + PREVIEW_TOKEN_TTL_SECONDS`. The token
+/// identifier is returned alongside it so an administrator can revoke this
+/// exact preview before it expires. The secret is used as an HMAC key and is
+/// never included in the result.
 pub fn issue_preview_token(
     secret: &str,
     store_id: &str,
     page_id: &str,
     now: i64,
-) -> Result<(String, i64), AppError> {
+) -> Result<IssuedPreviewToken, AppError> {
     if !valid_secret(secret) {
         return Err(AppError::NotImplemented(format!(
             "preview secret must be at least {MIN_PREVIEW_SECRET_BYTES} bytes"
@@ -93,8 +98,10 @@ pub fn issue_preview_token(
     let payload = PreviewTokenPayload {
         store_id: store_id.to_owned(),
         page_id: page_id.to_owned(),
+        jti: uuid::Uuid::now_v7().simple().to_string(),
         exp: expires_at,
     };
+    let jti = payload.jti.clone();
     let payload_json = serde_json::to_vec(&payload).map_err(|error| {
         AppError::internal(format!("could not serialize preview token: {error}"))
     })?;
@@ -107,7 +114,22 @@ pub fn issue_preview_token(
         URL_SAFE_NO_PAD.encode(&payload_json),
         URL_SAFE_NO_PAD.encode(signature)
     );
-    Ok((token, expires_at))
+    Ok(IssuedPreviewToken {
+        token,
+        expires_at,
+        jti,
+    })
+}
+
+/// A freshly issued preview credential and its revocable identifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuedPreviewToken {
+    /// Signed `payload.signature` token.
+    pub token: String,
+    /// Unix timestamp when the token expires.
+    pub expires_at: i64,
+    /// Identifier used to revoke this token early.
+    pub jti: String,
 }
 
 /// Verifies a preview token for a store at a point in time.
@@ -195,6 +217,11 @@ pub(crate) async fn render(
         Ok(database) => database,
         Err(error) => return ApiError::new(AppError::from(error)).into_response(),
     };
+    match is_revoked(&database, &payload.jti, now).await {
+        Ok(true) => return rejected_token(),
+        Ok(false) => {}
+        Err(error) => return ApiError::new(error).into_response(),
+    }
     let currency = match CurrencyCode::new(store.currency_code.clone()) {
         Ok(currency) => currency,
         Err(error) => return ApiError::new(AppError::from(error)).into_response(),
@@ -234,7 +261,16 @@ pub(crate) async fn render(
     let mut data: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     data.insert(
         RESERVED_CONTEXT_KEY.to_owned(),
-        build_context_data(&store, &host, &currency, &theme, DataMode::Preview),
+        build_context_data(
+            &database,
+            request.headers(),
+            &store,
+            &host,
+            &currency,
+            &theme,
+            DataMode::Preview,
+        )
+        .await,
     );
     if !compiled.bindings.is_empty() {
         let resolution = DataResolutionContext {
@@ -251,6 +287,7 @@ pub(crate) async fn render(
         {
             Ok(bag) => data.extend(bag),
             Err(error) => {
+                context.metrics.record_storefront_data_failure();
                 tracing::warn!(error = %error, "preview data resolution failed");
             }
         }
@@ -335,6 +372,22 @@ pub(crate) async fn render(
     }
 }
 
+/// Returns true when the token identifier has been explicitly revoked.
+///
+/// Signature verification happens first; the denylist is only consulted for a
+/// cryptographically valid, unexpired token bound to the current store.
+async fn is_revoked(db: &StoreDatabase, jti: &str, now: i64) -> Result<bool, AppError> {
+    let row = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM preview_token_revocations WHERE jti = ? AND expires_at > ?",
+    )
+    .bind(jti)
+    .bind(now)
+    .fetch_optional(db.pool())
+    .await
+    .map_err(database_error)?;
+    Ok(row.is_some())
+}
+
 /// Returns the configured preview secret, treating blank or weak values as
 /// absent so the preview surface stays disabled instead of weakening HMAC.
 fn configured_secret(context: &AppContext) -> Option<&str> {
@@ -403,19 +456,30 @@ mod tests {
     #[test]
     fn valid_token_round_trips() {
         let now = 1_000;
-        let (token, expires_at) = issue_preview_token(SECRET, "store_1", "page_1", now).unwrap();
-        assert_eq!(expires_at, now + PREVIEW_TOKEN_TTL_SECONDS);
-        assert_eq!(token.matches('.').count(), 1);
+        let issued = issue_preview_token(SECRET, "store_1", "page_1", now).unwrap();
+        assert_eq!(issued.expires_at, now + PREVIEW_TOKEN_TTL_SECONDS);
+        assert_eq!(issued.token.matches('.').count(), 1);
+        assert_eq!(issued.jti.len(), 32, "uuid v7 simple form");
 
-        let payload = verify_preview_token(SECRET, &token, "store_1", now + 1).unwrap();
+        let payload = verify_preview_token(SECRET, &issued.token, "store_1", now + 1).unwrap();
         assert_eq!(payload.store_id, "store_1");
         assert_eq!(payload.page_id, "page_1");
-        assert_eq!(payload.exp, expires_at);
+        assert_eq!(payload.jti, issued.jti);
+        assert_eq!(payload.exp, issued.expires_at);
+    }
+
+    #[test]
+    fn revoked_tokens_keep_their_identifier() {
+        let first = issue_preview_token(SECRET, "store_1", "page_1", 0).unwrap();
+        let second = issue_preview_token(SECRET, "store_1", "page_1", 0).unwrap();
+        assert_ne!(first.jti, second.jti, "each issuance must be revocable");
     }
 
     #[test]
     fn tampered_payload_is_rejected() {
-        let (token, _) = issue_preview_token(SECRET, "store_1", "page_1", 0).unwrap();
+        let token = issue_preview_token(SECRET, "store_1", "page_1", 0)
+            .unwrap()
+            .token;
         let (payload, signature) = token.split_once('.').unwrap();
         let mut claims: serde_json::Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
@@ -431,7 +495,9 @@ mod tests {
 
     #[test]
     fn tampered_signature_is_rejected() {
-        let (token, _) = issue_preview_token(SECRET, "store_1", "page_1", 0).unwrap();
+        let token = issue_preview_token(SECRET, "store_1", "page_1", 0)
+            .unwrap()
+            .token;
         let (payload, signature) = token.split_once('.').unwrap();
         let mut bytes = signature.as_bytes().to_vec();
         bytes[0] = if bytes[0] == b'A' { b'B' } else { b'A' };
@@ -445,16 +511,18 @@ mod tests {
 
     #[test]
     fn expired_token_is_rejected() {
-        let (token, expires_at) = issue_preview_token(SECRET, "store_1", "page_1", 0).unwrap();
+        let issued = issue_preview_token(SECRET, "store_1", "page_1", 0).unwrap();
         assert_eq!(
-            verify_preview_token(SECRET, &token, "store_1", expires_at),
+            verify_preview_token(SECRET, &issued.token, "store_1", issued.expires_at),
             Err(PreviewTokenError::Expired)
         );
     }
 
     #[test]
     fn wrong_store_is_rejected() {
-        let (token, _) = issue_preview_token(SECRET, "store_1", "page_1", 0).unwrap();
+        let token = issue_preview_token(SECRET, "store_1", "page_1", 0)
+            .unwrap()
+            .token;
         assert_eq!(
             verify_preview_token(SECRET, &token, "store_2", 1),
             Err(PreviewTokenError::WrongStore)
