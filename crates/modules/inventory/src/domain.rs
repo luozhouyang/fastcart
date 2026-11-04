@@ -2,7 +2,7 @@
 
 use fastcart_kernel::{
     AppError, CheckoutId, InventoryItemId, InventoryLocationId, LineItemId, Metadata, OrderId,
-    ReservationId, Timestamp, VariantId, validate_length, validate_quantity,
+    ReservationId, ReturnId, Timestamp, VariantId, validate_length, validate_quantity,
 };
 
 /// A warehouse, store or other physical location that holds stock.
@@ -208,6 +208,57 @@ impl ReservationReference {
     pub fn new(checkout_id: CheckoutId) -> Self {
         Self { checkout_id }
     }
+}
+
+/// One returned quantity to place back into stock.
+///
+/// `received_quantity` is the cumulative quantity received on the return line
+/// after this transition. It makes the movement reference deterministic, so
+/// replaying the same receive cannot increase stock more than once while
+/// separate partial receipts still record distinct movements.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReturnRestockLine {
+    /// Historical order line being returned.
+    pub order_item_id: LineItemId,
+    /// Catalog variant whose inventory item receives the stock.
+    pub variant_id: VariantId,
+    /// Quantity received in this transition.
+    pub quantity: i64,
+    /// Cumulative received quantity for this return line.
+    pub received_quantity: i64,
+}
+
+impl ReturnRestockLine {
+    /// Creates a restock line for a newly received return quantity.
+    #[must_use]
+    pub fn new(
+        order_item_id: LineItemId,
+        variant_id: VariantId,
+        quantity: i64,
+        received_quantity: i64,
+    ) -> Self {
+        Self {
+            order_item_id,
+            variant_id,
+            quantity,
+            received_quantity,
+        }
+    }
+}
+
+/// Builds the deterministic movement reference used by [`ReturnRestockLine`].
+#[must_use]
+pub fn return_restock_reference(
+    return_id: &ReturnId,
+    order_item_id: &LineItemId,
+    received_quantity: i64,
+) -> String {
+    format!(
+        "return-restock:{}:{}:{}",
+        return_id.as_str(),
+        order_item_id.as_str(),
+        received_quantity
+    )
 }
 
 /// Alias used by callers that model the owning checkout as a reference.

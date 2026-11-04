@@ -272,6 +272,9 @@ pub struct OrderClaim {
     pub status: ClaimStatus,
     /// Optional reason for the claim.
     pub reason: Option<String>,
+    /// Refund created for this claim, when linked.
+    #[serde(default)]
+    pub refund_id: Option<RefundId>,
     /// Free-form metadata.
     pub metadata: Metadata,
     /// Creation timestamp in Unix seconds.

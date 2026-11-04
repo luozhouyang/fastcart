@@ -3,8 +3,8 @@
 use fastcart_infrastructure::{StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, CheckoutId, InventoryItemId, InventoryLocationId, LineItemId, Metadata, OrderId,
-    PageResult, Pagination, ReservationId, Timestamp, VariantId, now_timestamp, validate_length,
-    validate_metadata,
+    PageResult, Pagination, ReservationId, ReturnId, Timestamp, VariantId, now_timestamp,
+    validate_length, validate_metadata,
 };
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
@@ -13,11 +13,13 @@ use uuid::Uuid;
 use crate::domain::{
     CreateInventoryItemInput, CreateLocationInput, InventoryItem, InventoryLevel,
     InventoryLocation, InventoryMovement, InventoryReservation, ReservationLine,
-    ReservationReference, ReservationStatus, UpdateLocationInput, available_quantity_from,
-    validate_name, validate_positive_quantity, validate_reason, validate_ttl,
+    ReservationReference, ReservationStatus, ReturnRestockLine, UpdateLocationInput,
+    available_quantity_from, return_restock_reference, validate_name, validate_positive_quantity,
+    validate_reason, validate_ttl,
 };
 
 const DEFAULT_LOCATION_ID: &str = "loc_default";
+const RETURN_RESTOCK_REASON: &str = "return_restock";
 
 fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7().simple())
@@ -212,6 +214,25 @@ async fn ensure_level_in_tx(
     .bind(new_id("ilvl"))
     .bind(item_id.as_str())
     .bind(location_id.as_str())
+    .bind(now)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
+/// Creates the fallback location when a store has not provisioned one yet.
+async fn ensure_default_location_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    now: Timestamp,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO inventory_locations \
+         (id, name, address, metadata, created_at, updated_at) \
+         VALUES (?, 'Default location', '{}', '{}', ?, ?)",
+    )
+    .bind(DEFAULT_LOCATION_ID)
     .bind(now)
     .bind(now)
     .execute(&mut **tx)
@@ -1214,6 +1235,115 @@ impl InventoryService {
 
         tx.commit().await.map_err(database_error)?;
         Ok(u64::try_from(rows.len()).unwrap_or(u64::MAX))
+    }
+
+    /// Restocks quantities newly received on an order return.
+    ///
+    /// Each movement reference is derived from the return, order line and
+    /// cumulative received quantity, so replaying a receive neither records a
+    /// second movement nor increases stock twice. Partial receipts keep
+    /// distinct references because their cumulative quantities differ.
+    ///
+    /// The destination location follows the order's committed reservation for
+    /// the variant when one exists, otherwise `loc_default`. Lines whose
+    /// variant has no inventory item are ignored. Returns the number of units
+    /// actually restocked.
+    pub async fn restock_return(
+        &self,
+        order_id: &OrderId,
+        return_id: &ReturnId,
+        lines: &[ReturnRestockLine],
+    ) -> Result<i64, AppError> {
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        for line in lines {
+            validate_positive_quantity(line.quantity, "quantity")?;
+        }
+
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
+        let mut restocked = 0_i64;
+        for line in lines {
+            let item_id: Option<String> =
+                sqlx::query_scalar("SELECT id FROM inventory_items WHERE variant_id = ?")
+                    .bind(line.variant_id.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            let Some(item_id) = item_id else {
+                continue;
+            };
+            let item_id = InventoryItemId::from_string(item_id);
+
+            let location_id: Option<String> = sqlx::query_scalar(
+                "SELECT location_id FROM inventory_reservations \
+                 WHERE order_id = ? AND inventory_item_id = ? AND status = 'committed' \
+                 ORDER BY CASE WHEN location_id = ? THEN 0 ELSE 1 END, created_at, rowid \
+                 LIMIT 1",
+            )
+            .bind(order_id.as_str())
+            .bind(item_id.as_str())
+            .bind(DEFAULT_LOCATION_ID)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            let location_id = match location_id {
+                Some(location_id) => InventoryLocationId::from_string(location_id),
+                None => {
+                    ensure_default_location_in_tx(&mut tx, now).await?;
+                    InventoryLocationId::from_string(DEFAULT_LOCATION_ID)
+                }
+            };
+            ensure_level_in_tx(&mut tx, &item_id, &location_id, now).await?;
+
+            let reference =
+                return_restock_reference(return_id, &line.order_item_id, line.received_quantity);
+            let inserted = sqlx::query(
+                "INSERT OR IGNORE INTO inventory_movements \
+                 (id, inventory_item_id, location_id, quantity_delta, reason, reference, \
+                  actor_id, metadata, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, NULL, '{}', ?)",
+            )
+            .bind(new_id("imvt"))
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .bind(line.quantity)
+            .bind(RETURN_RESTOCK_REASON)
+            .bind(&reference)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if inserted.rows_affected() == 0 {
+                // This receive has already been restocked.
+                continue;
+            }
+
+            let affected = sqlx::query(
+                "UPDATE inventory_levels \
+                 SET stocked_quantity = stocked_quantity + ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ?",
+            )
+            .bind(line.quantity)
+            .bind(now)
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if affected.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "inventory level no longer matches the restock movement",
+                ));
+            }
+            restocked = restocked
+                .checked_add(line.quantity)
+                .ok_or_else(|| AppError::conflict("restocked quantity overflow"))?;
+        }
+
+        tx.commit().await.map_err(database_error)?;
+        Ok(restocked)
     }
 
     /// Releases reservations whose expiry is at or before `now`.

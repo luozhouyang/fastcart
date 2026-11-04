@@ -80,6 +80,7 @@ struct ClaimRow {
     order_id: String,
     status: String,
     reason: Option<String>,
+    refund_id: Option<String>,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -336,6 +337,45 @@ impl OrderService {
         order_id: &OrderId,
         return_id: &ReturnId,
     ) -> Result<OrderReturn, AppError> {
+        self.load_return(order_id, return_id).await
+    }
+
+    /// Links an order refund to a return exactly once.
+    ///
+    /// Repeating the call with the same refund is a no-op. Linking a return
+    /// that already points at a different refund is rejected.
+    pub async fn attach_return_refund(
+        &self,
+        order_id: &OrderId,
+        return_id: &ReturnId,
+        refund_id: &RefundId,
+    ) -> Result<OrderReturn, AppError> {
+        let current = self.load_return(order_id, return_id).await?;
+        if let Some(existing) = current.refund_id.as_ref() {
+            if existing == refund_id {
+                return Ok(current);
+            }
+            return Err(AppError::conflict(
+                "return is already linked to a different refund",
+            ));
+        }
+        let updated = sqlx::query(
+            "UPDATE order_returns SET refund_id = ?, updated_at = ?
+             WHERE id = ? AND order_id = ? AND (refund_id IS NULL OR refund_id = ?)",
+        )
+        .bind(refund_id.as_str())
+        .bind(now_timestamp())
+        .bind(return_id.as_str())
+        .bind(order_id.as_str())
+        .bind(refund_id.as_str())
+        .execute(self.database().pool())
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::conflict(
+                "return refund link changed concurrently",
+            ));
+        }
         self.load_return(order_id, return_id).await
     }
 
@@ -805,11 +845,48 @@ impl OrderService {
         self.load_claim(order_id, claim_id).await
     }
 
+    /// Links an order refund to a claim exactly once.
+    ///
+    /// Repeating the call with the same refund is a no-op. Linking a claim
+    /// that already points at a different refund is rejected.
+    pub async fn attach_claim_refund(
+        &self,
+        order_id: &OrderId,
+        claim_id: &ClaimId,
+        refund_id: &RefundId,
+    ) -> Result<OrderClaim, AppError> {
+        let current = self.load_claim(order_id, claim_id).await?;
+        if let Some(existing) = current.refund_id.as_ref() {
+            if existing == refund_id {
+                return Ok(current);
+            }
+            return Err(AppError::conflict(
+                "claim is already linked to a different refund",
+            ));
+        }
+        let updated = sqlx::query(
+            "UPDATE order_claims SET refund_id = ?, updated_at = ?
+             WHERE id = ? AND order_id = ? AND (refund_id IS NULL OR refund_id = ?)",
+        )
+        .bind(refund_id.as_str())
+        .bind(now_timestamp())
+        .bind(claim_id.as_str())
+        .bind(order_id.as_str())
+        .bind(refund_id.as_str())
+        .execute(self.database().pool())
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::conflict("claim refund link changed concurrently"));
+        }
+        self.load_claim(order_id, claim_id).await
+    }
+
     /// Lists claims for an order.
     pub async fn list_claims(&self, order_id: &OrderId) -> Result<Vec<OrderClaim>, AppError> {
         self.get(order_id).await?;
         let rows = sqlx::query_as::<_, ClaimRow>(
-            "SELECT id, order_id, status, reason, metadata, created_at, updated_at,
+            "SELECT id, order_id, status, reason, refund_id, metadata, created_at, updated_at,
                     accepted_at, canceled_at
              FROM order_claims WHERE order_id = ?
              ORDER BY created_at ASC, rowid ASC",
@@ -927,7 +1004,7 @@ impl OrderService {
         claim_id: &ClaimId,
     ) -> Result<OrderClaim, AppError> {
         let row = sqlx::query_as::<_, ClaimRow>(
-            "SELECT id, order_id, status, reason, metadata, created_at, updated_at,
+            "SELECT id, order_id, status, reason, refund_id, metadata, created_at, updated_at,
                     accepted_at, canceled_at
              FROM order_claims WHERE id = ? AND order_id = ?",
         )
@@ -959,6 +1036,7 @@ impl OrderService {
             order_id: OrderId::from_string(row.order_id),
             status: ClaimStatus::from_stored(&row.status)?,
             reason: row.reason,
+            refund_id: row.refund_id.map(RefundId::from_string),
             metadata: fastcart_kernel::Metadata::from_json_str(&row.metadata),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -1430,17 +1508,22 @@ impl OrderService {
             .after_subtotal
             .checked_sub(edit.before_subtotal)
             .ok_or_else(|| AppError::validation("edit subtotal overflow"))?;
-        let delta_total = edit
-            .after_total
-            .checked_sub(edit.before_total)
-            .ok_or_else(|| AppError::validation("edit total overflow"))?;
         let next_subtotal = order
             .subtotal
             .checked_add(delta_subtotal)
             .ok_or_else(|| AppError::validation("order subtotal overflow"))?;
-        let next_total = order
-            .total
-            .checked_add(delta_total)
+
+        // Edit lines carry a price delta only: they do not introduce any new
+        // discount, shipping or tax allocation. Preserve the existing
+        // allocations and recompute the total from them using the same sign
+        // conventions as order creation. Order-level adjustments are part of
+        // the persisted total and therefore preserved too.
+        let adjustment_total = checked_sum(order.adjustments.iter().map(|value| value.amount))?;
+        let next_total = next_subtotal
+            .checked_sub(order.discount_total)
+            .and_then(|value| value.checked_add(order.shipping_total))
+            .and_then(|value| value.checked_add(order.tax_total))
+            .and_then(|value| value.checked_add(adjustment_total))
             .ok_or_else(|| AppError::validation("order total overflow"))?;
         if next_subtotal < 0 || next_total < 0 {
             return Err(AppError::conflict(
@@ -1467,10 +1550,12 @@ impl OrderService {
         }
         let updated_edit = sqlx::query(
             "UPDATE order_edits
-             SET status = ?, confirmed_at = ?, updated_at = ?
+             SET status = ?, after_subtotal = ?, after_total = ?, confirmed_at = ?, updated_at = ?
              WHERE id = ? AND order_id = ? AND status = ?",
         )
         .bind(OrderEditStatus::Confirmed.as_str())
+        .bind(next_subtotal)
+        .bind(next_total)
         .bind(now)
         .bind(now)
         .bind(edit_id.as_str())
@@ -1916,7 +2001,7 @@ fn normalize_text(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use fastcart_infrastructure::StoreDatabase;
-    use fastcart_kernel::{OrderId, StoreId, VariantId};
+    use fastcart_kernel::{OrderId, PaymentId, RefundId, StoreId, VariantId};
     use serde_json::json;
 
     use super::OrderService;
@@ -1926,7 +2011,7 @@ mod tests {
         OrderEditAction, OrderEditItemInput, OrderEditStatus, ReceiveReturnInput,
         ReceiveReturnItemInput, ReturnItemInput, ReturnStatus, WriteOffReturnInput,
     };
-    use crate::domain::{CreateOrderInput, CreateOrderItemInput, Order, OrderStatus};
+    use crate::domain::{CreateOrderInput, CreateOrderItemInput, Order, OrderStatus, RefundInput};
 
     async fn service() -> OrderService {
         let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
@@ -2361,6 +2446,172 @@ mod tests {
             .unwrap();
         assert_eq!(confirmed.status, OrderEditStatus::Confirmed);
         assert_eq!(service.get(&order.id).await.unwrap().total, 1_000);
+    }
+
+    #[tokio::test]
+    async fn confirming_an_edit_keeps_all_order_totals_consistent() {
+        let service = service().await;
+        let order = service
+            .create_order(CreateOrderInput {
+                email: "buyer@example.com".to_owned(),
+                currency_code: "USD".to_owned(),
+                items: vec![CreateOrderItemInput {
+                    product_title: "Widget".to_owned(),
+                    unit_price: 1_000,
+                    quantity: 2,
+                    subtotal: Some(2_000),
+                    discount_total: Some(200),
+                    tax_total: Some(180),
+                    total: Some(1_980),
+                    requires_shipping: true,
+                    ..CreateOrderItemInput::default()
+                }],
+                subtotal: 2_000,
+                discount_total: 200,
+                shipping_total: 500,
+                tax_total: 180,
+                total: 2_480,
+                shipping_address: json!({}),
+                billing_address: json!({}),
+                ..CreateOrderInput::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(order.total, 2_480);
+
+        let edit = service
+            .create_order_edit(
+                &order.id,
+                CreateOrderEditInput {
+                    reason: Some("add gift".to_owned()),
+                    metadata: fastcart_kernel::Metadata::default(),
+                    items: vec![OrderEditItemInput {
+                        order_item_id: None,
+                        action: OrderEditAction::Add,
+                        product_id: None,
+                        variant_id: None,
+                        product_title: Some("Gift card".to_owned()),
+                        variant_title: None,
+                        sku: Some("GIFT-1".to_owned()),
+                        unit_price: Some(500),
+                        before_quantity: None,
+                        after_quantity: 1,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(edit.after_subtotal, 2_500);
+        assert_eq!(edit.after_total, 2_980);
+
+        let confirmed = service
+            .confirm_order_edit(&order.id, &edit.id)
+            .await
+            .unwrap();
+        assert_eq!(confirmed.after_subtotal, 2_500);
+        assert_eq!(confirmed.after_total, 2_980);
+
+        let reloaded = service.get(&order.id).await.unwrap();
+        assert_eq!(reloaded.subtotal, 2_500);
+        assert_eq!(reloaded.discount_total, 200);
+        assert_eq!(reloaded.shipping_total, 500);
+        assert_eq!(reloaded.tax_total, 180);
+        assert_eq!(reloaded.total, 2_980);
+        assert_eq!(
+            reloaded.total,
+            reloaded.subtotal - reloaded.discount_total
+                + reloaded.shipping_total
+                + reloaded.tax_total
+        );
+        // The historical line snapshot is untouched.
+        assert_eq!(reloaded.items.len(), 1);
+        assert_eq!(reloaded.items[0].quantity, 2);
+        assert_eq!(reloaded.items[0].total, 1_980);
+    }
+
+    #[tokio::test]
+    async fn idempotent_order_refunds_do_not_write_twice() {
+        let service = service().await;
+        let order = order(&service, 2).await;
+        let input = RefundInput {
+            payment_id: PaymentId::new(),
+            amount: 500,
+            currency: "USD".to_owned(),
+            reason: Some("return".to_owned()),
+        };
+
+        let (first_order, first_id) = service
+            .add_refund_idempotent(&order.id, input.clone(), "after-sales:return-refund:ret_1")
+            .await
+            .unwrap();
+        let (second_order, second_id) = service
+            .add_refund_idempotent(&order.id, input, "after-sales:return-refund:ret_1")
+            .await
+            .unwrap();
+
+        assert_eq!(first_id, second_id);
+        assert_eq!(first_order.refunds.len(), 1);
+        assert_eq!(second_order.refunds.len(), 1);
+        assert_eq!(second_order.refunds[0].id, first_id);
+        assert_eq!(second_order.refunds[0].amount, 500);
+    }
+
+    #[tokio::test]
+    async fn after_sales_refund_links_are_idempotent() {
+        let service = service().await;
+        let order = order(&service, 2).await;
+
+        let created = service
+            .create_return(&order.id, return_input(&order, 1))
+            .await
+            .unwrap();
+        let refund = RefundId::new();
+        let linked = service
+            .attach_return_refund(&order.id, &created.id, &refund)
+            .await
+            .unwrap();
+        assert_eq!(linked.refund_id.as_ref(), Some(&refund));
+        let linked_again = service
+            .attach_return_refund(&order.id, &created.id, &refund)
+            .await
+            .unwrap();
+        assert_eq!(linked_again.refund_id.as_ref(), Some(&refund));
+        let other = RefundId::new();
+        assert!(matches!(
+            service
+                .attach_return_refund(&order.id, &created.id, &other)
+                .await,
+            Err(fastcart_kernel::AppError::Conflict(_))
+        ));
+
+        let claim = service
+            .create_claim(
+                &order.id,
+                CreateClaimInput {
+                    reason: None,
+                    metadata: fastcart_kernel::Metadata::default(),
+                    items: vec![ClaimItemInput {
+                        order_item_id: order.items[0].id.clone(),
+                        quantity: 1,
+                        item_type: ClaimItemType::Refund,
+                        replacement_variant_id: None,
+                        reason: None,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let claim_refund = RefundId::new();
+        let linked_claim = service
+            .attach_claim_refund(&order.id, &claim.id, &claim_refund)
+            .await
+            .unwrap();
+        assert_eq!(linked_claim.refund_id.as_ref(), Some(&claim_refund));
+        let linked_claim_again = service
+            .attach_claim_refund(&order.id, &claim.id, &claim_refund)
+            .await
+            .unwrap();
+        assert_eq!(linked_claim_again.refund_id.as_ref(), Some(&claim_refund));
     }
 
     #[tokio::test]

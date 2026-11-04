@@ -21,6 +21,9 @@ use crate::domain::{
 /// Scope used for order-creation idempotency keys.
 const IDEMPOTENCY_SCOPE: &str = "order.create";
 
+/// Scope used for idempotent order-refund keys.
+const REFUND_IDEMPOTENCY_SCOPE: &str = "order.refund";
+
 /// Persistence row for `orders`.
 #[derive(sqlx::FromRow)]
 struct OrderRow {
@@ -863,6 +866,36 @@ impl OrderService {
     /// order total. When the cumulative refund reaches the order total the
     /// order is marked refunded, otherwise partially refunded.
     pub async fn add_refund(&self, id: &OrderId, input: RefundInput) -> Result<Order, AppError> {
+        let (order, _) = self.add_refund_inner(id, input, None).await?;
+        Ok(order)
+    }
+
+    /// Records an order refund exactly once for a caller-supplied key.
+    ///
+    /// A replay with the same key returns the previously recorded refund and
+    /// the current order without writing a second refund row. The key is
+    /// scoped to order refunds so after-sales workflows can safely retry.
+    pub async fn add_refund_idempotent(
+        &self,
+        id: &OrderId,
+        input: RefundInput,
+        idempotency_key: &str,
+    ) -> Result<(Order, RefundId), AppError> {
+        let key = idempotency_key.trim();
+        if key.is_empty() {
+            return Err(AppError::validation(
+                "refund idempotency_key must not be empty",
+            ));
+        }
+        self.add_refund_inner(id, input, Some(key)).await
+    }
+
+    async fn add_refund_inner(
+        &self,
+        id: &OrderId,
+        input: RefundInput,
+        idempotency_key: Option<&str>,
+    ) -> Result<(Order, RefundId), AppError> {
         if input.amount <= 0 {
             return Err(AppError::validation(
                 "refund amount must be greater than zero".to_owned(),
@@ -878,6 +911,24 @@ impl OrderService {
         }
 
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+
+        if let Some(key) = idempotency_key {
+            let existing: Option<String> = sqlx::query_scalar(
+                "SELECT resource_id FROM idempotency_keys WHERE key = ? AND scope = ?",
+            )
+            .bind(key)
+            .bind(REFUND_IDEMPOTENCY_SCOPE)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if let Some(existing) = existing {
+                let refund_id = RefundId::from_string(existing);
+                tx.commit().await.map_err(database_error)?;
+                let order = self.load_order(id).await?;
+                return Ok((order, refund_id));
+            }
+        }
+
         let refunded: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount), 0) FROM order_refunds WHERE order_id = ?",
         )
@@ -889,6 +940,7 @@ impl OrderService {
             .checked_add(input.amount)
             .ok_or_else(|| AppError::validation("refund amount overflow"))?;
         if total_refunded > order.total {
+            tx.rollback().await.map_err(database_error)?;
             return Err(AppError::conflict(format!(
                 "refund of {} exceeds the refundable order total of {}",
                 input.amount, order.total
@@ -905,6 +957,7 @@ impl OrderService {
             PaymentStatus::PartiallyRefunded
         };
 
+        let refund_id = RefundId::new();
         let now = now_timestamp();
         sqlx::query(
             "INSERT INTO order_refunds
@@ -912,7 +965,7 @@ impl OrderService {
                  provider_refund_id, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, ?, ?)",
         )
-        .bind(RefundId::new().as_str())
+        .bind(refund_id.as_str())
         .bind(id.as_str())
         .bind(input.payment_id.as_str())
         .bind(input.amount)
@@ -953,12 +1006,41 @@ impl OrderService {
             now,
         )
         .await?;
+
+        if let Some(key) = idempotency_key {
+            let result = sqlx::query(
+                "INSERT INTO idempotency_keys (key, scope, resource_id, response, created_at)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(key)
+            .bind(REFUND_IDEMPOTENCY_SCOPE)
+            .bind(refund_id.as_str())
+            .bind(serde_json::json!({"refund_id": refund_id.as_str()}).to_string())
+            .bind(now)
+            .execute(&mut *tx)
+            .await;
+            if let Err(error) = result {
+                if is_unique_violation(&error) {
+                    tx.rollback().await.map_err(database_error)?;
+                    if let Some(existing) = self.find_refund_id_by_key(key).await? {
+                        let order = self.load_order(id).await?;
+                        return Ok((order, existing));
+                    }
+                    return Err(AppError::conflict(
+                        "refund idempotency key was used concurrently".to_owned(),
+                    ));
+                }
+                return Err(database_error(error));
+            }
+        }
+
         let event = DomainEventEnvelope::new(
             "order.refunded",
             Some(self.db.store_id().clone()),
             serde_json::json!({
                 "order_id": id.as_str(),
                 "payment_id": input.payment_id.as_str(),
+                "refund_id": refund_id.as_str(),
                 "amount": input.amount,
                 "currency_code": currency,
             }),
@@ -968,7 +1050,32 @@ impl OrderService {
             .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
 
-        self.load_order(id).await
+        let order = self.load_order(id).await?;
+        Ok((order, refund_id))
+    }
+
+    /// Returns the refund previously recorded for an order-refund key.
+    ///
+    /// After-sales workflows use this after a crash between recording the
+    /// refund and linking it to a return or claim, so the retry can complete
+    /// the link without attempting another refund.
+    pub async fn refund_id_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<RefundId>, AppError> {
+        self.find_refund_id_by_key(idempotency_key.trim()).await
+    }
+
+    async fn find_refund_id_by_key(&self, key: &str) -> Result<Option<RefundId>, AppError> {
+        let resource = sqlx::query_scalar::<_, String>(
+            "SELECT resource_id FROM idempotency_keys WHERE key = ? AND scope = ?",
+        )
+        .bind(key)
+        .bind(REFUND_IDEMPOTENCY_SCOPE)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(resource.map(RefundId::from_string))
     }
 
     /// Appends an order status history row without changing the order status.
