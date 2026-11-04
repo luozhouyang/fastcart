@@ -3,6 +3,7 @@
 //! Handlers translate HTTP requests into [`OrderService`] calls after enforcing
 //! the `orders.read`, `orders.write` and `orders.cancel` permissions.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -11,18 +12,22 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiQuery, ApiResult, PaginationQuery};
 use fastcart_kernel::{
-    ClaimId, CustomerId, ExchangeId, LineItemId, OrderEditId, OrderId, PaymentId, ProductId,
-    RefundId, ReturnId, VariantId,
+    ClaimId, CustomerId, ExchangeId, LineItemId, Metadata, OrderEditId, OrderId, PaymentId,
+    ProductId, RefundId, ReturnId, VariantId,
 };
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::{
     ClaimItemInput, CreateClaimInput, CreateExchangeInput, CreateOrderEditInput, CreateReturnInput,
     ExchangeItemInput, FulfillmentInput, FulfillmentItemInput, Order, OrderClaim, OrderEdit,
-    OrderEditItemInput, OrderExchange, OrderFilter, OrderRefund, OrderReturn, OrderService,
-    OrderStatus, OrderStatusHistory, PaymentStatus, ReceiveReturnInput, ReceiveReturnItemInput,
-    RefundInput, ReturnItemInput, WriteOffReturnInput, WriteOffReturnItemInput,
+    OrderEditItemInput, OrderExchange, OrderFilter, OrderItem, OrderRefund, OrderReturn,
+    OrderService, OrderStatus, OrderStatusHistory, PaymentStatus, ReceiveReturnInput,
+    ReceiveReturnItemInput, RefundInput, ReturnItemInput, WriteOffReturnInput,
+    WriteOffReturnItemInput,
 };
 use fastcart_module_payment::PaymentService;
+use fastcart_module_shipping::{
+    CreateFulfillmentRequest, FulfillmentItemRequest as ProviderFulfillmentItemRequest,
+};
 use serde::Deserialize;
 
 use super::{StoreDb, record_store_audit};
@@ -168,6 +173,7 @@ fn map_order_filter(query: OrderListQuery) -> OrderFilter {
 fn map_fulfillment_input(request: FulfillOrderRequest) -> FulfillmentInput {
     FulfillmentInput {
         provider_id: request.provider_id,
+        provider_fulfillment_id: None,
         provider_data: request.provider_data,
         items: request
             .items
@@ -180,6 +186,99 @@ fn map_fulfillment_input(request: FulfillOrderRequest) -> FulfillmentInput {
         tracking_numbers: request.tracking_numbers,
         shipped_at: request.shipped_at,
         partial: request.partial,
+    }
+}
+
+/// Maps the requested lines onto the variants snapshotted on the order.
+///
+/// When the request has no explicit lines the remaining shippable quantity of
+/// every line is used. Quantities already recorded in previous fulfillments are
+/// subtracted so a retry never asks the provider to ship the same units twice.
+fn map_provider_items(
+    order: &Order,
+    requested: &[FulfillmentItemRequest],
+) -> ApiResult<Vec<ProviderFulfillmentItemRequest>> {
+    let mut fulfilled: HashMap<&str, i64> = HashMap::new();
+    for fulfillment in &order.fulfillments {
+        for item in &fulfillment.items {
+            *fulfilled.entry(item.order_item_id.as_str()).or_default() += item.quantity;
+        }
+    }
+    let remaining = |item: &OrderItem| -> i64 {
+        if !item.requires_shipping {
+            return 0;
+        }
+        item.quantity
+            .saturating_sub(fulfilled.get(item.id.as_str()).copied().unwrap_or_default())
+    };
+    let variant_id = |item: &OrderItem| -> String {
+        item.variant_id
+            .as_ref()
+            .map_or_else(|| item.id.as_str().to_owned(), |id| id.as_str().to_owned())
+    };
+
+    if requested.is_empty() {
+        return Ok(order
+            .items
+            .iter()
+            .filter(|item| remaining(item) > 0)
+            .map(|item| ProviderFulfillmentItemRequest {
+                variant_id: variant_id(item),
+                quantity: remaining(item),
+            })
+            .collect());
+    }
+
+    let mut seen = HashSet::new();
+    let mut items = Vec::with_capacity(requested.len());
+    for line in requested {
+        if line.quantity <= 0 {
+            return Err(ApiError::validation(
+                "fulfillment item quantities must be positive",
+            ));
+        }
+        if !seen.insert(line.order_item_id.as_str()) {
+            return Err(ApiError::validation(
+                "fulfillment items must not repeat an order item",
+            ));
+        }
+        let Some(order_item) = order
+            .items
+            .iter()
+            .find(|order_item| order_item.id == line.order_item_id)
+        else {
+            return Err(ApiError::validation(
+                "fulfillment item does not belong to this order",
+            ));
+        };
+        if !order_item.requires_shipping {
+            return Err(ApiError::validation(
+                "fulfillment item does not require shipping",
+            ));
+        }
+        let left = remaining(order_item);
+        if line.quantity > left {
+            return Err(ApiError::validation(format!(
+                "cannot fulfill {} units; only {left} remain",
+                line.quantity
+            )));
+        }
+        items.push(ProviderFulfillmentItemRequest {
+            variant_id: variant_id(order_item),
+            quantity: line.quantity,
+        });
+    }
+    Ok(items)
+}
+
+/// Whether a provider response carries data worth persisting.
+fn has_provider_data(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Object(map) => !map.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::String(text) => !text.is_empty(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
     }
 }
 
@@ -451,9 +550,50 @@ async fn fulfill_order(
         .require_permission("orders.write")
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
-    let order = OrderService::new(db)
-        .fulfill(&id, map_fulfillment_input(request))
-        .await?;
+    let orders = OrderService::new(db);
+    let current = orders.get(&id).await?;
+
+    let provider_id = request
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| "manual".to_owned());
+    let provider = context
+        .shipping_providers
+        .get(&provider_id)
+        .ok_or_else(|| {
+            ApiError::new(fastcart_kernel::AppError::validation(format!(
+                "unknown fulfillment provider: {provider_id}"
+            )))
+        })?;
+
+    let provider_items = map_provider_items(&current, &request.items)?;
+    if provider_items.is_empty() {
+        return Err(ApiError::new(fastcart_kernel::AppError::conflict(
+            "order has no remaining shippable items",
+        )));
+    }
+
+    // Create the provider-side fulfillment before touching the order. A failure
+    // here must leave every local record unchanged.
+    let receipt = provider
+        .create_fulfillment(CreateFulfillmentRequest {
+            order_id: id.as_str().to_owned(),
+            items: provider_items,
+            tracking_numbers: request.tracking_numbers.clone(),
+            provider_data: request.provider_data.clone(),
+            metadata: Metadata::empty(),
+        })
+        .await
+        .map_err(ApiError::new)?;
+
+    let mut input = map_fulfillment_input(request);
+    input.provider_id = Some(provider_id);
+    input.provider_fulfillment_id = Some(receipt.provider_fulfillment_id);
+    if has_provider_data(&receipt.data) {
+        input.provider_data = receipt.data;
+    }
+
+    let order = orders.fulfill(&id, input).await?;
     record_store_audit(
         &context,
         &actor,

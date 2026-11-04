@@ -784,11 +784,12 @@ impl OrderService {
             "INSERT INTO order_fulfillments
                 (id, order_id, status, provider_id, provider_fulfillment_id, provider_data,
                  tracking_numbers, shipped_at, delivered_at, metadata, created_at, updated_at)
-             VALUES (?, ?, 'fulfilled', ?, NULL, ?, ?, ?, NULL, '{}', ?, ?)",
+             VALUES (?, ?, 'fulfilled', ?, ?, ?, ?, ?, NULL, '{}', ?, ?)",
         )
         .bind(fulfillment_id.as_str())
         .bind(id.as_str())
         .bind(provider_id.trim())
+        .bind(input.provider_fulfillment_id.as_deref())
         .bind(json_text(&provider_data)?)
         .bind(json_text(&input.tracking_numbers)?)
         .bind(shipped_at)
@@ -2063,6 +2064,7 @@ mod tests {
                 &order.id,
                 FulfillmentInput {
                     provider_id: None,
+                    provider_fulfillment_id: None,
                     provider_data: json!({}),
                     items: Vec::new(),
                     tracking_numbers: vec!["TRACK-1".to_owned()],
@@ -2098,6 +2100,7 @@ mod tests {
                 &order.id,
                 FulfillmentInput {
                     provider_id: None,
+                    provider_fulfillment_id: None,
                     provider_data: json!({}),
                     items: vec![crate::domain::FulfillmentItemInput {
                         order_item_id: order.items[0].id.clone(),
@@ -2122,6 +2125,7 @@ mod tests {
                 &order.id,
                 FulfillmentInput {
                     provider_id: None,
+                    provider_fulfillment_id: None,
                     provider_data: json!({}),
                     items: Vec::new(),
                     tracking_numbers: vec!["TRACK-3".to_owned()],

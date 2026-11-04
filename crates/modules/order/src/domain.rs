@@ -539,6 +539,9 @@ pub struct CreateOrderInput {
 pub struct FulfillmentInput {
     /// Registered fulfillment provider; defaults to `manual`.
     pub provider_id: Option<String>,
+    /// Identifier assigned by the fulfillment provider, when one was created.
+    #[serde(default)]
+    pub provider_fulfillment_id: Option<String>,
     /// Provider-specific configuration.
     pub provider_data: Value,
     /// Items and quantities to fulfill. When empty, every remaining
