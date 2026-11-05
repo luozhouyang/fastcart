@@ -16,7 +16,8 @@ use crate::domain::{
     Category, Collection, CreateCategoryInput, CreateCollectionInput, CreateImageInput,
     CreateOptionInput, CreateProductInput, CreateVariantInput, Dimensions, Product, ProductFilter,
     ProductImage, ProductOption, ProductOptionValue, ProductSort, ProductStatus, ProductVariant,
-    Tag, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput, UpdateVariantInput,
+    PublishedRouteEntry, Tag, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput,
+    UpdateVariantInput,
 };
 
 /// Maximum product, variant, option or category title length.
@@ -1276,6 +1277,68 @@ impl CatalogService {
     }
 
     /// Lists handles of published, non-deleted collections for sitemaps.
+    /// Lists published products with their sitemap timestamp.
+    pub async fn list_published_product_entries(
+        &self,
+        pagination: Pagination,
+    ) -> Result<PageResult<PublishedRouteEntry>, AppError> {
+        let pagination = checked_pagination(pagination)?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM products WHERE deleted_at IS NULL AND status = 'active'",
+        )
+        .fetch_one(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT handle, strftime('%Y-%m-%dT%H:%M:%SZ', updated_at, 'unixepoch') \
+             FROM products WHERE deleted_at IS NULL AND status = 'active' \
+             ORDER BY handle ASC, id ASC LIMIT ? OFFSET ?",
+        )
+        .bind(pagination.limit)
+        .bind(pagination.offset)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(PageResult::new(
+            rows.into_iter()
+                .map(|(handle, lastmod)| PublishedRouteEntry { handle, lastmod })
+                .collect(),
+            count,
+            pagination,
+        ))
+    }
+
+    /// Lists published collections with their sitemap timestamp.
+    pub async fn list_published_collection_entries(
+        &self,
+        pagination: Pagination,
+    ) -> Result<PageResult<PublishedRouteEntry>, AppError> {
+        let pagination = checked_pagination(pagination)?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM collections WHERE deleted_at IS NULL AND is_published = 1",
+        )
+        .fetch_one(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT handle, strftime('%Y-%m-%dT%H:%M:%SZ', updated_at, 'unixepoch') \
+             FROM collections WHERE deleted_at IS NULL AND is_published = 1 \
+             ORDER BY handle ASC, id ASC LIMIT ? OFFSET ?",
+        )
+        .bind(pagination.limit)
+        .bind(pagination.offset)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(PageResult::new(
+            rows.into_iter()
+                .map(|(handle, lastmod)| PublishedRouteEntry { handle, lastmod })
+                .collect(),
+            count,
+            pagination,
+        ))
+    }
+
     pub async fn list_published_collection_handles(
         &self,
         pagination: Pagination,

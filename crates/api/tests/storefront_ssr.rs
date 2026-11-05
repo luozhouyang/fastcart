@@ -467,6 +467,7 @@ async fn serves_robots_and_a_published_page_sitemap() {
     );
     assert!(!sitemap.contains("contact-us"), "{sitemap}");
     assert!(!sitemap.contains("draft"), "{sitemap}");
+    assert!(sitemap.contains("<lastmod>"), "{sitemap}");
     assert!(
         requests.lock().unwrap().is_empty(),
         "static discovery routes must not invoke the runtime"
@@ -801,6 +802,10 @@ async fn renders_theme_dynamic_routes_from_published_templates() {
     assert!(
         sitemap.contains("<loc>https://shop.example.com/collections/featured</loc>"),
         "{sitemap}"
+    );
+    assert!(
+        sitemap.matches("<lastmod>").count() >= 2,
+        "route URLs carry lastmod: {sitemap}"
     );
 }
 

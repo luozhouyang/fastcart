@@ -259,6 +259,8 @@ pub struct PageRoute {
     pub handle: String,
     /// Published page classifier.
     pub page_type: String,
+    /// Publication timestamp as UTC RFC 3339, used as sitemap `lastmod`.
+    pub lastmod: String,
 }
 
 /// An HTTP redirect registered by the storefront.

@@ -556,3 +556,12 @@ pub struct ProductFilter {
     /// Include soft-deleted products.
     pub include_deleted: bool,
 }
+
+/// A published product or collection handle with its sitemap timestamp.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedRouteEntry {
+    /// Published URL handle.
+    pub handle: String,
+    /// Last update timestamp as UTC RFC 3339.
+    pub lastmod: String,
+}

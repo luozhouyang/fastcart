@@ -450,10 +450,11 @@ impl ContentService {
             .map_err(database_error)?;
         let sql = format!(
             "SELECT id, COALESCE(published_handle, handle) AS handle, \
-             COALESCE(published_page_type, page_type) AS page_type \
+             COALESCE(published_page_type, page_type) AS page_type, \
+             strftime('%Y-%m-%dT%H:%M:%SZ', updated_at, 'unixepoch') AS lastmod \
              FROM pages{CONDITIONS} ORDER BY handle ASC, id ASC LIMIT ? OFFSET ?"
         );
-        let rows = sqlx::query_as::<_, (String, String, String)>(&sql)
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(&sql)
             .bind(pagination.limit)
             .bind(pagination.offset)
             .fetch_all(self.db.pool())
@@ -461,10 +462,11 @@ impl ContentService {
             .map_err(database_error)?;
         let data = rows
             .into_iter()
-            .map(|(id, handle, page_type)| PageRoute {
+            .map(|(id, handle, page_type, lastmod)| PageRoute {
                 id: PageId::from_string(id),
                 handle,
                 page_type,
+                lastmod,
             })
             .collect();
         Ok(PageResult::new(data, count, pagination))

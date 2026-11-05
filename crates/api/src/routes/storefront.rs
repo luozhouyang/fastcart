@@ -451,7 +451,10 @@ async fn sitemap_response(
             } else {
                 format!("{scheme}://{host}/{}", xml_escape(&page.handle))
             };
-            xml.push_str(&format!("  <url><loc>{loc}</loc></url>\n"));
+            xml.push_str(&format!(
+                "  <url><loc>{loc}</loc><lastmod>{}</lastmod></url>\n",
+                xml_escape(&page.lastmod)
+            ));
             seen += 1;
         }
         offset = offset.saturating_add(pagination.limit);
@@ -487,20 +490,21 @@ async fn sitemap_response(
                 Err(error) => return ApiError::new(error).into_response(),
             };
             let catalog = fastcart_module_catalog::CatalogService::new(database.clone());
-            let handles = match kind.as_str() {
-                "product" => catalog.list_published_product_handles(pagination).await,
-                "collection" => catalog.list_published_collection_handles(pagination).await,
+            let entries = match kind.as_str() {
+                "product" => catalog.list_published_product_entries(pagination).await,
+                "collection" => catalog.list_published_collection_entries(pagination).await,
                 _ => break,
             };
-            let handles = match handles {
-                Ok(handles) => handles,
+            let entries = match entries {
+                Ok(entries) => entries,
                 Err(error) => return ApiError::new(error).into_response(),
             };
-            let batch_len = handles.data.len();
-            for handle in handles.data {
-                let path = pattern.replace("{handle}", &xml_escape(&handle));
+            let batch_len = entries.data.len();
+            for entry in entries.data {
+                let path = pattern.replace("{handle}", &xml_escape(&entry.handle));
                 xml.push_str(&format!(
-                    "  <url><loc>{scheme}://{host}{path}</loc></url>\n"
+                    "  <url><loc>{scheme}://{host}{path}</loc><lastmod>{}</lastmod></url>\n",
+                    xml_escape(&entry.lastmod)
                 ));
                 seen += 1;
                 if seen >= MAX_SITEMAP_URLS {

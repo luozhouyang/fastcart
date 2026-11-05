@@ -164,7 +164,10 @@ template; the host resolves the referenced record and exposes it to the theme as
 a published template exist. Draft previews follow the same matching: the
 preview path selects the handle, an optional `preview_handle` query parameter
 overrides it, and otherwise the first published record of the template's kind
-is used.
+is used. Sitemap entries carry the record's UTC update time as `<lastmod>`;
+`changefreq`/`priority` are omitted because search engines ignore them, and
+`hreflang` alternates require a translation model the platform does not yet
+have.
 
 Theme editor contract: `editor.manifest.json` is the stable, data-only contract
 used by the admin palette, inspector and server-side page validation.

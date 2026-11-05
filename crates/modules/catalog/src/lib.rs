@@ -14,8 +14,8 @@ pub use domain::{
     Category, Collection, CreateCategoryInput, CreateCollectionInput, CreateImageInput,
     CreateOptionInput, CreateProductInput, CreateVariantInput, Dimensions, Product, ProductFilter,
     ProductImage, ProductOption, ProductOptionValue, ProductSort, ProductStatus, ProductVariant,
-    Tag, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput, UpdateVariantInput,
-    VariantOptionInput,
+    PublishedRouteEntry, Tag, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput,
+    UpdateVariantInput, VariantOptionInput,
 };
 pub use service::{
     CatalogService, MAX_OPTION_VALUE_LENGTH, MAX_SKU_LENGTH, MAX_TAG_VALUE_LENGTH,
