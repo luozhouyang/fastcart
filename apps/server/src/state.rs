@@ -79,6 +79,8 @@ impl AppState {
                 .clone()
                 .filter(|secret| !secret.is_empty()),
             storefront_timeout_ms: config.storefront.request_timeout_ms,
+            storefront_streaming_enabled: config.storefront.streaming_enabled,
+            storefront_stream_timeout_ms: config.storefront.stream_timeout_ms,
             internal_fetch_secret: config
                 .storefront
                 .internal_fetch_secret

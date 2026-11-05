@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use fastcart_runtime_api::{RuntimeError, RuntimeRequest, RuntimeResponse, StorefrontRuntime};
+use fastcart_runtime_api::{
+    RuntimeBody, RuntimeError, RuntimeRequest, RuntimeResponse, StorefrontRuntime,
+};
+use futures::StreamExt;
 use tokio::sync::Semaphore;
 
 /// A round-robin pool of storefront runtime workers with bounded concurrency
@@ -88,11 +91,24 @@ impl StorefrontRuntime for RuntimePool {
             self.next_worker().render(request),
         )
         .await;
-        drop(permit);
-        match result {
-            Ok(response) => response,
-            Err(_) => Err(RuntimeError::Timeout(timeout_ms)),
-        }
+        let mut response = match result {
+            Ok(response) => response?,
+            Err(_) => return Err(RuntimeError::Timeout(timeout_ms)),
+        };
+        let RuntimeBody::Stream(stream) = response.body else {
+            return Ok(response);
+        };
+        // A streamed body is still using a worker slot until it ends. Keep the
+        // permit inside the stream so dropped or finished bodies release it.
+        let stream =
+            futures::stream::try_unfold((stream, permit), |(mut stream, permit)| async move {
+                match stream.next().await {
+                    Some(item) => Ok::<_, RuntimeError>(Some((item?, (stream, permit)))),
+                    None => Ok(None),
+                }
+            });
+        response.body = RuntimeBody::Stream(Box::pin(stream));
+        Ok(response)
     }
 
     async fn health_check(&self) -> Result<(), RuntimeError> {
@@ -120,6 +136,7 @@ mod tests {
     use fastcart_runtime_api::{
         RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest, RuntimeResponse, StorefrontRuntime,
     };
+    use futures::StreamExt;
     use tokio::sync::Notify;
 
     use super::RuntimePool;
@@ -156,6 +173,37 @@ mod tests {
                 status: 200,
                 headers: Vec::new(),
                 body: RuntimeBody::Full(Bytes::new()),
+            })
+        }
+
+        async fn health_check(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    struct StreamingRuntime {
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorefrontRuntime for StreamingRuntime {
+        async fn render(&self, _request: RuntimeRequest) -> Result<RuntimeResponse, RuntimeError> {
+            let release = self.release.clone();
+            let first = futures::stream::once(async {
+                Ok::<_, RuntimeError>(Bytes::from_static(b"first"))
+            });
+            let second = futures::stream::once(async move {
+                release.notified().await;
+                Ok::<_, RuntimeError>(Bytes::from_static(b"second"))
+            });
+            Ok(RuntimeResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: RuntimeBody::stream(Box::pin(first.chain(second))),
             })
         }
 
@@ -215,6 +263,8 @@ mod tests {
             capabilities: std::collections::BTreeMap::new(),
             mode: RuntimeMode::Production,
             timeout_ms,
+            streaming: false,
+            stream_timeout_ms: timeout_ms,
         }
     }
 
@@ -243,6 +293,28 @@ mod tests {
         let pool = RuntimePool::new(vec![Arc::new(SlowRuntime)]).unwrap();
         let error = pool.render(request(10)).await.unwrap_err();
         assert!(matches!(error, RuntimeError::Timeout(10)));
+    }
+
+    #[tokio::test]
+    async fn streaming_bodies_hold_a_slot_until_they_end() {
+        let release = Arc::new(Notify::new());
+        let runtime = StreamingRuntime {
+            release: release.clone(),
+        };
+        let pool = RuntimePool::with_capacity(vec![Arc::new(runtime)], 2).unwrap();
+
+        let response = pool.render(request(1_000)).await.unwrap();
+        assert_eq!(pool.inflight(), 1);
+        let RuntimeBody::Stream(mut stream) = response.body else {
+            panic!("expected a streaming body");
+        };
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"first");
+        assert_eq!(pool.inflight(), 1);
+
+        release.notify_one();
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"second");
+        assert!(stream.next().await.is_none());
+        assert_eq!(pool.inflight(), 0);
     }
 
     #[tokio::test]

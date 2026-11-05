@@ -198,6 +198,10 @@ pub struct StorefrontConfig {
     pub queue_capacity: usize,
     /// SSR request timeout in milliseconds.
     pub request_timeout_ms: u64,
+    /// Whether themes may stream their HTML response.
+    pub streaming_enabled: bool,
+    /// Total time budget for one streamed response in milliseconds.
+    pub stream_timeout_ms: u64,
     /// Base URL of the Node.js sidecar, used when `runtime = "node"`.
     pub node_url: Option<String>,
     /// Optional bearer secret for sidecar requests.
@@ -218,6 +222,8 @@ impl Default for StorefrontConfig {
             worker_count: 2,
             queue_capacity: 128,
             request_timeout_ms: 10_000,
+            streaming_enabled: true,
+            stream_timeout_ms: 30_000,
             node_url: None,
             node_secret: None,
             internal_fetch_secret: None,
@@ -374,6 +380,16 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_STOREFRONT_RUNTIME") {
             self.storefront.runtime = value;
         }
+        if let Ok(value) = env::var("FASTCART_STOREFRONT_STREAMING") {
+            self.storefront.streaming_enabled = value
+                .parse()
+                .context("FASTCART_STOREFRONT_STREAMING must be true or false")?;
+        }
+        if let Ok(value) = env::var("FASTCART_STOREFRONT_STREAM_TIMEOUT_MS") {
+            self.storefront.stream_timeout_ms = value
+                .parse()
+                .context("FASTCART_STOREFRONT_STREAM_TIMEOUT_MS must be a number")?;
+        }
         if let Ok(value) = env::var("FASTCART_STOREFRONT_NODE_URL") {
             self.storefront.node_url = Some(value);
         }
@@ -485,6 +501,9 @@ impl Config {
         }
         if self.storefront.request_timeout_ms == 0 {
             bail!("storefront.request_timeout_ms must be greater than zero");
+        }
+        if self.storefront.stream_timeout_ms == 0 {
+            bail!("storefront.stream_timeout_ms must be greater than zero");
         }
         if !matches!(self.storefront.runtime.as_str(), "v8" | "node") {
             bail!("storefront.runtime must be either \"v8\" or \"node\"");

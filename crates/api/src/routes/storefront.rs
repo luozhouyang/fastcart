@@ -35,6 +35,7 @@ use fastcart_runtime_api::{
 };
 use fastcart_storefront::{PageBody, StorefrontError, ThemeEditorManifest};
 use fastcart_storefront_data::{DataMode, DataResolutionContext};
+use futures::StreamExt as _;
 use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
 use serde_json::json;
@@ -283,10 +284,14 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
         capabilities,
         mode: RuntimeMode::Production,
         timeout_ms: context.config.storefront_timeout_ms.max(1),
+        streaming: context.config.storefront_streaming_enabled,
+        stream_timeout_ms: context.config.storefront_stream_timeout_ms.max(1),
     };
 
     match runtime.render(runtime_request).await {
-        Ok(response) => runtime_response(response),
+        Ok(response) => {
+            runtime_response(response, context.config.storefront_stream_timeout_ms.max(1))
+        }
         Err(RuntimeError::Timeout(timeout_ms)) => runtime_error(
             StatusCode::GATEWAY_TIMEOUT,
             "RUNTIME_TIMEOUT",
@@ -897,7 +902,7 @@ fn is_published_page(page: &Page) -> bool {
     page.status == PageStatus::Published && page.deleted_at.is_none()
 }
 
-pub(crate) fn runtime_response(response: RuntimeResponse) -> Response {
+pub(crate) fn runtime_response(response: RuntimeResponse, stream_timeout_ms: u64) -> Response {
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut builder = Response::builder().status(status);
     for (name, value) in response.headers {
@@ -914,7 +919,27 @@ pub(crate) fn runtime_response(response: RuntimeResponse) -> Response {
     }
     let body = match response.body {
         RuntimeBody::Full(bytes) => Body::from(bytes),
-        RuntimeBody::Stream(stream) => Body::from_stream(stream),
+        RuntimeBody::Stream(stream) => {
+            // Bound the whole body even when the runtime adapter does not.
+            // A stalled sidecar connection must not pin an HTTP response
+            // forever.
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_millis(stream_timeout_ms.max(1));
+            let limited = futures::stream::try_unfold(
+                (stream, deadline),
+                move |(mut stream, deadline)| async move {
+                    let stream_budget = stream_timeout_ms;
+                    let next = tokio::time::timeout_at(deadline, stream.next())
+                        .await
+                        .map_err(|_| RuntimeError::Timeout(stream_budget))?;
+                    match next {
+                        Some(item) => Ok::<_, RuntimeError>(Some((item?, (stream, deadline)))),
+                        None => Ok(None),
+                    }
+                },
+            );
+            Body::from_stream(limited)
+        }
     };
     builder.body(body).unwrap_or_else(|error| {
         runtime_error(

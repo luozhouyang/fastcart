@@ -51,6 +51,12 @@ runtime = "node"
 worker_count = 2
 queue_capacity = 128
 request_timeout_ms = 10000
+# Let themes that return a stream send the HTML shell before the whole page
+# is rendered. Disable when a proxy buffers chunked responses.
+streaming_enabled = true
+# Total budget for one streamed response. The shell still has to arrive within
+# request_timeout_ms.
+stream_timeout_ms = 30000
 node_url = "http://127.0.0.1:8788"
 # node_secret = "shared-sidecar-secret"
 # Enables the secret-authenticated /internal/storefront HTTP surface for the sidecar.

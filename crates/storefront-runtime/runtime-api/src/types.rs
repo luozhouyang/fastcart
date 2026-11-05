@@ -107,6 +107,18 @@ pub struct RuntimeRequest {
     pub mode: RuntimeMode,
     /// Execution timeout in milliseconds.
     pub timeout_ms: u64,
+    /// Whether the runtime may answer with a streaming body.
+    ///
+    /// Runtimes that cannot stream ignore the flag and return
+    /// [`RuntimeBody::Full`]. It is a capability negotiation hint, not a
+    /// requirement: a streaming-capable theme may still return a buffered
+    /// body.
+    pub streaming: bool,
+    /// Total time budget for a streamed response in milliseconds.
+    ///
+    /// The budget covers the whole body, including the time spent waiting for
+    /// the first byte. Adapters apply it only when they stream.
+    pub stream_timeout_ms: u64,
 }
 
 /// One response produced by a storefront runtime.

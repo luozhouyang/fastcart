@@ -39,6 +39,17 @@ pub struct ApiConfig {
     pub stripe_webhook_secret: Option<String>,
     /// Timeout applied to storefront SSR render requests in milliseconds.
     pub storefront_timeout_ms: u64,
+    /// Whether runtimes may stream storefront responses.
+    ///
+    /// Enabled by default. Disabling it makes every render buffered, which is
+    /// useful behind proxies that cannot pass chunked responses through.
+    pub storefront_streaming_enabled: bool,
+    /// Total time budget for one streamed storefront response in milliseconds.
+    ///
+    /// A stream still has to produce its shell within
+    /// [`Self::storefront_timeout_ms`]; this larger budget bounds the whole
+    /// body.
+    pub storefront_stream_timeout_ms: u64,
     /// Optional shared secret required by the internal storefront HTTP surface.
     ///
     /// When absent, internal routes are not mounted over HTTP; the in-process
@@ -99,6 +110,8 @@ impl Default for ApiConfig {
             stripe_secret_key: None,
             stripe_webhook_secret: None,
             storefront_timeout_ms: 10_000,
+            storefront_streaming_enabled: true,
+            storefront_stream_timeout_ms: 30_000,
             internal_fetch_secret: None,
             capability_secret: None,
             preview_secret: None,

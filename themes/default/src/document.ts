@@ -9,27 +9,33 @@ export function escapeHtml(value: string): string {
 }
 
 /** Document inputs assembled by the server renderer. */
-export interface DocumentOptions {
+export interface DocumentShellOptions {
   lang: string;
   title: string;
   seo: unknown;
   settings: Record<string, unknown>;
-  bodyHtml: string;
   /** Pre-serialized hydration state. */
   hydrationJson: string;
   /** Browser module URL, or null when no public asset base was provided. */
   clientScriptUrl: string | null;
 }
 
-/** Builds the complete HTML document around a rendered page tree. */
-export function renderDocument(options: DocumentOptions): string {
+/** Document inputs including the already rendered page tree. */
+export interface DocumentOptions extends DocumentShellOptions {
+  bodyHtml: string;
+}
+
+/**
+ * Builds the part of the document that can be sent before React starts.
+ *
+ * Streaming uses this at shell time so the browser gets the head, styles and
+ * the empty root while the page tree is still rendering.
+ */
+export function renderDocumentPrefix(options: DocumentShellOptions): string {
   const title = options.title.trim() || "Fastcart";
   const lang = options.lang.trim() || "en";
   const seoHead = renderSeoHead(options.seo);
   const style = renderThemeStyle(options.settings);
-  const script = options.clientScriptUrl
-    ? `<script type="module" src="${escapeHtml(options.clientScriptUrl)}"></script>`
-    : "";
 
   return `<!doctype html>
 <html lang="${escapeHtml(lang)}">
@@ -41,11 +47,25 @@ ${seoHead}
 <style>${style}</style>
 </head>
 <body>
-<div id="fastcart-root">${options.bodyHtml}</div>
+<div id="fastcart-root">`;
+}
+
+/** Builds the closing markup, hydration state and client script. */
+export function renderDocumentSuffix(options: DocumentShellOptions): string {
+  const script = options.clientScriptUrl
+    ? `<script type="module" src="${escapeHtml(options.clientScriptUrl)}"></script>`
+    : "";
+
+  return `</div>
 <script>window.__FASTCART_RENDER__ = ${options.hydrationJson};</script>
 ${script}
 </body>
 </html>`;
+}
+
+/** Builds the complete HTML document around a rendered page tree. */
+export function renderDocument(options: DocumentOptions): string {
+  return `${renderDocumentPrefix(options)}${options.bodyHtml}${renderDocumentSuffix(options)}`;
 }
 
 /** Minimal document used for non-rendered statuses such as a missing page. */

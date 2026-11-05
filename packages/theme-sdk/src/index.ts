@@ -303,14 +303,32 @@ export interface RenderPayload {
   capabilities: Record<string, RenderCapabilityGrant>;
   mode: RenderMode;
   timeout_ms: number;
+  /**
+   * Whether the host can consume a streamed body.
+   *
+   * When false, a theme that returns a stream is buffered by the sidecar and
+   * delivered through the buffered JSON contract. Older hosts omit the field.
+   */
+  streaming?: boolean;
+  /** Total time budget for a streamed body, in milliseconds. */
+  stream_timeout_ms?: number;
 }
+
+/**
+ * A body a theme may return.
+ *
+ * Strings and bytes are buffered. Async iterables and web `ReadableStream`s are
+ * streamed chunk by chunk when the host accepts it, and buffered otherwise.
+ */
+export type RenderBody =
+  string | Uint8Array | ReadableStream<Uint8Array> | AsyncIterable<Uint8Array> | null;
 
 /** Response returned by a theme's `render` export. */
 export interface RenderResult {
   status: number;
   headers?: [string, string][];
-  /** Raw response body; the sidecar base64-encodes it for the host. */
-  body: string | null;
+  /** Raw response body, optionally streamed. */
+  body: RenderBody;
 }
 
 // ---------------------------------------------------------------------------

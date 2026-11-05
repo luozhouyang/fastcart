@@ -58,6 +58,33 @@ impl StorefrontRuntime for RecordingRuntime {
     }
 }
 
+struct StreamingRuntime;
+
+#[async_trait::async_trait]
+impl StorefrontRuntime for StreamingRuntime {
+    async fn render(&self, _request: RuntimeRequest) -> Result<RuntimeResponse, RuntimeError> {
+        Ok(RuntimeResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_owned(), "text/html".to_owned()),
+                ("x-stream".to_owned(), "yes".to_owned()),
+            ],
+            body: fastcart_runtime_api::RuntimeBody::stream(Box::pin(futures::stream::iter([
+                Ok::<_, RuntimeError>(b"<html>".to_vec().into()),
+                Ok(b"</html>".to_vec().into()),
+            ]))),
+        })
+    }
+
+    async fn health_check(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
 struct TimeoutRuntime;
 
 #[async_trait::async_trait]
@@ -271,6 +298,36 @@ async fn renders_with_the_active_theme_through_the_runtime() {
     assert_eq!(theme.id, "default");
     assert_eq!(theme.entry, "dist/server.js");
     assert_eq!(theme.settings["brand_color"], "#111111");
+    assert!(request.streaming);
+    assert_eq!(request.stream_timeout_ms, 30_000);
+}
+
+#[tokio::test]
+async fn streams_runtime_bodies_to_the_client() {
+    let fixture = fixture(Some(Arc::new(StreamingRuntime)), None).await;
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("host", "shop.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-stream")
+            .and_then(|value| value.to_str().ok()),
+        Some("yes")
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"<html></html>");
 }
 
 #[tokio::test]

@@ -55,7 +55,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - SQLite-backed persistent job queue with atomic claiming and lease expiry.
 - Signed webhook delivery from outbox events with idempotent fan-out, retry/backoff, crash recovery and replay.
 - Provider-independent transactional email with queued `send_email` jobs, SMTP (`lettre`) and Resend (`resend-rs`) providers, plus log and in-memory test providers.
-- Storefront SSR rendering through a bounded Node sidecar pool, with active theme context and trusted store resolution.
+- Storefront SSR rendering through a bounded Node sidecar pool, with active theme context, trusted store resolution and streamed HTML shells.
 - Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; email jobs; simple job handlers.
 - Store-scoped Moka cache with generation-based invalidation.
 - Prometheus-compatible `/metrics` with latency histograms, plus baseline security response headers.
@@ -109,6 +109,7 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
   `FASTCART_SMTP_PASSWORD`, `FASTCART_SMTP_SECURITY` — SMTP delivery
 - `FASTCART_RESEND_API_KEY` — Resend delivery
 - `FASTCART_STOREFRONT_ENABLED`, `FASTCART_STOREFRONT_RUNTIME` — enable SSR (default off) and select `node`/`v8`
+- `FASTCART_STOREFRONT_STREAMING`, `FASTCART_STOREFRONT_STREAM_TIMEOUT_MS` — allow streamed HTML (default on) and its total time budget (default 30s)
 - `FASTCART_STOREFRONT_NODE_URL`, `FASTCART_STOREFRONT_NODE_SECRET` — Node sidecar endpoint and bearer secret
 - `FASTCART_THEMES_DIR` — trusted theme bundle directory (default `./themes`)
 - `FASTCART_INTERNAL_FETCH_SECRET` — mounts the secret-gated `/internal/storefront` HTTP surface
@@ -129,6 +130,15 @@ The sidecar listens on `127.0.0.1:8788` by default; set `HOST=0.0.0.0` in a
 container and always pair a non-loopback bind with `SIDECAR_SECRET`. New stores
 get the default theme registered and activated automatically when the bundle is
 present under `storefront.themes_dir`.
+
+Themes may return a `ReadableStream` or async iterable from `render`. When
+`streaming_enabled` is on, the sidecar forwards the theme's status and headers
+and then the HTML bytes as they are produced, marking the response with
+`x-fastcart-mode: stream`. The bundled default theme uses
+`renderToPipeableStream`, so the document head, styles and shell reach the
+browser before the page tree finishes. Buffered themes and older hosts keep the
+existing JSON contract. Streaming requires the reverse proxy to pass chunked
+responses through without buffering.
 
 Themes may also declare dynamic routes in `theme.json`, for example
 `"routes": { "product": "/products/{handle}", "collection": "/collections/{handle}" }`.

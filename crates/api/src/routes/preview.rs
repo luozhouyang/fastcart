@@ -354,11 +354,14 @@ pub(crate) async fn render(
         capabilities,
         mode: RuntimeMode::Preview,
         timeout_ms: context.config.storefront_timeout_ms.max(1),
+        streaming: context.config.storefront_streaming_enabled,
+        stream_timeout_ms: context.config.storefront_stream_timeout_ms.max(1),
     };
 
     match runtime.render(runtime_request).await {
         Ok(response) => {
-            let mut response = runtime_response(response);
+            let mut response =
+                runtime_response(response, context.config.storefront_stream_timeout_ms.max(1));
             // Draft previews must never be cached by browsers or shared
             // proxies, even if the theme emits permissive headers.
             response.headers_mut().insert(

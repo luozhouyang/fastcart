@@ -2,10 +2,13 @@
 //!
 //! This adapter is the documented fallback when embedded V8 cannot support a
 //! required TanStack Start capability. The sidecar owns the JavaScript runtime;
-//! the host talks to it over a small JSON+base64 HTTP contract:
+//! the host talks to it over a small HTTP contract:
 //!
 //! - `POST {base}/render` with a `RenderPayload`, optionally authenticated with
-//!   a bearer token, returning a `RenderResult`.
+//!   a bearer token. The sidecar answers either with a JSON `RenderResult`
+//!   (buffered body) or, when the theme streams and the payload asks for it,
+//!   with the themed status, headers and raw HTML bytes plus the
+//!   `x-fastcart-mode: stream` marker.
 //! - `GET {base}/health` for readiness.
 //!
 //! Rendering is bounded by the request timeout, and sidecar failures are
@@ -21,12 +24,17 @@ use fastcart_runtime_api::{
     CapabilityGrant, PageContext, RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest,
     RuntimeResponse, RuntimeTheme, StorefrontRuntime,
 };
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 /// Path used to render a storefront request on the sidecar.
 pub const RENDER_PATH: &str = "/render";
 /// Path used to check sidecar readiness.
 pub const HEALTH_PATH: &str = "/health";
+/// Sidecar response header marking a raw streaming body.
+pub const STREAM_MODE_HEADER: &str = "x-fastcart-mode";
+/// Header value that marks a raw streaming body.
+const STREAM_MODE_VALUE: &str = "stream";
 /// Maximum decoded response body accepted from the sidecar.
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -77,11 +85,21 @@ impl NodeRuntime {
         &self,
         payload: &RenderPayload,
         timeout_ms: u64,
+        stream_timeout_ms: u64,
     ) -> Result<RuntimeResponse, RuntimeError> {
+        // The reqwest timeout covers the whole response body. Give streams the
+        // larger budget; the stream itself also enforces it per chunk.
+        let client_timeout_ms = if payload.streaming {
+            stream_timeout_ms.max(timeout_ms)
+        } else {
+            timeout_ms
+        };
         let mut builder = self
             .client
             .post(self.endpoint(RENDER_PATH))
-            .timeout(Duration::from_millis(timeout_ms.saturating_add(1_000)))
+            .timeout(Duration::from_millis(
+                client_timeout_ms.saturating_add(1_000),
+            ))
             .json(payload);
         if let Some(secret) = &self.secret {
             builder = builder.bearer_auth(secret);
@@ -95,6 +113,9 @@ impl NodeRuntime {
                 "node sidecar returned HTTP {}",
                 response.status()
             )));
+        }
+        if is_stream_response(&response) {
+            return stream_response(response, stream_timeout_ms);
         }
         let result: RenderResult = response.json().await.map_err(|error| {
             RuntimeError::FetchBridge(format!("invalid node sidecar response: {error}"))
@@ -131,10 +152,92 @@ impl NodeRuntime {
     }
 }
 
+/// Returns whether the sidecar answered with a raw streaming body.
+fn is_stream_response(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(STREAM_MODE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case(STREAM_MODE_VALUE))
+}
+
+/// Converts a raw sidecar stream into a bounded [`RuntimeBody::Stream`].
+///
+/// Theme headers are carried as ordinary HTTP headers. The mode marker and
+/// hop-by-hop headers are internal to the bridge and never reach the client.
+fn stream_response(
+    response: reqwest::Response,
+    stream_timeout_ms: u64,
+) -> Result<RuntimeResponse, RuntimeError> {
+    let status = response.status().as_u16();
+    let mut headers = Vec::new();
+    for (name, value) in response.headers() {
+        let name = name.as_str();
+        if name.eq_ignore_ascii_case(STREAM_MODE_HEADER)
+            || name.eq_ignore_ascii_case("content-length")
+            || is_hop_by_hop(name)
+        {
+            continue;
+        }
+        let value = value.to_str().map_err(|_| {
+            RuntimeError::FetchBridge("node sidecar returned an invalid header".to_owned())
+        })?;
+        headers.push((name.to_owned(), value.to_owned()));
+    }
+    let headers = validate_headers(headers)?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(stream_timeout_ms.max(1));
+    let chunks = response.bytes_stream();
+    let limited = stream::try_unfold(
+        (chunks, 0usize, deadline),
+        move |(mut chunks, total, deadline)| async move {
+            let stream_budget = stream_timeout_ms;
+            let next = tokio::time::timeout_at(deadline, chunks.next())
+                .await
+                .map_err(|_| RuntimeError::Timeout(stream_budget))?;
+            let Some(item) = next else {
+                return Ok(None);
+            };
+            let chunk = item.map_err(|error| {
+                RuntimeError::FetchBridge(format!("node sidecar stream failed: {error}"))
+            })?;
+            let total = total.saturating_add(chunk.len());
+            if total > MAX_RESPONSE_BYTES {
+                return Err(RuntimeError::FetchBridge(format!(
+                    "node sidecar response exceeded {MAX_RESPONSE_BYTES} bytes"
+                )));
+            }
+            Ok(Some((chunk, (chunks, total, deadline))))
+        },
+    );
+    Ok(RuntimeResponse {
+        status,
+        headers,
+        body: RuntimeBody::Stream(Box::pin(limited)),
+    })
+}
+
+/// Returns true for headers that must not be forwarded between connections.
+fn is_hop_by_hop(name: &str) -> bool {
+    [
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
 #[async_trait::async_trait]
 impl StorefrontRuntime for NodeRuntime {
     async fn render(&self, request: RuntimeRequest) -> Result<RuntimeResponse, RuntimeError> {
         let timeout_ms = request.timeout_ms.max(1);
+        let stream_timeout_ms = request.stream_timeout_ms.max(1);
         let payload = RenderPayload {
             request_id: request.request_id,
             store: StorePayload::from(&request.store),
@@ -148,11 +251,13 @@ impl StorefrontRuntime for NodeRuntime {
             capabilities: request.capabilities,
             mode: request.mode,
             timeout_ms,
+            streaming: request.streaming,
+            stream_timeout_ms,
         };
 
         match tokio::time::timeout(
             Duration::from_millis(timeout_ms),
-            self.dispatch(&payload, timeout_ms),
+            self.dispatch(&payload, timeout_ms, stream_timeout_ms),
         )
         .await
         {
@@ -222,6 +327,8 @@ struct RenderPayload {
     capabilities: BTreeMap<String, CapabilityGrant>,
     mode: RuntimeMode,
     timeout_ms: u64,
+    streaming: bool,
+    stream_timeout_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,6 +379,7 @@ mod tests {
         PageContext, RuntimeBody, RuntimeError, RuntimeMode, RuntimeRequest, RuntimeTheme,
         StorefrontRuntime,
     };
+    use futures::StreamExt;
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
@@ -325,6 +433,8 @@ mod tests {
             capabilities: BTreeMap::new(),
             mode: RuntimeMode::Production,
             timeout_ms,
+            streaming: false,
+            stream_timeout_ms: timeout_ms,
         }
     }
 
@@ -369,6 +479,43 @@ mod tests {
         StatusCode::SERVICE_UNAVAILABLE
     }
 
+    async fn slow_stream() -> axum::response::Response {
+        use axum::body::Bytes;
+        use axum::response::IntoResponse;
+
+        let body = axum::body::Body::from_stream(futures::stream::once(async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok::<_, std::io::Error>(Bytes::from_static(b"late"))
+        }));
+        (
+            StatusCode::OK,
+            [("x-fastcart-mode", "stream"), ("content-type", "text/html")],
+            body,
+        )
+            .into_response()
+    }
+
+    async fn streaming_render() -> axum::response::Response {
+        use axum::body::Bytes;
+        use axum::response::IntoResponse;
+
+        let body = axum::body::Body::from_stream(futures::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"<html>")),
+            Ok(Bytes::from_static(b"</html>")),
+        ]));
+        (
+            StatusCode::OK,
+            [
+                ("x-fastcart-mode", "stream"),
+                ("content-type", "text/html; charset=utf-8"),
+                ("x-theme", "default"),
+                ("transfer-encoding", "chunked"),
+            ],
+            body,
+        )
+            .into_response()
+    }
+
     #[tokio::test]
     async fn renders_through_the_sidecar() {
         let seen: Seen = Arc::default();
@@ -397,6 +544,62 @@ mod tests {
         assert_eq!(payload["store"]["currency"], "USD");
 
         runtime.health_check().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streams_raw_sidecar_bodies() {
+        let app = Router::new().route("/render", post(streaming_render));
+        let runtime = NodeRuntime::new(spawn(app).await);
+
+        let mut request = request(500);
+        request.streaming = true;
+        request.stream_timeout_ms = 2_000;
+        let response = runtime.render(request).await.unwrap();
+
+        assert_eq!(response.status, 200);
+        assert!(
+            response
+                .headers
+                .iter()
+                .any(|(name, value)| name == "x-theme" && value == "default")
+        );
+        assert!(
+            !response
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("x-fastcart-mode"))
+        );
+        assert!(
+            !response
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+        );
+
+        let RuntimeBody::Stream(mut stream) = response.body else {
+            panic!("expected a streaming body");
+        };
+        let mut collected = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            collected.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(collected, b"<html></html>");
+    }
+
+    #[tokio::test]
+    async fn enforces_the_stream_budget() {
+        let app = Router::new().route("/render", post(slow_stream));
+        let runtime = NodeRuntime::new(spawn(app).await);
+
+        let mut request = request(500);
+        request.streaming = true;
+        request.stream_timeout_ms = 50;
+        let response = runtime.render(request).await.unwrap();
+        let RuntimeBody::Stream(mut stream) = response.body else {
+            panic!("expected a streaming body");
+        };
+        let error = stream.next().await.expect("one chunk").unwrap_err();
+        assert!(matches!(error, RuntimeError::Timeout(50)));
     }
 
     #[tokio::test]

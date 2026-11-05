@@ -1,10 +1,12 @@
 // Fastcart theme runtime sidecar.
 //
-// The Rust `NodeRuntime` talks to this process over a small JSON+base64 HTTP
-// contract:
+// The Rust `NodeRuntime` talks to this process over a small HTTP contract:
 //
 // - GET  /health                 readiness probe
-// - POST /render                 render one storefront request
+// - POST /render                 render one storefront request. Buffered results
+//                                use the JSON+base64 shape; streams answer with
+//                                the theme status/headers, raw body bytes and
+//                                `x-fastcart-mode: stream`.
 // - GET  /theme-assets/<bundle>/<client-relative-path>
 //                                serve a file from the bundle's client output
 //
@@ -74,7 +76,9 @@ const server = createServer((request, response) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`theme sidecar listening on http://${HOST}:${PORT}`);
+  const address = server.address();
+  const actualPort = typeof address === "object" && address !== null ? address.port : PORT;
+  console.log(`theme sidecar listening on http://${HOST}:${actualPort}`);
   console.log(`theme root: ${THEME_ROOT}`);
   console.log(
     SECRET
@@ -108,8 +112,7 @@ async function handle(request, response) {
       throw new HttpError(401, "UNAUTHORIZED", "missing or invalid bearer token");
     }
     const payload = await readJson(request);
-    const result = await renderTheme(payload);
-    sendJson(response, 200, result);
+    await renderTheme(payload, response);
     return;
   }
 
@@ -128,7 +131,7 @@ async function handle(request, response) {
 // Rendering
 // ---------------------------------------------------------------------------
 
-async function renderTheme(payload) {
+async function renderTheme(payload, response) {
   if (!isRecord(payload)) {
     throw new HttpError(400, "INVALID_PAYLOAD", "request body must be a JSON object");
   }
@@ -152,9 +155,20 @@ async function renderTheme(payload) {
     throw new HttpError(400, "INVALID_THEME", "theme entry is not a file");
   }
 
+  if (payload.streaming === true) {
+    await runStreamingRender(entryFile, stat, payload, streamTimeout(payload), response);
+    return;
+  }
   const timeoutMs = renderTimeout(payload);
   const result = await runRenderWorker(entryFile, stat, payload, timeoutMs);
-  return encodeResult(result);
+  sendJson(response, 200, encodeResult(result));
+}
+
+/** Clamps the host-supplied total stream budget to a bounded deadline. */
+function streamTimeout(payload) {
+  const requested = Number(payload.stream_timeout_ms);
+  const value = Number.isFinite(requested) && requested > 0 ? requested : 30_000;
+  return Math.min(Math.max(Math.trunc(value), 1), MAX_RENDER_TIMEOUT_MS);
 }
 
 /** Clamps the host-supplied render timeout to a bounded worker deadline. */
@@ -233,6 +247,221 @@ async function runRenderWorker(entryFile, stat, payload, timeoutMs) {
   } finally {
     worker.terminate().catch(() => {});
   }
+}
+
+/**
+ * Runs one streaming render and writes the theme response directly.
+ *
+ * The worker sends headers first, then one chunk at a time waiting for an ack.
+ * Writing with the callback and acknowledging there serializes the producer
+ * and bounds memory to one chunk, even when the client is slow.
+ */
+async function runStreamingRender(entryFile, stat, payload, timeoutMs, response) {
+  const worker = new Worker(RENDER_WORKER, {
+    workerData: { entryFile, version: stat.mtimeMs, payload },
+    resourceLimits: {
+      maxOldGenerationSizeMb: 256,
+      maxYoungGenerationSizeMb: 64,
+      stackSizeMb: 4,
+    },
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let timedOut = false;
+      let total = 0;
+      const settle = (callback, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        callback(value);
+      };
+      const fail = (error) => settle(reject, error);
+      const finish = () => settle(resolve, undefined);
+      const timeoutError = () => new HttpError(504, "RENDER_TIMEOUT", "theme render timed out");
+      const timer = setTimeout(() => {
+        timedOut = true;
+        if (response.headersSent) {
+          response.destroy();
+        }
+        worker.terminate().finally(() => fail(timeoutError()));
+      }, timeoutMs);
+
+      response.once("close", () => {
+        if (!settled && !response.writableEnded) {
+          fail(new HttpError(499, "CLIENT_CLOSED_REQUEST", "client closed the connection"));
+        }
+      });
+
+      worker.on("message", (message) => {
+        if (settled) {
+          return;
+        }
+        if (!isRecord(message)) {
+          if (response.headersSent) {
+            response.destroy();
+          }
+          fail(new HttpError(502, "INVALID_RESULT", "theme worker returned an invalid message"));
+          return;
+        }
+        if (message.ok === false) {
+          if (response.headersSent) {
+            response.destroy();
+          }
+          fail(new HttpError(500, "RENDER_FAILED", "theme render failed"));
+          return;
+        }
+        if (message.stream !== true) {
+          // The theme chose a buffered body even though streaming was offered.
+          try {
+            const encoded = encodeResult(message.result);
+            if (response.headersSent) {
+              throw new HttpError(
+                502,
+                "INVALID_RESULT",
+                "theme mixed streamed and buffered responses",
+              );
+            }
+            sendJson(response, 200, encoded);
+            finish();
+          } catch (error) {
+            fail(error);
+          }
+          return;
+        }
+        if (message.done === true) {
+          if (!response.headersSent) {
+            response.destroy();
+            fail(new HttpError(502, "INVALID_RESULT", "theme ended before sending headers"));
+            return;
+          }
+          response.end();
+          finish();
+          return;
+        }
+        if (message.chunk !== undefined) {
+          const chunk = toBuffer(message.chunk);
+          if (!chunk) {
+            response.destroy();
+            fail(new HttpError(502, "INVALID_RESULT", "theme returned an invalid stream chunk"));
+            return;
+          }
+          total += chunk.length;
+          if (total > MAX_RESPONSE_BYTES) {
+            response.destroy();
+            fail(new HttpError(502, "RESPONSE_TOO_LARGE", "theme response exceeded 10 MiB"));
+            return;
+          }
+          if (!response.headersSent) {
+            response.destroy();
+            fail(new HttpError(502, "INVALID_RESULT", "theme streamed before sending headers"));
+            return;
+          }
+          response.write(chunk, () => {
+            if (!settled) {
+              worker.postMessage({ type: "ack" });
+            }
+          });
+          return;
+        }
+        try {
+          if (response.headersSent) {
+            throw new HttpError(502, "INVALID_RESULT", "theme sent duplicate stream headers");
+          }
+          const status = message.status;
+          if (!Number.isInteger(status) || status < 100 || status > 599) {
+            throw new HttpError(502, "INVALID_RESULT", "theme returned an invalid status");
+          }
+          const headers = message.headers ?? [];
+          if (!Array.isArray(headers) || !headers.every(isHeaderTuple)) {
+            throw new HttpError(502, "INVALID_RESULT", "theme returned invalid headers");
+          }
+          applyStreamHeaders(response, headers);
+          response.statusCode = status;
+          response.setHeader("x-fastcart-mode", "stream");
+          response.flushHeaders();
+        } catch (error) {
+          if (response.headersSent) {
+            response.destroy();
+          }
+          fail(error);
+        }
+      });
+      worker.once("error", (error) => {
+        console.error(`theme worker failed for ${entryFile}:`, error);
+        if (response.headersSent) {
+          response.destroy();
+        }
+        fail(new HttpError(500, "RENDER_FAILED", "theme render failed"));
+      });
+      worker.once("exit", (code) => {
+        if (settled) {
+          return;
+        }
+        if (response.headersSent) {
+          response.destroy();
+        }
+        fail(
+          timedOut
+            ? timeoutError()
+            : new HttpError(500, "RENDER_FAILED", `theme worker exited (${code})`),
+        );
+      });
+    });
+  } finally {
+    worker.terminate().catch(() => {});
+  }
+}
+
+/** Copies theme headers onto the HTTP response, dropping bridge internals. */
+function applyStreamHeaders(response, headers) {
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    if (
+      lower === "x-fastcart-mode" ||
+      lower === "content-length" ||
+      lower === "transfer-encoding" ||
+      isHopByHop(lower)
+    ) {
+      continue;
+    }
+    try {
+      response.appendHeader(name, value);
+    } catch {
+      throw new HttpError(502, "INVALID_RESULT", "theme returned an invalid header");
+    }
+  }
+  if (!response.hasHeader("content-type")) {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+  }
+}
+
+function isHopByHop(name) {
+  return [
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "upgrade",
+  ].includes(name);
+}
+
+function toBuffer(value) {
+  if (typeof value === "string") {
+    return Buffer.from(value, "utf8");
+  }
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof ArrayBuffer) {
+    return Buffer.from(value);
+  }
+  return null;
 }
 
 function encodeResult(result) {
@@ -551,8 +780,12 @@ function resolveFromRepo(value, fallback) {
 }
 
 function parsePort(value, fallback) {
+  if (value === undefined || value.trim() === "") {
+    return fallback;
+  }
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : fallback;
+  // Zero asks the OS for an ephemeral port, which the integration tests use.
+  return Number.isInteger(parsed) && parsed >= 0 && parsed < 65536 ? parsed : fallback;
 }
 
 function isRecord(value) {

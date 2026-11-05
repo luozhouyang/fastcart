@@ -859,6 +859,7 @@ dependencies = [
  "fastcart-storefront-data",
  "fastcart-workflows",
  "form_urlencoded",
+ "futures",
  "hex",
  "hmac",
  "http-body-util",
@@ -1372,6 +1373,7 @@ dependencies = [
  "base64 0.22.1",
  "fastcart-kernel",
  "fastcart-runtime-api",
+ "futures",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1386,6 +1388,7 @@ dependencies = [
  "bytes",
  "fastcart-kernel",
  "fastcart-runtime-api",
+ "futures",
  "tokio",
 ]
 
