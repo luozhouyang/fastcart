@@ -130,6 +130,13 @@ container and always pair a non-loopback bind with `SIDECAR_SECRET`. New stores
 get the default theme registered and activated automatically when the bundle is
 present under `storefront.themes_dir`.
 
+Themes may also declare dynamic routes in `theme.json`, for example
+`"routes": { "product": "/products/{handle}", "collection": "/collections/{handle}" }`.
+A published page whose `page_type` matches the route kind is used as the
+template; the host resolves the referenced record and exposes it to the theme as
+`data.context.route`. The sitemap only advertises those URLs when the route and
+a published template exist.
+
 Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
 
 ## HTTP API
