@@ -17,6 +17,7 @@ import { ApiError } from "@fastcart/api-client";
 import type {
   JsonValue,
   Page,
+  PageBlock,
   PageBody,
   PageVersion,
   PreviewTokenResponse,
@@ -100,12 +101,37 @@ function isConflict(cause: unknown): boolean {
   return cause instanceof ApiError && cause.status === 409;
 }
 
+/** Finds a block in page content or any zone. */
+function findBlockInBody(
+  content: PageBlock[],
+  zones: Array<[string, PageBlock[]]>,
+  id: string,
+): PageBlock | null {
+  const direct = findBlock(content, id);
+  if (direct) return direct;
+  for (const [, blocks] of zones) {
+    const found = findBlock(blocks, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Returns the owner (`content` or a zone name) that contains a block. */
+function ownerOf(content: PageBlock[], zones: Array<[string, PageBlock[]]>, id: string): string {
+  if (findBlock(content, id)) return "content";
+  for (const [name, blocks] of zones) {
+    if (findBlock(blocks, id)) return name;
+  }
+  return "content";
+}
+
 export function PageEditorPage() {
   const { pageId } = useParams({ from: "/pages/$pageId" });
   const { mode, client, store, dataKey } = useAuth();
   const [body, setBody] = useState<PageBody>(normalizePageBody(null));
   const [baseline, setBaseline] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [target, setTarget] = useState("content");
   const [jsonText, setJsonText] = useState("");
   const [jsonBaseline, setJsonBaseline] = useState("");
   const [busy, setBusy] = useState<"save" | "publish" | "unpublish" | "preview" | "restore" | null>(
@@ -168,7 +194,8 @@ export function PageEditorPage() {
   }, [data]);
 
   const content = body.content ?? [];
-  const selectedBlock = selectedId ? findBlock(content, selectedId) : null;
+  const zones = useMemo(() => Object.entries(body.zones ?? {}), [body.zones]);
+  const selectedBlock = selectedId ? findBlockInBody(content, zones, selectedId) : null;
   const parsedJson = useMemo(() => parseJsonText(jsonText), [jsonText]);
 
   const dirty = structured ? JSON.stringify(body) !== baseline : jsonText !== jsonBaseline;
@@ -185,34 +212,48 @@ export function PageEditorPage() {
 
   const page = data?.page ?? null;
 
-  const updateContent = (next: PageBody["content"]) => {
-    setBody((current) => ({ ...current, content: next ?? [] }));
+  /** Replaces the block list of one owner (`content` or a zone name). */
+  const updateBlocks = (owner: string, update: (blocks: PageBlock[]) => PageBlock[]) => {
+    setBody((current) => {
+      if (owner === "content") {
+        return { ...current, content: update(current.content ?? []) };
+      }
+      const nextZones = { ...(current.zones ?? {}) };
+      nextZones[owner] = update(nextZones[owner] ?? []);
+      return { ...current, zones: nextZones };
+    });
   };
 
+  const blocksFor = (owner: string): PageBlock[] =>
+    owner === "content" ? content : (body.zones?.[owner] ?? []);
+
   const addBlock = (type: string) => {
-    const block = buildBlock(type, editorManifest, collectBlockIds(content));
-    updateContent(appendBlock(content, block));
+    const owner = target;
+    const block = buildBlock(type, editorManifest, collectBlockIds(blocksFor(owner)));
+    updateBlocks(owner, (blocks) => appendBlock(blocks, block));
     const id = blockId(block);
     if (id) setSelectedId(id);
   };
 
   const addBlockToSlot = (parentId: string, slotName: string, type: string) => {
-    const block = buildBlock(type, editorManifest, collectBlockIds(content));
-    updateContent(appendBlockToSlot(content, parentId, slotName, block));
+    const owner = ownerOf(content, zones, parentId);
+    const block = buildBlock(type, editorManifest, collectBlockIds(blocksFor(owner)));
+    updateBlocks(owner, (blocks) => appendBlockToSlot(blocks, parentId, slotName, block));
     const id = blockId(block);
     if (id) setSelectedId(id);
   };
 
   const moveSelected = (id: string, direction: -1 | 1) => {
-    updateContent(moveBlock(content, id, direction));
+    const owner = ownerOf(content, zones, id);
+    updateBlocks(owner, (blocks) => moveBlock(blocks, id, direction));
   };
 
   const removeSelected = (id: string) => {
-    updateContent(removeBlock(content, id));
+    const owner = ownerOf(content, zones, id);
+    updateBlocks(owner, (blocks) => removeBlock(blocks, id));
     if (selectedId === id) setSelectedId(null);
   };
 
-  const zones = useMemo(() => Object.entries(body.zones ?? {}), [body.zones]);
   const declaredZones = editorManifest?.zones ?? {};
   const availableZones = useMemo(
     () =>
@@ -231,20 +272,20 @@ export function PageEditorPage() {
       delete next[name];
       return { ...current, zones: next };
     });
+    if (target === name) setTarget("content");
   };
 
   const changeProp = (key: string, value: JsonValue | undefined) => {
     if (!selectedId) return;
-    setBody((current) => {
-      const currentContent = current.content ?? [];
-      const next = updateBlockProps(currentContent, selectedId, (props) => {
+    const owner = ownerOf(content, zones, selectedId);
+    updateBlocks(owner, (blocks) =>
+      updateBlockProps(blocks, selectedId, (props) => {
         const updated = { ...props };
         if (value === undefined) delete updated[key];
         else updated[key] = value;
         return updated;
-      });
-      return { ...current, content: next };
-    });
+      }),
+    );
   };
 
   const save = async () => {
@@ -515,7 +556,19 @@ export function PageEditorPage() {
       {structured ? (
         <div className="grid items-start gap-4 xl:grid-cols-[180px_minmax(0,1fr)_minmax(260px,320px)]">
           <Card className="p-2.5 xl:sticky xl:top-[88px]">
-            <ComponentPalette manifest={editorManifest} onAdd={addBlock} />
+            <ComponentPalette
+              manifest={editorManifest}
+              onAdd={addBlock}
+              target={target}
+              onTargetChange={setTarget}
+              targets={[
+                { value: "content", label: "Page content" },
+                ...zones.map(([name]) => ({
+                  value: name,
+                  label: declaredZones[name]?.title || name,
+                })),
+              ]}
+            />
           </Card>
 
           <div className="min-w-0 space-y-4">
@@ -541,60 +594,63 @@ export function PageEditorPage() {
               />
             </Card>
 
-            {zones.length > 0 || availableZones.length > 0 ? (
-              <Card className="p-4">
-                <div className="mb-3">
-                  <p className="text-[12.5px] font-medium text-foreground">Page zones</p>
-                  <p className="mt-0.5 text-[10.5px] text-faint">
-                    Header and footer regions. Zones not declared by the active theme block saving
-                    and theme activation, so remove them before saving.
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  {zones.map(([name, blocks]) => {
-                    const declared = Object.hasOwn(declaredZones, name);
-                    return (
-                      <div
-                        key={name}
-                        className="flex items-center justify-between gap-2 rounded-lg border border-border px-2.5 py-2"
+            {zones.map(([name, blocks]) => {
+              const declared = Object.hasOwn(declaredZones, name);
+              return (
+                <Card key={name} className="p-4">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-[12.5px] font-medium text-foreground">
+                        Zone · {declared ? declaredZones[name]?.title : name}
+                      </p>
+                      <p className="mt-0.5 truncate font-mono text-[10px] text-faint">
+                        {name} · {blocks.length} {blocks.length === 1 ? "block" : "blocks"}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {declared ? null : (
+                        <Badge variant="destructive" className="text-[10px]">
+                          Not in theme
+                        </Badge>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="text-faint hover:text-destructive"
+                        aria-label={`Remove zone ${name}`}
+                        onClick={() => removeZone(name)}
                       >
-                        <div className="min-w-0">
-                          <p className="truncate text-[11.5px] font-medium text-foreground">
-                            {declared ? declaredZones[name]?.title : name}
-                          </p>
-                          <p className="truncate font-mono text-[10px] text-faint">
-                            {name} · {blocks.length} {blocks.length === 1 ? "block" : "blocks"}
-                          </p>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1.5">
-                          {declared ? null : (
-                            <Badge variant="destructive" className="text-[10px]">
-                              Not in theme
-                            </Badge>
-                          )}
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            className="text-faint hover:text-destructive"
-                            aria-label={`Remove zone ${name}`}
-                            onClick={() => removeZone(name)}
-                          >
-                            <Undo2 className="size-3.5" />
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                {availableZones.length > 0 ? (
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {availableZones.map(([name, zone]) => (
-                      <Button key={name} variant="outline" size="sm" onClick={() => addZone(name)}>
-                        Add {zone.title || name}
+                        <Undo2 className="size-3.5" />
                       </Button>
-                    ))}
+                    </div>
                   </div>
-                ) : null}
+                  <BlockTree
+                    blocks={blocks}
+                    manifest={editorManifest}
+                    selectedId={selectedId}
+                    onSelect={setSelectedId}
+                    onMove={moveSelected}
+                    onRemove={removeSelected}
+                    onAddToSlot={addBlockToSlot}
+                  />
+                </Card>
+              );
+            })}
+
+            {availableZones.length > 0 ? (
+              <Card className="p-4">
+                <p className="text-[12.5px] font-medium text-foreground">Add a zone</p>
+                <p className="mt-0.5 text-[10.5px] text-faint">
+                  Zones declared by the active theme. Zones that are not declared block saving and
+                  theme activation.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {availableZones.map(([name, zone]) => (
+                    <Button key={name} variant="outline" size="sm" onClick={() => addZone(name)}>
+                      Add {zone.title || name}
+                    </Button>
+                  ))}
+                </div>
               </Card>
             ) : null}
 

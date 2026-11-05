@@ -6,9 +6,15 @@ import { paletteGroups } from "@/lib/theme-editor";
 export function ComponentPalette({
   manifest,
   onAdd,
+  target,
+  targets,
+  onTargetChange,
 }: {
   manifest: ThemeEditorManifest | null;
   onAdd: (type: string) => void;
+  target?: string;
+  targets?: Array<{ value: string; label: string }>;
+  onTargetChange?: (value: string) => void;
 }) {
   const groups = paletteGroups(manifest);
 
@@ -18,6 +24,22 @@ export function ComponentPalette({
         <Boxes className="size-3.5 text-faint" aria-hidden="true" />
         <p className="text-[11px] font-medium text-muted-foreground">Component palette</p>
       </div>
+      {targets && targets.length > 1 && onTargetChange ? (
+        <label className="flex items-center gap-2 px-1 text-[10.5px] text-faint">
+          Add to
+          <select
+            value={target}
+            onChange={(event) => onTargetChange(event.target.value)}
+            className="h-7 min-w-0 flex-1 rounded-md border border-input bg-card px-1.5 text-[11px] text-foreground outline-none focus-visible:border-ring"
+          >
+            {targets.map((entry) => (
+              <option key={entry.value} value={entry.value}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
       {groups.length === 0 ? (
         <p className="rounded-lg border border-dashed border-border px-3 py-5 text-center text-[11.5px] text-muted-foreground">
           This theme does not expose editor components.
