@@ -413,9 +413,7 @@ export function PageEditorPage() {
       // Render the preview from the storefront origin so relative theme assets
       // and storefront API calls resolve against the store rather than the
       // admin host. Fall back to the API origin when no domain is configured.
-      const origin = store?.primary_domain
-        ? `${window.location.protocol}//${store.primary_domain}`
-        : API_BASE_URL;
+      const origin = previewOriginFor(store?.primary_domain);
       setPreviewToken(token);
       setPreviewOrigin(origin);
       setPreviewHandleDraft(previewHandle);
@@ -902,4 +900,33 @@ function previewPathFor(handle: string, pageHandle: string, routePattern: string
     return routePattern.replace("{handle}", encodeURIComponent(trimmed));
   }
   return `/${encodeURIComponent(pageHandle)}`;
+}
+
+/**
+ * Resolves the origin used by the preview iframe.
+ *
+ * Production storefronts live on the store's primary domain at the default
+ * port. Local development points the admin at a non-standard API port, so a
+ * loopback storefront domain inherits that port; otherwise the iframe would
+ * silently target port 80.
+ */
+function previewOriginFor(domain: string | null | undefined): string {
+  if (!domain) {
+    return API_BASE_URL;
+  }
+  const origin = `${window.location.protocol}//${domain}`;
+  if (!isLoopbackHost(domain)) {
+    return origin;
+  }
+  try {
+    const api = new URL(API_BASE_URL, window.location.origin);
+    return api.port ? `${origin}:${api.port}` : origin;
+  } catch {
+    return origin;
+  }
+}
+
+function isLoopbackHost(domain: string): boolean {
+  const host = domain.split(":")[0]?.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
 }
