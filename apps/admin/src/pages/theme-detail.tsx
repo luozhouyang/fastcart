@@ -201,7 +201,12 @@ export function ThemeDetailPage() {
           toast.error("This backend does not support settings drafts.");
           return;
         }
-        await saveDraftMethod.call(client.themes, themeId, { settings });
+        await saveDraftMethod.call(client.themes, themeId, {
+          settings,
+          ...(typeof data.theme.settings_revision === "number"
+            ? { base_revision: data.theme.settings_revision }
+            : {}),
+        });
         reload();
         toast.success("Settings draft saved");
       }
@@ -224,7 +229,12 @@ export function ThemeDetailPage() {
         } else if (client) {
           const saveDraftMethod = client.themes.saveSettingsDraft ?? client.themes.settingsDraft;
           if (saveDraftMethod) {
-            await saveDraftMethod.call(client.themes, themeId, { settings });
+            await saveDraftMethod.call(client.themes, themeId, {
+              settings,
+              ...(typeof data.theme.settings_revision === "number"
+                ? { base_revision: data.theme.settings_revision }
+                : {}),
+            });
           } else {
             await client.themes.updateSettings(themeId, { settings });
           }
@@ -246,7 +256,13 @@ export function ThemeDetailPage() {
           toast.error("This backend does not support publishing settings.");
           return;
         }
-        await publishSettingsMethod.call(client.themes, themeId);
+        await publishSettingsMethod.call(
+          client.themes,
+          themeId,
+          typeof data.theme.settings_revision === "number"
+            ? { base_revision: data.theme.settings_revision }
+            : {},
+        );
         toast.success("Theme settings published");
       }
       reload();

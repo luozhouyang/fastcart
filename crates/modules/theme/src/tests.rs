@@ -343,6 +343,7 @@ async fn settings_drafts_publish_and_restore_revisions() {
             &theme.id,
             json!({ "logo": "/draft.svg", "brand_color": "#abc" }),
             Some("user_1".to_owned()),
+            None,
         )
         .await
         .unwrap();
@@ -365,6 +366,7 @@ async fn settings_drafts_publish_and_restore_revisions() {
             &theme.id,
             json!({ "logo": "/draft-2.svg" }),
             Some("user_2".to_owned()),
+            None,
         )
         .await
         .unwrap();
@@ -383,7 +385,7 @@ async fn settings_drafts_publish_and_restore_revisions() {
     );
 
     let published = service
-        .publish_settings(&theme.id, Some("user_2".to_owned()))
+        .publish_settings(&theme.id, Some("user_2".to_owned()), None)
         .await
         .unwrap();
     assert_eq!(published.settings, json!({ "logo": "/draft-2.svg" }));
@@ -393,9 +395,16 @@ async fn settings_drafts_publish_and_restore_revisions() {
     assert_eq!(revisions[0].revision, 2);
     assert_eq!(revisions[0].status, ThemeSettingsRevisionStatus::Published);
 
+    // A stale concurrency token is rejected without touching the draft.
+    let error = service
+        .save_settings_draft(&theme.id, json!({ "logo": "/stale.svg" }), None, Some(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::ConflictDetails { .. }));
+
     // Restoring revision 1 appends a new published revision.
     let restored = service
-        .restore_settings_revision(&theme.id, 1, Some("user_3".to_owned()))
+        .restore_settings_revision(&theme.id, 1, Some("user_3".to_owned()), None)
         .await
         .unwrap();
     assert_eq!(restored.settings, json!({ "logo": "/logo.svg" }));
@@ -409,13 +418,13 @@ async fn settings_drafts_publish_and_restore_revisions() {
 
     // Invalid drafts never reach the live settings or the revision history.
     let error = service
-        .save_settings_draft(&theme.id, json!({ "brand_color": "#000" }), None)
+        .save_settings_draft(&theme.id, json!({ "brand_color": "#000" }), None, None)
         .await
         .unwrap_err();
     assert!(matches!(error, AppError::Validation(_)));
 
     let error = service
-        .restore_settings_revision(&theme.id, 99, None)
+        .restore_settings_revision(&theme.id, 99, None, None)
         .await
         .unwrap_err();
     assert!(error.is_not_found());

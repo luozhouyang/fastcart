@@ -146,6 +146,17 @@ impl From<UpdateThemeSettingsRequest> for UpdateThemeSettingsInput {
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct SaveThemeSettingsDraftRequest {
     settings: Value,
+    /// Revision the caller last observed, enabling optimistic concurrency.
+    #[serde(default)]
+    base_revision: Option<i64>,
+}
+
+/// Optional concurrency token for publish and restore.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct ThemeSettingsRevisionRequest {
+    /// Revision the caller last observed, enabling optimistic concurrency.
+    #[serde(default)]
+    base_revision: Option<i64>,
 }
 
 /// Capability binding upsert body.
@@ -556,7 +567,12 @@ async fn save_theme_settings_draft(
     let actor_id = actor.user_id.as_ref().map(ToString::to_string);
     let theme = ThemeService::new(db)
         .with_audit_actor(actor_id.clone())
-        .save_settings_draft(&ThemeId::from_string(id), input.settings, actor_id)
+        .save_settings_draft(
+            &ThemeId::from_string(id),
+            input.settings,
+            actor_id,
+            input.base_revision,
+        )
         .await?;
     Ok(Json(theme.into()))
 }
@@ -573,12 +589,14 @@ async fn publish_theme_settings(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
+    ApiJson(body): ApiJson<ThemeSettingsRevisionRequest>,
 ) -> ApiResult<Json<ThemeSettingsStateResponse>> {
     authorize(&actor, "themes.write")?;
     let actor_id = actor.user_id.as_ref().map(ToString::to_string);
+    let base_revision = body.base_revision;
     let theme = ThemeService::new(db)
         .with_audit_actor(actor_id.clone())
-        .publish_settings(&ThemeId::from_string(id), actor_id)
+        .publish_settings(&ThemeId::from_string(id), actor_id, base_revision)
         .await?;
     Ok(Json(theme.into()))
 }
@@ -623,12 +641,14 @@ async fn restore_theme_settings_revision(
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, revision)): Path<(String, i64)>,
+    ApiJson(body): ApiJson<ThemeSettingsRevisionRequest>,
 ) -> ApiResult<Json<ThemeSettingsStateResponse>> {
     authorize(&actor, "themes.write")?;
     let actor_id = actor.user_id.as_ref().map(ToString::to_string);
+    let base_revision = body.base_revision;
     let theme = ThemeService::new(db)
         .with_audit_actor(actor_id.clone())
-        .restore_settings_revision(&ThemeId::from_string(id), revision, actor_id)
+        .restore_settings_revision(&ThemeId::from_string(id), revision, actor_id, base_revision)
         .await?;
     Ok(Json(theme.into()))
 }

@@ -350,9 +350,11 @@ impl ThemeService {
         id: &ThemeId,
         settings: Value,
         created_by: Option<String>,
+        expected_revision: Option<i64>,
     ) -> Result<Theme, AppError> {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
+        ensure_settings_revision(&theme, expected_revision)?;
         validate_settings(theme.settings_schema.as_ref(), &settings)?;
 
         let settings_json = serialize_json(&settings, "settings")?;
@@ -397,9 +399,11 @@ impl ThemeService {
         &self,
         id: &ThemeId,
         created_by: Option<String>,
+        expected_revision: Option<i64>,
     ) -> Result<Theme, AppError> {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
+        ensure_settings_revision(&theme, expected_revision)?;
         let draft = theme.draft_settings.clone().ok_or_else(|| {
             AppError::conflict(format!("theme has no settings draft to publish: {id}"))
         })?;
@@ -475,9 +479,11 @@ impl ThemeService {
         id: &ThemeId,
         revision: i64,
         created_by: Option<String>,
+        expected_revision: Option<i64>,
     ) -> Result<Theme, AppError> {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
+        ensure_settings_revision(&theme, expected_revision)?;
         let sql = format!(
             "SELECT {SETTINGS_REVISION_COLUMNS} FROM theme_settings_revisions \
              WHERE theme_id = ? AND revision = ?"
@@ -1002,6 +1008,23 @@ fn validate_settings_schema(schema: &Value) -> Result<(), AppError> {
     }
     jsonschema::validator_for(schema)
         .map_err(|error| AppError::validation(format!("invalid settings schema: {error}")))?;
+    Ok(())
+}
+
+/// Rejects a settings write when the caller's revision is stale.
+fn ensure_settings_revision(theme: &Theme, expected: Option<i64>) -> Result<(), AppError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if theme.settings_revision != expected {
+        return Err(AppError::conflict_details(
+            format!(
+                "theme settings revision {} does not match the expected revision {expected}",
+                theme.settings_revision
+            ),
+            serde_json::json!({ "current_revision": theme.settings_revision }),
+        ));
+    }
     Ok(())
 }
 

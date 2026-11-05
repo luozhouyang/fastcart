@@ -2070,11 +2070,13 @@ export interface ThemeSettingsState {
 
 export interface SaveThemeSettingsDraftRequest {
   settings: JsonValue;
+  /** Revision the caller last observed, enabling optimistic concurrency. */
+  base_revision?: number | null;
 }
 
 export interface PublishThemeSettingsRequest {
-  /** Optional revision to publish, when a backend accepts one. */
-  revision?: number | null;
+  /** Revision the caller last observed, enabling optimistic concurrency. */
+  base_revision?: number | null;
 }
 
 export interface RestoreThemeSettingsRequest {
