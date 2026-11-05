@@ -18,7 +18,10 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fastcart_http::{ApiError, RequestId};
 use fastcart_infrastructure::{StoreDatabase, database_error};
-use fastcart_kernel::{AppError, CurrencyCode, PageId, StoreContext, now_timestamp};
+use fastcart_kernel::{
+    AppError, CurrencyCode, PageId, Pagination, StoreContext, now_timestamp, validate_handle,
+};
+use fastcart_module_catalog::CatalogService;
 use fastcart_module_content::{ContentService, PageStatus};
 use fastcart_module_theme::ThemeService;
 use fastcart_runtime_api::{RuntimeError, RuntimeMode, RuntimeRequest, RuntimeTheme};
@@ -30,7 +33,7 @@ use sha2::Sha256;
 
 use super::storefront::{
     THEME_ASSETS_BASE_URL, build_context_data, capability_grants, compile_page, is_hop_by_hop,
-    resolve_active_editor, runtime_error, runtime_response,
+    match_theme_route, resolve_active_editor, runtime_error, runtime_response,
 };
 use crate::state::AppContext;
 
@@ -75,6 +78,12 @@ pub enum PreviewTokenError {
 pub(crate) struct PreviewQuery {
     /// Signed preview token.
     token: Option<String>,
+    /// Optional resource handle for a dynamic route template.
+    ///
+    /// Used only when the request path does not already match the template's
+    /// route. The value is internal to the preview surface and is removed
+    /// before the URL reaches the theme.
+    preview_handle: Option<String>,
 }
 
 /// Issues a signed preview token for one page.
@@ -257,6 +266,73 @@ pub(crate) async fn render(
         return ApiError::not_found("page").into_response();
     }
 
+    // A dynamic route template is previewed with a concrete resource so that
+    // `data.context.route` matches production. The path wins; otherwise an
+    // explicit handle is used, and finally the first published record of the
+    // template's kind. A missing resource leaves the route unset rather than
+    // failing the preview.
+    let page_type = page.page_type.trim();
+    let mut route_context: Option<serde_json::Value> = None;
+    if theme.manifest.routes.contains_key(page_type) {
+        let matched = match_theme_route(&theme.manifest.routes, preview_path(request.uri()))
+            .filter(|route| route.kind == page_type);
+        let handle = if let Some(route) = matched {
+            Some(route.handle)
+        } else if let Some(handle) = query
+            .preview_handle
+            .as_deref()
+            .map(str::trim)
+            .filter(|handle| !handle.is_empty())
+        {
+            if validate_handle(handle, "handle").is_ok() {
+                Some(handle.to_owned())
+            } else {
+                tracing::debug!(handle, "ignored invalid preview handle");
+                None
+            }
+        } else {
+            first_published_handle(&database, page_type).await
+        };
+        if let Some(handle) = handle {
+            let resolution = DataResolutionContext {
+                currency: currency.clone(),
+                sales_channel_id: None,
+                customer_group_id: None,
+                mode: DataMode::Preview,
+                now,
+            };
+            match context
+                .storefront_data
+                .resolve_route(&database, page_type, &handle, &resolution)
+                .await
+            {
+                Ok(Some(resource)) => {
+                    route_context = Some(serde_json::json!({
+                        "kind": page_type,
+                        "handle": handle,
+                        "resource": resource,
+                    }));
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        kind = page_type,
+                        handle = %handle,
+                        "preview route resource not found"
+                    );
+                }
+                Err(error) => {
+                    context.metrics.record_storefront_data_failure();
+                    tracing::warn!(
+                        kind = page_type,
+                        handle = %handle,
+                        error = %error,
+                        "preview route resolution failed"
+                    );
+                }
+            }
+        }
+    }
+
     let editor = resolve_active_editor(&context, &store.id, &theme).await;
     let compiled = match compile_page(&page, editor.manifest.as_deref()) {
         Ok(compiled) => compiled,
@@ -268,21 +344,22 @@ pub(crate) async fn render(
         }
     };
 
+    let mut context_entry = build_context_data(
+        &context,
+        &database,
+        request.headers(),
+        &store,
+        &domain,
+        &currency,
+        &theme,
+        DataMode::Preview,
+    )
+    .await;
+    if let Some(route) = route_context {
+        context_entry["route"] = route;
+    }
     let mut data: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    data.insert(
-        RESERVED_CONTEXT_KEY.to_owned(),
-        build_context_data(
-            &context,
-            &database,
-            request.headers(),
-            &store,
-            &domain,
-            &currency,
-            &theme,
-            DataMode::Preview,
-        )
-        .await,
-    );
+    data.insert(RESERVED_CONTEXT_KEY.to_owned(), context_entry);
     if !compiled.bindings.is_empty() {
         let resolution = DataResolutionContext {
             currency: currency.clone(),
@@ -462,20 +539,26 @@ fn rejected_token() -> Response {
     ApiError::new(AppError::Unauthorized).into_response()
 }
 
+/// Returns the site-relative path behind the `/preview` prefix.
+fn preview_path(uri: &Uri) -> &str {
+    let rest = uri.path().strip_prefix("/preview").unwrap_or_default();
+    if rest.is_empty() { "/" } else { rest }
+}
+
 /// Maps a preview request URI to the runtime URL.
 ///
-/// The `/preview` prefix is removed, the `token` query parameter is dropped,
-/// and the remaining path and query are preserved. `/preview` maps to `/`.
+/// The `/preview` prefix is removed, preview-only query parameters are
+/// dropped, and the remaining path and query are preserved. `/preview` maps to
+/// `/`.
 fn preview_runtime_url(uri: &Uri) -> String {
-    let rest = uri.path().strip_prefix("/preview").unwrap_or_default();
-    let path = if rest.is_empty() { "/" } else { rest };
+    let path = preview_path(uri);
     match remaining_query(uri.query()) {
         Some(query) => format!("{path}?{query}"),
         None => path.to_owned(),
     }
 }
 
-/// Rebuilds a query string without the preview token parameter.
+/// Rebuilds a query string without preview-only parameters.
 ///
 /// Keys are percent-decoded before comparison so an encoded spelling such as
 /// `to%6ben` cannot smuggle the bearer token into the runtime URL.
@@ -484,13 +567,39 @@ fn remaining_query(query: Option<&str>) -> Option<String> {
     let mut serializer = form_urlencoded::Serializer::new(String::new());
     let mut kept = false;
     for (key, value) in form_urlencoded::parse(query.as_bytes()) {
-        if key == "token" {
+        if key == "token" || key == "preview_handle" {
             continue;
         }
         serializer.append_pair(&key, &value);
         kept = true;
     }
     kept.then(|| serializer.finish())
+}
+
+/// Picks the first published resource of a route kind for auto-previewed
+/// templates.
+async fn first_published_handle(database: &StoreDatabase, kind: &str) -> Option<String> {
+    let pagination = Pagination {
+        limit: 1,
+        offset: 0,
+    };
+    let catalog = CatalogService::new(database.clone());
+    let result = match kind {
+        "product" => catalog.list_published_product_handles(pagination).await,
+        "collection" => catalog.list_published_collection_handles(pagination).await,
+        _ => return None,
+    };
+    match result {
+        Ok(page) => page.data.into_iter().next(),
+        Err(error) => {
+            tracing::warn!(
+                kind,
+                error = %error,
+                "could not auto-select a preview route handle"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]

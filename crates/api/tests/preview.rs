@@ -7,8 +7,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use fastcart_api::routes::preview::issue_preview_token;
 use fastcart_api::{ApiConfig, AppContext, build_router};
-use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
+use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabase, StoreDatabaseManager};
 use fastcart_kernel::{Metadata, StoreId, now_timestamp};
+use fastcart_module_catalog::{CatalogService, CreateCollectionInput, CreateProductInput};
 use fastcart_module_content::{ContentService, CreatePageInput};
 use fastcart_module_theme::{RegisterThemeInput, ThemeService};
 use fastcart_platform::PlatformStore;
@@ -62,8 +63,11 @@ impl StorefrontRuntime for RecordingRuntime {
 
 struct Fixture {
     app: Router,
+    database: StoreDatabase,
     store_id: String,
     page_id: String,
+    product_page_id: String,
+    collection_page_id: String,
     session: String,
     csrf: String,
     requests: Arc<Mutex<Vec<RuntimeRequest>>>,
@@ -155,7 +159,12 @@ async fn fixture(preview_secret: Option<&str>) -> Fixture {
                     schema_version: 1,
                 }),
                 requires: None,
-                routes: Default::default(),
+                routes: [
+                    ("product".to_owned(), "/products/{handle}".to_owned()),
+                    ("collection".to_owned(), "/collections/{handle}".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
             },
             bundle_path: "themes/default".to_owned(),
             settings_schema: None,
@@ -167,7 +176,32 @@ async fn fixture(preview_secret: Option<&str>) -> Fixture {
         .unwrap();
     themes.activate(&theme.id).await.unwrap();
 
-    let page = ContentService::new(database)
+    let catalog = CatalogService::new(database.clone());
+    let product = catalog
+        .create_product(CreateProductInput {
+            title: "Hoodie".to_owned(),
+            handle: Some("hoodie".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog.publish_product(&product.id).await.unwrap();
+    let collection = catalog
+        .create_collection(CreateCollectionInput {
+            title: "Featured".to_owned(),
+            handle: Some("featured".to_owned()),
+            is_published: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog
+        .add_product_to_collection(&product.id, &collection.id, 0)
+        .await
+        .unwrap();
+
+    let content = ContentService::new(database.clone());
+    let page = content
         .create_page(CreatePageInput {
             title: "About".to_owned(),
             handle: Some("about".to_owned()),
@@ -178,11 +212,46 @@ async fn fixture(preview_secret: Option<&str>) -> Fixture {
         })
         .await
         .unwrap();
+    let product_page = content
+        .create_page(CreatePageInput {
+            title: "Product".to_owned(),
+            handle: Some("product-template".to_owned()),
+            page_type: Some("product".to_owned()),
+            body: json!({
+                "schema_version": 1,
+                "content": [{ "type": "ProductDetail", "props": { "id": "pd-1" } }],
+                "root": { "props": {} },
+                "zones": {}
+            }),
+            seo: json!({}),
+            metadata: Metadata::empty(),
+        })
+        .await
+        .unwrap();
+    let collection_page = content
+        .create_page(CreatePageInput {
+            title: "Collection".to_owned(),
+            handle: Some("collection-template".to_owned()),
+            page_type: Some("collection".to_owned()),
+            body: json!({
+                "schema_version": 1,
+                "content": [{ "type": "CollectionDetail", "props": { "id": "cd-1" } }],
+                "root": { "props": {} },
+                "zones": {}
+            }),
+            seo: json!({}),
+            metadata: Metadata::empty(),
+        })
+        .await
+        .unwrap();
 
     Fixture {
         app,
+        database,
         store_id,
         page_id: page.id.as_str().to_owned(),
+        product_page_id: product_page.id.as_str().to_owned(),
+        collection_page_id: collection_page.id.as_str().to_owned(),
         session,
         csrf,
         requests,
@@ -194,9 +263,26 @@ fn editor_manifest() -> Value {
     json!({
         "schema_version": 1,
         "categories": {
-            "product": { "title": "Product", "components": ["ProductGrid"] }
+            "product": {
+                "title": "Product",
+                "components": ["ProductGrid", "ProductDetail", "CollectionDetail"]
+            }
         },
         "components": {
+            "CollectionDetail": {
+                "title": "Collection detail",
+                "category": "product",
+                "fields": {},
+                "defaultProps": {},
+                "slots": []
+            },
+            "ProductDetail": {
+                "title": "Product detail",
+                "category": "product",
+                "fields": {},
+                "defaultProps": {},
+                "slots": []
+            },
             "ProductGrid": {
                 "title": "Product Grid",
                 "category": "product",
@@ -356,6 +442,121 @@ async fn preview_token_renders_the_draft_page_through_the_runtime() {
     assert_eq!(context["mode"], "preview");
     assert_eq!(context["store"]["id"], fixture.store_id);
     assert!(data.get("grid-1").is_some(), "resolved binding data");
+}
+
+#[tokio::test]
+async fn preview_resolves_dynamic_route_resources() {
+    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let token = issue_preview_token(
+        PREVIEW_SECRET,
+        &fixture.store_id,
+        &fixture.product_page_id,
+        now_timestamp(),
+    )
+    .unwrap()
+    .token;
+
+    // A matching path selects its handle.
+    let (status, body) = send_preview(
+        &fixture.app,
+        &format!("/preview/products/hoodie?token={token}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let requests = fixture.requests.lock().unwrap();
+        let request = &requests[0];
+        assert_eq!(request.page.as_ref().unwrap().page_type, "product");
+        assert_eq!(request.url, "/products/hoodie");
+        let route = &request.data.as_ref().unwrap()["context"]["route"];
+        assert_eq!(route["kind"], "product");
+        assert_eq!(route["handle"], "hoodie");
+        assert_eq!(route["resource"]["product"]["title"], "Hoodie");
+    }
+
+    // A path that does not match auto-selects the first published record.
+    let (status, body) = send_preview(
+        &fixture.app,
+        &format!("/preview/product-template?token={token}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let requests = fixture.requests.lock().unwrap();
+        let request = &requests[1];
+        let route = &request.data.as_ref().unwrap()["context"]["route"];
+        assert_eq!(route["kind"], "product");
+        assert_eq!(route["handle"], "hoodie");
+    }
+
+    // An explicit handle wins over the auto-selection and is stripped from the
+    // URL handed to the theme.
+    let catalog = CatalogService::new(fixture.database.clone());
+    let tee = catalog
+        .create_product(CreateProductInput {
+            title: "Tee".to_owned(),
+            handle: Some("tee".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog.publish_product(&tee.id).await.unwrap();
+    let (status, body) = send_preview(
+        &fixture.app,
+        &format!("/preview/product-template?preview_handle=tee&x=1&token={token}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let requests = fixture.requests.lock().unwrap();
+        let request = &requests[2];
+        assert_eq!(request.url, "/product-template?x=1");
+        let route = &request.data.as_ref().unwrap()["context"]["route"];
+        assert_eq!(route["handle"], "tee");
+        assert_eq!(route["resource"]["product"]["title"], "Tee");
+    }
+
+    // A missing resource leaves the template renderable without route data.
+    let (status, body) = send_preview(
+        &fixture.app,
+        &format!("/preview/products/missing?token={token}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let requests = fixture.requests.lock().unwrap();
+        let request = &requests[3];
+        assert_eq!(request.page.as_ref().unwrap().page_type, "product");
+        assert!(request.data.as_ref().unwrap()["context"]["route"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn preview_resolves_collection_route_resources() {
+    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let token = issue_preview_token(
+        PREVIEW_SECRET,
+        &fixture.store_id,
+        &fixture.collection_page_id,
+        now_timestamp(),
+    )
+    .unwrap()
+    .token;
+
+    let (status, body) = send_preview(
+        &fixture.app,
+        &format!("/preview/collections/featured?token={token}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let requests = fixture.requests.lock().unwrap();
+    let request = &requests[0];
+    assert_eq!(request.page.as_ref().unwrap().page_type, "collection");
+    let route = &request.data.as_ref().unwrap()["context"]["route"];
+    assert_eq!(route["kind"], "collection");
+    assert_eq!(route["handle"], "featured");
+    assert_eq!(route["resource"]["collection"]["title"], "Featured");
+    assert_eq!(route["resource"]["products"][0]["title"], "Hoodie");
 }
 
 #[tokio::test]

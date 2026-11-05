@@ -145,7 +145,10 @@ Themes may also declare dynamic routes in `theme.json`, for example
 A published page whose `page_type` matches the route kind is used as the
 template; the host resolves the referenced record and exposes it to the theme as
 `data.context.route`. The sitemap only advertises those URLs when the route and
-a published template exist.
+a published template exist. Draft previews follow the same matching: the
+preview path selects the handle, an optional `preview_handle` query parameter
+overrides it, and otherwise the first published record of the template's kind
+is used.
 
 Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
 

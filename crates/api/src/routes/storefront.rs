@@ -345,16 +345,16 @@ async fn load_storefront_page(content: &ContentService, path: &str) -> Option<Pa
 }
 
 /// A dynamic theme route matched from the active manifest.
-struct MatchedRoute {
-    kind: String,
-    handle: String,
+pub(crate) struct MatchedRoute {
+    pub(crate) kind: String,
+    pub(crate) handle: String,
 }
 
 /// Matches a request path against the theme's declared dynamic routes.
 ///
 /// A route pattern contains exactly one `{handle}` placeholder. The most
 /// specific static prefix wins when patterns overlap.
-fn match_theme_route(
+pub(crate) fn match_theme_route(
     routes: &std::collections::BTreeMap<String, String>,
     path: &str,
 ) -> Option<MatchedRoute> {

@@ -34,6 +34,7 @@ import { BlockFields } from "@/components/theme-editor/field-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -139,8 +140,10 @@ export function PageEditorPage() {
   );
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewOrigin, setPreviewOrigin] = useState<string | null>(null);
   const [previewToken, setPreviewToken] = useState<PreviewTokenResponse | null>(null);
+  const [previewHandle, setPreviewHandle] = useState("");
+  const [previewHandleDraft, setPreviewHandleDraft] = useState("");
 
   const loader = useCallback(
     async (signal: AbortSignal): Promise<PageEditorData> => {
@@ -211,6 +214,11 @@ export function PageEditorPage() {
   }, [dirty]);
 
   const page = data?.page ?? null;
+  const previewRoutePattern = data?.activeTheme?.manifest.routes?.[page?.page_type ?? ""] ?? null;
+  const previewSrc =
+    previewOrigin && previewToken && page
+      ? `${previewOrigin}/preview${previewPathFor(previewHandle, page.handle, previewRoutePattern)}?token=${encodeURIComponent(previewToken.token)}`
+      : null;
 
   /** Replaces the block list of one owner (`content` or a zone name). */
   const updateBlocks = (owner: string, update: (blocks: PageBlock[]) => PageBlock[]) => {
@@ -223,9 +231,6 @@ export function PageEditorPage() {
       return { ...current, zones: nextZones };
     });
   };
-
-  const blocksFor = (owner: string): PageBlock[] =>
-    owner === "content" ? content : (body.zones?.[owner] ?? []);
 
   /** Block identifiers are unique across content and every zone. */
   const allBlockIds = (): Set<string> => {
@@ -408,12 +413,12 @@ export function PageEditorPage() {
       // Render the preview from the storefront origin so relative theme assets
       // and storefront API calls resolve against the store rather than the
       // admin host. Fall back to the API origin when no domain is configured.
-      const previewOrigin = store?.primary_domain
+      const origin = store?.primary_domain
         ? `${window.location.protocol}//${store.primary_domain}`
         : API_BASE_URL;
-      const url = `${previewOrigin}/preview/${encodeURIComponent(page.handle)}?token=${encodeURIComponent(token.token)}`;
       setPreviewToken(token);
-      setPreviewUrl(url);
+      setPreviewOrigin(origin);
+      setPreviewHandleDraft(previewHandle);
       setPreviewOpen(true);
     } catch (cause) {
       toast.error(
@@ -432,7 +437,7 @@ export function PageEditorPage() {
       return;
     }
     setPreviewOpen(false);
-    setPreviewUrl(null);
+    setPreviewOrigin(null);
     const token = previewToken;
     setPreviewToken(null);
     if (token && mode !== "demo" && client) {
@@ -821,11 +826,35 @@ export function PageEditorPage() {
               this dialog closes.
             </DialogDescription>
           </DialogHeader>
-          {previewUrl ? (
+          {previewSrc ? (
             <div className="space-y-3">
+              {previewRoutePattern ? (
+                <form
+                  className="flex flex-wrap items-center gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    setPreviewHandle(previewHandleDraft.trim());
+                  }}
+                >
+                  <label htmlFor="preview-handle" className="text-[11.5px] text-muted-foreground">
+                    Preview handle
+                  </label>
+                  <Input
+                    id="preview-handle"
+                    value={previewHandleDraft}
+                    onChange={(event) => setPreviewHandleDraft(event.target.value)}
+                    placeholder="first published item"
+                    className="h-8 max-w-56"
+                  />
+                  <Button type="submit" variant="outline" size="sm">
+                    Apply
+                  </Button>
+                  <span className="font-mono text-[10px] text-faint">{previewRoutePattern}</span>
+                </form>
+              ) : null}
               <iframe
                 title={`Preview of ${page.title}`}
-                src={previewUrl}
+                src={previewSrc}
                 className="h-[68vh] w-full rounded-lg border border-border bg-white"
                 sandbox="allow-scripts allow-same-origin allow-forms"
               />
@@ -837,7 +866,7 @@ export function PageEditorPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => window.open(previewUrl, "_blank", "noopener,noreferrer")}
+                  onClick={() => window.open(previewSrc, "_blank", "noopener,noreferrer")}
                 >
                   <Eye className="size-3.5" aria-hidden="true" />
                   Open in new tab
@@ -858,4 +887,19 @@ export function PageEditorPage() {
       </Dialog>
     </div>
   );
+}
+
+/**
+ * Builds the storefront path for a draft preview.
+ *
+ * Dynamic route templates use their declared pattern when a handle is
+ * supplied; otherwise the server auto-selects the first published record and
+ * the page handle is kept as a harmless fallback path.
+ */
+function previewPathFor(handle: string, pageHandle: string, routePattern: string | null): string {
+  const trimmed = handle.trim();
+  if (routePattern && trimmed) {
+    return routePattern.replace("{handle}", encodeURIComponent(trimmed));
+  }
+  return `/${encodeURIComponent(pageHandle)}`;
 }
