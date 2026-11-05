@@ -171,6 +171,78 @@ impl StorefrontDataResolver {
             .collect())
     }
 
+    /// Resolves the resource addressed by a dynamic theme route.
+    ///
+    /// Returns `None` when the resource is missing or unpublished, so the
+    /// storefront can fall through to the theme's own not-found rendering.
+    pub async fn resolve_route(
+        &self,
+        db: &StoreDatabase,
+        kind: &str,
+        handle: &str,
+        context: &DataResolutionContext,
+    ) -> Result<Option<Value>, AppError> {
+        match kind {
+            "product" => {
+                let channels = channel_filter(context).unwrap_or_default();
+                let product = match CatalogService::new(db.clone())
+                    .get_published_by_handle_in_channels(handle, &channels)
+                    .await
+                {
+                    Ok(product) => product,
+                    Err(error) if error.is_not_found() => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                let card = build_product_cards(db, std::slice::from_ref(&product), context)
+                    .await?
+                    .into_iter()
+                    .next();
+                Ok(Some(json!({
+                    "product": card,
+                    "subtitle": product.subtitle,
+                    "description": product.description,
+                    "images": product.images,
+                })))
+            }
+            "collection" => {
+                let collection = match CatalogService::new(db.clone())
+                    .get_published_collection_by_handle(handle)
+                    .await
+                {
+                    Ok(collection) => collection,
+                    Err(error) if error.is_not_found() => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                let products = CatalogService::new(db.clone())
+                    .list_products(
+                        ProductFilter {
+                            status: Some(ProductStatus::Active),
+                            collection_id: Some(collection.id.clone()),
+                            sales_channel_ids: channel_filter(context),
+                            include_deleted: false,
+                            ..ProductFilter::default()
+                        },
+                        Pagination {
+                            limit: i64::from(DEFAULT_BINDING_LIMIT),
+                            offset: 0,
+                        },
+                    )
+                    .await?;
+                let cards = build_product_cards(db, &products.data, context).await?;
+                Ok(Some(json!({
+                    "collection": {
+                        "id": collection.id,
+                        "title": collection.title,
+                        "handle": collection.handle,
+                        "description": collection.description,
+                    },
+                    "products": cards,
+                })))
+            }
+            _ => Ok(None),
+        }
+    }
+
     async fn resolve_binding(
         &self,
         db: &StoreDatabase,

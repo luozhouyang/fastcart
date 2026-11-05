@@ -835,6 +835,9 @@ pub struct ThemeManifestDto {
     /// Optional platform contracts and capabilities the theme depends on.
     #[serde(default)]
     pub requires: Option<ThemeRequirementsDto>,
+    /// Optional dynamic routes keyed by template page type.
+    #[serde(default)]
+    pub routes: std::collections::BTreeMap<String, String>,
 }
 
 impl From<ThemeManifest> for ThemeManifestDto {
@@ -849,6 +852,7 @@ impl From<ThemeManifest> for ThemeManifestDto {
             assets_manifest: manifest.assets_manifest,
             editor: manifest.editor.map(ThemeEditorRefDto::from),
             requires: manifest.requires.map(ThemeRequirementsDto::from),
+            routes: manifest.routes,
         }
     }
 }
@@ -865,6 +869,7 @@ impl From<ThemeManifestDto> for ThemeManifest {
             assets_manifest: manifest.assets_manifest,
             editor: manifest.editor.map(ThemeEditorRef::from),
             requires: manifest.requires.map(ThemeRequirements::from),
+            routes: manifest.routes,
         }
     }
 }

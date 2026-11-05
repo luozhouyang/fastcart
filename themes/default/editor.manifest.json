@@ -15,7 +15,7 @@
     },
     "commerce": {
       "title": "Commerce",
-      "components": ["ProductGrid"]
+      "components": ["ProductGrid", "ProductDetail", "CollectionDetail"]
     }
   },
   "components": {
@@ -233,6 +233,44 @@
       "slots": [],
       "description": "A responsive grid of products from a collection or product list binding.",
       "icon": "grid"
+    },
+    "ProductDetail": {
+      "title": "Product detail",
+      "category": "commerce",
+      "description": "Renders the product resolved from the current /products/{handle} route.",
+      "fields": {
+        "emptyText": {
+          "type": "text",
+          "label": "Empty text",
+          "default": "Product not found."
+        }
+      },
+      "defaultProps": {
+        "emptyText": "Product not found."
+      },
+      "slots": [],
+      "icon": "package"
+    },
+    "CollectionDetail": {
+      "title": "Collection detail",
+      "category": "commerce",
+      "description": "Renders the collection resolved from the current /collections/{handle} route and its products.",
+      "fields": {
+        "title": {
+          "type": "text",
+          "label": "Title override"
+        },
+        "emptyText": {
+          "type": "text",
+          "label": "Empty text",
+          "default": "Collection not found."
+        }
+      },
+      "defaultProps": {
+        "emptyText": "Collection not found."
+      },
+      "slots": [],
+      "icon": "layers"
     }
   },
   "zones": {

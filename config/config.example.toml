@@ -55,6 +55,9 @@ node_url = "http://127.0.0.1:8788"
 # node_secret = "shared-sidecar-secret"
 # Enables the secret-authenticated /internal/storefront HTTP surface for the sidecar.
 # internal_fetch_secret = "long-random-internal-secret"
+# Signs theme capability grants; capability endpoints sharing this secret can
+# verify tokens without a database lookup.
+# capability_secret = "long-random-capability-secret"
 
 [jobs]
 enabled = true

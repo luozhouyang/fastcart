@@ -1,6 +1,8 @@
+import { CollectionDetail } from "./components/collection-detail";
 import { ContactForm } from "./components/contact-form";
 import { Heading } from "./components/heading";
 import { Image } from "./components/image";
+import { ProductDetail } from "./components/product-detail";
 import { ProductGrid } from "./components/product-grid";
 import { components as registry } from "./components/registry";
 import { Text } from "./components/text";
@@ -19,6 +21,8 @@ export const components = {
   Heading,
   Image,
   ProductGrid,
+  ProductDetail,
+  CollectionDetail,
 };
 
 export const definitions = registry;

@@ -44,6 +44,11 @@ pub struct ApiConfig {
     /// When absent, internal routes are not mounted over HTTP; the in-process
     /// bridge remains the only way to reach them.
     pub internal_fetch_secret: Option<String>,
+    /// Optional secret used to sign theme capability grants.
+    ///
+    /// When set, grants carry a signed payload a capability endpoint sharing
+    /// the secret can verify statelessly. Unset mints opaque random tokens.
+    pub capability_secret: Option<String>,
     /// Optional signing secret for draft page preview tokens.
     ///
     /// When absent, preview token issuance and the preview render surface are
@@ -95,6 +100,7 @@ impl Default for ApiConfig {
             stripe_webhook_secret: None,
             storefront_timeout_ms: 10_000,
             internal_fetch_secret: None,
+            capability_secret: None,
             preview_secret: None,
             preview_frame_ancestors: Vec::new(),
             themes_root: PathBuf::from("./themes"),

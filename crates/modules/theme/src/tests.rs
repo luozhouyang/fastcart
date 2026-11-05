@@ -41,6 +41,7 @@ fn manifest(id: &str) -> ThemeManifest {
         assets_manifest: Some("assets.json".to_owned()),
         editor: None,
         requires: None,
+        routes: Default::default(),
     }
 }
 
@@ -570,6 +571,17 @@ async fn rollback_returns_to_the_previous_theme() {
     let forward = service.rollback().await.unwrap();
     assert_eq!(forward.id, second.id);
     assert!(forward.is_active);
+
+    let history = service.activation_history(10).await.unwrap();
+    assert_eq!(history.len(), 4);
+    assert_eq!(history[0].theme_id, second.id);
+    assert_eq!(history[0].manifest_id.as_deref(), Some("second"));
+    assert_eq!(history[0].previous_theme_id.as_ref(), Some(&first.id));
+    assert_eq!(history[1].theme_id, first.id);
+    assert_eq!(history[2].theme_id, second.id);
+    assert_eq!(history[2].previous_theme_id.as_ref(), Some(&first.id));
+    assert_eq!(history[3].theme_id, first.id);
+    assert!(history[3].previous_theme_id.is_none());
 }
 
 #[tokio::test]

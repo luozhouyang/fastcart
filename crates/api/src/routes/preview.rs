@@ -322,7 +322,7 @@ pub(crate) async fn render(
                 .map(|value| (name.as_str().to_owned(), value.to_owned()))
         })
         .collect();
-    let capabilities = capability_grants(&database, &theme).await;
+    let capabilities = capability_grants(&context, &store.id, &database, &theme).await;
     let runtime_request = RuntimeRequest {
         request_id: request_id.clone(),
         store: StoreContext {

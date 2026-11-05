@@ -19,7 +19,8 @@ import { timingSafeEqual } from "node:crypto";
 import { createReadStream, promises as fs } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(HERE, "..");
@@ -32,11 +33,10 @@ const SECRET = process.env.SIDECAR_SECRET?.trim() || null;
 
 const MAX_PAYLOAD_BYTES = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
-const MODULE_CACHE_LIMIT = 64;
-const ASSET_CACHE_CONTROL = "public, max-age=3600";
-
-/** Dynamic theme modules keyed by absolute path + mtime. */
-const moduleCache = new Map();
+const ASSET_CACHE_CONTROL = "public, max-age=300";
+const IMMUTABLE_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const RENDER_WORKER = path.join(HERE, "render-worker.mjs");
+const MAX_RENDER_TIMEOUT_MS = 60_000;
 
 const CONTENT_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -152,53 +152,87 @@ async function renderTheme(payload) {
     throw new HttpError(400, "INVALID_THEME", "theme entry is not a file");
   }
 
-  const module = await loadThemeModule(entryFile, stat);
-  const render = renderFunction(module);
-  if (!render) {
-    throw new HttpError(500, "INVALID_THEME", "theme entry does not export a render function");
-  }
-
-  let result;
-  try {
-    result = await render(payload);
-  } catch (error) {
-    // Keep the stack in the sidecar log only; the host gets a stable error.
-    console.error(`theme render failed for ${bundlePath}/${entry}:`, error);
-    throw new HttpError(500, "RENDER_FAILED", "theme render failed");
-  }
+  const timeoutMs = renderTimeout(payload);
+  const result = await runRenderWorker(entryFile, stat, payload, timeoutMs);
   return encodeResult(result);
 }
 
-async function loadThemeModule(entryFile, stat) {
-  const key = `${entryFile}@${stat.mtimeMs}`;
-  const cached = moduleCache.get(key);
-  if (cached !== undefined) {
-    return cached;
+/** Clamps the host-supplied render timeout to a bounded worker deadline. */
+function renderTimeout(payload) {
+  const requested = Number(payload.timeout_ms);
+  if (!Number.isFinite(requested)) {
+    return 10_000;
   }
-  const url = `${pathToFileURL(entryFile).href}?mtime=${encodeURIComponent(String(stat.mtimeMs))}`;
-  const module = await import(url);
-  moduleCache.set(key, module);
-  while (moduleCache.size > MODULE_CACHE_LIMIT) {
-    const oldest = moduleCache.keys().next().value;
-    if (oldest === undefined) {
-      break;
-    }
-    moduleCache.delete(oldest);
-  }
-  return module;
+  return Math.min(Math.max(Math.trunc(requested), 1), MAX_RENDER_TIMEOUT_MS);
 }
 
-function renderFunction(module) {
-  if (typeof module?.render === "function") {
-    return module.render;
+/**
+ * Runs one theme render in an isolated worker thread.
+ *
+ * The worker is terminated when the deadline passes, so a synchronous loop or
+ * an unbounded allocation cannot stall the shared event loop.
+ */
+async function runRenderWorker(entryFile, stat, payload, timeoutMs) {
+  const worker = new Worker(RENDER_WORKER, {
+    workerData: { entryFile, version: stat.mtimeMs, payload },
+    resourceLimits: {
+      maxOldGenerationSizeMb: 256,
+      maxYoungGenerationSizeMb: 64,
+      stackSizeMb: 4,
+    },
+  });
+  try {
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (callback, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        callback(value);
+      };
+      let timedOut = false;
+      const timeoutError = () => new HttpError(504, "RENDER_TIMEOUT", "theme render timed out");
+      const timer = setTimeout(() => {
+        timedOut = true;
+        worker.terminate().finally(() => settle(reject, timeoutError()));
+      }, timeoutMs);
+      worker.once("message", (message) => {
+        if (!isRecord(message)) {
+          settle(
+            reject,
+            new HttpError(502, "INVALID_RESULT", "theme worker returned an invalid message"),
+          );
+          return;
+        }
+        if (message.ok) {
+          settle(resolve, message.result);
+        } else {
+          console.error(
+            `theme render failed for ${entryFile}: ${message.message ?? "unknown error"}`,
+          );
+          settle(reject, new HttpError(500, "RENDER_FAILED", "theme render failed"));
+        }
+      });
+      worker.once("error", (error) => {
+        console.error(`theme worker failed for ${entryFile}:`, error);
+        settle(reject, new HttpError(500, "RENDER_FAILED", "theme render failed"));
+      });
+      worker.once("exit", (code) => {
+        if (!settled) {
+          settle(
+            reject,
+            timedOut
+              ? timeoutError()
+              : new HttpError(500, "RENDER_FAILED", `theme worker exited (${code})`),
+          );
+        }
+      });
+    });
+  } finally {
+    worker.terminate().catch(() => {});
   }
-  if (typeof module?.default?.render === "function") {
-    return module.default.render;
-  }
-  if (typeof module?.default === "function") {
-    return module.default;
-  }
-  return null;
 }
 
 function encodeResult(result) {
@@ -301,7 +335,11 @@ async function serveAsset(request, response, url) {
   response.statusCode = 200;
   response.setHeader("content-type", contentType);
   response.setHeader("content-length", String(stat.size));
-  response.setHeader("cache-control", ASSET_CACHE_CONTROL);
+  const immutable = relative.startsWith("chunks/") || relative.startsWith("assets/");
+  response.setHeader(
+    "cache-control",
+    immutable ? IMMUTABLE_ASSET_CACHE_CONTROL : ASSET_CACHE_CONTROL,
+  );
   response.setHeader("x-content-type-options", "nosniff");
   if (request.method === "HEAD") {
     response.end();

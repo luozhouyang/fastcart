@@ -1,4 +1,4 @@
-import type { PageBlock, PageBody, RenderMode } from "@fastcart/theme-sdk";
+import type { PageBlock, PageBody, RenderMode, RenderRouteContext } from "@fastcart/theme-sdk";
 import type { ReactNode } from "react";
 
 import { ThemeProvider } from "../context";
@@ -37,12 +37,14 @@ export function PageRenderer({
   const beforeZones = entries.filter(([name]) => name !== "footer");
   const afterZones = entries.filter(([name]) => name === "footer");
 
+  const route = extractRoute(data);
   return (
     <ThemeProvider
       apiBaseUrl={apiBaseUrl}
       assetsBaseUrl={assetsBaseUrl}
       mode={mode}
       settings={settings}
+      route={route}
     >
       <div className="fc-page" data-theme="default">
         {beforeZones.map(([name, blocks]) => (
@@ -136,6 +138,17 @@ function mergeBlockData(
   const id = typeof props.id === "string" ? props.id : undefined;
   const resolved = id && isRecord(data) ? data[id] : undefined;
   return isRecord(resolved) ? { ...props, ...resolved } : { ...props };
+}
+
+/** Reads the host-resolved dynamic route from the reserved context entry. */
+function extractRoute(data: Record<string, unknown> | null | undefined): RenderRouteContext | null {
+  if (!isRecord(data) || !isRecord(data.context) || !isRecord(data.context.route)) {
+    return null;
+  }
+  const route = data.context.route;
+  return typeof route.kind === "string" && typeof route.handle === "string"
+    ? (route as unknown as RenderRouteContext)
+    : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

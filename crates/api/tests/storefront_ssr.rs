@@ -9,6 +9,7 @@ use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::Metadata;
 use fastcart_module_cart::{CartService, CreateCartInput};
+use fastcart_module_catalog::{CatalogService, CreateCollectionInput, CreateProductInput};
 use fastcart_module_content::{ContentService, CreatePageInput, UpdatePageInput};
 use fastcart_module_customer::{CustomerService, RegisterCustomerInput};
 use fastcart_module_theme::{RegisterThemeInput, ThemeService};
@@ -117,6 +118,7 @@ async fn fixture(
                     schema_version: 1,
                 }),
                 requires: None,
+                routes: Default::default(),
             },
             bundle_path: "themes/default".to_owned(),
             settings_schema: None,
@@ -210,6 +212,7 @@ async fn provision_with_theme(
                     schema_version: 1,
                 }),
                 requires: None,
+                routes: Default::default(),
             },
             bundle_path: "themes/default".to_owned(),
             settings_schema: None,
@@ -422,6 +425,17 @@ async fn discovery_files_work_without_a_storefront_runtime() {
     assert_eq!(status, StatusCode::OK, "{sitemap}");
     let (status, _) = send(&fixture.app, "/", "shop.example.com", &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A TLS-terminating proxy can declare the public scheme.
+    let (status, robots) = send(
+        &fixture.app,
+        "/robots.txt",
+        "shop.example.com",
+        &[("x-forwarded-proto", "http")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{robots}");
+    assert!(robots.contains("http://shop.example.com/sitemap.xml"));
 }
 
 #[tokio::test]
@@ -465,6 +479,7 @@ async fn serves_theme_client_assets_and_rejects_traversal() {
                 assets_manifest: None,
                 editor: None,
                 requires: None,
+                routes: Default::default(),
             },
             bundle_path: "default".to_owned(),
             settings_schema: None,
@@ -517,6 +532,219 @@ async fn serves_theme_client_assets_and_rejects_traversal() {
         let (status, _) = send(&app, path, "shop.example.com", &[]).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+#[tokio::test]
+async fn renders_theme_dynamic_routes_from_published_templates() {
+    let dir = tempfile::tempdir().unwrap();
+    let platform = PlatformStore::in_memory().await.unwrap();
+    let databases = Arc::new(StoreDatabaseManager::new(
+        dir.path().join("stores"),
+        DatabaseOptions::default().with_max_connections(2),
+    ));
+    let store = platform
+        .create_store(CreateStoreInput::new("Demo", "demo", "shop.example.com"))
+        .await
+        .unwrap();
+    StoreProvisioningService::new(platform.clone(), databases.clone())
+        .provision(&store.id, None)
+        .await
+        .unwrap();
+    let database = databases.database(&store.id).await.unwrap();
+    let themes = ThemeService::new(database.clone());
+    let theme = themes
+        .register(RegisterThemeInput {
+            manifest: ThemeManifest {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                version: "1.0.0".to_owned(),
+                runtime: "node".to_owned(),
+                entry: "dist/server.js".to_owned(),
+                settings_schema: None,
+                assets_manifest: None,
+                editor: Some(ThemeEditorRef {
+                    entry: "editor.js".to_owned(),
+                    manifest: "editor.manifest.json".to_owned(),
+                    schema_version: 1,
+                }),
+                requires: None,
+                routes: [
+                    ("product".to_owned(), "/products/{handle}".to_owned()),
+                    ("collection".to_owned(), "/collections/{handle}".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            bundle_path: "default".to_owned(),
+            settings_schema: None,
+            assets_manifest: None,
+            settings: None,
+            editor_manifest: Some(serde_json::json!({
+                "schema_version": 1,
+                "categories": {
+                    "commerce": {
+                        "title": "Commerce",
+                        "components": ["ProductDetail", "CollectionDetail"]
+                    }
+                },
+                "components": {
+                    "CollectionDetail": {
+                        "title": "Collection detail",
+                        "category": "commerce",
+                        "fields": {},
+                        "defaultProps": {},
+                        "slots": []
+                    },
+                    "ProductDetail": {
+                        "title": "Product detail",
+                        "category": "commerce",
+                        "fields": {
+                            "emptyText": { "type": "text" }
+                        },
+                        "defaultProps": {},
+                        "slots": []
+                    }
+                }
+            })),
+        })
+        .await
+        .unwrap();
+    themes.activate(&theme.id).await.unwrap();
+
+    let content = ContentService::new(database.clone());
+    let template = content
+        .create_page(CreatePageInput {
+            title: "Product".to_owned(),
+            handle: Some("product-template".to_owned()),
+            page_type: Some("product".to_owned()),
+            body: serde_json::json!({
+                "schema_version": 1,
+                "content": [{
+                    "type": "ProductDetail",
+                    "props": { "id": "pd-1" }
+                }],
+                "root": { "props": {} },
+                "zones": {}
+            }),
+            seo: serde_json::json!({}),
+            metadata: Metadata::empty(),
+        })
+        .await
+        .unwrap();
+    content.publish_page(&template.id).await.unwrap();
+
+    let catalog = CatalogService::new(database.clone());
+    let product = catalog
+        .create_product(CreateProductInput {
+            title: "Hoodie".to_owned(),
+            handle: Some("hoodie".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog.publish_product(&product.id).await.unwrap();
+
+    let collection = catalog
+        .create_collection(CreateCollectionInput {
+            title: "Featured".to_owned(),
+            handle: Some("featured".to_owned()),
+            is_published: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog
+        .add_product_to_collection(&product.id, &collection.id, 0)
+        .await
+        .unwrap();
+
+    let collection_template = content
+        .create_page(CreatePageInput {
+            title: "Collection".to_owned(),
+            handle: Some("collection-template".to_owned()),
+            page_type: Some("collection".to_owned()),
+            body: serde_json::json!({
+                "schema_version": 1,
+                "content": [{
+                    "type": "CollectionDetail",
+                    "props": { "id": "cd-1" }
+                }],
+                "root": { "props": {} },
+                "zones": {}
+            }),
+            seo: serde_json::json!({}),
+            metadata: Metadata::empty(),
+        })
+        .await
+        .unwrap();
+    content.publish_page(&collection_template.id).await.unwrap();
+
+    let (runtime, requests) = RecordingRuntime::new();
+    let app = build_router(Arc::new(
+        AppContext::new(
+            ApiConfig {
+                cookie_secure: false,
+                backup_dir: dir.path().join("backups"),
+                ..ApiConfig::default()
+            },
+            platform,
+            databases,
+            StoreCache::default_capacity(),
+        )
+        .with_storefront_runtime(Some(Arc::new(runtime))),
+    ));
+
+    let (status, body) = send(&app, "/products/hoodie", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let requests = requests.lock().unwrap();
+        let request = &requests[0];
+        let page = request.page.as_ref().expect("route template page");
+        assert_eq!(page.page_type, "product");
+        assert_eq!(page.handle, "product-template");
+        let data = request.data.as_ref().expect("data bag");
+        let route = &data["context"]["route"];
+        assert_eq!(route["kind"], "product");
+        assert_eq!(route["handle"], "hoodie");
+        assert_eq!(route["resource"]["product"]["title"], "Hoodie");
+    }
+
+    let (status, body) = send(&app, "/collections/featured", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let requests = requests.lock().unwrap();
+        let request = &requests[1];
+        let page = request.page.as_ref().expect("collection template page");
+        assert_eq!(page.page_type, "collection");
+        let data = request.data.as_ref().expect("data bag");
+        let route = &data["context"]["route"];
+        assert_eq!(route["kind"], "collection");
+        assert_eq!(route["resource"]["collection"]["title"], "Featured");
+        assert_eq!(
+            route["resource"]["products"][0]["title"], "Hoodie",
+            "collection products are resolved for the route"
+        );
+    }
+
+    // An unknown handle resolves no route resource, so the runtime receives no
+    // page and the theme renders its own not-found document.
+    let (status, body) = send(&app, "/products/missing", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        requests.lock().unwrap()[2].page.is_none(),
+        "missing resources must not render the template"
+    );
+
+    let (status, sitemap) = send(&app, "/sitemap.xml", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{sitemap}");
+    assert!(
+        sitemap.contains("<loc>https://shop.example.com/products/hoodie</loc>"),
+        "{sitemap}"
+    );
+    assert!(
+        sitemap.contains("<loc>https://shop.example.com/collections/featured</loc>"),
+        "{sitemap}"
+    );
 }
 
 #[tokio::test]

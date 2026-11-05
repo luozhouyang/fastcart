@@ -112,6 +112,7 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_STOREFRONT_NODE_URL`, `FASTCART_STOREFRONT_NODE_SECRET` — Node sidecar endpoint and bearer secret
 - `FASTCART_THEMES_DIR` — trusted theme bundle directory (default `./themes`)
 - `FASTCART_INTERNAL_FETCH_SECRET` — mounts the secret-gated `/internal/storefront` HTTP surface
+- `FASTCART_CAPABILITY_SECRET` — signs theme capability grants so plugin endpoints can verify them
 
 Storefront SSR uses the Node sidecar (`runtime = "node"`, the default runtime).
 The embedded `v8` provider is not built yet; starting with `runtime = "v8"`

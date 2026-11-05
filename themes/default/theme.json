@@ -14,5 +14,9 @@
   "requires": {
     "data_api": 1,
     "capabilities": []
+  },
+  "routes": {
+    "product": "/products/{handle}",
+    "collection": "/collections/{handle}"
   }
 }

@@ -45,6 +45,8 @@ export interface ThemeManifest {
   assets_manifest?: string;
   editor?: ThemeEditorRef;
   requires?: ThemeRequirements;
+  /** Dynamic routes keyed by template page type. */
+  routes?: Record<string, string>;
 }
 
 export interface ThemeSettingSchema {
@@ -254,6 +256,25 @@ export interface RenderPageContext {
   title?: string;
   seo?: unknown;
   body: PageBody | unknown;
+}
+
+/**
+ * Resource resolved for a dynamic theme route.
+ *
+ * The host injects this into the reserved `context` data entry, so page
+ * components read it from the theme runtime rather than from block props.
+ */
+export interface RenderRouteContext {
+  /** Route kind declared by the theme manifest, e.g. `product`. */
+  kind: string;
+  /** Handle captured from the request path. */
+  handle: string;
+  /**
+   * Resolved resource. A product route carries `product`, `subtitle`,
+   * `description` and `images`; a collection route carries `collection` and
+   * `products`.
+   */
+  resource: Record<string, unknown>;
 }
 
 /** One plugin capability granted to this request. */

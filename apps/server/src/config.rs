@@ -204,6 +204,8 @@ pub struct StorefrontConfig {
     pub node_secret: Option<String>,
     /// Optional shared secret enabling the internal storefront HTTP surface.
     pub internal_fetch_secret: Option<String>,
+    /// Optional secret used to sign theme capability grants.
+    pub capability_secret: Option<String>,
     /// Directory containing trusted theme bundles.
     pub themes_dir: PathBuf,
 }
@@ -219,6 +221,7 @@ impl Default for StorefrontConfig {
             node_url: None,
             node_secret: None,
             internal_fetch_secret: None,
+            capability_secret: None,
             themes_dir: PathBuf::from("./themes"),
         }
     }
@@ -379,6 +382,9 @@ impl Config {
         }
         if let Ok(value) = env::var("FASTCART_INTERNAL_FETCH_SECRET") {
             self.storefront.internal_fetch_secret = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_CAPABILITY_SECRET") {
+            self.storefront.capability_secret = Some(value);
         }
         if let Ok(value) = env::var("FASTCART_THEMES_DIR") {
             self.storefront.themes_dir = PathBuf::from(value);

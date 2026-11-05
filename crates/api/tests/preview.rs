@@ -155,6 +155,7 @@ async fn fixture(preview_secret: Option<&str>) -> Fixture {
                     schema_version: 1,
                 }),
                 requires: None,
+                routes: Default::default(),
             },
             bundle_path: "themes/default".to_owned(),
             settings_schema: None,

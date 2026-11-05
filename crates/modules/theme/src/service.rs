@@ -11,8 +11,9 @@ use serde_json::Value;
 use sqlx::{FromRow, Sqlite, Transaction};
 
 use crate::domain::{
-    RegisterThemeInput, Theme, ThemeCapabilityBinding, ThemeCapabilityBindingInput,
-    ThemeSettingsRevision, ThemeSettingsRevisionStatus, UpdateThemeSettingsInput,
+    RegisterThemeInput, Theme, ThemeActivationRecord, ThemeCapabilityBinding,
+    ThemeCapabilityBindingInput, ThemeSettingsRevision, ThemeSettingsRevisionStatus,
+    UpdateThemeSettingsInput,
 };
 
 const THEME_COLUMNS: &str = "id, manifest, bundle_path, settings_schema, settings, \
@@ -703,6 +704,51 @@ impl ThemeService {
 
         tx.commit().await.map_err(database_error)?;
         self.get(id).await
+    }
+
+    /// Lists recent activations, newest first, with theme metadata.
+    pub async fn activation_history(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ThemeActivationRecord>, AppError> {
+        let limit = limit.clamp(1, Pagination::MAX_LIMIT);
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                i64,
+            ),
+        >(
+            "SELECT a.id, a.theme_id, t.manifest_id, t.name, t.version, \
+             a.previous_theme_id, a.created_at \
+             FROM theme_activations a LEFT JOIN themes t ON t.id = a.theme_id \
+             ORDER BY a.created_at DESC, a.id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, theme_id, manifest_id, theme_name, theme_version, previous, created_at)| {
+                    ThemeActivationRecord {
+                        id: ThemeActivationId::from_string(id),
+                        theme_id: ThemeId::from_string(theme_id),
+                        manifest_id,
+                        theme_name,
+                        theme_version,
+                        previous_theme_id: previous.map(ThemeId::from_string),
+                        created_at,
+                    }
+                },
+            )
+            .collect())
     }
 
     /// Returns the theme that a rollback would activate.

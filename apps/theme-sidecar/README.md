@@ -12,8 +12,10 @@ pnpm --filter @fastcart/theme-sidecar start
 ```
 
 The sidecar does not import a theme at startup. Every `/render` request
-resolves and dynamically imports the active theme entry, caching modules by
-absolute path + mtime.
+resolves the active theme entry and renders it inside a short-lived worker
+thread with a heap cap and a hard deadline. A runaway theme is terminated
+instead of blocking other renders or `/health`; the trade-off is a small
+per-request worker startup cost.
 
 ## Environment
 

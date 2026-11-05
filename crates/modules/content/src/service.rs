@@ -370,6 +370,26 @@ impl ContentService {
         Ok(row.map(PageRow::into_published_page))
     }
 
+    /// Loads the newest published page used as a dynamic route template.
+    ///
+    /// Route templates are matched by published `page_type`, so a draft-only
+    /// classifier change cannot start serving a different template.
+    pub async fn get_published_page_by_type(&self, page_type: &str) -> Result<Page, AppError> {
+        let sql = format!(
+            "SELECT {PAGE_COLUMNS} FROM pages \
+             WHERE status = 'published' AND deleted_at IS NULL \
+               AND COALESCE(published_page_type, page_type) = ? \
+             ORDER BY published_at DESC, id ASC LIMIT 1"
+        );
+        sqlx::query_as::<_, PageRow>(&sql)
+            .bind(page_type)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("page type", page_type))
+            .map(PageRow::into_published_page)
+    }
+
     /// Lists pages with an optional status filter and pagination.
     pub async fn list_pages(
         &self,

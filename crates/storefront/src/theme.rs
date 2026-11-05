@@ -36,6 +36,13 @@ pub struct ThemeManifest {
     /// Optional platform contracts and capabilities the theme depends on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<ThemeRequirements>,
+    /// Optional dynamic routes keyed by template page type.
+    ///
+    /// A pattern such as `/products/{handle}` matches one storefront path and
+    /// renders the published page whose `page_type` equals the map key. The
+    /// captured handle resolves a product or collection for the request.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub routes: std::collections::BTreeMap<String, String>,
 }
 
 /// Bundle-relative references to the theme editor surface.
@@ -152,8 +159,36 @@ impl ThemeManifest {
                 }
             }
         }
+        for (kind, pattern) in &self.routes {
+            if !matches!(kind.as_str(), "product" | "collection") {
+                return Err(StorefrontError::Invalid(format!(
+                    "unsupported theme route kind: {kind}"
+                )));
+            }
+            validate_route_pattern(pattern)?;
+        }
         Ok(())
     }
+}
+
+/// Validates one dynamic route pattern such as `/products/{handle}`.
+fn validate_route_pattern(pattern: &str) -> Result<(), StorefrontError> {
+    if !pattern.starts_with('/')
+        || pattern.len() > 200
+        || pattern.chars().any(char::is_whitespace)
+        || pattern.matches("{handle}").count() != 1
+    {
+        return Err(StorefrontError::Invalid(format!(
+            "invalid theme route pattern: {pattern}"
+        )));
+    }
+    let stripped = pattern.replace("{handle}", "handle");
+    if stripped.contains('{') || stripped.contains('}') {
+        return Err(StorefrontError::Invalid(format!(
+            "invalid theme route pattern: {pattern}"
+        )));
+    }
+    Ok(())
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -189,6 +224,7 @@ mod tests {
             assets_manifest: Some("assets.json".to_owned()),
             editor: None,
             requires: None,
+            routes: Default::default(),
         }
     }
 
@@ -221,6 +257,28 @@ mod tests {
         let mut manifest = theme();
         manifest.assets_manifest = Some("/absolute.json".to_owned());
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn dynamic_routes_are_validated() {
+        let mut manifest = theme();
+        manifest
+            .routes
+            .insert("product".to_owned(), "/products/{handle}".to_owned());
+        manifest.validate().unwrap();
+
+        for (kind, pattern) in [
+            ("product", "/products/hoodie"),
+            ("product", "products/{handle}"),
+            ("product", "/products/{slug}"),
+            ("product", "/products/{handle}/{handle}"),
+            ("unknown", "/things/{handle}"),
+            ("product", "/products/{handle} extra"),
+        ] {
+            let mut manifest = theme();
+            manifest.routes.insert(kind.to_owned(), pattern.to_owned());
+            assert!(manifest.validate().is_err(), "{kind} {pattern}");
+        }
     }
 
     #[test]

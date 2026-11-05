@@ -128,10 +128,14 @@ async fn get_theme_asset(
         CONTENT_LENGTH,
         HeaderValue::from_str(&len.to_string()).unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
-    headers.insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600"),
-    );
+    // Vite emits content-hashed files under `chunks/` and `assets/`, so those
+    // can be cached forever. Entry files are stable names and must revalidate.
+    let cache_control = if path.starts_with("chunks/") || path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=300"
+    };
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
     headers.insert(
         axum::http::header::HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),

@@ -84,6 +84,11 @@ impl AppState {
                 .internal_fetch_secret
                 .clone()
                 .filter(|secret| !secret.is_empty()),
+            capability_secret: config
+                .storefront
+                .capability_secret
+                .clone()
+                .filter(|secret| !secret.is_empty()),
             preview_secret: config
                 .server
                 .preview_secret

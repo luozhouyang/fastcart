@@ -1881,6 +1881,11 @@ export interface ThemeManifest {
   editor?: ThemeEditorRef | null;
   /** Optional platform contracts and capabilities the theme depends on. */
   requires?: ThemeRequirements | null;
+  /**
+   * Dynamic routes keyed by template page type, for example
+   * `{ "product": "/products/{handle}", "collection": "/collections/{handle}" }`.
+   */
+  routes?: Record<string, string> | null;
 }
 
 export interface Theme {
@@ -2033,6 +2038,17 @@ export interface ThemeEditorManifest {
 export type ThemeSettingsRevisionStatus = "draft" | "published";
 /** @deprecated Use {@link ThemeSettingsRevisionStatus}. */
 export type ThemeSettingsRevisionKind = ThemeSettingsRevisionStatus;
+
+/** One recorded theme activation. */
+export interface ThemeActivation {
+  id: string;
+  theme_id: string;
+  manifest_id?: string | null;
+  theme_name?: string | null;
+  theme_version?: string | null;
+  previous_theme_id?: string | null;
+  created_at: Timestamp;
+}
 
 export interface ThemeSettingsRevision {
   id: string;

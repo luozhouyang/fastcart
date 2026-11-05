@@ -1071,6 +1071,23 @@ impl CatalogService {
         collection_from_row(&row)
     }
 
+    /// Loads a published, non-deleted collection by handle for storefronts.
+    pub async fn get_published_collection_by_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Collection, AppError> {
+        let row = sqlx::query(
+            "SELECT * FROM collections \
+             WHERE handle = ? AND deleted_at IS NULL AND is_published = 1",
+        )
+        .bind(handle)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| AppError::not_found("published collection handle", handle))?;
+        collection_from_row(&row)
+    }
+
     /// Partially updates a collection.
     pub async fn update_collection(
         &self,
@@ -1232,6 +1249,54 @@ impl CatalogService {
             collections.push(collection_from_row(row)?);
         }
         Ok(PageResult::new(collections, count, pagination))
+    }
+
+    /// Lists handles of active, non-deleted products for sitemaps.
+    pub async fn list_published_product_handles(
+        &self,
+        pagination: Pagination,
+    ) -> Result<PageResult<String>, AppError> {
+        let pagination = checked_pagination(pagination)?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM products WHERE deleted_at IS NULL AND status = 'active'",
+        )
+        .fetch_one(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let handles = sqlx::query_scalar(
+            "SELECT handle FROM products WHERE deleted_at IS NULL AND status = 'active' \
+             ORDER BY handle ASC, id ASC LIMIT ? OFFSET ?",
+        )
+        .bind(pagination.limit)
+        .bind(pagination.offset)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(PageResult::new(handles, count, pagination))
+    }
+
+    /// Lists handles of published, non-deleted collections for sitemaps.
+    pub async fn list_published_collection_handles(
+        &self,
+        pagination: Pagination,
+    ) -> Result<PageResult<String>, AppError> {
+        let pagination = checked_pagination(pagination)?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM collections WHERE deleted_at IS NULL AND is_published = 1",
+        )
+        .fetch_one(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let handles = sqlx::query_scalar(
+            "SELECT handle FROM collections WHERE deleted_at IS NULL AND is_published = 1 \
+             ORDER BY handle ASC, id ASC LIMIT ? OFFSET ?",
+        )
+        .bind(pagination.limit)
+        .bind(pagination.offset)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(PageResult::new(handles, count, pagination))
     }
 
     /// Publishes a collection.

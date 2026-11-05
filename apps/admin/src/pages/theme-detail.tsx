@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import type {
   JsonValue,
   Theme,
+  ThemeActivation,
   ThemeCapabilityBinding,
   ThemeEditorManifest,
   ThemePageValidationResult,
@@ -59,6 +60,7 @@ interface ThemeDetailData {
   editorManifest: ThemeEditorManifest | null;
   capabilities: ThemeCapabilityBinding[] | null;
   revisions: ThemeSettingsRevision[];
+  activations: ThemeActivation[];
   assetsManifest: JsonValue | null;
 }
 
@@ -93,6 +95,7 @@ export function ThemeDetailPage() {
             },
           ],
           revisions: listDefaultThemeSettingsRevisions(themeId),
+          activations: [],
           assetsManifest: theme.assets_manifest ?? null,
         };
       }
@@ -110,11 +113,18 @@ export function ThemeDetailPage() {
       const revisionsPromise: Promise<ThemeSettingsRevision[]> = client.themes.settingsRevisions
         ? client.themes.settingsRevisions(themeId, { signal }).catch(() => [])
         : Promise.resolve([]);
-      const [capabilities, revisions] = await Promise.all([capabilitiesPromise, revisionsPromise]);
+      const activationsPromise: Promise<ThemeActivation[]> = client.themes.activations
+        ? client.themes.activations({ limit: 50 }, { signal }).catch(() => [])
+        : Promise.resolve([]);
+      const [capabilities, revisions, activations] = await Promise.all([
+        capabilitiesPromise,
+        revisionsPromise,
+        activationsPromise,
+      ]);
 
       const assetsManifest: JsonValue | null = theme.assets_manifest ?? null;
 
-      return { theme, editorManifest, capabilities, revisions, assetsManifest };
+      return { theme, editorManifest, capabilities, revisions, activations, assetsManifest };
     },
     [mode, client, themeId],
   );
@@ -582,6 +592,7 @@ export function ThemeDetailPage() {
             <TabsTrigger value="manifest">Manifest</TabsTrigger>
             <TabsTrigger value="editor">Editor manifest</TabsTrigger>
             <TabsTrigger value="assets">Assets manifest</TabsTrigger>
+            <TabsTrigger value="history">Activation history</TabsTrigger>
           </TabsList>
           <TabsContent value="manifest" className="mt-3">
             <pre className="max-h-[440px] overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-ink-soft">
@@ -597,6 +608,38 @@ export function ThemeDetailPage() {
               <p className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-[12px] text-muted-foreground">
                 This theme does not expose an editor manifest.
               </p>
+            )}
+          </TabsContent>
+          <TabsContent value="history" className="mt-3">
+            {data.activations.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-[12px] text-muted-foreground">
+                No activations recorded yet.
+              </p>
+            ) : (
+              <div className="divide-y divide-border">
+                {data.activations.map((activation) => (
+                  <div
+                    key={activation.id}
+                    className="flex items-center justify-between gap-3 py-2.5"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-[12px] font-medium text-foreground">
+                        {activation.manifest_id ?? activation.theme_id}
+                        {activation.theme_version ? ` · v${activation.theme_version}` : ""}
+                      </p>
+                      <p className="truncate font-mono text-[10px] text-faint">
+                        {activation.theme_id}
+                        {activation.previous_theme_id
+                          ? ` · from ${activation.previous_theme_id}`
+                          : " · first activation"}
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-[10.5px] text-faint">
+                      {shortDate(fromUnixSeconds(activation.created_at))}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
           </TabsContent>
           <TabsContent value="assets" className="mt-3">

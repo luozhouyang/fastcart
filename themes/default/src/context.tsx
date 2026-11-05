@@ -1,6 +1,6 @@
 import { createContext, useContext, type ReactNode } from "react";
 
-import type { RenderMode } from "@fastcart/theme-sdk";
+import type { RenderMode, RenderRouteContext } from "@fastcart/theme-sdk";
 
 /**
  * Runtime values shared by server rendering and client hydration.
@@ -15,6 +15,8 @@ export interface ThemeRuntimeContextValue {
   assetsBaseUrl?: string;
   mode?: RenderMode;
   settings: Record<string, unknown>;
+  /** Resource resolved for a dynamic route such as a product page. */
+  route?: RenderRouteContext;
 }
 
 const defaultContext: ThemeRuntimeContextValue = { settings: {} };
@@ -26,6 +28,7 @@ export interface ThemeProviderProps {
   assetsBaseUrl?: string | null | undefined;
   mode?: RenderMode | string | null | undefined;
   settings?: Record<string, unknown> | null | undefined;
+  route?: RenderRouteContext | null | undefined;
   children?: ReactNode;
 }
 
@@ -35,6 +38,7 @@ export function ThemeProvider({
   assetsBaseUrl,
   mode,
   settings,
+  route,
   children,
 }: ThemeProviderProps) {
   const value: ThemeRuntimeContextValue = {
@@ -42,6 +46,7 @@ export function ThemeProvider({
     ...(apiBaseUrl ? { apiBaseUrl } : {}),
     ...(assetsBaseUrl ? { assetsBaseUrl } : {}),
     ...(mode === "production" || mode === "preview" || mode === "editor" ? { mode } : {}),
+    ...(route ? { route } : {}),
   };
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }

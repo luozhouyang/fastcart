@@ -16,8 +16,8 @@ use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
 use fastcart_kernel::{ActorContext, AppError, Pagination, ThemeId};
 use fastcart_module_content::ContentService;
 use fastcart_module_theme::{
-    RegisterThemeInput, Theme, ThemeCapabilityBinding, ThemeCapabilityBindingInput, ThemeService,
-    ThemeSettingsRevision, UpdateThemeSettingsInput,
+    RegisterThemeInput, Theme, ThemeActivationRecord, ThemeCapabilityBinding,
+    ThemeCapabilityBindingInput, ThemeService, ThemeSettingsRevision, UpdateThemeSettingsInput,
 };
 use fastcart_storefront::ThemeEditorManifest;
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,7 @@ pub fn router() -> Router<Arc<AppContext>> {
     Router::new()
         .route("/themes", get(list_themes).post(register_theme))
         .route("/themes/active", get(get_active_theme))
+        .route("/themes/activations", get(list_theme_activations))
         .route("/themes/rollback", post(rollback_theme))
         .route("/themes/{id}", get(get_theme).delete(delete_theme))
         .route("/themes/{id}/settings", patch(update_theme_settings))
@@ -73,6 +74,7 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
     OpenApiRouter::new()
         .routes(routes!(list_themes, register_theme))
         .routes(routes!(get_active_theme))
+        .routes(routes!(list_theme_activations))
         .routes(routes!(rollback_theme))
         .routes(routes!(get_theme, delete_theme))
         .routes(routes!(update_theme_settings))
@@ -224,6 +226,32 @@ impl From<ThemeSettingsRevision> for ThemeSettingsRevisionResponse {
             status: revision.status.as_str().to_owned(),
             created_by: revision.created_by,
             created_at: revision.created_at,
+        }
+    }
+}
+
+/// One activation history entry exposed to administrators.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ThemeActivationResponse {
+    id: String,
+    theme_id: String,
+    manifest_id: Option<String>,
+    theme_name: Option<String>,
+    theme_version: Option<String>,
+    previous_theme_id: Option<String>,
+    created_at: i64,
+}
+
+impl From<ThemeActivationRecord> for ThemeActivationResponse {
+    fn from(record: ThemeActivationRecord) -> Self {
+        Self {
+            id: record.id.to_string(),
+            theme_id: record.theme_id.to_string(),
+            manifest_id: record.manifest_id,
+            theme_name: record.theme_name,
+            theme_version: record.theme_version,
+            previous_theme_id: record.previous_theme_id.map(|id| id.to_string()),
+            created_at: record.created_at,
         }
     }
 }
@@ -795,6 +823,31 @@ async fn ensure_theme_activatable(
         }
     }
     Ok(())
+}
+
+#[utoipa::path(
+    get,
+    path = "/themes/activations",
+    tag = "Admin",
+    summary = "List theme activation history",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = Vec<ThemeActivationResponse>))
+)]
+async fn list_theme_activations(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    PaginationQuery { limit, .. }: PaginationQuery,
+) -> ApiResult<Json<Vec<ThemeActivationResponse>>> {
+    authorize(&actor, "themes.read")?;
+    let limit = Pagination::new(limit, None).map_err(ApiError::new)?.limit;
+    let activations = ThemeService::new(db)
+        .activation_history(limit)
+        .await?
+        .into_iter()
+        .map(ThemeActivationResponse::from)
+        .collect();
+    Ok(Json(activations))
 }
 
 #[utoipa::path(

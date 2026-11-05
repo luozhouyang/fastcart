@@ -12,7 +12,7 @@ pub use bundle::{
     load_theme_bundle_file,
 };
 pub use domain::{
-    RegisterThemeInput, Theme, ThemeActivation, ThemeCapabilityBinding,
+    RegisterThemeInput, Theme, ThemeActivation, ThemeActivationRecord, ThemeCapabilityBinding,
     ThemeCapabilityBindingInput, ThemeSettingsRevision, ThemeSettingsRevisionStatus,
     UpdateThemeSettingsInput,
 };

@@ -162,6 +162,25 @@ const fn default_active() -> bool {
     true
 }
 
+/// An activation history entry enriched with the activated theme's metadata.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ThemeActivationRecord {
+    /// Activation identifier.
+    pub id: ThemeActivationId,
+    /// Theme that was activated.
+    pub theme_id: ThemeId,
+    /// Manifest identifier of the activated theme, when it still exists.
+    pub manifest_id: Option<String>,
+    /// Display name of the activated theme, when it still exists.
+    pub theme_name: Option<String>,
+    /// Version of the activated theme, when it still exists.
+    pub theme_version: Option<String>,
+    /// Theme that was active before this activation, when any.
+    pub previous_theme_id: Option<ThemeId>,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: Timestamp,
+}
+
 /// A recorded theme activation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThemeActivation {

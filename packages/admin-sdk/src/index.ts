@@ -120,6 +120,7 @@ import type {
   TaxRateListQuery,
   TaxRegion,
   Theme,
+  ThemeActivation,
   ThemeCapabilityBinding,
   ThemeEditorManifest,
   ThemePageValidationResult,
@@ -259,6 +260,11 @@ export interface AdminClient {
     editorManifest(id: string, options?: AdminRequestOptions): Promise<ThemeEditorManifest>;
     /** URL of the theme editor bundle served by the API. */
     editorScriptUrl(id: string): string;
+    /** Lists recent theme activations, newest first. */
+    activations?(
+      query?: { limit?: number },
+      options?: AdminRequestOptions,
+    ): Promise<ThemeActivation[]>;
     /** Validates every page against the theme's editor manifest. */
     validatePages?(id: string, options?: AdminRequestOptions): Promise<ThemePageValidationResult>;
     /** Reads the current settings state, including the working draft. */
@@ -1130,6 +1136,11 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
           `/api/v1/admin/themes/${id(themeId)}/editor-manifest`,
           requestOptions,
         ),
+      activations: (query, requestOptions) =>
+        request<ThemeActivation[]>("/api/v1/admin/themes/activations", {
+          ...requestOptions,
+          query,
+        }),
       editorScriptUrl: (themeId) => `${baseUrl}/api/v1/admin/themes/${id(themeId)}/editor.js`,
       validatePages: (themeId, requestOptions) =>
         request<ThemePageValidationResult>(`/api/v1/admin/themes/${id(themeId)}/validate-pages`, {

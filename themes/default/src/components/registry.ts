@@ -1,9 +1,11 @@
 import type { ThemeComponentDefinition } from "@fastcart/theme-sdk";
 import { defineThemeComponent } from "@fastcart/theme-sdk";
 
+import { CollectionDetail } from "./collection-detail";
 import { ContactForm } from "./contact-form";
 import { Heading } from "./heading";
 import { Image } from "./image";
+import { ProductDetail } from "./product-detail";
 import { ProductGrid } from "./product-grid";
 import { Text } from "./text";
 
@@ -31,6 +33,8 @@ export const components = {
   Heading: register("Heading", Heading),
   Image: register("Image", Image),
   ProductGrid: register("ProductGrid", ProductGrid),
+  ProductDetail: register("ProductDetail", ProductDetail),
+  CollectionDetail: register("CollectionDetail", CollectionDetail),
 } as const;
 
 /** Component names the default theme can render. */
