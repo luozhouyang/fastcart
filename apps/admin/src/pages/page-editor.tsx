@@ -227,9 +227,18 @@ export function PageEditorPage() {
   const blocksFor = (owner: string): PageBlock[] =>
     owner === "content" ? content : (body.zones?.[owner] ?? []);
 
+  /** Block identifiers are unique across content and every zone. */
+  const allBlockIds = (): Set<string> => {
+    const ids = collectBlockIds(content);
+    for (const [, blocks] of zones) {
+      collectBlockIds(blocks, ids);
+    }
+    return ids;
+  };
+
   const addBlock = (type: string) => {
     const owner = target;
-    const block = buildBlock(type, editorManifest, collectBlockIds(blocksFor(owner)));
+    const block = buildBlock(type, editorManifest, allBlockIds());
     updateBlocks(owner, (blocks) => appendBlock(blocks, block));
     const id = blockId(block);
     if (id) setSelectedId(id);
@@ -237,7 +246,7 @@ export function PageEditorPage() {
 
   const addBlockToSlot = (parentId: string, slotName: string, type: string) => {
     const owner = ownerOf(content, zones, parentId);
-    const block = buildBlock(type, editorManifest, collectBlockIds(blocksFor(owner)));
+    const block = buildBlock(type, editorManifest, allBlockIds());
     updateBlocks(owner, (blocks) => appendBlockToSlot(blocks, parentId, slotName, block));
     const id = blockId(block);
     if (id) setSelectedId(id);
