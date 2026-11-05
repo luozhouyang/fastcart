@@ -12,6 +12,7 @@ serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true
+uuid.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 fastcart-kernel.workspace = true

@@ -599,6 +599,80 @@ impl OrderService {
         self.get(id).await
     }
 
+    /// Reverts the order-side refund a provider later reported as failed.
+    ///
+    /// The payment service emits `payment.refund_failed` after a refund it
+    /// previously recorded is rejected. This finds the newest local refund row
+    /// matching the order, payment and amount that is not already failed, marks
+    /// it failed and recomputes the order payment status from the remaining
+    /// successful refunds.
+    ///
+    /// Returns `true` when a row was reverted and `false` when nothing matched,
+    /// which makes a replayed event an idempotent no-op.
+    pub async fn mark_payment_refund_failed(
+        &self,
+        order_id: &OrderId,
+        payment_id: &str,
+        amount: i64,
+    ) -> Result<bool, AppError> {
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let refund_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM order_refunds
+             WHERE order_id = ? AND payment_id = ? AND amount = ? AND status != 'failed'
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT 1",
+        )
+        .bind(order_id.as_str())
+        .bind(payment_id)
+        .bind(amount)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let Some(refund_id) = refund_id else {
+            tx.commit().await.map_err(database_error)?;
+            return Ok(false);
+        };
+
+        sqlx::query("UPDATE order_refunds SET status = 'failed', updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(&refund_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+
+        let total: i64 = sqlx::query_scalar("SELECT total FROM orders WHERE id = ?")
+            .bind(order_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("order", order_id))?;
+        let refunded: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount), 0) FROM order_refunds
+             WHERE order_id = ? AND status != 'failed'",
+        )
+        .bind(order_id.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let payment_status = if refunded >= total {
+            PaymentStatus::Refunded
+        } else if refunded > 0 {
+            PaymentStatus::PartiallyRefunded
+        } else {
+            PaymentStatus::Captured
+        };
+        sqlx::query("UPDATE orders SET payment_status = ?, updated_at = ? WHERE id = ?")
+            .bind(payment_status.as_str())
+            .bind(now)
+            .bind(order_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(true)
+    }
+
     /// Moves a pending order to `confirmed`.
     pub async fn confirm(&self, id: &OrderId) -> Result<Order, AppError> {
         let order = self.load_order(id).await?;
@@ -2283,6 +2357,110 @@ mod tests {
         assert_eq!(full.refund_status, RefundStatus::Refunded);
         assert_eq!(full.payment_status, PaymentStatus::Refunded);
         assert_eq!(full.refunds.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_refund_reverts_payment_status_and_is_idempotent() {
+        let service = service().await;
+        let order = service
+            .create_order(order_input(vec![item(1_000, 2)]))
+            .await
+            .unwrap();
+        let payment = PaymentId::new();
+        let refunded = service
+            .add_refund(
+                &order.id,
+                RefundInput {
+                    payment_id: payment.clone(),
+                    amount: 500,
+                    currency: "USD".to_owned(),
+                    reason: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(refunded.payment_status, PaymentStatus::PartiallyRefunded);
+
+        assert!(
+            service
+                .mark_payment_refund_failed(&order.id, payment.as_str(), 500)
+                .await
+                .unwrap()
+        );
+        let order = service.get(&order.id).await.unwrap();
+        assert_eq!(order.payment_status, PaymentStatus::Captured);
+        assert_eq!(order.refunds.len(), 1);
+        assert_eq!(order.refunds[0].status, "failed");
+
+        // Replaying the provider failure is an idempotent no-op.
+        assert!(
+            !service
+                .mark_payment_refund_failed(&order.id, payment.as_str(), 500)
+                .await
+                .unwrap()
+        );
+        let order = service.get(&order.id).await.unwrap();
+        assert_eq!(order.payment_status, PaymentStatus::Captured);
+        assert_eq!(order.refunds[0].status, "failed");
+    }
+
+    #[tokio::test]
+    async fn failed_full_refund_recomputes_payment_status_from_remaining_refunds() {
+        let service = service().await;
+        let order = service
+            .create_order(order_input(vec![item(1_000, 2)]))
+            .await
+            .unwrap();
+        let payment = PaymentId::new();
+        for amount in [500, 1_500] {
+            service
+                .add_refund(
+                    &order.id,
+                    RefundInput {
+                        payment_id: payment.clone(),
+                        amount,
+                        currency: "USD".to_owned(),
+                        reason: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let order = service.get(&order.id).await.unwrap();
+        assert_eq!(order.payment_status, PaymentStatus::Refunded);
+
+        assert!(
+            service
+                .mark_payment_refund_failed(&order.id, payment.as_str(), 1_500)
+                .await
+                .unwrap()
+        );
+        let order = service.get(&order.id).await.unwrap();
+        assert_eq!(order.payment_status, PaymentStatus::PartiallyRefunded);
+        assert_eq!(
+            order
+                .refunds
+                .iter()
+                .filter(|refund| refund.status == "failed")
+                .count(),
+            1
+        );
+
+        assert!(
+            service
+                .mark_payment_refund_failed(&order.id, payment.as_str(), 500)
+                .await
+                .unwrap()
+        );
+        let order = service.get(&order.id).await.unwrap();
+        assert_eq!(order.payment_status, PaymentStatus::Captured);
+        assert!(order.refunds.iter().all(|refund| refund.status == "failed"));
+        assert!(
+            !service
+                .mark_payment_refund_failed(&order.id, payment.as_str(), 500)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

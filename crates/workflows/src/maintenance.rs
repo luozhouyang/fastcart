@@ -8,7 +8,7 @@ use fastcart_infrastructure::{
     fetch_pending_audits, fetch_pending_outbox, mark_audit_failed, mark_audit_processed,
     mark_outbox_failed, mark_outbox_processed,
 };
-use fastcart_kernel::{AppError, Pagination, StoreId, now_timestamp};
+use fastcart_kernel::{AppError, DomainEventEnvelope, OrderId, Pagination, StoreId, now_timestamp};
 use fastcart_module_asset::{
     fetch_pending_asset_purges, mark_asset_purge_failed, mark_asset_purge_processed,
 };
@@ -17,6 +17,7 @@ use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::CheckoutService;
 use fastcart_module_inquiry::{InquiryFileService, InquiryService};
 use fastcart_module_inventory::InventoryService;
+use fastcart_module_order::OrderService;
 use fastcart_module_webhook::WebhookService;
 use fastcart_notifications::{
     NotificationChannelService, NotificationOutcome, NotificationService, RenderContext,
@@ -29,6 +30,10 @@ const JOB_LEASE_SECONDS: i64 = 300;
 
 /// How often a running handler refreshes its job lease.
 const JOB_LEASE_RENEW_SECONDS: u64 = 60;
+
+/// How long a channel delivery claim may exist before it is considered
+/// abandoned because its job was never enqueued.
+const CHANNEL_CLAIM_LEASE_SECONDS: i64 = 300;
 
 /// Counts produced by one maintenance sweep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,6 +70,8 @@ pub struct MaintenanceReport {
     pub channel_notifications_duplicates: u64,
     /// Channel deliveries that failed while rendering or enqueueing.
     pub channel_notifications_failed: u64,
+    /// Abandoned channel delivery claims reset for re-dispatch.
+    pub channel_claims_recovered: u64,
     /// Expired inquiry uploads removed from storage.
     pub inquiry_files_expired: u64,
     /// Store-level failures encountered.
@@ -198,6 +205,28 @@ pub async fn run_maintenance_with_notifications(
                 }
                 Err(error) => {
                     tracing::warn!(store_id = %store.id, error = %error, "job claim failed");
+                    report.failures += 1;
+                }
+            }
+            match NotificationChannelService::recover_abandoned_claims(
+                &database,
+                now,
+                CHANNEL_CLAIM_LEASE_SECONDS,
+            )
+            .await
+            {
+                Ok(recovered) => {
+                    report.channel_claims_recovered += recovered;
+                    if recovered > 0 {
+                        tracing::warn!(
+                            store_id = %store.id,
+                            recovered,
+                            "recovered abandoned notification channel claims"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "channel claim recovery failed");
                     report.failures += 1;
                 }
             }
@@ -377,6 +406,28 @@ pub async fn run_outbox_and_notification_jobs(
                 }
             };
             let queue = JobQueue::new(database.pool().clone());
+            match NotificationChannelService::recover_abandoned_claims(
+                &database,
+                now,
+                CHANNEL_CLAIM_LEASE_SECONDS,
+            )
+            .await
+            {
+                Ok(recovered) => {
+                    report.channel_claims_recovered += recovered;
+                    if recovered > 0 {
+                        tracing::warn!(
+                            store_id = %store.id,
+                            recovered,
+                            "recovered abandoned notification channel claims"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "channel claim recovery failed");
+                    report.failures += 1;
+                }
+            }
             dispatch_outbox(
                 &store.id,
                 &database,
@@ -676,6 +727,37 @@ fn spawn_lease_heartbeat(queue: &JobQueue, job_id: &str, worker_id: &str) -> Lea
     }))
 }
 
+/// Applies a provider-reported refund failure to the local order ledger.
+///
+/// Payments without an order are a no-op. Missing fields are consumer errors so
+/// the outbox row is retried instead of being silently dropped.
+async fn reconcile_failed_refund(
+    database: &StoreDatabase,
+    event: &DomainEventEnvelope,
+) -> Result<(), AppError> {
+    let Some(order_id) = event
+        .data
+        .get("order_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(());
+    };
+    let payment_id = event
+        .data
+        .get("payment_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AppError::validation("payment.refund_failed is missing payment_id"))?;
+    let amount = event
+        .data
+        .get("amount")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| AppError::validation("payment.refund_failed is missing amount"))?;
+    OrderService::new(database.clone())
+        .mark_payment_refund_failed(&OrderId::from_string(order_id), payment_id, amount)
+        .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_outbox(
     store_id: &StoreId,
@@ -697,6 +779,7 @@ async fn dispatch_outbox(
                 let mut fan_out_failed = false;
                 let mut notification_failed = false;
                 let mut channel_failed = false;
+                let mut refund_failed = false;
                 if let Some(event) = record.to_envelope(Some(store_id.clone())) {
                     // Fan out before publishing so a database failure keeps the
                     // outbox row retryable.
@@ -759,8 +842,26 @@ async fn dispatch_outbox(
                             channel_failed = true;
                         }
                     }
+                    // A provider-reported refund failure must revert the local
+                    // order ledger before the outbox row is marked processed.
+                    // A consumer error keeps the row retryable.
+                    if event.event_type == "payment.refund_failed" {
+                        match reconcile_failed_refund(database, &event).await {
+                            Ok(()) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    store_id = %store_id,
+                                    event_id = %event.id,
+                                    error = %error,
+                                    "order refund failure reconciliation failed"
+                                );
+                                report.failures += 1;
+                                refund_failed = true;
+                            }
+                        }
+                    }
                 }
-                if fan_out_failed || notification_failed || channel_failed {
+                if fan_out_failed || notification_failed || channel_failed || refund_failed {
                     let reason = if fan_out_failed && notification_failed {
                         "webhook fan-out and notification dispatch failed"
                     } else if fan_out_failed {
@@ -769,8 +870,10 @@ async fn dispatch_outbox(
                         "email and channel notification dispatch failed"
                     } else if notification_failed {
                         "notification dispatch failed"
-                    } else {
+                    } else if channel_failed {
                         "channel notification dispatch failed"
+                    } else {
+                        "order refund failure reconciliation failed"
                     };
                     if let Err(error) =
                         mark_outbox_failed(database.pool(), &record.id, reason).await
@@ -950,8 +1053,11 @@ mod tests {
         DatabaseOptions, EventBus, JobQueue, LocalStorage, NewAuditOutbox, Storage,
         StoreDatabaseManager, append_audit_outbox, append_outbox_event, fetch_pending_audits,
     };
-    use fastcart_kernel::{DomainEventEnvelope, Pagination};
+    use fastcart_kernel::{DomainEventEnvelope, Pagination, PaymentId};
     use fastcart_module_asset::{AssetService, CreateAssetInput, fetch_pending_asset_purges};
+    use fastcart_module_order::{
+        CreateOrderInput, CreateOrderItemInput, OrderService, PaymentStatus, RefundInput,
+    };
     use fastcart_platform::{CreateStoreInput, PlatformStore, StoreProvisioningService};
 
     use super::{cleanup_asset_purges, run_maintenance_with_options};
@@ -1015,6 +1121,94 @@ mod tests {
         assert_eq!(payload.to, "buyer@example.com");
         assert!(payload.html.as_deref().is_some_and(|html| !html.is_empty()));
         assert!(queue.claim("test", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maintenance_reconciles_a_failed_refund_against_the_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = PlatformStore::in_memory().await.unwrap();
+        let databases = Arc::new(StoreDatabaseManager::new(
+            dir.path().join("stores"),
+            DatabaseOptions::default().with_max_connections(2),
+        ));
+        let store = platform
+            .create_store(CreateStoreInput::new(
+                "Refund Store",
+                "refund-store",
+                "refund.example.com",
+            ))
+            .await
+            .unwrap();
+        StoreProvisioningService::new(platform.clone(), databases.clone())
+            .provision(&store.id, None)
+            .await
+            .unwrap();
+        let database = databases.database(&store.id).await.unwrap();
+
+        let orders = OrderService::new(database.clone());
+        let order = orders
+            .create_order(CreateOrderInput {
+                email: "buyer@example.com".to_owned(),
+                currency_code: "USD".to_owned(),
+                items: vec![CreateOrderItemInput {
+                    product_title: "Widget".to_owned(),
+                    unit_price: 1_000,
+                    quantity: 1,
+                    ..CreateOrderItemInput::default()
+                }],
+                subtotal: 1_000,
+                total: 1_000,
+                shipping_address: serde_json::json!({}),
+                billing_address: serde_json::json!({}),
+                ..CreateOrderInput::default()
+            })
+            .await
+            .unwrap();
+        let payment = PaymentId::new();
+        let refunded = orders
+            .add_refund(
+                &order.id,
+                RefundInput {
+                    payment_id: payment.clone(),
+                    amount: 1_000,
+                    currency: "USD".to_owned(),
+                    reason: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(refunded.payment_status, PaymentStatus::Refunded);
+
+        let event = DomainEventEnvelope::new(
+            "payment.refund_failed",
+            Some(store.id.clone()),
+            serde_json::json!({
+                "payment_id": payment.as_str(),
+                "order_id": order.id.as_str(),
+                "refund_id": "refund_provider",
+                "amount": 1_000,
+                "currency_code": "USD",
+            }),
+        );
+        append_outbox_event(database.pool(), &event).await.unwrap();
+
+        let report = run_maintenance_with_options(
+            &platform,
+            &databases,
+            &EventBus::new(8),
+            &EmailService::with_default_registry(),
+            true,
+        )
+        .await;
+
+        assert_eq!(report.failures, 0);
+        let order = OrderService::new(database.clone())
+            .get(&order.id)
+            .await
+            .unwrap();
+        assert_eq!(order.payment_status, PaymentStatus::Captured);
+        assert_eq!(order.refunds.len(), 1);
+        assert_eq!(order.refunds[0].status, "failed");
     }
 
     #[tokio::test]

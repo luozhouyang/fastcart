@@ -16,14 +16,18 @@ use serde_json::Value;
 use sha2::Sha256;
 use sqlx::FromRow;
 
+use crate::cipher::SecretCipher;
 use crate::domain::{
     CreateWebhookEndpointInput, CreatedWebhookEndpoint, DEFAULT_MAX_ATTEMPTS, DeliveryReport,
     DeliveryStatus, MAX_EVENT_LENGTH, MAX_EVENTS, MAX_RESPONSE_BODY_BYTES, MAX_URL_LENGTH,
     UpdateWebhookEndpointInput, WebhookDelivery, WebhookEndpoint, retry_delay_seconds,
 };
 
-const ENDPOINT_COLUMNS: &str =
-    "id, url, secret, is_active, events, metadata, created_at, updated_at";
+/// How long the previous signing secret stays valid after a rotation.
+pub const SECRET_ROTATION_GRACE_SECONDS: i64 = 86_400;
+
+const ENDPOINT_COLUMNS: &str = "id, url, secret, secret_previous, secret_rotated_at, is_active, \
+     events, metadata, created_at, updated_at";
 const DELIVERY_COLUMNS: &str = "id, endpoint_id, event_id, event_type, payload, status, attempts, \
      response_status, response_body, next_retry_at, created_at, updated_at";
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,6 +40,8 @@ pub struct WebhookService {
     max_attempts: u32,
     allow_private_networks: bool,
     audit: Option<AuditActor>,
+    cipher: Option<SecretCipher>,
+    secret_rotation_grace_seconds: i64,
 }
 
 impl WebhookService {
@@ -52,7 +58,27 @@ impl WebhookService {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             allow_private_networks: false,
             audit: None,
+            cipher: SecretCipher::from_env(),
+            secret_rotation_grace_seconds: SECRET_ROTATION_GRACE_SECONDS,
         }
+    }
+
+    /// Overrides the cipher used to protect signing secrets at rest.
+    ///
+    /// Passing `None` keeps legacy plaintext storage. Tests use this to
+    /// provide a fixed key instead of reading the environment.
+    #[must_use]
+    pub fn with_secret_cipher(mut self, cipher: Option<SecretCipher>) -> Self {
+        self.cipher = cipher;
+        self
+    }
+
+    /// Overrides how long the previous signing secret remains valid after a
+    /// rotation.
+    #[must_use]
+    pub fn with_secret_rotation_grace_seconds(mut self, seconds: i64) -> Self {
+        self.secret_rotation_grace_seconds = seconds.max(0);
+        self
     }
 
     /// Records endpoint mutations in the store audit outbox.
@@ -81,6 +107,48 @@ impl WebhookService {
                 .map_err(database_error)?;
         }
         Ok(())
+    }
+
+    /// Encrypts a plaintext secret when a cipher is configured.
+    fn encrypt_secret(&self, plaintext: &str) -> Result<String, AppError> {
+        match &self.cipher {
+            Some(cipher) => cipher.encrypt(plaintext),
+            None => Ok(plaintext.to_owned()),
+        }
+    }
+
+    /// Decrypts a stored secret, passing legacy plaintext values through.
+    fn decrypt_secret(&self, stored: &str) -> Result<String, AppError> {
+        match &self.cipher {
+            Some(cipher) => cipher.decrypt(stored),
+            None if SecretCipher::is_encrypted(stored) => Err(AppError::internal(
+                "webhook signing secret is encrypted but no cipher is configured",
+            )),
+            None => Ok(stored.to_owned()),
+        }
+    }
+
+    /// Builds the comma-separated signature header for a delivery.
+    ///
+    /// During the rotation grace window both the current and previous secrets
+    /// sign the same timestamp and payload, so receivers accepting any
+    /// matching `v1` value continue to verify without downtime.
+    fn signatures(
+        &self,
+        endpoint: &EndpointRow,
+        timestamp: Timestamp,
+        payload: &str,
+    ) -> Result<String, AppError> {
+        let current = self.decrypt_secret(&endpoint.secret)?;
+        let mut signatures = vec![sign(&current, timestamp, payload)?];
+        if let (Some(previous), Some(rotated_at)) =
+            (&endpoint.secret_previous, endpoint.secret_rotated_at)
+            && rotated_at.saturating_add(self.secret_rotation_grace_seconds) > timestamp
+        {
+            let previous = self.decrypt_secret(previous)?;
+            signatures.push(sign(&previous, timestamp, payload)?);
+        }
+        Ok(signatures.join(","))
     }
 
     /// Allows loopback and private destinations. Only for tests and local
@@ -123,6 +191,7 @@ impl WebhookService {
         };
         let metadata = input.metadata.unwrap_or_default();
         validate_metadata(&metadata)?;
+        let stored_secret = self.encrypt_secret(&secret)?;
 
         let id = WebhookId::new();
         let now = now_timestamp();
@@ -134,7 +203,7 @@ impl WebhookService {
         )
         .bind(id.as_str())
         .bind(&url)
-        .bind(&secret)
+        .bind(&stored_secret)
         .bind(serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_owned()))
         .bind(metadata.to_json_string())
         .bind(now)
@@ -260,17 +329,26 @@ impl WebhookService {
     }
 
     /// Rotates the signing secret and returns it exactly once.
+    ///
+    /// The previous secret is retained so deliveries can carry both
+    /// signatures during the rotation grace window.
     pub async fn rotate_secret(&self, id: &WebhookId) -> Result<String, AppError> {
         let secret = generate_secret();
+        let stored_secret = self.encrypt_secret(&secret)?;
+        let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        let result =
-            sqlx::query("UPDATE webhook_endpoints SET secret = ?, updated_at = ? WHERE id = ?")
-                .bind(&secret)
-                .bind(now_timestamp())
-                .bind(id.as_str())
-                .execute(&mut *tx)
-                .await
-                .map_err(database_error)?;
+        let result = sqlx::query(
+            "UPDATE webhook_endpoints
+             SET secret_previous = secret, secret = ?, secret_rotated_at = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&stored_secret)
+        .bind(now)
+        .bind(now)
+        .bind(id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
         if result.rows_affected() == 0 {
             return Err(AppError::not_found("webhook endpoint", id));
         }
@@ -542,7 +620,7 @@ impl WebhookService {
             ensure_public_resolution(&endpoint.url).await?;
         }
         let timestamp = now_timestamp();
-        let signature = sign(&endpoint.secret, timestamp, &row.payload)?;
+        let signature = self.signatures(endpoint, timestamp, &row.payload)?;
         let response = self
             .client
             .post(&endpoint.url)
@@ -647,6 +725,8 @@ struct EndpointRow {
     id: String,
     url: String,
     secret: String,
+    secret_previous: Option<String>,
+    secret_rotated_at: Option<i64>,
     is_active: i64,
     events: String,
     metadata: String,
@@ -962,6 +1042,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{CreateWebhookEndpointInput, UpdateWebhookEndpointInput, WebhookService};
+    use crate::cipher::SecretCipher;
     use crate::domain::{DeliveryStatus, retry_delay_seconds};
 
     #[derive(Clone, Debug)]
@@ -1012,6 +1093,16 @@ mod tests {
                 .expect("in-memory store database"),
         )
         .with_private_networks_allowed(true)
+    }
+
+    fn test_cipher() -> SecretCipher {
+        SecretCipher::from_hex(&"ab".repeat(32)).expect("valid test key")
+    }
+
+    fn expected_signature(secret: &str, timestamp: &str, body: &str) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(format!("{timestamp}.{body}").as_bytes());
+        format!("v1={}", hex::encode(mac.finalize().into_bytes()))
     }
 
     async fn endpoint(service: &WebhookService, url: &str, events: Vec<&str>) -> String {
@@ -1379,9 +1470,16 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(format!("{timestamp}.{}", delivery.body).as_bytes());
         let expected = format!("v1={}", hex::encode(mac.finalize().into_bytes()));
-        assert_eq!(
-            delivery.headers.get("x-fastcart-signature").unwrap(),
-            expected.as_str()
+        let header = delivery
+            .headers
+            .get("x-fastcart-signature")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let signatures: Vec<&str> = header.split(',').collect();
+        assert!(
+            signatures.contains(&expected.as_str()),
+            "expected the current signature in {header}"
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&delivery.body).unwrap()["id"],
@@ -1564,5 +1662,203 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(mock.captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn secrets_are_encrypted_at_rest_and_still_sign() {
+        let (url, mock) = spawn_mock(StatusCode::OK).await;
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = WebhookService::new(db.clone())
+            .with_private_networks_allowed(true)
+            .with_secret_cipher(Some(test_cipher()));
+        let created = service
+            .create_endpoint(CreateWebhookEndpointInput {
+                url,
+                events: vec!["order.placed".to_owned()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let stored: String =
+            sqlx::query_scalar("SELECT secret FROM webhook_endpoints WHERE id = ?")
+                .bind(created.endpoint.id.as_str())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert!(stored.starts_with("enc:v1:"));
+        assert_ne!(stored, created.secret);
+        assert!(!stored.contains(&created.secret));
+
+        let event = DomainEventEnvelope::new("order.placed", None, serde_json::json!({}));
+        service.fan_out(&event).await.unwrap();
+        let report = service.deliver_due(now_timestamp(), 10).await.unwrap();
+        assert_eq!(report.delivered, 1);
+
+        let captured = mock.captured.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1);
+        let delivery = &captured[0];
+        let timestamp = delivery
+            .headers
+            .get("x-fastcart-timestamp")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let expected = expected_signature(&created.secret, timestamp, &delivery.body);
+        assert_eq!(
+            delivery
+                .headers
+                .get("x-fastcart-signature")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn rotation_grace_emits_both_signatures_then_only_the_current() {
+        let (url, mock) = spawn_mock(StatusCode::OK).await;
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = WebhookService::new(db.clone())
+            .with_private_networks_allowed(true)
+            .with_secret_cipher(Some(test_cipher()))
+            .with_secret_rotation_grace_seconds(60);
+        let created = service
+            .create_endpoint(CreateWebhookEndpointInput {
+                url,
+                events: vec!["order.placed".to_owned()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let rotated = service.rotate_secret(&created.endpoint.id).await.unwrap();
+
+        service
+            .fan_out(&DomainEventEnvelope::new(
+                "order.placed",
+                None,
+                serde_json::json!({"n": 1}),
+            ))
+            .await
+            .unwrap();
+        service.deliver_due(now_timestamp(), 10).await.unwrap();
+
+        {
+            let captured = mock.captured.lock().unwrap();
+            let delivery = &captured[0];
+            let timestamp = delivery
+                .headers
+                .get("x-fastcart-timestamp")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let header = delivery
+                .headers
+                .get("x-fastcart-signature")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let signatures: Vec<&str> = header.split(',').collect();
+            assert_eq!(signatures.len(), 2, "expected both signatures in {header}");
+            assert!(
+                signatures
+                    .contains(&expected_signature(&rotated, timestamp, &delivery.body).as_str())
+            );
+            assert!(signatures.contains(
+                &expected_signature(&created.secret, timestamp, &delivery.body).as_str()
+            ));
+        }
+
+        // Move the rotation beyond the grace window: only the current secret
+        // may sign new deliveries.
+        sqlx::query("UPDATE webhook_endpoints SET secret_rotated_at = ? WHERE id = ?")
+            .bind(now_timestamp().saturating_sub(120))
+            .bind(created.endpoint.id.as_str())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        service
+            .fan_out(&DomainEventEnvelope::new(
+                "order.placed",
+                None,
+                serde_json::json!({"n": 2}),
+            ))
+            .await
+            .unwrap();
+        service.deliver_due(now_timestamp(), 10).await.unwrap();
+
+        let captured = mock.captured.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2);
+        let delivery = &captured[1];
+        let timestamp = delivery
+            .headers
+            .get("x-fastcart-timestamp")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let header = delivery
+            .headers
+            .get("x-fastcart-signature")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            header,
+            expected_signature(&rotated, timestamp, &delivery.body)
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_secrets_still_sign() {
+        let (url, mock) = spawn_mock(StatusCode::OK).await;
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        let service = WebhookService::new(db.clone())
+            .with_private_networks_allowed(true)
+            .with_secret_cipher(Some(test_cipher()));
+        let now = now_timestamp();
+        let secret = "whsec_legacy_plaintext_secret";
+        sqlx::query(
+            "INSERT INTO webhook_endpoints
+             (id, url, secret, is_active, events, metadata, created_at, updated_at)
+             VALUES ('wh_legacy', ?, ?, 1, ?, '{}', ?, ?)",
+        )
+        .bind(&url)
+        .bind(secret)
+        .bind(r#"["order.placed"]"#)
+        .bind(now)
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        service
+            .fan_out(&DomainEventEnvelope::new(
+                "order.placed",
+                None,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        let report = service.deliver_due(now_timestamp(), 10).await.unwrap();
+        assert_eq!(report.delivered, 1);
+
+        let captured = mock.captured.lock().unwrap().clone();
+        let delivery = &captured[0];
+        let timestamp = delivery
+            .headers
+            .get("x-fastcart-timestamp")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            delivery
+                .headers
+                .get("x-fastcart-signature")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            expected_signature(secret, timestamp, &delivery.body)
+        );
     }
 }

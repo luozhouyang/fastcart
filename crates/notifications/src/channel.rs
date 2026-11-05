@@ -581,6 +581,40 @@ impl NotificationChannelService {
         Ok(result.rows_affected())
     }
 
+    /// Resets delivery claims that were never followed by a job enqueue.
+    ///
+    /// Dispatch persists a claimed `job_id` before enqueueing, so a crash in
+    /// between leaves a `queued` row that no worker will ever process. Jobs are
+    /// never deleted, so a missing `jobs` row proves the enqueue never
+    /// happened. Rows whose job still exists — pending, running, completed or
+    /// failed — are left untouched to avoid enqueueing a duplicate send.
+    ///
+    /// Returns the number of recovered deliveries.
+    pub async fn recover_abandoned_claims(
+        db: &StoreDatabase,
+        now: i64,
+        lease_seconds: i64,
+    ) -> Result<u64, AppError> {
+        let cutoff = now.saturating_sub(lease_seconds.max(0));
+        let result = sqlx::query(
+            "UPDATE notification_channel_deliveries
+             SET status = 'pending', job_id = NULL, claimed_at = NULL, updated_at = ?
+             WHERE status = 'queued'
+               AND claimed_at IS NOT NULL
+               AND claimed_at <= ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM jobs
+                   WHERE jobs.id = notification_channel_deliveries.job_id
+               )",
+        )
+        .bind(now)
+        .bind(cutoff)
+        .execute(db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(result.rows_affected())
+    }
+
     /// Fans one domain event out to every subscribed channel.
     ///
     /// A unique `(channel_id, event_id)` delivery row makes replays
@@ -1561,8 +1595,10 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::post;
     use axum::serve;
-    use fastcart_infrastructure::{JobQueue, StoreDatabase, fetch_pending_audits, jobs::status};
-    use fastcart_kernel::{DomainEventEnvelope, StoreId};
+    use fastcart_infrastructure::{
+        JobQueue, NewJob, StoreDatabase, fetch_pending_audits, jobs::status,
+    };
+    use fastcart_kernel::{DomainEventEnvelope, JobId, StoreId};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
@@ -2160,6 +2196,125 @@ mod tests {
         let remaining = service.list_deliveries(&db, &channel.id, 10).await.unwrap();
         let statuses: Vec<DeliveryStatus> = remaining.iter().map(|row| row.status).collect();
         assert_eq!(statuses, vec![DeliveryStatus::Sent, DeliveryStatus::Queued]);
+    }
+
+    #[tokio::test]
+    async fn abandoned_channel_claims_are_recovered_without_duplicating_queued_jobs() {
+        let db = database().await;
+        let queue = JobQueue::new(db.pool().clone());
+        let service = service();
+        let channel = create_channel(
+            &service,
+            &db,
+            "https://open.feishu.cn/open-apis/bot/v2/hook/token1234".to_owned(),
+            vec!["order.placed"],
+        )
+        .await;
+        let now = fastcart_kernel::now_timestamp();
+        let stale = now - 1_000;
+
+        for (id, event_id, status, job_id, claimed_at) in [
+            (
+                "abandoned",
+                "event-abandoned",
+                "queued",
+                Some("job_missing"),
+                Some(stale),
+            ),
+            (
+                "pending-job",
+                "event-pending-job",
+                "queued",
+                Some("job_pending"),
+                Some(stale),
+            ),
+            (
+                "running-job",
+                "event-running-job",
+                "queued",
+                Some("job_running"),
+                Some(stale),
+            ),
+            (
+                "fresh",
+                "event-fresh",
+                "queued",
+                Some("job_fresh"),
+                Some(now),
+            ),
+            ("sent", "event-sent", "sent", Some("job_sent"), Some(stale)),
+        ] {
+            sqlx::query(
+                "INSERT INTO notification_channel_deliveries
+                 (id, channel_id, event_id, event_type, status, job_id, claimed_at,
+                  created_at, updated_at)
+                 VALUES (?, ?, ?, 'order.placed', ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(channel.id.as_str())
+            .bind(event_id)
+            .bind(status)
+            .bind(job_id)
+            .bind(claimed_at)
+            .bind(now)
+            .bind(now)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        queue
+            .enqueue_with_id(
+                &JobId::from_string("job_pending"),
+                NewJob::new("send_channel_notification", json!({})),
+            )
+            .await
+            .unwrap();
+        queue
+            .enqueue_with_id(
+                &JobId::from_string("job_running"),
+                NewJob::new("send_channel_notification", json!({})),
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET status = 'running' WHERE id = 'job_running'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let recovered = NotificationChannelService::recover_abandoned_claims(&db, now, 300)
+            .await
+            .unwrap();
+        assert_eq!(recovered, 1);
+
+        let rows: Vec<(String, String, Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT id, status, job_id, claimed_at
+             FROM notification_channel_deliveries ORDER BY id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        let by_id: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .map(|(id, status, job_id, claimed_at)| (id, (status, job_id, claimed_at)))
+            .collect();
+        assert_eq!(by_id["abandoned"].0, "pending");
+        assert!(by_id["abandoned"].1.is_none());
+        assert!(by_id["abandoned"].2.is_none());
+        for id in ["pending-job", "running-job", "fresh"] {
+            assert_eq!(by_id[id].0, "queued");
+            assert!(by_id[id].1.is_some());
+            assert!(by_id[id].2.is_some());
+        }
+        assert_eq!(by_id["sent"].0, "sent");
+
+        // A second sweep has nothing left to recover.
+        assert_eq!(
+            NotificationChannelService::recover_abandoned_claims(&db, now, 300)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

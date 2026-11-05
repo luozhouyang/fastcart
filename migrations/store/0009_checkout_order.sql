@@ -17,9 +17,17 @@ CREATE TABLE IF NOT EXISTS checkout_sessions (
     order_id TEXT,
     idempotency_key TEXT UNIQUE,
     expires_at INTEGER,
+    placement_token TEXT,
+    placement_claimed_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- Completion leases are short-lived fencing tokens. The index keeps sweeps of
+-- stale claims cheap without paying for unclaimed rows.
+CREATE INDEX IF NOT EXISTS idx_checkout_placement_claim
+    ON checkout_sessions (placement_claimed_at)
+    WHERE placement_token IS NOT NULL;
 
 -- A cart has at most one checkout that can still complete. Failed, canceled
 -- and expired sessions are superseded by the next attempt.

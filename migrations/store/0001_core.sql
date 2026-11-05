@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS webhook_endpoints (
     id TEXT PRIMARY KEY,
     url TEXT NOT NULL,
     secret TEXT NOT NULL,
+    secret_previous TEXT,
+    secret_rotated_at INTEGER,
     is_active INTEGER NOT NULL DEFAULT 1,
     events TEXT NOT NULL DEFAULT '[]',
     metadata TEXT NOT NULL DEFAULT '{}',

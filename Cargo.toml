@@ -75,6 +75,7 @@ minijinja = "3.0.5"
 moka = { version = "0.12.16", features = ["future", "sync"] }
 rand = "0.8.5"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls", "stream"] }
+ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10.9"

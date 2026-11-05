@@ -23,6 +23,9 @@ use crate::cart::{CartContext, CartWorkflow};
 
 const DEFAULT_CHECKOUT_TTL_SECONDS: i64 = 30 * 60;
 const RESERVATION_TTL_SECONDS: i64 = 30 * 60;
+/// Lease for the exclusive completion claim. A crashed runner stops blocking
+/// retries once this elapses; capture and transitions are idempotent.
+const PLACEMENT_LEASE_SECONDS: i64 = 120;
 
 /// Request to open a checkout from a cart.
 #[derive(Clone, Debug)]
@@ -352,6 +355,56 @@ impl CheckoutWorkflow {
             )));
         }
 
+        // Fence concurrent completions before cart validation, capture or any
+        // order side effect. The lease bounds how long a crashed runner can
+        // block retries; an expired lease is taken over by the next attempt.
+        let Some(token) = self
+            .checkout
+            .claim_placement(checkout_id, now_timestamp(), PLACEMENT_LEASE_SECONDS)
+            .await?
+        else {
+            let latest = self.checkout.get(checkout_id).await?;
+            if latest.status == CheckoutStatus::OrderPlaced {
+                return self.placed_result(&latest).await;
+            }
+            return Err(AppError::conflict(
+                "checkout completion is already in progress; retry shortly",
+            ));
+        };
+
+        let result = self
+            .complete_claimed(checkout, payment_session_id, &token, context)
+            .await;
+        if result.is_err() {
+            // Releasing after `order_placed` would be pointless because
+            // `mark_order_placed` already cleared the claim; skip the write.
+            let placed = matches!(
+                self.checkout.get(checkout_id).await,
+                Ok(latest) if latest.status == CheckoutStatus::OrderPlaced
+            );
+            if !placed
+                && let Err(error) = self.checkout.release_placement(checkout_id, &token).await
+            {
+                tracing::warn!(
+                    checkout_id = %checkout_id,
+                    error = %error,
+                    "failed to release checkout placement claim"
+                );
+            }
+        }
+        result
+    }
+
+    /// Completes a checkout whose placement claim is already held.
+    async fn complete_claimed(
+        &self,
+        checkout: CheckoutSession,
+        payment_session_id: PaymentSessionId,
+        placement_token: &str,
+        context: &CartContext,
+    ) -> Result<CompleteCheckoutResult, AppError> {
+        let checkout_id = checkout.id.clone();
+
         // Validate the cart snapshot before charging the customer. A price or
         // stock change must not result in a captured payment without an order.
         let cart = self.carts.recalculate(&checkout.cart_id, context).await?;
@@ -394,12 +447,12 @@ impl CheckoutWorkflow {
             CheckoutStatus::PaymentPending => {
                 match self
                     .checkout
-                    .transition(checkout_id, CheckoutStatus::PaymentConfirmed, None)
+                    .transition(&checkout_id, CheckoutStatus::PaymentConfirmed, None)
                     .await
                 {
                     Ok(updated) => updated,
                     Err(error) => {
-                        let latest = self.checkout.get(checkout_id).await?;
+                        let latest = self.checkout.get(&checkout_id).await?;
                         match latest.status {
                             CheckoutStatus::PaymentConfirmed => latest,
                             CheckoutStatus::OrderPlaced => {
@@ -549,7 +602,10 @@ impl CheckoutWorkflow {
             }
         };
 
-        let order = match self.finish_order(&checkout, &cart, &payment, &order).await {
+        let order = match self
+            .finish_order(&checkout, &cart, &payment, &order, placement_token)
+            .await
+        {
             Ok(order) => order,
             Err(error) => {
                 self.compensate(&checkout, &payment, Some(&order)).await;
@@ -599,6 +655,7 @@ impl CheckoutWorkflow {
         cart: &fastcart_module_cart::Cart,
         payment: &Payment,
         order: &Order,
+        placement_token: &str,
     ) -> Result<Order, AppError> {
         // A concurrent retry may already have completed this checkout. Treat
         // the placed state as success so the loser never compensates a good order.
@@ -654,9 +711,11 @@ impl CheckoutWorkflow {
 
         if let Err(error) = self
             .checkout
-            .mark_order_placed(&checkout.id, &order.id)
+            .mark_order_placed_with_claim(&checkout.id, &order.id, placement_token)
             .await
         {
+            // The claim may have been lost to a takeover, but if that runner
+            // placed the same order this attempt still succeeded.
             let latest = self.checkout.get(&checkout.id).await?;
             let placed = latest.status == CheckoutStatus::OrderPlaced
                 && latest.order_id.as_ref() == Some(&order.id);

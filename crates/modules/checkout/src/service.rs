@@ -335,6 +335,61 @@ impl CheckoutService {
         row.map(CheckoutRow::into_domain).transpose()
     }
 
+    /// Attempts to fence a checkout completion with a short-lived lease.
+    ///
+    /// The claim succeeds only when the session is awaiting completion and has
+    /// no live claim. An expired lease can be taken over, which is what lets a
+    /// crashed runner's retry resume the work. The returned token must be
+    /// passed to [`Self::release_placement`] if the attempt aborts.
+    pub async fn claim_placement(
+        &self,
+        id: &CheckoutId,
+        now: i64,
+        lease_seconds: i64,
+    ) -> Result<Option<String>, AppError> {
+        let token = format!("plc_{}", uuid::Uuid::now_v7().simple());
+        let expired_before = now.saturating_sub(lease_seconds.max(0));
+        let result = sqlx::query(
+            "UPDATE checkout_sessions
+             SET placement_token = ?, placement_claimed_at = ?, updated_at = ?
+             WHERE id = ?
+               AND status IN ('payment_pending', 'payment_confirmed')
+               AND (
+                    placement_token IS NULL
+                    OR placement_claimed_at IS NULL
+                    OR placement_claimed_at <= ?
+               )",
+        )
+        .bind(&token)
+        .bind(now)
+        .bind(now)
+        .bind(id.as_str())
+        .bind(expired_before)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok((result.rows_affected() == 1).then_some(token))
+    }
+
+    /// Releases a completion claim held by `token`.
+    ///
+    /// The update is conditional on the token so a runner whose lease expired
+    /// and was taken over cannot clear the new owner's claim.
+    pub async fn release_placement(&self, id: &CheckoutId, token: &str) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE checkout_sessions
+             SET placement_token = NULL, placement_claimed_at = NULL, updated_at = ?
+             WHERE id = ? AND placement_token = ?",
+        )
+        .bind(now_timestamp())
+        .bind(id.as_str())
+        .bind(token)
+        .execute(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(())
+    }
+
     /// Lists checkout sessions in a given state, newest first.
     pub async fn list_by_status(
         &self,
@@ -444,17 +499,25 @@ impl CheckoutService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        let updated = sqlx::query(
+        // A terminal session must never stay fenced by a completion claim:
+        // the next attempt may be a fresh checkout for the same cart.
+        let sql = if matches!(to, CheckoutStatus::Failed | CheckoutStatus::Canceled) {
+            "UPDATE checkout_sessions
+             SET status = ?, updated_at = ?,
+                 placement_token = NULL, placement_claimed_at = NULL
+             WHERE id = ? AND status = ?"
+        } else {
             "UPDATE checkout_sessions SET status = ?, updated_at = ?
-             WHERE id = ? AND status = ?",
-        )
-        .bind(to.as_str())
-        .bind(now)
-        .bind(id.as_str())
-        .bind(session.status.as_str())
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
+             WHERE id = ? AND status = ?"
+        };
+        let updated = sqlx::query(sql)
+            .bind(to.as_str())
+            .bind(now)
+            .bind(id.as_str())
+            .bind(session.status.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
         if updated.rows_affected() == 0 {
             tx.rollback().await.map_err(database_error)?;
             return Err(AppError::conflict("checkout status changed concurrently"));
@@ -530,7 +593,9 @@ impl CheckoutService {
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let updated = sqlx::query(
-            "UPDATE checkout_sessions SET status = ?, order_id = ?, updated_at = ?
+            "UPDATE checkout_sessions
+             SET status = ?, order_id = ?, updated_at = ?,
+                 placement_token = NULL, placement_claimed_at = NULL
              WHERE id = ? AND status = 'payment_confirmed' AND order_id IS NULL",
         )
         .bind(CheckoutStatus::OrderPlaced.as_str())
@@ -560,16 +625,69 @@ impl CheckoutService {
         self.get(id).await
     }
 
+    /// Marks an order placed only while `token` still owns the placement claim.
+    ///
+    /// Unlike [`Self::mark_order_placed`], this fences the final write: a runner
+    /// whose lease expired and was taken over cannot clear the new owner's
+    /// claim or place a competing order.
+    pub async fn mark_order_placed_with_claim(
+        &self,
+        id: &CheckoutId,
+        order_id: &fastcart_kernel::OrderId,
+        token: &str,
+    ) -> Result<CheckoutSession, AppError> {
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let updated = sqlx::query(
+            "UPDATE checkout_sessions
+             SET status = ?, order_id = ?, updated_at = ?,
+                 placement_token = NULL, placement_claimed_at = NULL
+             WHERE id = ? AND status = 'payment_confirmed' AND order_id IS NULL
+               AND placement_token = ?",
+        )
+        .bind(CheckoutStatus::OrderPlaced.as_str())
+        .bind(order_id.as_str())
+        .bind(now)
+        .bind(id.as_str())
+        .bind(token)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict(
+                "checkout placement claim was lost while placing the order",
+            ));
+        }
+        insert_history(
+            &mut tx,
+            id,
+            Some(CheckoutStatus::PaymentConfirmed),
+            CheckoutStatus::OrderPlaced,
+            Some("order placed"),
+            now,
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
+
+        self.get(id).await
+    }
+
     /// Marks every expirable session whose expiry is at or before `now` as failed.
     ///
     /// Returns the number of sessions expired.
     pub async fn expire_due(&self, now: i64) -> Result<u64, AppError> {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let due = sqlx::query_as::<_, (String, String)>(
-            "SELECT id, status FROM checkout_sessions
-             WHERE expires_at IS NOT NULL
-               AND expires_at <= ?
-               AND status IN ('created', 'validating', 'ready_for_payment', 'payment_pending')",
+            "SELECT cs.id, cs.status FROM checkout_sessions cs
+             WHERE cs.expires_at IS NOT NULL
+               AND cs.expires_at <= ?
+               AND cs.status IN ('created', 'validating', 'ready_for_payment', 'payment_pending')
+               AND NOT EXISTS (
+                    SELECT 1 FROM payment_sessions ps
+                    WHERE ps.id = cs.payment_session_id
+                      AND ps.status IN ('captured', 'partially_refunded', 'refunded')
+               )",
         )
         .bind(now)
         .fetch_all(&mut *tx)
@@ -579,7 +697,9 @@ impl CheckoutService {
         for (id, status) in &due {
             let from = CheckoutStatus::from_stored(status)?;
             let updated = sqlx::query(
-                "UPDATE checkout_sessions SET status = ?, updated_at = ?
+                "UPDATE checkout_sessions
+                 SET status = ?, updated_at = ?,
+                     placement_token = NULL, placement_claimed_at = NULL
                  WHERE id = ? AND status = ?",
             )
             .bind(CheckoutStatus::Failed.as_str())
@@ -668,6 +788,8 @@ async fn cancel_stale_session(
         "UPDATE checkout_sessions
          SET status = CASE WHEN status IN ('failed', 'canceled') THEN status ELSE 'canceled' END,
              idempotency_key = NULL,
+             placement_token = NULL,
+             placement_claimed_at = NULL,
              updated_at = ?
          WHERE id = ?",
     )
@@ -1003,6 +1125,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expire_due_keeps_checkouts_with_captured_payments() {
+        let service = service().await;
+        let captured = service.create(input(CartId::new())).await.unwrap();
+        let pending = service.create(input(CartId::new())).await.unwrap();
+        for session in [&captured, &pending] {
+            for status in [
+                CheckoutStatus::Validating,
+                CheckoutStatus::ReadyForPayment,
+                CheckoutStatus::PaymentPending,
+            ] {
+                service.transition(&session.id, status, None).await.unwrap();
+            }
+        }
+
+        let now = now_timestamp();
+        let payment_session_id = "pay_captured";
+        sqlx::query(
+            "INSERT INTO payment_sessions
+                (id, checkout_id, provider, amount, currency_code, status, created_at, updated_at)
+             VALUES (?, ?, 'manual', 2500, 'USD', 'captured', ?, ?)",
+        )
+        .bind(payment_session_id)
+        .bind(captured.id.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(service.db.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE checkout_sessions SET payment_session_id = ? WHERE id = ?")
+            .bind(payment_session_id)
+            .bind(captured.id.as_str())
+            .execute(service.db.pool())
+            .await
+            .unwrap();
+
+        let expired = service.expire_due(now + 7_200).await.unwrap();
+        assert_eq!(expired, 1);
+        // Captured money must stay completable rather than being failed.
+        assert_eq!(
+            service.get(&captured.id).await.unwrap().status,
+            CheckoutStatus::PaymentPending
+        );
+        assert_eq!(
+            service.get(&pending.id).await.unwrap().status,
+            CheckoutStatus::Failed
+        );
+    }
+
+    #[tokio::test]
     async fn validates_currency_email_and_expiry() {
         let service = service().await;
 
@@ -1054,6 +1225,98 @@ mod tests {
         let second = service.create(request).await.unwrap();
         assert_ne!(first.id, second.id);
         assert_eq!(second.status, CheckoutStatus::Created);
+    }
+
+    #[tokio::test]
+    async fn placement_claim_fences_concurrent_completion() {
+        let service = service().await;
+        let session = service.create(input(CartId::new())).await.unwrap();
+        for status in [
+            CheckoutStatus::Validating,
+            CheckoutStatus::ReadyForPayment,
+            CheckoutStatus::PaymentPending,
+        ] {
+            service.transition(&session.id, status, None).await.unwrap();
+        }
+
+        let now = now_timestamp();
+        let first = service
+            .claim_placement(&session.id, now, 120)
+            .await
+            .unwrap();
+        assert!(first.is_some());
+        // A second runner at the same instant loses the race.
+        assert!(
+            service
+                .claim_placement(&session.id, now, 120)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // After the lease expires a retry can take over.
+        let second = service
+            .claim_placement(&session.id, now + 121, 120)
+            .await
+            .unwrap();
+        assert!(second.is_some());
+        let token: Option<String> =
+            sqlx::query_scalar("SELECT placement_token FROM checkout_sessions WHERE id = ?")
+                .bind(session.id.as_str())
+                .fetch_one(service.db.pool())
+                .await
+                .unwrap();
+        assert_eq!(token, second);
+
+        // A stale owner cannot release the new owner's claim.
+        service
+            .release_placement(&session.id, first.as_deref().unwrap())
+            .await
+            .unwrap();
+        let token: Option<String> =
+            sqlx::query_scalar("SELECT placement_token FROM checkout_sessions WHERE id = ?")
+                .bind(session.id.as_str())
+                .fetch_one(service.db.pool())
+                .await
+                .unwrap();
+        assert_eq!(token, second);
+
+        // The current owner can release, and the checkout becomes reclaimable.
+        service
+            .release_placement(&session.id, second.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            service
+                .claim_placement(&session.id, now + 122, 120)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Placing the order clears the claim so it cannot fence a replay.
+        service
+            .transition(&session.id, CheckoutStatus::PaymentConfirmed, None)
+            .await
+            .unwrap();
+        service
+            .mark_order_placed(&session.id, &OrderId::new())
+            .await
+            .unwrap();
+        let token: Option<String> =
+            sqlx::query_scalar("SELECT placement_token FROM checkout_sessions WHERE id = ?")
+                .bind(session.id.as_str())
+                .fetch_one(service.db.pool())
+                .await
+                .unwrap();
+        assert!(token.is_none());
+        assert!(
+            service
+                .claim_placement(&session.id, now + 200, 120)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
