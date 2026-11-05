@@ -2,6 +2,7 @@ import type {
   InquiryFormStatus,
   InquiryStatus,
   NotificationDeliveryStatus,
+  PageStatus,
 } from "@fastcart/shared-types";
 
 import { Badge } from "@/components/ui/badge";
@@ -109,6 +110,21 @@ export function InquiryFormStatusPill({ status }: { status: InquiryFormStatus })
   return <Pill tone={entry.tone} label={entry.label} />;
 }
 
+const PAGE_STATUS: Record<PageStatus, { label: string; tone: Tone }> = {
+  draft: { label: "Draft", tone: "secondary" },
+  published: { label: "Published", tone: "brand" },
+  archived: { label: "Archived", tone: "info" },
+};
+
+export function PageStatusPill({ status }: { status: PageStatus }) {
+  const entry = PAGE_STATUS[status];
+  return <Pill tone={entry.tone} label={entry.label} />;
+}
+
+export function ThemeActivePill({ active }: { active: boolean }) {
+  return <Pill tone={active ? "brand" : "secondary"} label={active ? "Active" : "Inactive"} />;
+}
+
 const INQUIRY_STATUS: Record<InquiryStatus, { label: string; tone: Tone }> = {
   new: { label: "New", tone: "info" },
   read: { label: "Read", tone: "secondary" },
@@ -122,10 +138,7 @@ export function InquiryStatusPill({ status }: { status: InquiryStatus }) {
   return <Pill tone={entry.tone} label={entry.label} />;
 }
 
-const DELIVERY_STATUS: Record<
-  NotificationDeliveryStatus,
-  { label: string; tone: Tone }
-> = {
+const DELIVERY_STATUS: Record<NotificationDeliveryStatus, { label: string; tone: Tone }> = {
   pending: { label: "Pending", tone: "secondary" },
   queued: { label: "Queued", tone: "info" },
   sent: { label: "Sent", tone: "brand" },

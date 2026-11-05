@@ -3,8 +3,10 @@ import {
   ExternalLink,
   Layers3,
   LayoutGrid,
+  LayoutTemplate,
   LogOut,
   Package,
+  Palette,
   Plus,
   ReceiptText,
   Settings2,
@@ -32,6 +34,8 @@ const PAGES = [
   { to: "/products", label: "Products", icon: Package },
   { to: "/inventory", label: "Inventory", icon: Layers3 },
   { to: "/customers", label: "Customers", icon: Users },
+  { to: "/pages", label: "Pages", icon: LayoutTemplate },
+  { to: "/themes", label: "Themes", icon: Palette },
   { to: "/settings", label: "Settings", icon: Settings2 },
 ] as const;
 

@@ -61,6 +61,20 @@ pub struct ThemeEditorManifest {
     /// Fields available on the page root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<EditorRoot>,
+    /// Named page zones (header, footer, sidebar) available to authors.
+    #[serde(default)]
+    pub zones: BTreeMap<String, EditorZone>,
+}
+
+/// One named page zone exposed by the theme.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorZone {
+    /// Display title.
+    pub title: String,
+    /// Component types allowed in this zone; `None` allows every component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_components: Option<Vec<String>>,
 }
 
 /// One editor palette category.
@@ -89,6 +103,12 @@ pub struct EditorRoot {
 pub struct EditorComponent {
     /// Display title.
     pub title: String,
+    /// Optional short description shown in the palette or inspector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional icon name understood by the admin editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     /// Palette category, when the component is user-insertable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -124,6 +144,15 @@ pub struct EditorField {
     /// Field type.
     #[serde(rename = "type")]
     pub field_type: String,
+    /// Human-readable label shown by the editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional help text shown under the input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional picker configuration for `data_source` and `asset` fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picker: Option<Value>,
     /// Data source kind for `data_source` and `asset` fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -222,6 +251,28 @@ impl ThemeEditorManifest {
                 )));
             }
             component.validate(name, self)?;
+        }
+
+        for (name, zone) in &self.zones {
+            if !valid_name(name) {
+                return Err(StorefrontError::Invalid(format!(
+                    "invalid editor zone name: {name}"
+                )));
+            }
+            if zone.title.trim().is_empty() || zone.title.chars().count() > 120 {
+                return Err(StorefrontError::Invalid(format!(
+                    "zone {name} title must be between 1 and 120 characters"
+                )));
+            }
+            if let Some(allowed) = zone.allowed_components.as_ref() {
+                for component in allowed {
+                    if !self.components.contains_key(component) {
+                        return Err(StorefrontError::Invalid(format!(
+                            "zone {name} references unknown component: {component}"
+                        )));
+                    }
+                }
+            }
         }
 
         if let Some(root) = self.root.as_ref() {

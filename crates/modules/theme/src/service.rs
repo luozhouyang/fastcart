@@ -2,18 +2,28 @@
 
 use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
-    AppError, PageResult, Pagination, ThemeActivationId, ThemeId, now_timestamp,
+    AppError, PageResult, Pagination, ThemeActivationId, ThemeId, Timestamp, now_timestamp,
 };
 use fastcart_storefront::{
     StorefrontError, ThemeEditorManifest, ThemeManifest, validate_bundle_path,
 };
 use serde_json::Value;
-use sqlx::FromRow;
+use sqlx::{FromRow, Sqlite, Transaction};
 
-use crate::domain::{RegisterThemeInput, Theme, UpdateThemeSettingsInput};
+use crate::domain::{
+    RegisterThemeInput, Theme, ThemeCapabilityBinding, ThemeCapabilityBindingInput,
+    ThemeSettingsRevision, ThemeSettingsRevisionStatus, UpdateThemeSettingsInput,
+};
 
 const THEME_COLUMNS: &str = "id, manifest, bundle_path, settings_schema, settings, \
-     editor_manifest, schema_version, is_active, created_at, updated_at";
+     assets_manifest, draft_settings, settings_revision, editor_manifest, schema_version, \
+     is_active, created_at, updated_at";
+
+const SETTINGS_REVISION_COLUMNS: &str = "id, theme_id, revision, settings, status, \
+     created_by, created_at";
+
+const CAPABILITY_COLUMNS: &str = "id, theme_id, capability_id, endpoint, config, is_active, \
+     created_at, updated_at";
 
 /// Application service for the storefront theme registry.
 #[derive(Clone, Debug)]
@@ -42,7 +52,7 @@ impl ThemeService {
     /// Appends one audit entry to the outbox inside a mutation transaction.
     async fn append_audit(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Transaction<'_, Sqlite>,
         action: &str,
         resource_type: &str,
         resource_id: &str,
@@ -57,12 +67,21 @@ impl ThemeService {
         Ok(())
     }
 
+    fn audit_actor_id(&self) -> Option<String> {
+        self.audit.as_ref().map(|audit| audit.actor_id().to_owned())
+    }
+
     /// Registers a validated theme bundle.
+    ///
+    /// The same manifest may be registered more than once at different
+    /// versions; registering an existing `(manifest_id, version)` pair is a
+    /// conflict.
     pub async fn register(&self, input: RegisterThemeInput) -> Result<Theme, AppError> {
         let RegisterThemeInput {
             manifest,
             bundle_path,
             settings_schema,
+            assets_manifest,
             settings,
             editor_manifest,
         } = input;
@@ -104,21 +123,29 @@ impl ThemeService {
             (None, None) => None,
         };
 
-        if self.manifest_id_exists(&manifest.id).await? {
+        if self
+            .manifest_version_exists(&manifest.id, &manifest.version)
+            .await?
+        {
             return Err(AppError::conflict(format!(
-                "theme already registered: {}",
-                manifest.id
+                "theme version already registered: {}@{}",
+                manifest.id, manifest.version
             )));
         }
 
         let id = ThemeId::new();
         let now = now_timestamp();
+        let created_by = self.audit_actor_id();
         let manifest_json = serialize_json(&manifest, "manifest")?;
         let settings_schema_json = match settings_schema.as_ref() {
             Some(schema) => Some(serialize_json(schema, "settings_schema")?),
             None => None,
         };
         let settings_json = serialize_json(&settings, "settings")?;
+        let assets_manifest_json = match assets_manifest.as_ref() {
+            Some(value) => Some(serialize_json(value, "assets_manifest")?),
+            None => None,
+        };
         let editor_manifest_json = match editor_manifest.as_ref() {
             Some(raw) => Some(serialize_json(raw, "editor_manifest")?),
             None => None,
@@ -128,8 +155,9 @@ impl ThemeService {
         sqlx::query(
             "INSERT INTO themes \
              (id, manifest_id, name, version, runtime, manifest, bundle_path, settings_schema, \
-              settings, editor_manifest, schema_version, is_active, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+              settings, assets_manifest, draft_settings, settings_revision, editor_manifest, \
+              schema_version, is_active, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?)",
         )
         .bind(id.as_str())
         .bind(&manifest.id)
@@ -140,13 +168,26 @@ impl ThemeService {
         .bind(&bundle_path)
         .bind(settings_schema_json.as_deref())
         .bind(&settings_json)
+        .bind(assets_manifest_json.as_deref())
+        .bind(None::<String>)
         .bind(editor_manifest_json.as_deref())
         .bind(i64::from(schema_version))
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
         .await
-        .map_err(|error| unique_conflict(error, "theme already registered"))?;
+        .map_err(|error| unique_conflict(error, "theme version already registered"))?;
+        // The initial settings are live, so they form revision 1.
+        self.write_settings_revision(
+            &mut tx,
+            &id,
+            1,
+            &settings_json,
+            ThemeSettingsRevisionStatus::Published,
+            created_by.as_deref(),
+            now,
+        )
+        .await?;
         self.append_audit(
             &mut tx,
             "theme.registered",
@@ -157,6 +198,7 @@ impl ThemeService {
                 "version": manifest.version,
                 "bundle_path": bundle_path,
                 "has_editor_manifest": editor_manifest_json.is_some(),
+                "has_assets_manifest": assets_manifest_json.is_some(),
             }),
         )
         .await?;
@@ -232,53 +274,389 @@ impl ThemeService {
     }
 
     /// Replaces a theme's settings after schema validation.
+    ///
+    /// This keeps the historical immediate-publish contract: `settings` becomes
+    /// live at once. A matching draft and a published revision snapshot are
+    /// written in the same transaction.
     pub async fn update_settings(
         &self,
         id: &ThemeId,
         input: UpdateThemeSettingsInput,
     ) -> Result<Theme, AppError> {
-        let theme = self.fetch_row(id).await?.into_theme()?;
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
         validate_settings(theme.settings_schema.as_ref(), &input.settings)?;
 
         let settings_json = serialize_json(&input.settings, "settings")?;
         let changed = theme.settings != input.settings;
-        let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        let result = sqlx::query("UPDATE themes SET settings = ?, updated_at = ? WHERE id = ?")
+        let now = now_timestamp();
+        let created_by = self.audit_actor_id();
+
+        if changed {
+            let revision = theme.settings_revision + 1;
+            sqlx::query(
+                "UPDATE themes SET settings = ?, draft_settings = NULL, settings_revision = ?, \
+                 updated_at = ? WHERE id = ?",
+            )
             .bind(&settings_json)
-            .bind(now_timestamp())
+            .bind(revision)
+            .bind(now)
             .bind(id.as_str())
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
-        if result.rows_affected() == 0 {
-            return Err(AppError::not_found("theme", id));
-        }
-        if changed {
+            self.discard_settings_drafts(&mut tx, id).await?;
+            self.write_settings_revision(
+                &mut tx,
+                id,
+                revision,
+                &settings_json,
+                ThemeSettingsRevisionStatus::Published,
+                created_by.as_deref(),
+                now,
+            )
+            .await?;
             self.append_audit(
                 &mut tx,
                 "theme.settings_updated",
                 "theme",
                 id.as_str(),
-                serde_json::json!({"manifest_id": theme.manifest.id}),
+                serde_json::json!({"manifest_id": theme.manifest.id, "revision": revision}),
             )
             .await?;
+        } else {
+            // No live change: still discard any working draft so the state is
+            // exactly the published settings.
+            sqlx::query("UPDATE themes SET draft_settings = NULL, updated_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(id.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+            self.discard_settings_drafts(&mut tx, id).await?;
         }
         tx.commit().await.map_err(database_error)?;
 
         self.get(id).await
     }
 
-    /// Activates a theme. Activating the active theme is a no-op.
-    pub async fn activate(&self, id: &ThemeId) -> Result<Theme, AppError> {
-        let mut tx = self.db.begin().await?;
-        let sql = format!("SELECT {THEME_COLUMNS} FROM themes WHERE id = ?");
-        let target = sqlx::query_as::<_, ThemeRow>(&sql)
+    /// Saves a settings draft without changing the live settings.
+    ///
+    /// The draft revision reuses the next revision number until it is
+    /// published, so repeated saves replace one working copy.
+    pub async fn save_settings_draft(
+        &self,
+        id: &ThemeId,
+        settings: Value,
+        created_by: Option<String>,
+    ) -> Result<Theme, AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
+        validate_settings(theme.settings_schema.as_ref(), &settings)?;
+
+        let settings_json = serialize_json(&settings, "settings")?;
+        let revision = theme.settings_revision + 1;
+        let now = now_timestamp();
+
+        sqlx::query("UPDATE themes SET draft_settings = ?, updated_at = ? WHERE id = ?")
+            .bind(&settings_json)
+            .bind(now)
             .bind(id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        self.write_settings_revision(
+            &mut tx,
+            id,
+            revision,
+            &settings_json,
+            ThemeSettingsRevisionStatus::Draft,
+            created_by.as_deref(),
+            now,
+        )
+        .await?;
+        self.append_audit(
+            &mut tx,
+            "theme.settings_draft_saved",
+            "theme",
+            id.as_str(),
+            serde_json::json!({"manifest_id": theme.manifest.id, "revision": revision}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
+
+        self.get(id).await
+    }
+
+    /// Publishes the current settings draft.
+    ///
+    /// The draft is validated again against the theme schema, copied to the
+    /// live settings and recorded as a published revision.
+    pub async fn publish_settings(
+        &self,
+        id: &ThemeId,
+        created_by: Option<String>,
+    ) -> Result<Theme, AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
+        let draft = theme.draft_settings.clone().ok_or_else(|| {
+            AppError::conflict(format!("theme has no settings draft to publish: {id}"))
+        })?;
+        validate_settings(theme.settings_schema.as_ref(), &draft)?;
+
+        let settings_json = serialize_json(&draft, "settings")?;
+        let revision = theme.settings_revision + 1;
+        let now = now_timestamp();
+
+        sqlx::query(
+            "UPDATE themes SET settings = ?, draft_settings = NULL, settings_revision = ?, \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(&settings_json)
+        .bind(revision)
+        .bind(now)
+        .bind(id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        self.write_settings_revision(
+            &mut tx,
+            id,
+            revision,
+            &settings_json,
+            ThemeSettingsRevisionStatus::Published,
+            created_by.as_deref(),
+            now,
+        )
+        .await?;
+        self.append_audit(
+            &mut tx,
+            "theme.settings_published",
+            "theme",
+            id.as_str(),
+            serde_json::json!({"manifest_id": theme.manifest.id, "revision": revision}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
+
+        self.get(id).await
+    }
+
+    /// Lists recent settings revisions, newest first.
+    pub async fn settings_revisions(
+        &self,
+        id: &ThemeId,
+        limit: i64,
+    ) -> Result<Vec<ThemeSettingsRevision>, AppError> {
+        self.fetch_row(id).await?;
+        let limit = limit.clamp(1, Pagination::MAX_LIMIT);
+        let sql = format!(
+            "SELECT {SETTINGS_REVISION_COLUMNS} FROM theme_settings_revisions \
+             WHERE theme_id = ? ORDER BY revision DESC LIMIT ?"
+        );
+        let rows = sqlx::query_as::<_, ThemeSettingsRevisionRow>(&sql)
+            .bind(id.as_str())
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        rows.into_iter()
+            .map(ThemeSettingsRevisionRow::into_revision)
+            .collect()
+    }
+
+    /// Restores one historical settings revision as a new published revision.
+    ///
+    /// Historical rows are immutable; restoring validates the snapshot against
+    /// the current schema and appends a fresh revision.
+    pub async fn restore_settings_revision(
+        &self,
+        id: &ThemeId,
+        revision: i64,
+        created_by: Option<String>,
+    ) -> Result<Theme, AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
+        let sql = format!(
+            "SELECT {SETTINGS_REVISION_COLUMNS} FROM theme_settings_revisions \
+             WHERE theme_id = ? AND revision = ?"
+        );
+        let source = sqlx::query_as::<_, ThemeSettingsRevisionRow>(&sql)
+            .bind(id.as_str())
+            .bind(revision)
             .fetch_optional(&mut *tx)
             .await
             .map_err(database_error)?
-            .ok_or_else(|| AppError::not_found("theme", id))?;
-        let target = target.into_theme()?;
+            .ok_or_else(|| {
+                AppError::not_found("theme settings revision", format!("{id}@{revision}"))
+            })?
+            .into_revision()?;
+        validate_settings(theme.settings_schema.as_ref(), &source.settings)?;
+
+        let settings_json = serialize_json(&source.settings, "settings")?;
+        let next_revision = theme.settings_revision + 1;
+        let now = now_timestamp();
+        sqlx::query(
+            "UPDATE themes SET settings = ?, draft_settings = NULL, settings_revision = ?, \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(&settings_json)
+        .bind(next_revision)
+        .bind(now)
+        .bind(id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        self.write_settings_revision(
+            &mut tx,
+            id,
+            next_revision,
+            &settings_json,
+            ThemeSettingsRevisionStatus::Published,
+            created_by.as_deref(),
+            now,
+        )
+        .await?;
+        self.append_audit(
+            &mut tx,
+            "theme.settings_restored",
+            "theme",
+            id.as_str(),
+            serde_json::json!({
+                "manifest_id": theme.manifest.id,
+                "restored_revision": revision,
+                "revision": next_revision,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
+
+        self.get(id).await
+    }
+
+    /// Lists a theme's capability bindings, including inactive ones.
+    pub async fn list_capability_bindings(
+        &self,
+        id: &ThemeId,
+    ) -> Result<Vec<ThemeCapabilityBinding>, AppError> {
+        self.fetch_row(id).await?;
+        let sql = format!(
+            "SELECT {CAPABILITY_COLUMNS} FROM theme_capability_bindings \
+             WHERE theme_id = ? ORDER BY capability_id ASC"
+        );
+        let rows = sqlx::query_as::<_, ThemeCapabilityBindingRow>(&sql)
+            .bind(id.as_str())
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        rows.into_iter()
+            .map(ThemeCapabilityBindingRow::into_binding)
+            .collect()
+    }
+
+    /// Creates or replaces a capability binding for a theme.
+    pub async fn upsert_capability_binding(
+        &self,
+        id: &ThemeId,
+        input: ThemeCapabilityBindingInput,
+    ) -> Result<ThemeCapabilityBinding, AppError> {
+        validate_capability_binding(&input)?;
+
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
+        let now = now_timestamp();
+        let config_json = serialize_json(&input.config, "capability config")?;
+        let binding_id = format!("{}:{}", id.as_str(), input.capability_id);
+
+        sqlx::query(
+            "INSERT INTO theme_capability_bindings \
+             (id, theme_id, capability_id, endpoint, config, is_active, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (theme_id, capability_id) DO UPDATE SET \
+             endpoint = excluded.endpoint, config = excluded.config, \
+             is_active = excluded.is_active, updated_at = excluded.updated_at",
+        )
+        .bind(&binding_id)
+        .bind(id.as_str())
+        .bind(&input.capability_id)
+        .bind(&input.endpoint)
+        .bind(&config_json)
+        .bind(if input.is_active { 1_i64 } else { 0_i64 })
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+
+        let sql = format!(
+            "SELECT {CAPABILITY_COLUMNS} FROM theme_capability_bindings \
+             WHERE theme_id = ? AND capability_id = ?"
+        );
+        let binding = sqlx::query_as::<_, ThemeCapabilityBindingRow>(&sql)
+            .bind(id.as_str())
+            .bind(&input.capability_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database_error)?
+            .into_binding()?;
+
+        self.append_audit(
+            &mut tx,
+            "theme.capability_bound",
+            "theme",
+            id.as_str(),
+            serde_json::json!({
+                "manifest_id": theme.manifest.id,
+                "capability_id": input.capability_id,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
+
+        Ok(binding)
+    }
+
+    /// Deletes one capability binding from a theme.
+    pub async fn delete_capability_binding(
+        &self,
+        id: &ThemeId,
+        capability_id: &str,
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
+        let result = sqlx::query(
+            "DELETE FROM theme_capability_bindings WHERE theme_id = ? AND capability_id = ?",
+        )
+        .bind(id.as_str())
+        .bind(capability_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found(
+                "theme capability binding",
+                capability_id,
+            ));
+        }
+        self.append_audit(
+            &mut tx,
+            "theme.capability_unbound",
+            "theme",
+            id.as_str(),
+            serde_json::json!({
+                "manifest_id": theme.manifest.id,
+                "capability_id": capability_id,
+            }),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Activates a theme. Activating the active theme is a no-op.
+    pub async fn activate(&self, id: &ThemeId) -> Result<Theme, AppError> {
+        let mut tx = self.db.begin().await?;
+        let target = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
 
         if target.is_active {
             tx.commit().await.map_err(database_error)?;
@@ -325,6 +703,31 @@ impl ThemeService {
 
         tx.commit().await.map_err(database_error)?;
         self.get(id).await
+    }
+
+    /// Returns the theme that a rollback would activate.
+    ///
+    /// Callers validate this theme before committing the rollback so a bad
+    /// previous theme cannot be restored blindly.
+    pub async fn previous(&self) -> Result<Theme, AppError> {
+        let id = self.previous_theme_id().await?;
+        self.get(&id).await
+    }
+
+    async fn previous_theme_id(&self) -> Result<ThemeId, AppError> {
+        let latest_previous: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT previous_theme_id FROM theme_activations \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let previous_id = latest_previous
+            .ok_or_else(|| AppError::conflict("no theme activation to roll back"))?
+            .ok_or_else(|| {
+                AppError::conflict("the latest theme activation has no previous theme")
+            })?;
+        Ok(ThemeId::from_string(previous_id))
     }
 
     /// Rolls back the most recent activation to the theme active before it.
@@ -439,12 +842,71 @@ impl ThemeService {
         Ok(())
     }
 
-    async fn manifest_id_exists(&self, manifest_id: &str) -> Result<bool, AppError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM themes WHERE manifest_id = ?")
-            .bind(manifest_id)
-            .fetch_one(self.db.pool())
+    /// Writes or replaces one settings revision row.
+    #[allow(clippy::too_many_arguments)]
+    /// Deletes working-copy revisions for a theme.
+    ///
+    /// Used when the live settings are changed directly or the working draft is
+    /// discarded, so revision history never shows a draft that is not current.
+    async fn discard_settings_drafts(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        theme_id: &ThemeId,
+    ) -> Result<(), AppError> {
+        sqlx::query("DELETE FROM theme_settings_revisions WHERE theme_id = ? AND status = 'draft'")
+            .bind(theme_id.as_str())
+            .execute(&mut **tx)
             .await
             .map_err(database_error)?;
+        Ok(())
+    }
+
+    // One row write needs every column and the audit actor; grouping them in a
+    // private struct would not make the call sites clearer.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_settings_revision(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        theme_id: &ThemeId,
+        revision: i64,
+        settings_json: &str,
+        status: ThemeSettingsRevisionStatus,
+        created_by: Option<&str>,
+        created_at: Timestamp,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO theme_settings_revisions \
+             (id, theme_id, revision, settings, status, created_by, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (theme_id, revision) DO UPDATE SET \
+             settings = excluded.settings, status = excluded.status, \
+             created_by = excluded.created_by, created_at = excluded.created_at",
+        )
+        .bind(format!("{}:{revision}", theme_id.as_str()))
+        .bind(theme_id.as_str())
+        .bind(revision)
+        .bind(settings_json)
+        .bind(status.as_str())
+        .bind(created_by)
+        .bind(created_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        Ok(())
+    }
+
+    async fn manifest_version_exists(
+        &self,
+        manifest_id: &str,
+        version: &str,
+    ) -> Result<bool, AppError> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM themes WHERE manifest_id = ? AND version = ?")
+                .bind(manifest_id)
+                .bind(version)
+                .fetch_one(self.db.pool())
+                .await
+                .map_err(database_error)?;
         Ok(count > 0)
     }
 
@@ -453,6 +915,20 @@ impl ThemeService {
         sqlx::query_as::<_, ThemeRow>(&sql)
             .bind(id.as_str())
             .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("theme", id))
+    }
+
+    async fn fetch_row_in(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: &ThemeId,
+    ) -> Result<ThemeRow, AppError> {
+        let sql = format!("SELECT {THEME_COLUMNS} FROM themes WHERE id = ?");
+        sqlx::query_as::<_, ThemeRow>(&sql)
+            .bind(id.as_str())
+            .fetch_optional(&mut **tx)
             .await
             .map_err(database_error)?
             .ok_or_else(|| AppError::not_found("theme", id))
@@ -494,6 +970,48 @@ fn validate_settings(schema: Option<&Value>, settings: &Value) -> Result<(), App
         .map_err(|error| AppError::validation(format!("invalid theme settings: {error}")))
 }
 
+fn validate_capability_binding(input: &ThemeCapabilityBindingInput) -> Result<(), AppError> {
+    if input.capability_id.trim().is_empty() || input.capability_id.chars().count() > 120 {
+        return Err(AppError::validation(
+            "capability_id must be between 1 and 120 characters",
+        ));
+    }
+    validate_absolute_url(&input.endpoint)?;
+    if !input.config.is_object() {
+        return Err(AppError::validation(
+            "capability config must be a JSON object",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_absolute_url(endpoint: &str) -> Result<(), AppError> {
+    if endpoint.is_empty()
+        || endpoint.chars().count() > 2048
+        || endpoint.chars().any(char::is_whitespace)
+    {
+        return Err(AppError::validation(
+            "capability endpoint must be a non-empty absolute URL",
+        ));
+    }
+    let lower = endpoint.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+    else {
+        return Err(AppError::validation(
+            "capability endpoint must be an absolute http(s) URL",
+        ));
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if host.is_empty() {
+        return Err(AppError::validation(
+            "capability endpoint must include a host",
+        ));
+    }
+    Ok(())
+}
+
 fn serialize_json<T: serde::Serialize>(value: &T, field: &str) -> Result<String, AppError> {
     serde_json::to_string(value)
         .map_err(|error| AppError::internal(format!("could not serialize {field}: {error}")))
@@ -506,6 +1024,9 @@ struct ThemeRow {
     bundle_path: String,
     settings_schema: Option<String>,
     settings: String,
+    assets_manifest: Option<String>,
+    draft_settings: Option<String>,
+    settings_revision: i64,
     editor_manifest: Option<String>,
     schema_version: i64,
     is_active: i64,
@@ -527,6 +1048,18 @@ impl ThemeRow {
         let settings: Value = serde_json::from_str(&self.settings).map_err(|error| {
             AppError::internal(format!("invalid stored theme settings: {error}"))
         })?;
+        let assets_manifest: Option<Value> = match self.assets_manifest {
+            Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
+                AppError::internal(format!("invalid stored theme assets manifest: {error}"))
+            })?),
+            None => None,
+        };
+        let draft_settings: Option<Value> = match self.draft_settings {
+            Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
+                AppError::internal(format!("invalid stored theme settings draft: {error}"))
+            })?),
+            None => None,
+        };
         let editor_manifest: Option<Value> = match self.editor_manifest {
             Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
                 AppError::internal(format!("invalid stored theme editor manifest: {error}"))
@@ -546,8 +1079,75 @@ impl ThemeRow {
             bundle_path: self.bundle_path,
             settings_schema,
             settings,
+            assets_manifest,
+            draft_settings,
+            settings_revision: self.settings_revision,
             editor_manifest,
             schema_version,
+            is_active: self.is_active != 0,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct ThemeSettingsRevisionRow {
+    id: String,
+    theme_id: String,
+    revision: i64,
+    settings: String,
+    status: String,
+    created_by: Option<String>,
+    created_at: i64,
+}
+
+impl ThemeSettingsRevisionRow {
+    fn into_revision(self) -> Result<ThemeSettingsRevision, AppError> {
+        let settings: Value = serde_json::from_str(&self.settings).map_err(|error| {
+            AppError::internal(format!("invalid stored theme settings revision: {error}"))
+        })?;
+        let status = ThemeSettingsRevisionStatus::parse(&self.status).ok_or_else(|| {
+            AppError::internal(format!(
+                "invalid stored theme settings revision status: {}",
+                self.status
+            ))
+        })?;
+        Ok(ThemeSettingsRevision {
+            id: self.id,
+            theme_id: ThemeId::from_string(self.theme_id),
+            revision: self.revision,
+            settings,
+            status,
+            created_by: self.created_by,
+            created_at: self.created_at,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct ThemeCapabilityBindingRow {
+    id: String,
+    theme_id: String,
+    capability_id: String,
+    endpoint: String,
+    config: String,
+    is_active: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl ThemeCapabilityBindingRow {
+    fn into_binding(self) -> Result<ThemeCapabilityBinding, AppError> {
+        let config: Value = serde_json::from_str(&self.config).map_err(|error| {
+            AppError::internal(format!("invalid stored capability config: {error}"))
+        })?;
+        Ok(ThemeCapabilityBinding {
+            id: self.id,
+            theme_id: ThemeId::from_string(self.theme_id),
+            capability_id: self.capability_id,
+            endpoint: self.endpoint,
+            config,
             is_active: self.is_active != 0,
             created_at: self.created_at,
             updated_at: self.updated_at,

@@ -108,13 +108,26 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_SMTP_HOST`, `FASTCART_SMTP_PORT`, `FASTCART_SMTP_USERNAME`,
   `FASTCART_SMTP_PASSWORD`, `FASTCART_SMTP_SECURITY` — SMTP delivery
 - `FASTCART_RESEND_API_KEY` — Resend delivery
-- `FASTCART_STOREFRONT_ENABLED`, `FASTCART_STOREFRONT_RUNTIME` — enable SSR and select `node`/`v8`
+- `FASTCART_STOREFRONT_ENABLED`, `FASTCART_STOREFRONT_RUNTIME` — enable SSR (default off) and select `node`/`v8`
 - `FASTCART_STOREFRONT_NODE_URL`, `FASTCART_STOREFRONT_NODE_SECRET` — Node sidecar endpoint and bearer secret
+- `FASTCART_THEMES_DIR` — trusted theme bundle directory (default `./themes`)
 - `FASTCART_INTERNAL_FETCH_SECRET` — mounts the secret-gated `/internal/storefront` HTTP surface
 
-Storefront SSR uses the Node sidecar (`runtime = "node"`). The embedded `v8`
-provider is not built yet; starting with `runtime = "v8"` logs a warning and
-serves API routes without SSR.
+Storefront SSR uses the Node sidecar (`runtime = "node"`, the default runtime).
+The embedded `v8` provider is not built yet; starting with `runtime = "v8"`
+logs a warning and serves API routes without SSR.
+
+Build the bundled theme and start the sidecar before enabling storefront SSR:
+
+```bash
+pnpm --filter @fastcart/theme-default build
+SIDECAR_SECRET=change-me pnpm --filter @fastcart/theme-sidecar start
+```
+
+The sidecar listens on `127.0.0.1:8788` by default; set `HOST=0.0.0.0` in a
+container and always pair a non-loopback bind with `SIDECAR_SECRET`. New stores
+get the default theme registered and activated automatically when the bundle is
+present under `storefront.themes_dir`.
 
 Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
 

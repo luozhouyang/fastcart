@@ -5,6 +5,8 @@ import {
   type RequestOptions,
 } from "@fastcart/api-client";
 import type {
+  Asset,
+  AssetListQuery,
   AvailabilityResponse,
   CancelOrderRequest,
   Category,
@@ -20,6 +22,7 @@ import type {
   CreateImageRequest,
   CreateInventoryItemRequest,
   CreateInventoryLocationRequest,
+  CreatePageRequest,
   CreatePriceListRequest,
   CreateProductRequest,
   CreatePromotionRequest,
@@ -39,6 +42,8 @@ import type {
   CustomerAddress,
   CustomerAddressInput,
   CustomerListQuery,
+  DataPickerResponse,
+  DataSourceQuery,
   DeleteStoreRequest,
   Domain,
   DomainRequest,
@@ -63,7 +68,10 @@ import type {
   Order,
   OrderListQuery,
   OrderStatusHistory,
+  Page,
+  PageListQuery,
   PageResult,
+  PageVersion,
   PaginationQuery,
   Payment,
   PaymentAttempt,
@@ -82,11 +90,17 @@ import type {
   PromotionListQuery,
   PromotionUsageResponse,
   ProvisioningResponse,
+  PublishThemeSettingsRequest,
+  PreviewTokenResponse,
   Refund,
   RegisterThemeRequest,
   ReleasedResponse,
   ResolvedShippingOption,
+  RestorePageVersionQuery,
+  RestoreThemeSettingsRequest,
+  RevokePreviewTokenRequest,
   SalesChannel,
+  SaveThemeSettingsDraftRequest,
   SearchQuery,
   SelectedShippingRate,
   SelectRateQuery,
@@ -106,6 +120,11 @@ import type {
   TaxRateListQuery,
   TaxRegion,
   Theme,
+  ThemeCapabilityBinding,
+  ThemeEditorManifest,
+  ThemePageValidationResult,
+  ThemeSettingsRevision,
+  ThemeSettingsState,
   CreatePaymentRefundRequest,
   FailPaymentSessionRequest,
   UpdateCategoryRequest,
@@ -113,6 +132,7 @@ import type {
   UpdateCouponRequest,
   UpdateCustomerRequest,
   UpdateInventoryLocationRequest,
+  UpdatePageRequest,
   UpdatePriceListRequest,
   UpdateProductRequest,
   UpdatePromotionRequest,
@@ -126,6 +146,8 @@ import type {
   UpdateThemeSettingsRequest,
   UpdateVariantRequest,
   UpdateWebhookRequest,
+  UploadAssetFields,
+  UpsertThemeCapabilityRequest,
   Variant,
   WebhookDeliveriesQuery,
   WebhookDelivery,
@@ -134,7 +156,6 @@ import type {
   CreateNotificationChannelRequest,
   Inquiry,
   InquiryDetail,
-  InquiryFile,
   InquiryForm,
   InquiryFormListQuery,
   InquiryFormRevision,
@@ -234,6 +255,104 @@ export interface AdminClient {
       body: UpdateThemeSettingsRequest,
       options?: AdminRequestOptions,
     ): Promise<Theme>;
+    /** Parsed editor manifest for a registered theme. */
+    editorManifest(id: string, options?: AdminRequestOptions): Promise<ThemeEditorManifest>;
+    /** URL of the theme editor bundle served by the API. */
+    editorScriptUrl(id: string): string;
+    /** Validates every page against the theme's editor manifest. */
+    validatePages?(id: string, options?: AdminRequestOptions): Promise<ThemePageValidationResult>;
+    /** Reads the current settings state, including the working draft. */
+    getSettingsDraft?(id: string, options?: AdminRequestOptions): Promise<ThemeSettingsState>;
+    /** Persists a working settings draft, when the backend supports drafts. */
+    saveSettingsDraft?(
+      id: string,
+      body: SaveThemeSettingsDraftRequest,
+      options?: AdminRequestOptions,
+    ): Promise<ThemeSettingsState>;
+    /** Alias for {@link saveSettingsDraft} used by newer admin surfaces. */
+    settingsDraft?(
+      id: string,
+      body: SaveThemeSettingsDraftRequest,
+      options?: AdminRequestOptions,
+    ): Promise<ThemeSettingsState>;
+    /** Publishes the current settings draft. */
+    publishSettings?(
+      id: string,
+      body?: PublishThemeSettingsRequest,
+      options?: AdminRequestOptions,
+    ): Promise<ThemeSettingsState>;
+    /** Lists immutable settings revisions. */
+    settingsRevisions?(id: string, options?: AdminRequestOptions): Promise<ThemeSettingsRevision[]>;
+    /** Restores an earlier settings revision as a new published revision. */
+    restoreSettings?(
+      id: string,
+      revision: number,
+      body?: RestoreThemeSettingsRequest,
+      options?: AdminRequestOptions,
+    ): Promise<ThemeSettingsState>;
+    /** Capability bindings for a theme. */
+    capabilities?: {
+      list(id: string, options?: AdminRequestOptions): Promise<ThemeCapabilityBinding[]>;
+      upsert(
+        id: string,
+        body: UpsertThemeCapabilityRequest,
+        options?: AdminRequestOptions,
+      ): Promise<ThemeCapabilityBinding>;
+      delete(id: string, capabilityId: string, options?: AdminRequestOptions): Promise<void>;
+    };
+  };
+
+  content: {
+    pages: {
+      list(query?: PageListQuery, options?: AdminRequestOptions): Promise<PageResult<Page>>;
+      get(id: string, options?: AdminRequestOptions): Promise<Page>;
+      create(body: CreatePageRequest, options?: AdminRequestOptions): Promise<Page>;
+      update(id: string, body: UpdatePageRequest, options?: AdminRequestOptions): Promise<Page>;
+      delete(id: string, options?: AdminRequestOptions): Promise<void>;
+      publish(id: string, options?: AdminRequestOptions): Promise<Page>;
+      unpublish(id: string, options?: AdminRequestOptions): Promise<Page>;
+      archive(id: string, options?: AdminRequestOptions): Promise<Page>;
+      /** Issues a short-lived signed token for draft preview. */
+      previewToken(id: string, options?: AdminRequestOptions): Promise<PreviewTokenResponse>;
+      revoke(
+        id: string,
+        body: RevokePreviewTokenRequest,
+        options?: AdminRequestOptions,
+      ): Promise<void>;
+      versions(
+        id: string,
+        query?: PaginationQuery,
+        options?: AdminRequestOptions,
+      ): Promise<PageResult<PageVersion>>;
+      restore(
+        id: string,
+        version: number,
+        query?: RestorePageVersionQuery,
+        options?: AdminRequestOptions,
+      ): Promise<Page>;
+    };
+  };
+
+  /** Candidate records for the theme editor's reference pickers. */
+  dataSources: {
+    list(
+      source: string,
+      query?: DataSourceQuery,
+      options?: AdminRequestOptions,
+    ): Promise<DataPickerResponse>;
+  };
+
+  assets: {
+    list(query?: AssetListQuery, options?: AdminRequestOptions): Promise<PageResult<Asset>>;
+    get(id: string, options?: AdminRequestOptions): Promise<Asset>;
+    upload(
+      file: File | Blob,
+      fields?: UploadAssetFields,
+      options?: AdminRequestOptions,
+    ): Promise<Asset>;
+    delete(id: string, options?: AdminRequestOptions): Promise<void>;
+    /** Public storefront URL used inside page data bindings. */
+    assetUrl(id: string): string;
   };
 
   products: {
@@ -848,6 +967,7 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
   }
 
   const id = (value: string): string => encodeURIComponent(value);
+  const baseUrl = options.baseUrl?.replace(/\/$/, "") ?? "";
 
   const login = async (
     body: LoginRequest,
@@ -1005,6 +1125,181 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
           method: "PATCH",
           body,
         }),
+      editorManifest: (themeId, requestOptions) =>
+        request<ThemeEditorManifest>(
+          `/api/v1/admin/themes/${id(themeId)}/editor-manifest`,
+          requestOptions,
+        ),
+      editorScriptUrl: (themeId) => `${baseUrl}/api/v1/admin/themes/${id(themeId)}/editor.js`,
+      validatePages: (themeId, requestOptions) =>
+        request<ThemePageValidationResult>(`/api/v1/admin/themes/${id(themeId)}/validate-pages`, {
+          ...requestOptions,
+          method: "POST",
+        }),
+      getSettingsDraft: (themeId, requestOptions) =>
+        request<ThemeSettingsState>(
+          `/api/v1/admin/themes/${id(themeId)}/settings/draft`,
+          requestOptions,
+        ),
+      saveSettingsDraft: (themeId, body, requestOptions) =>
+        request<ThemeSettingsState>(`/api/v1/admin/themes/${id(themeId)}/settings/draft`, {
+          ...requestOptions,
+          method: "PUT",
+          body,
+        }),
+      settingsDraft: (themeId, body, requestOptions) =>
+        request<ThemeSettingsState>(`/api/v1/admin/themes/${id(themeId)}/settings/draft`, {
+          ...requestOptions,
+          method: "PUT",
+          body,
+        }),
+      publishSettings: (themeId, body, requestOptions) =>
+        request<ThemeSettingsState>(`/api/v1/admin/themes/${id(themeId)}/settings/publish`, {
+          ...requestOptions,
+          method: "POST",
+          body: body ?? {},
+        }),
+      settingsRevisions: async (themeId, requestOptions) => {
+        const response = await request<ThemeSettingsRevision[] | { data: ThemeSettingsRevision[] }>(
+          `/api/v1/admin/themes/${id(themeId)}/settings/revisions`,
+          requestOptions,
+        );
+        return Array.isArray(response) ? response : response.data;
+      },
+      restoreSettings: (themeId, revision, body, requestOptions) =>
+        request<ThemeSettingsState>(
+          `/api/v1/admin/themes/${id(themeId)}/settings/revisions/${revision}/restore`,
+          {
+            ...requestOptions,
+            method: "POST",
+            body: body ?? {},
+          },
+        ),
+      capabilities: {
+        list: (themeId, requestOptions) =>
+          request<ThemeCapabilityBinding[]>(
+            `/api/v1/admin/themes/${id(themeId)}/capabilities`,
+            requestOptions,
+          ),
+        upsert: (themeId, body, requestOptions) =>
+          request<ThemeCapabilityBinding>(`/api/v1/admin/themes/${id(themeId)}/capabilities`, {
+            ...requestOptions,
+            method: "PUT",
+            body,
+          }),
+        delete: (themeId, capabilityId, requestOptions) =>
+          request<void>(`/api/v1/admin/themes/${id(themeId)}/capabilities`, {
+            ...requestOptions,
+            method: "DELETE",
+            body: { capability_id: capabilityId },
+          }),
+      },
+    },
+
+    content: {
+      pages: {
+        list: (query, requestOptions) =>
+          request<PageResult<Page>>("/api/v1/admin/content/pages", {
+            ...requestOptions,
+            query,
+          }),
+        get: (pageId, requestOptions) =>
+          request<Page>(`/api/v1/admin/content/pages/${id(pageId)}`, requestOptions),
+        create: (body, requestOptions) =>
+          request<Page>("/api/v1/admin/content/pages", {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        update: (pageId, body, requestOptions) =>
+          request<Page>(`/api/v1/admin/content/pages/${id(pageId)}`, {
+            ...requestOptions,
+            method: "PATCH",
+            body,
+          }),
+        delete: (pageId, requestOptions) =>
+          request<void>(`/api/v1/admin/content/pages/${id(pageId)}`, {
+            ...requestOptions,
+            method: "DELETE",
+          }),
+        publish: (pageId, requestOptions) =>
+          request<Page>(`/api/v1/admin/content/pages/${id(pageId)}/publish`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+        unpublish: (pageId, requestOptions) =>
+          request<Page>(`/api/v1/admin/content/pages/${id(pageId)}/unpublish`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+        archive: (pageId, requestOptions) =>
+          request<Page>(`/api/v1/admin/content/pages/${id(pageId)}/archive`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+        previewToken: (pageId, requestOptions) =>
+          request<PreviewTokenResponse>(`/api/v1/admin/content/pages/${id(pageId)}/preview-token`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+        revoke: (pageId, body, requestOptions) =>
+          request<void>(`/api/v1/admin/content/pages/${id(pageId)}/preview-token/revoke`, {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        versions: (pageId, query, requestOptions) =>
+          request<PageResult<PageVersion>>(`/api/v1/admin/content/pages/${id(pageId)}/versions`, {
+            ...requestOptions,
+            query,
+          }),
+        restore: (pageId, version, query, requestOptions) =>
+          request<Page>(`/api/v1/admin/content/pages/${id(pageId)}/versions/${version}/restore`, {
+            ...requestOptions,
+            method: "POST",
+            query,
+          }),
+      },
+    },
+
+    dataSources: {
+      list: (source, query, requestOptions) =>
+        request<DataPickerResponse>(`/api/v1/admin/data-sources/${id(source)}`, {
+          ...requestOptions,
+          query,
+        }),
+    },
+
+    assets: {
+      list: (query, requestOptions) =>
+        request<PageResult<Asset>>("/api/v1/admin/assets", {
+          ...requestOptions,
+          query,
+        }),
+      get: (assetId, requestOptions) =>
+        request<Asset>(`/api/v1/admin/assets/${id(assetId)}`, requestOptions),
+      upload: (file, fields, requestOptions) => {
+        const form = new FormData();
+        const filename =
+          typeof File !== "undefined" && file instanceof File && file.name.length > 0
+            ? file.name
+            : "upload";
+        form.append("file", file, filename);
+        if (fields?.alt !== undefined) form.append("alt", fields.alt);
+        if (fields?.width !== undefined) form.append("width", String(fields.width));
+        if (fields?.height !== undefined) form.append("height", String(fields.height));
+        return request<Asset>("/api/v1/admin/assets", {
+          ...requestOptions,
+          method: "POST",
+          body: form,
+        });
+      },
+      delete: (assetId, requestOptions) =>
+        request<void>(`/api/v1/admin/assets/${id(assetId)}`, {
+          ...requestOptions,
+          method: "DELETE",
+        }),
+      assetUrl: (assetId) => `/api/v1/store/assets/${id(assetId)}`,
     },
 
     products: {
@@ -1883,13 +2178,10 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
           requestOptions,
         ),
       publishVersion: (formId, version, requestOptions) =>
-        request<InquiryForm>(
-          `/api/v1/admin/inquiry-forms/${id(formId)}/publish/${version}`,
-          {
-            ...requestOptions,
-            method: "POST",
-          },
-        ),
+        request<InquiryForm>(`/api/v1/admin/inquiry-forms/${id(formId)}/publish/${version}`, {
+          ...requestOptions,
+          method: "POST",
+        }),
     },
 
     inquiries: {
@@ -1907,10 +2199,7 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
           body,
         }),
       unreadCount: (requestOptions) =>
-        request<InquiryUnreadCountResponse>(
-          "/api/v1/admin/inquiries/unread-count",
-          requestOptions,
-        ),
+        request<InquiryUnreadCountResponse>("/api/v1/admin/inquiries/unread-count", requestOptions),
       fileUrl: (inquiryId, fileId) =>
         `/api/v1/admin/inquiries/${id(inquiryId)}/files/${id(fileId)}`,
     },
@@ -1974,10 +2263,7 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
           },
         ),
       events: (requestOptions) =>
-        request<NotificationChannelEvent[]>(
-          "/api/v1/admin/notification-events",
-          requestOptions,
-        ),
+        request<NotificationChannelEvent[]>("/api/v1/admin/notification-events", requestOptions),
     },
 
     settings: {

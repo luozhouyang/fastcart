@@ -13,9 +13,11 @@ import {
   Inbox,
   Layers3,
   LayoutGrid,
+  LayoutTemplate,
   LogOut,
   Menu,
   Package,
+  Palette,
   ReceiptText,
   Search,
   Settings as SettingsIcon,
@@ -54,6 +56,8 @@ interface NavItem {
     | "/customers"
     | "/forms"
     | "/inbox"
+    | "/pages"
+    | "/themes"
     | "/notifications"
     | "/settings";
   label: string;
@@ -63,7 +67,10 @@ interface NavItem {
 const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   {
     label: "Workspace",
-    items: [{ to: "/", label: "Overview", icon: LayoutGrid }],
+    items: [
+      { to: "/", label: "Overview", icon: LayoutGrid },
+      { to: "/pages", label: "Pages", icon: LayoutTemplate },
+    ],
   },
   {
     label: "Operations",
@@ -79,6 +86,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   {
     label: "Configuration",
     items: [
+      { to: "/themes", label: "Themes", icon: Palette },
       { to: "/notifications", label: "Notifications", icon: Bell },
       { to: "/settings", label: "Settings", icon: SettingsIcon },
     ],
@@ -93,6 +101,8 @@ const PAGE_TITLES: Record<string, string> = {
   "/customers": "Customers",
   "/forms": "Forms",
   "/inbox": "Inbox",
+  "/pages": "Pages",
+  "/themes": "Themes",
   "/notifications": "Notifications",
   "/settings": "Settings",
 };
@@ -101,6 +111,8 @@ function pageTitleFor(pathname: string): string {
   const title = PAGE_TITLES[pathname];
   if (title) return title;
   if (pathname.startsWith("/forms/")) return "Form editor";
+  if (pathname.startsWith("/pages/")) return "Page editor";
+  if (pathname.startsWith("/themes/")) return "Theme";
   return "Overview";
 }
 

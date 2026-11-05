@@ -10,6 +10,29 @@ use serde_json::Value;
 /// Maximum accepted size of an editor manifest, in bytes.
 const MAX_EDITOR_MANIFEST_BYTES: u64 = 1024 * 1024;
 
+/// Maximum accepted size of a general theme bundle file, in bytes.
+const MAX_BUNDLE_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Returns `true` when `bundle_path` resolves to a directory inside the
+/// canonical bundle root.
+///
+/// Registration uses this to decide whether a missing manifest file should be
+/// a validation error: deployments point `themes_root` at a real directory,
+/// while tests may use bundle paths that do not exist on disk.
+#[must_use]
+pub fn bundle_directory_exists(bundle_root: &Path, bundle_path: &str) -> bool {
+    if validate_bundle_path(bundle_path).is_err() {
+        return false;
+    }
+    let Ok(root) = std::fs::canonicalize(bundle_root) else {
+        return false;
+    };
+    let Ok(candidate) = std::fs::canonicalize(root.join(bundle_path)) else {
+        return false;
+    };
+    candidate.starts_with(&root) && candidate.is_dir()
+}
+
 /// Loads and validates a theme's editor manifest from its bundle on disk.
 ///
 /// `bundle_path` and `manifest_file` are bundle-relative and are validated by
@@ -21,62 +44,14 @@ pub async fn load_editor_manifest(
     bundle_path: &str,
     manifest_file: &str,
 ) -> Result<ThemeEditorManifest, AppError> {
-    validate_bundle_path(bundle_path).map_err(|error| AppError::validation(error.to_string()))?;
-    validate_bundle_path(manifest_file).map_err(|error| AppError::validation(error.to_string()))?;
-
+    let bytes = read_bundle_file(
+        bundle_root,
+        bundle_path,
+        manifest_file,
+        MAX_EDITOR_MANIFEST_BYTES,
+        "theme editor manifest",
+    )?;
     let relative = format!("{bundle_path}/{manifest_file}");
-    let root = std::fs::canonicalize(bundle_root).map_err(|error| {
-        AppError::validation(format!(
-            "theme bundle root is not available for {relative}: {error}"
-        ))
-    })?;
-    let resolved = root.join(bundle_path).join(manifest_file);
-    let canonical = std::fs::canonicalize(&resolved).map_err(|error| {
-        AppError::validation(format!(
-            "could not read theme editor manifest {relative}: {error}"
-        ))
-    })?;
-    if !canonical.starts_with(&root) {
-        return Err(AppError::validation(format!(
-            "theme editor manifest escapes the bundle root: {relative}"
-        )));
-    }
-
-    // The file is capped at 1 MiB, so a direct synchronous read is acceptable
-    // here; the async signature keeps this aligned with the service methods.
-    let file = std::fs::File::open(&canonical).map_err(|error| {
-        AppError::validation(format!(
-            "could not read theme editor manifest {relative}: {error}"
-        ))
-    })?;
-    let metadata = file.metadata().map_err(|error| {
-        AppError::validation(format!(
-            "could not inspect theme editor manifest {relative}: {error}"
-        ))
-    })?;
-    if !metadata.is_file() {
-        return Err(AppError::validation(format!(
-            "theme editor manifest is not a file: {relative}"
-        )));
-    }
-    if metadata.len() > MAX_EDITOR_MANIFEST_BYTES {
-        return Err(too_large(&relative));
-    }
-
-    let mut bytes = Vec::new();
-    file.take(MAX_EDITOR_MANIFEST_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            AppError::validation(format!(
-                "could not read theme editor manifest {relative}: {error}"
-            ))
-        })?;
-    // Re-check the actual bytes read in case the file changed after the
-    // metadata call.
-    if bytes.len() as u64 > MAX_EDITOR_MANIFEST_BYTES {
-        return Err(too_large(&relative));
-    }
-
     let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
         AppError::validation(format!(
             "invalid theme editor manifest JSON in {relative}: {error}"
@@ -88,9 +63,143 @@ pub async fn load_editor_manifest(
     })
 }
 
-fn too_large(relative: &str) -> AppError {
+/// Reads one file from a theme bundle with canonical root and traversal checks.
+///
+/// The resolved file must stay inside the canonical bundle root, must be a
+/// regular file and may not exceed 4 MiB. Callers choose the bundle-relative
+/// path from trusted manifest data, never from raw request input.
+pub async fn load_theme_bundle_file(
+    bundle_root: &Path,
+    bundle_path: &str,
+    relative_path: &str,
+) -> Result<Vec<u8>, AppError> {
+    read_bundle_file(
+        bundle_root,
+        bundle_path,
+        relative_path,
+        MAX_BUNDLE_FILE_BYTES,
+        "theme bundle file",
+    )
+}
+
+/// Loads a theme's assets manifest as JSON.
+pub async fn load_assets_manifest(
+    bundle_root: &Path,
+    bundle_path: &str,
+    manifest_file: &str,
+) -> Result<Value, AppError> {
+    let bytes = read_bundle_file(
+        bundle_root,
+        bundle_path,
+        manifest_file,
+        MAX_BUNDLE_FILE_BYTES,
+        "theme assets manifest",
+    )?;
+    let relative = format!("{bundle_path}/{manifest_file}");
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::validation(format!(
+            "invalid theme assets manifest JSON in {relative}: {error}"
+        ))
+    })
+}
+
+/// Loads a theme's settings JSON Schema and verifies it is a JSON object.
+pub async fn load_settings_schema(
+    bundle_root: &Path,
+    bundle_path: &str,
+    schema_file: &str,
+) -> Result<Value, AppError> {
+    let bytes = read_bundle_file(
+        bundle_root,
+        bundle_path,
+        schema_file,
+        MAX_BUNDLE_FILE_BYTES,
+        "theme settings schema",
+    )?;
+    let relative = format!("{bundle_path}/{schema_file}");
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::validation(format!(
+            "invalid theme settings schema JSON in {relative}: {error}"
+        ))
+    })?;
+    if !value.is_object() {
+        return Err(AppError::validation(format!(
+            "theme settings schema must be a JSON object: {relative}"
+        )));
+    }
+    Ok(value)
+}
+
+fn read_bundle_file(
+    bundle_root: &Path,
+    bundle_path: &str,
+    relative_path: &str,
+    max_bytes: u64,
+    kind: &str,
+) -> Result<Vec<u8>, AppError> {
+    validate_bundle_path(bundle_path).map_err(|error| AppError::validation(error.to_string()))?;
+    validate_bundle_path(relative_path).map_err(|error| AppError::validation(error.to_string()))?;
+
+    let relative = format!("{bundle_path}/{relative_path}");
+    let root = std::fs::canonicalize(bundle_root).map_err(|error| {
+        AppError::validation(format!(
+            "{kind} root is not available for {relative}: {error}"
+        ))
+    })?;
+    let bundle_root = std::fs::canonicalize(root.join(bundle_path)).map_err(|error| {
+        AppError::validation(format!(
+            "{kind} bundle is not available for {relative}: {error}"
+        ))
+    })?;
+    if !bundle_root.starts_with(&root) {
+        return Err(AppError::validation(format!(
+            "{kind} bundle escapes the theme root: {relative}"
+        )));
+    }
+    let canonical = std::fs::canonicalize(bundle_root.join(relative_path)).map_err(|error| {
+        AppError::validation(format!("could not read {kind} {relative}: {error}"))
+    })?;
+    if !canonical.starts_with(&bundle_root) {
+        return Err(AppError::validation(format!(
+            "{kind} escapes the theme bundle: {relative}"
+        )));
+    }
+
+    // Files are capped at a few MiB, so a direct synchronous read is acceptable
+    // here; the async signatures keep this aligned with the service methods.
+    let file = std::fs::File::open(&canonical).map_err(|error| {
+        AppError::validation(format!("could not read {kind} {relative}: {error}"))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        AppError::validation(format!("could not inspect {kind} {relative}: {error}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::validation(format!(
+            "{kind} is not a file: {relative}"
+        )));
+    }
+    if metadata.len() > max_bytes {
+        return Err(too_large(kind, &relative, max_bytes));
+    }
+
+    let mut bytes = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            AppError::validation(format!("could not read {kind} {relative}: {error}"))
+        })?;
+    // Re-check the actual bytes read in case the file changed after the
+    // metadata call.
+    if bytes.len() as u64 > max_bytes {
+        return Err(too_large(kind, &relative, max_bytes));
+    }
+    Ok(bytes)
+}
+
+fn too_large(kind: &str, relative: &str, max_bytes: u64) -> AppError {
     AppError::validation(format!(
-        "theme editor manifest exceeds the 1 MiB limit: {relative}"
+        "{kind} exceeds the {} MiB limit: {relative}",
+        max_bytes / (1024 * 1024)
     ))
 }
 

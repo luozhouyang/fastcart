@@ -211,8 +211,8 @@ pub struct StorefrontConfig {
 impl Default for StorefrontConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            runtime: "v8".to_owned(),
+            enabled: false,
+            runtime: "node".to_owned(),
             worker_count: 2,
             queue_capacity: 128,
             request_timeout_ms: 10_000,

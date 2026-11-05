@@ -20,6 +20,7 @@ use fastcart_module_content::{
     PageVersion, Redirect, UpdateNavigationInput, UpdatePageInput,
 };
 use fastcart_module_theme::ThemeService;
+use fastcart_storefront::{PageThemeRef, SUPPORTED_EDITOR_SCHEMA_VERSION, ThemeEditorManifest};
 use serde::Deserialize;
 use serde_json::Value;
 use utoipa_axum::router::OpenApiRouter;
@@ -298,15 +299,33 @@ fn parse_page_revision_origin(value: &str) -> ApiResult<PageRevisionOrigin> {
         .ok_or_else(|| ApiError::validation("invalid page revision origin"))
 }
 
-/// Builds a content service bound to the active theme editor manifest.
+/// Builds a content service bound to the active theme.
 ///
-/// The actor is recorded by the service inside each mutation transaction, so
+/// Page bodies are validated against the active theme editor manifest and
+/// stamped with a [`PageThemeRef`] built from the active manifest identity. The
+/// actor is recorded by the service inside each mutation transaction, so
 /// content audits are atomic with the change and never need a second write.
 async fn content_service(db: StoreDatabase, actor_id: Option<String>) -> ApiResult<ContentService> {
-    let editor_manifest = ThemeService::new(db.clone())
-        .active_editor_manifest()
-        .await?;
-    Ok(ContentService::with_editor_manifest(db, editor_manifest).with_audit_actor(actor_id))
+    let (editor_manifest, theme_ref) = match ThemeService::new(db.clone()).active().await? {
+        Some(theme) => {
+            let editor_manifest = match theme.editor_manifest {
+                Some(raw) => Some(ThemeEditorManifest::parse(&raw).map_err(|error| {
+                    AppError::conflict(format!("stored theme editor manifest is invalid: {error}"))
+                })?),
+                None => None,
+            };
+            let theme_ref = PageThemeRef {
+                id: theme.manifest.id,
+                version: theme.manifest.version,
+                schema_version: SUPPORTED_EDITOR_SCHEMA_VERSION,
+            };
+            (editor_manifest, Some(theme_ref))
+        }
+        None => (None, None),
+    };
+    Ok(ContentService::with_editor_manifest(db, editor_manifest)
+        .with_theme_ref(theme_ref)
+        .with_audit_actor(actor_id))
 }
 
 /// Returns the authenticated actor identifier, when one is available.

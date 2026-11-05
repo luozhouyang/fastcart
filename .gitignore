@@ -10,6 +10,7 @@ apps/storefront/.output/
 apps/storefront/.nitro/
 apps/storefront/.tanstack/
 packages/*/dist/
+themes/*/dist/
 
 # Local design documents (kept out of version control)
 /docs/

@@ -24,7 +24,7 @@ use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{AppError, CurrencyCode, NavigationId, PageId, Pagination};
 use fastcart_module_asset::AssetService;
 use fastcart_module_catalog::{CatalogService, ProductFilter, ProductSort, ProductStatus};
-use fastcart_module_content::{ContentService, PageStatus};
+use fastcart_module_content::ContentService;
 use fastcart_module_inquiry::InquiryFormService;
 use fastcart_storefront::page::MAX_BINDING_LIMIT;
 use fastcart_storefront::{BindingRequest, DataBag, DataBinding};
@@ -384,18 +384,19 @@ async fn resolve_page(
     id: &str,
     context: &DataResolutionContext,
 ) -> Result<Value, AppError> {
-    let page = match ContentService::new(db.clone())
-        .get_page(&PageId::from_string(id))
-        .await
-    {
+    let page_id = PageId::from_string(id);
+    let page = if context.mode == DataMode::Production {
+        ContentService::new(db.clone())
+            .get_published_page(&page_id)
+            .await
+    } else {
+        ContentService::new(db.clone()).get_page(&page_id).await
+    };
+    let page = match page {
         Ok(page) => page,
         Err(error) if error.is_not_found() => return Ok(json!({ "page": null })),
         Err(error) => return Err(error),
     };
-    if context.mode == DataMode::Production && page.status != PageStatus::Published {
-        tracing::debug!(page_id = id, "hidden unpublished page");
-        return Ok(json!({ "page": null }));
-    }
     Ok(json!({
         "page": {
             "id": page.id.as_str(),
@@ -408,18 +409,21 @@ async fn resolve_page(
 
 /// Resolves a published inquiry form by handle.
 ///
-/// Production mode only ever sees published forms because
+/// Production only ever sees published forms because
 /// [`InquiryFormService::published_by_handle`] enforces publication. Preview
-/// and editor modes also return the published revision; there is no separate
-/// draft preview yet.
+/// mode uses the working draft when one exists so editors can check copy and
+/// field changes before publishing.
 async fn resolve_inquiry_form(
     db: &StoreDatabase,
     handle: &str,
-    _context: &DataResolutionContext,
+    context: &DataResolutionContext,
 ) -> Result<Value, AppError> {
-    let published = InquiryFormService::new(db.clone())
-        .published_by_handle(handle)
-        .await?;
+    let service = InquiryFormService::new(db.clone());
+    let published = if context.mode == DataMode::Preview {
+        service.draft_by_handle(handle).await?
+    } else {
+        service.published_by_handle(handle).await?
+    };
     let settings = json!({
         "submit_label": published.revision.settings.submit_label,
         "success_message": published.revision.settings.success_message,
@@ -431,7 +435,7 @@ async fn resolve_inquiry_form(
     Ok(json!({
         "form": {
             "handle": published.form.handle,
-            "version": published.form.published_version.unwrap_or(published.revision.version),
+            "version": published.revision.version,
             "fields": published.revision.fields,
             "settings": settings,
         }

@@ -91,6 +91,7 @@ impl AppState {
                 .filter(|secret| !secret.is_empty()),
             preview_frame_ancestors: config.server.preview_frame_ancestors.clone(),
             themes_root: config.storefront.themes_dir.clone(),
+            storefront_runtime_kind: config.storefront.runtime.clone(),
             admin_base_url: config
                 .server
                 .admin_base_url
@@ -104,6 +105,11 @@ impl AppState {
             notification_retention_days: config.notifications.retention_days,
         };
         let storefront_runtime = build_storefront_runtime(&config.storefront)?;
+        if let Some(runtime) = storefront_runtime.as_ref()
+            && let Err(error) = runtime.health_check().await
+        {
+            tracing::warn!(error = %error, "storefront runtime health check failed; rendering will return 503 until it recovers");
+        }
         let email = build_email_service(&config.email)?;
         let context = Arc::new(
             AppContext::new(api_config, platform, databases.clone(), cache)

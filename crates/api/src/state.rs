@@ -60,6 +60,11 @@ pub struct ApiConfig {
     /// Used to load `editor.manifest.json` at registration and to keep bundle
     /// paths confined to deployed theme code.
     pub themes_root: PathBuf,
+    /// Runtime provider selected for this deployment (`v8` or `node`).
+    ///
+    /// Theme activation compares this with the manifest's declared runtime so a
+    /// theme cannot be activated onto an incompatible runtime.
+    pub storefront_runtime_kind: String,
     /// Optional admin application origin used for notification deep links.
     pub admin_base_url: Option<String>,
     /// Root directory backing the default local object storage adapter.
@@ -93,6 +98,7 @@ impl Default for ApiConfig {
             preview_secret: None,
             preview_frame_ancestors: Vec::new(),
             themes_root: PathBuf::from("./themes"),
+            storefront_runtime_kind: "node".to_owned(),
             admin_base_url: None,
             storage_root: PathBuf::from("./data/assets"),
             max_asset_upload_bytes: 100 * 1024 * 1024,

@@ -929,6 +929,12 @@ pub struct ThemeDto {
     pub settings: Value,
     /// Raw editor manifest, when the theme exposes an editor.
     pub editor_manifest: Option<Value>,
+    /// Parsed `assets.json` from the theme bundle.
+    pub assets_manifest: Option<Value>,
+    /// Draft settings, when they differ from the live settings.
+    pub draft_settings: Option<Value>,
+    /// Monotonic settings revision.
+    pub settings_revision: i64,
     /// Editor manifest schema version.
     pub schema_version: u32,
     /// Whether this is the active theme.
@@ -950,6 +956,9 @@ impl From<Theme> for ThemeDto {
             settings_schema: theme.settings_schema,
             settings: theme.settings,
             editor_manifest: theme.editor_manifest,
+            assets_manifest: theme.assets_manifest,
+            draft_settings: theme.draft_settings,
+            settings_revision: theme.settings_revision,
             schema_version: theme.schema_version,
             is_active: theme.is_active,
             created_at: theme.created_at,
@@ -964,10 +973,8 @@ impl From<Theme> for ThemeDto {
 pub struct StoreThemeDto {
     /// Theme identifier.
     pub id: String,
-    /// Parsed theme manifest.
+    /// Public theme manifest metadata.
     pub manifest: ThemeManifestDto,
-    /// Bundle-relative asset root.
-    pub bundle_path: String,
     /// Current theme settings.
     pub settings: Value,
 }
@@ -977,7 +984,6 @@ impl From<Theme> for StoreThemeDto {
         Self {
             id: theme.id.to_string(),
             manifest: theme.manifest.into(),
-            bundle_path: theme.bundle_path,
             settings: theme.settings,
         }
     }

@@ -31,6 +31,15 @@ pub struct PageContext {
     pub handle: String,
     /// Publication status at render time.
     pub status: String,
+    /// Page classifier such as `home`, `custom` or `faq`.
+    #[serde(default)]
+    pub page_type: String,
+    /// Human-readable page title used for the document title.
+    #[serde(default)]
+    pub title: String,
+    /// Structured SEO metadata.
+    #[serde(default)]
+    pub seo: Value,
     /// Validated page body.
     pub body: Value,
 }
@@ -63,6 +72,12 @@ pub struct RuntimeTheme {
     pub entry: String,
     /// Active theme settings.
     pub settings: serde_json::Value,
+    /// Parsed `assets.json` from the theme bundle, when present.
+    #[serde(default)]
+    pub assets_manifest: Option<serde_json::Value>,
+    /// Public base URL that serves the theme's client assets.
+    #[serde(default)]
+    pub assets_base_url: Option<String>,
 }
 
 /// One request handed to a storefront runtime.

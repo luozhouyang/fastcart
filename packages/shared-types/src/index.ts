@@ -1839,6 +1839,34 @@ export interface WebhookDeliveriesQuery {
 // Themes
 // ---------------------------------------------------------------------------
 
+/** Bundle-relative references to a theme editor surface. */
+export interface ThemeEditorRef {
+  /** ESM entry that exports render and field components. */
+  entry: string;
+  /** JSON file describing categories, components and fields. */
+  manifest: string;
+  /** Editor manifest schema version. */
+  schema_version?: number;
+}
+
+/** One capability required by a theme. */
+export interface CapabilityRequirement {
+  /** Capability identifier. */
+  id: string;
+  /** Required capability version. */
+  version: number;
+  /** Whether activation may proceed when the capability is missing. */
+  optional?: boolean;
+}
+
+/** Platform contracts and capabilities a theme depends on. */
+export interface ThemeRequirements {
+  /** Required storefront data API version. */
+  data_api?: number;
+  /** Optional or required plugin capabilities. */
+  capabilities?: CapabilityRequirement[];
+}
+
 export interface ThemeManifest {
   id: string;
   name: string;
@@ -1849,6 +1877,10 @@ export interface ThemeManifest {
   entry: string;
   settings_schema?: string | null;
   assets_manifest?: string | null;
+  /** Optional editor bundle and manifest references. */
+  editor?: ThemeEditorRef | null;
+  /** Optional platform contracts and capabilities the theme depends on. */
+  requires?: ThemeRequirements | null;
 }
 
 export interface Theme {
@@ -1857,6 +1889,16 @@ export interface Theme {
   bundle_path: string;
   settings_schema: JsonValue | null;
   settings: JsonValue;
+  /** Raw editor manifest, when the theme exposes an editor. */
+  editor_manifest?: JsonValue | null;
+  /** Editor manifest schema version. */
+  schema_version?: number;
+  /** Parsed asset manifest, when the backend exposes one. */
+  assets_manifest?: JsonValue | null;
+  /** Working settings that have not been published yet. */
+  draft_settings?: JsonValue | null;
+  /** Optimistic concurrency token for theme settings. */
+  settings_revision?: number | null;
   is_active: boolean;
   created_at: Timestamp;
   updated_at: Timestamp;
@@ -1866,7 +1908,8 @@ export interface Theme {
 export interface StoreTheme {
   id: string;
   manifest: ThemeManifest;
-  bundle_path: string;
+  /** Bundle-relative asset root; omitted by the storefront DTO. */
+  bundle_path?: string;
   settings: JsonValue;
 }
 
@@ -1875,10 +1918,187 @@ export interface RegisterThemeRequest {
   bundle_path: string;
   settings_schema?: JsonValue | null;
   settings?: JsonValue | null;
+  /** Raw editor manifest; required when `manifest.editor` is present. */
+  editor_manifest?: JsonValue | null;
+  /** Parsed asset manifest, when the bundle publishes one. */
+  assets_manifest?: JsonValue | null;
 }
 
 export interface UpdateThemeSettingsRequest {
   settings: JsonValue;
+  /** Revision the caller last observed, when supported by the backend. */
+  base_revision?: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Theme editor manifest
+// ---------------------------------------------------------------------------
+
+export type ThemeEditorFieldType =
+  | "text"
+  | "textarea"
+  | "number"
+  | "boolean"
+  | "select"
+  | "object"
+  | "array"
+  | "data_source"
+  | "asset"
+  | "custom";
+
+export type ThemeDataSourceKind =
+  | "collection"
+  | "product"
+  | "product_list"
+  | "page"
+  | "navigation"
+  | "asset"
+  | "search"
+  | "inquiry_form";
+
+export interface ThemeEditorFieldOption {
+  value: string;
+  label: string;
+}
+
+export interface ThemeEditorField {
+  type: ThemeEditorFieldType | string;
+  /** Human-readable label shown by the editor. */
+  label?: string | null;
+  /** Optional help text shown under the input. */
+  description?: string | null;
+  /** Optional picker configuration for data_source and asset fields. */
+  picker?: JsonValue | null;
+  /** Data source kind for `data_source` and `asset` fields. */
+  source?: string | null;
+  required?: boolean;
+  min?: number | null;
+  max?: number | null;
+  options?: ThemeEditorFieldOption[] | null;
+  default?: JsonValue;
+  /** Nested field definitions for `object` fields. */
+  fields?: Record<string, ThemeEditorField> | null;
+  /** Item definition for `array` fields. */
+  items?: ThemeEditorField | null;
+}
+
+export interface ThemeEditorSlot {
+  name: string;
+  title?: string | null;
+  /** Component types allowed in the slot; absent allows every component. */
+  allowed_components?: string[] | null;
+}
+
+export interface ThemeEditorComponent {
+  title: string;
+  /** Optional short description shown in the palette or inspector. */
+  description?: string | null;
+  /** Optional icon name understood by the admin editor. */
+  icon?: string | null;
+  category?: string | null;
+  fields?: Record<string, ThemeEditorField>;
+  defaultProps?: JsonValue;
+  slots?: ThemeEditorSlot[];
+}
+
+/** One named page zone (header, footer, sidebar) exposed by the theme. */
+export interface ThemeEditorZone {
+  title: string;
+  /** Component types allowed in the zone; absent allows every component. */
+  allowed_components?: string[] | null;
+}
+
+export interface ThemeEditorCategory {
+  title: string;
+  components?: string[];
+}
+
+export interface ThemeEditorRoot {
+  fields?: Record<string, ThemeEditorField>;
+}
+
+export interface ThemeEditorManifest {
+  schema_version?: number;
+  categories?: Record<string, ThemeEditorCategory>;
+  components?: Record<string, ThemeEditorComponent>;
+  root?: ThemeEditorRoot;
+  /** Named page zones available to authors. */
+  zones?: Record<string, ThemeEditorZone>;
+}
+
+// ---------------------------------------------------------------------------
+// Theme settings revisions, capabilities and validation
+// ---------------------------------------------------------------------------
+
+export type ThemeSettingsRevisionStatus = "draft" | "published";
+/** @deprecated Use {@link ThemeSettingsRevisionStatus}. */
+export type ThemeSettingsRevisionKind = ThemeSettingsRevisionStatus;
+
+export interface ThemeSettingsRevision {
+  id: string;
+  theme_id: string;
+  revision: number;
+  settings: JsonValue;
+  status: ThemeSettingsRevisionStatus;
+  created_by?: string | null;
+  created_at: Timestamp;
+}
+
+/** Settings state returned by the draft, publish and restore endpoints. */
+export interface ThemeSettingsState {
+  theme_id: string;
+  settings: JsonValue;
+  draft_settings?: JsonValue | null;
+  settings_revision: number;
+}
+
+export interface SaveThemeSettingsDraftRequest {
+  settings: JsonValue;
+}
+
+export interface PublishThemeSettingsRequest {
+  /** Optional revision to publish, when a backend accepts one. */
+  revision?: number | null;
+}
+
+export interface RestoreThemeSettingsRequest {
+  /** Optional optimistic revision, when a backend accepts one. */
+  base_revision?: number | null;
+}
+
+/** A runtime capability endpoint bound to a theme. */
+export interface ThemeCapabilityBinding {
+  id: string;
+  theme_id: string;
+  capability_id: string;
+  endpoint: string;
+  config: JsonValue;
+  is_active: boolean;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface UpsertThemeCapabilityRequest {
+  capability_id: string;
+  endpoint: string;
+  config?: JsonValue;
+  is_active?: boolean;
+}
+
+export interface DeleteThemeCapabilityRequest {
+  capability_id: string;
+}
+
+/** One page that failed validation against a theme editor manifest. */
+export interface ThemePageValidationIssue {
+  page_id: string;
+  handle: string;
+  error: string;
+}
+
+export interface ThemePageValidationResult {
+  valid: boolean;
+  issues: ThemePageValidationIssue[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1886,6 +2106,60 @@ export interface UpdateThemeSettingsRequest {
 // ---------------------------------------------------------------------------
 
 export type PageStatus = "draft" | "published" | "archived";
+export type PageVersionKind = "draft" | "published";
+export type PageRevisionOrigin = "manual" | "ai";
+
+/** Theme metadata captured with a page body. */
+export interface PageThemeRef {
+  /** Theme manifest identifier. */
+  id: string;
+  /** Theme version. */
+  version: string;
+  /** Editor schema version used when the body was written. */
+  schema_version?: number;
+}
+
+/** Root property values for a page body. */
+export interface PageRoot {
+  props?: JsonValue;
+}
+
+/** One block in a structured page body. */
+export interface PageBlock {
+  /** Registered component type. */
+  type: string;
+  /** Component props. The `id` prop is the stable block identifier. */
+  props?: JsonValue;
+  /** Nested slot content keyed by declared slot name. */
+  slots?: Record<string, PageBlock[]>;
+}
+
+/** A versioned page definition compatible with the theme editor data model. */
+export interface PageBody {
+  schema_version?: number;
+  /** Theme the body was authored against. */
+  theme?: PageThemeRef | null;
+  /** Ordered page blocks. */
+  content?: PageBlock[];
+  root?: PageRoot;
+  /** Named top-level regions such as header or footer. */
+  zones?: Record<string, PageBlock[]>;
+}
+
+/**
+ * A stored data reference. The backend stores bindings as tagged JSON
+ * objects, for example `{ "source": "collection", "id": "col_123" }`.
+ */
+export interface DataBinding {
+  source: ThemeDataSourceKind;
+  id?: string;
+  handle?: string;
+  query?: string;
+  limit?: number;
+  collection_id?: string;
+  tag?: string;
+  sort?: string;
+}
 
 export interface Page {
   id: string;
@@ -1893,13 +2167,122 @@ export interface Page {
   handle: string;
   status: PageStatus;
   page_type: string;
+  /** Optimistic concurrency token; incremented on every write. */
+  revision: number;
   body: JsonValue;
+  /** Body last published to storefronts, when the page has been published. */
+  published_body?: JsonValue | null;
   seo: JsonValue;
   metadata: Metadata;
   published_at: Timestamp | null;
   created_at: Timestamp;
   updated_at: Timestamp;
   deleted_at: Timestamp | null;
+}
+
+export interface PageVersion {
+  id: string;
+  page_id: string;
+  version: number;
+  body: JsonValue;
+  kind: PageVersionKind;
+  origin: PageRevisionOrigin;
+  created_by?: string | null;
+  created_at: Timestamp;
+}
+
+export interface PageListQuery extends PaginationQuery {
+  status?: PageStatus;
+  include_deleted?: boolean;
+}
+
+export interface CreatePageRequest {
+  title: string;
+  handle?: string | null;
+  page_type?: string | null;
+  body?: JsonValue;
+  seo?: JsonValue;
+  metadata?: Metadata;
+}
+
+/** Partial page update; `base_revision` enables optimistic concurrency. */
+export interface UpdatePageRequest {
+  base_revision: number;
+  origin?: PageRevisionOrigin;
+  title?: string;
+  handle?: string;
+  page_type?: string;
+  body?: JsonValue;
+  seo?: JsonValue;
+  metadata?: Metadata;
+}
+
+export interface RestorePageVersionQuery {
+  base_revision?: number;
+}
+
+export interface PreviewTokenResponse {
+  token: string;
+  expires_at: Timestamp;
+  jti: string;
+}
+
+export interface RevokePreviewTokenRequest {
+  jti: string;
+}
+
+// ---------------------------------------------------------------------------
+// Editor data-source pickers
+// ---------------------------------------------------------------------------
+
+export interface DataPickerItem {
+  id: string;
+  handle: string;
+  label: string;
+}
+
+export interface DataPickerResponse {
+  items: DataPickerItem[];
+  /** Offset of the next page, or `null` when this is the last page. */
+  next: number | null;
+}
+
+export interface DataSourceQuery {
+  search?: string;
+  limit?: number;
+  offset?: number;
+  collection_id?: string;
+  tag?: string;
+  published?: boolean;
+  sort?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Media assets
+// ---------------------------------------------------------------------------
+
+export interface Asset {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  storage_key: string;
+  alt: string | null;
+  width: number | null;
+  height: number | null;
+  created_by: string | null;
+  created_at: Timestamp;
+  deleted_at: Timestamp | null;
+}
+
+export interface AssetListQuery extends PaginationQuery {
+  search?: string;
+}
+
+export interface UploadAssetFields {
+  alt?: string;
+  width?: number;
+  height?: number;
 }
 
 export interface NavigationItem {

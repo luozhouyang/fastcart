@@ -1,7 +1,7 @@
 {
   "version": 1,
   "entries": {
-    "client": "client",
-    "server": "server"
+    "client": "dist/client",
+    "server": "dist/server/server.js"
   }
 }

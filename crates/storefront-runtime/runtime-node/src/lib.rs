@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 pub const RENDER_PATH: &str = "/render";
 /// Path used to check sidecar readiness.
 pub const HEALTH_PATH: &str = "/health";
+/// Maximum decoded response body accepted from the sidecar.
+const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Node.js sidecar runtime adapter.
 #[derive(Clone, Debug)]
@@ -106,9 +108,19 @@ impl NodeRuntime {
         }
         let headers = validate_headers(result.headers)?;
         let body = match result.body {
-            Some(encoded) => STANDARD.decode(encoded).map_err(|error| {
-                RuntimeError::FetchBridge(format!("invalid node sidecar body encoding: {error}"))
-            })?,
+            Some(encoded) => {
+                let decoded = STANDARD.decode(encoded).map_err(|error| {
+                    RuntimeError::FetchBridge(format!(
+                        "invalid node sidecar body encoding: {error}"
+                    ))
+                })?;
+                if decoded.len() > MAX_RESPONSE_BYTES {
+                    return Err(RuntimeError::FetchBridge(format!(
+                        "node sidecar response exceeded {MAX_RESPONSE_BYTES} bytes"
+                    )));
+                }
+                decoded
+            }
             None => Vec::new(),
         };
         Ok(RuntimeResponse {
@@ -297,11 +309,16 @@ mod tests {
                 bundle_path: "themes/default".to_owned(),
                 entry: "dist/server.js".to_owned(),
                 settings: json!({"brand_color": "#111111"}),
+                assets_manifest: Some(json!({"entries": {"client": "dist/client"}})),
+                assets_base_url: Some("/api/v1/store/theme-assets".to_owned()),
             }),
             page: Some(PageContext {
                 id: "page_1".to_owned(),
                 handle: "home".to_owned(),
                 status: "published".to_owned(),
+                page_type: "home".to_owned(),
+                title: "Home".to_owned(),
+                seo: json!({"title": "Home"}),
                 body: json!({"schema_version": 1, "content": []}),
             }),
             data: Some(json!({"grid-1": {"products": []}})),

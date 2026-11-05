@@ -39,6 +39,11 @@ pub async fn maintenance_loop(context: Arc<AppContext>) {
         // retention cleanup. Outbox work is idempotent and is normally already
         // done by the ten-second loop, so a repeated pass is harmless.
         if tick.is_multiple_of(6) {
+            if let Some(runtime) = context.storefront_runtime.as_ref()
+                && let Err(error) = runtime.health_check().await
+            {
+                tracing::warn!(error = %error, "storefront runtime health check failed");
+            }
             let report = fastcart_workflows::run_maintenance_with_notifications(
                 &context.platform,
                 &context.databases,

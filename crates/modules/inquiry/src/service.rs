@@ -226,6 +226,57 @@ impl InquiryFormService {
         Ok(PageResult::new(data, count, pagination))
     }
 
+    /// Lists published forms newest first, optionally filtered by name or
+    /// handle.
+    ///
+    /// The query is matched case-insensitively and LIKE wildcards in user
+    /// input are escaped. An absent or blank query matches every published
+    /// form.
+    pub async fn list_published_forms(
+        &self,
+        query: Option<&str>,
+        pagination: Pagination,
+    ) -> Result<PageResult<InquiryForm>, AppError> {
+        let pattern = like_pattern(query);
+        let conditions = if pattern.is_some() {
+            " WHERE status = 'published' AND (LOWER(name) LIKE LOWER(?) ESCAPE '\\' \
+             OR LOWER(handle) LIKE LOWER(?) ESCAPE '\\')"
+        } else {
+            " WHERE status = 'published'"
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM inquiry_forms{conditions}");
+        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        if let Some(pattern) = pattern.as_deref() {
+            count_query = count_query.bind(pattern).bind(pattern);
+        }
+        let count = count_query
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let list_sql = format!(
+            "SELECT {FORM_COLUMNS} FROM inquiry_forms{conditions} \
+             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        );
+        let mut list_query = sqlx::query_as::<_, InquiryFormRow>(&list_sql);
+        if let Some(pattern) = pattern.as_deref() {
+            list_query = list_query.bind(pattern).bind(pattern);
+        }
+        let rows = list_query
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let data = rows
+            .into_iter()
+            .map(InquiryFormRow::into_form)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PageResult::new(data, count, pagination))
+    }
+
     /// Loads a form by identifier.
     pub async fn get_form(&self, id: &InquiryFormId) -> Result<InquiryForm, AppError> {
         let sql = format!("SELECT {FORM_COLUMNS} FROM inquiry_forms WHERE id = ?");
@@ -618,6 +669,36 @@ impl InquiryFormService {
         .map_err(database_error)?
         .ok_or_else(|| AppError::not_found("inquiry form", handle))?
         .into_published()
+    }
+
+    /// Loads the current draft revision by handle for editor previews.
+    ///
+    /// Archived forms are hidden. A form with no draft falls back to its
+    /// published revision so preview never turns into an error just because the
+    /// editor has not saved a draft yet.
+    pub async fn draft_by_handle(&self, handle: &str) -> Result<PublishedInquiryForm, AppError> {
+        let handle = handle.trim();
+        let sql = format!(
+            "SELECT {FORM_COLUMNS} FROM inquiry_forms \
+             WHERE handle = ? AND status <> 'archived'"
+        );
+        let form = sqlx::query_as::<_, InquiryFormRow>(&sql)
+            .bind(handle)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("inquiry form", handle))?
+            .into_form()?;
+        let revision = match self.get_draft(&form.id).await? {
+            Some(revision) => revision,
+            None => {
+                let version = form.published_version.ok_or_else(|| {
+                    AppError::not_found("published inquiry form revision", handle)
+                })?;
+                self.get_revision(&form.id, version).await?
+            }
+        };
+        Ok(PublishedInquiryForm { form, revision })
     }
 }
 

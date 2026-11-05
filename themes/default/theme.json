@@ -2,13 +2,17 @@
   "id": "default",
   "name": "Fastcart Default Theme",
   "version": "0.1.0",
-  "runtime": "tanstack-start",
-  "entry": "server.js",
+  "runtime": "node",
+  "entry": "dist/server/server.js",
   "settings_schema": "settings.schema.json",
   "assets_manifest": "assets.json",
   "editor": {
-    "entry": "src/editor.ts",
+    "entry": "dist/client/editor.js",
     "manifest": "editor.manifest.json",
     "schema_version": 1
+  },
+  "requires": {
+    "data_api": 1,
+    "capabilities": []
   }
 }

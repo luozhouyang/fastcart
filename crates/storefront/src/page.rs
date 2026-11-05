@@ -191,7 +191,25 @@ impl PageBody {
         let mut ids = HashSet::new();
         let mut count = 0_usize;
         validate_blocks_with_editor(&self.content, editor, 1, &mut ids, &mut count)?;
-        for blocks in self.zones.values() {
+        for (zone, blocks) in &self.zones {
+            if !editor.zones.is_empty() {
+                let definition = editor.zones.get(zone).ok_or_else(|| {
+                    StorefrontError::Invalid(format!("unknown page zone: {zone}"))
+                })?;
+                if let Some(allowed) = definition.allowed_components.as_ref() {
+                    for block in blocks {
+                        if !allowed
+                            .iter()
+                            .any(|component| component == &block.block_type)
+                        {
+                            return Err(StorefrontError::Invalid(format!(
+                                "component {} is not allowed in zone {zone}",
+                                block.block_type
+                            )));
+                        }
+                    }
+                }
+            }
             validate_blocks_with_editor(blocks, editor, 1, &mut ids, &mut count)?;
         }
         Ok(())

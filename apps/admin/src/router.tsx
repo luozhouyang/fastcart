@@ -13,8 +13,12 @@ import { LoginPage, NoStorePage, SplashScreen } from "@/pages/login";
 import { NotificationsPage } from "@/pages/notifications";
 import { OrdersPage } from "@/pages/orders";
 import { OverviewPage } from "@/pages/overview";
+import { PageEditorPage } from "@/pages/page-editor";
+import { PagesPage } from "@/pages/pages";
 import { ProductsPage } from "@/pages/products";
 import { SettingsPage } from "@/pages/settings";
+import { ThemeDetailPage } from "@/pages/theme-detail";
+import { ThemesPage } from "@/pages/themes";
 
 function AppGate() {
   const { status } = useAuth();
@@ -119,6 +123,30 @@ const notificationsRoute = createRoute({
   component: NotificationsPage,
 });
 
+const themesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/themes",
+  component: ThemesPage,
+});
+
+const themeDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/themes/$themeId",
+  component: ThemeDetailPage,
+});
+
+const pagesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/pages",
+  component: PagesPage,
+});
+
+const pageEditorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/pages/$pageId",
+  component: PageEditorPage,
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -135,6 +163,10 @@ const routeTree = rootRoute.addChildren([
   formEditorRoute,
   inboxRoute,
   notificationsRoute,
+  themesRoute,
+  themeDetailRoute,
+  pagesRoute,
+  pageEditorRoute,
   settingsRoute,
 ]);
 

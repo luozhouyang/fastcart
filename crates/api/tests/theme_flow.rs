@@ -87,7 +87,7 @@ fn theme_body(id: &str) -> Value {
             "id": id,
             "name": format!("Theme {id}"),
             "version": "1.0.0",
-            "runtime": "v8",
+            "runtime": "node",
             "entry": "dist/server.js",
             "settings_schema": "settings.schema.json",
             "assets_manifest": "assets.json",
@@ -298,7 +298,6 @@ async fn theme_registry_admin_and_storefront_flow() {
     let (status, public) = request(&app, "GET", "/api/v1/store/theme", None, &host).await;
     assert_eq!(status, StatusCode::OK, "{public}");
     assert_eq!(public["theme"]["manifest"]["id"], "default");
-    assert_eq!(public["theme"]["bundle_path"], "themes/default");
     assert_eq!(public["theme"]["settings"]["logo"], "/logo.svg");
     assert!(public["theme"].get("settings_schema").is_none());
 

@@ -7,16 +7,17 @@ use fastcart_kernel::{
     AppError, Metadata, NavigationId, PageId, PageResult, Pagination, now_timestamp,
     validate_handle, validate_length, validate_metadata,
 };
-use fastcart_storefront::{PageBody, StorefrontError, ThemeEditorManifest};
+use fastcart_storefront::{PageBody, PageThemeRef, StorefrontError, ThemeEditorManifest};
 use serde_json::Value;
 use sqlx::FromRow;
 
 use crate::domain::{
     CreateNavigationInput, CreatePageInput, CreateRedirectInput, MAX_PAGE_TYPE_LENGTH,
     MAX_REDIRECT_PATH_LENGTH, MAX_TITLE_LENGTH, MAX_URL_LENGTH, Navigation, NavigationItem,
-    NavigationItemInput, NavigationTree, NavigationTreeItem, Page, PageRevisionOrigin, PageStatus,
-    PageVersion, PageVersionKind, Redirect, UpdateNavigationInput, UpdatePageInput, generate_id,
-    resolve_handle, validate_page_content, validate_page_title, validate_redirect_status,
+    NavigationItemInput, NavigationTree, NavigationTreeItem, Page, PageRevisionOrigin, PageRoute,
+    PageStatus, PageVersion, PageVersionKind, Redirect, UpdateNavigationInput, UpdatePageInput,
+    generate_id, resolve_handle, validate_page_content, validate_page_title,
+    validate_redirect_status,
 };
 
 const PAGE_COLUMNS: &str = "id, title, handle, status, page_type, body, published_body, \
@@ -27,11 +28,23 @@ const NAVIGATION_COLUMNS: &str = "id, name, handle, metadata, created_at, update
 
 const NAVIGATION_ITEM_COLUMNS: &str = "id, navigation_id, parent_id, title, url, rank, metadata";
 
+/// A page whose stored body does not validate against a candidate theme.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct PageValidationIssue {
+    /// Page identifier.
+    pub page_id: PageId,
+    /// Page handle at validation time.
+    pub handle: String,
+    /// Human-readable validation failure.
+    pub error: String,
+}
+
 /// Application service for store pages, page versions, navigation and redirects.
 #[derive(Clone, Debug)]
 pub struct ContentService {
     db: StoreDatabase,
     editor_manifest: Option<ThemeEditorManifest>,
+    theme_ref: Option<PageThemeRef>,
     audit_actor: Option<String>,
 }
 
@@ -43,6 +56,7 @@ impl ContentService {
         Self {
             db,
             editor_manifest: None,
+            theme_ref: None,
             audit_actor: None,
         }
     }
@@ -57,8 +71,19 @@ impl ContentService {
         Self {
             db,
             editor_manifest,
+            theme_ref: None,
             audit_actor: None,
         }
+    }
+
+    /// Records the active theme reference stamped into page bodies.
+    ///
+    /// When set, new and updated bodies carry this reference and stored bodies
+    /// whose reference disagrees are rejected during validation.
+    #[must_use]
+    pub fn with_theme_ref(mut self, theme_ref: Option<PageThemeRef>) -> Self {
+        self.theme_ref = theme_ref;
+        self
     }
 
     /// Records content mutations in the store audit outbox.
@@ -97,16 +122,96 @@ impl ContentService {
         Ok(())
     }
 
+    /// Overwrites the body's theme reference with the active theme, when one is
+    /// known.
+    ///
+    /// Empty bodies are promoted to an object so the reference is recorded even
+    /// before the first block is authored. Bodies that are neither null nor an
+    /// object are left untouched and rejected by structural validation.
+    fn stamp_theme_ref(&self, mut body: Value) -> Value {
+        let Some(theme_ref) = self.theme_ref.as_ref() else {
+            return body;
+        };
+        if body.is_null() {
+            body = Value::Object(serde_json::Map::new());
+        }
+        if let Some(object) = body.as_object_mut() {
+            object.insert(
+                "theme".to_owned(),
+                serde_json::json!({
+                    "id": &theme_ref.id,
+                    "version": &theme_ref.version,
+                    "schema_version": theme_ref.schema_version,
+                }),
+            );
+        }
+        body
+    }
+
     /// Validates a page body structurally and, when a manifest is available,
     /// against the theme editor contract.
     fn validate_body(&self, body: &Value) -> Result<PageBody, AppError> {
         let parsed = PageBody::parse(body).map_err(storefront_error)?;
+        if let Some(expected) = self.theme_ref.as_ref()
+            && let Some(actual) = parsed.theme.as_ref()
+            && (actual.id != expected.id
+                || actual.version != expected.version
+                || actual.schema_version != expected.schema_version)
+        {
+            return Err(AppError::validation(format!(
+                "page body theme reference {}@{} does not match the active theme {}@{}",
+                actual.id, actual.version, expected.id, expected.version
+            )));
+        }
         if let Some(editor) = self.editor_manifest.as_ref() {
             parsed
                 .validate_with_editor(editor)
                 .map_err(storefront_error)?;
         }
         Ok(parsed)
+    }
+
+    /// Validates every non-deleted page body against a candidate theme.
+    ///
+    /// Empty bodies are skipped because they carry no theme-bound content.
+    /// Pages are read in batches of [`Pagination::MAX_LIMIT`] so a large store
+    /// is never loaded at once. Each returned issue identifies the page and the
+    /// first validation failure, which lets theme activation report every page
+    /// that cannot render under the candidate theme.
+    ///
+    /// A page authored under a different theme is still validated: activation
+    /// is the migration point between themes, so the question is whether the
+    /// blocks survive the new editor contract, not which theme stamped them.
+    pub async fn validate_all_pages(
+        &self,
+        editor_manifest: &ThemeEditorManifest,
+    ) -> Result<Vec<PageValidationIssue>, AppError> {
+        let mut issues = Vec::new();
+        let mut offset = 0_i64;
+        loop {
+            let pagination = Pagination::new(Some(Pagination::MAX_LIMIT), Some(offset))?;
+            let page = self.list_pages(None, false, pagination).await?;
+            let batch_len = page.data.len();
+            for record in page.data {
+                // Archived pages are withdrawn from every storefront surface,
+                // so they must not block theme activation.
+                if record.status == PageStatus::Archived || is_empty_body(&record.body) {
+                    continue;
+                }
+                if let Err(error) = validate_page_body_for_theme(&record.body, editor_manifest) {
+                    issues.push(PageValidationIssue {
+                        page_id: record.id,
+                        handle: record.handle,
+                        error,
+                    });
+                }
+            }
+            offset = offset.saturating_add(pagination.limit);
+            if batch_len < usize::try_from(pagination.limit).unwrap_or(usize::MAX) {
+                break;
+            }
+        }
+        Ok(issues)
     }
 
     /// Creates a page. The handle defaults to a slug of the title.
@@ -130,6 +235,7 @@ impl ContentService {
             }
             None => "custom".to_owned(),
         };
+        let body = self.stamp_theme_ref(body);
         validate_page_content(&body, &seo)?;
         self.validate_body(&body)?;
         validate_metadata(&metadata)?;
@@ -308,6 +414,42 @@ impl ContentService {
         Ok(PageResult::new(data, count, pagination))
     }
 
+    /// Lists storefront-visible routes without loading page bodies.
+    ///
+    /// Only the published snapshot is projected, so drafts cannot leak handles
+    /// or classifiers into sitemaps. Selecting three columns keeps the query
+    /// cheap even for stores with many pages.
+    pub async fn list_published_routes(
+        &self,
+        pagination: Pagination,
+    ) -> Result<PageResult<PageRoute>, AppError> {
+        const CONDITIONS: &str = " WHERE status = 'published' AND deleted_at IS NULL";
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM pages{CONDITIONS}"))
+            .fetch_one(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let sql = format!(
+            "SELECT id, COALESCE(published_handle, handle) AS handle, \
+             COALESCE(published_page_type, page_type) AS page_type \
+             FROM pages{CONDITIONS} ORDER BY handle ASC, id ASC LIMIT ? OFFSET ?"
+        );
+        let rows = sqlx::query_as::<_, (String, String, String)>(&sql)
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let data = rows
+            .into_iter()
+            .map(|(id, handle, page_type)| PageRoute {
+                id: PageId::from_string(id),
+                handle,
+                page_type,
+            })
+            .collect();
+        Ok(PageResult::new(data, count, pagination))
+    }
+
     /// Searches non-deleted pages by title or handle, newest first.
     ///
     /// The query is matched case-insensitively and LIKE wildcards in user
@@ -422,7 +564,9 @@ impl ContentService {
         };
         let body_supplied = body.is_some();
         let body = match body {
-            Some(body) => body,
+            Some(body) => self.stamp_theme_ref(body),
+            // A body-less update leaves the stored body and its theme
+            // reference untouched so unrelated edits stay possible.
             None => parse_json(&existing.body),
         };
         let seo = match seo {
@@ -1654,6 +1798,26 @@ fn validate_rank(rank: i64) -> Result<(), AppError> {
         return Err(AppError::validation("rank must not be negative"));
     }
     Ok(())
+}
+
+/// Returns true when a body carries no authored content.
+fn is_empty_body(body: &Value) -> bool {
+    body.is_null() || body.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+/// Validates one stored body against a candidate theme's editor manifest.
+///
+/// The body's own theme reference is deliberately ignored: it records who
+/// authored the body, while validation answers whether the candidate theme can
+/// still render it.
+fn validate_page_body_for_theme(
+    body: &Value,
+    editor_manifest: &ThemeEditorManifest,
+) -> Result<(), String> {
+    let parsed = PageBody::parse(body).map_err(|error| error.to_string())?;
+    parsed
+        .validate_with_editor(editor_manifest)
+        .map_err(|error| error.to_string())
 }
 
 fn storefront_error(error: StorefrontError) -> AppError {

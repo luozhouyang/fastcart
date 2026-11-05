@@ -29,8 +29,8 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use super::storefront::{
-    build_context_data, compile_page, is_hop_by_hop, resolve_active_editor, runtime_error,
-    runtime_response,
+    THEME_ASSETS_BASE_URL, build_context_data, capability_grants, compile_page, is_hop_by_hop,
+    resolve_active_editor, runtime_error, runtime_response,
 };
 use crate::state::AppContext;
 
@@ -142,6 +142,23 @@ pub fn verify_preview_token(
     store_id: &str,
     now: i64,
 ) -> Result<PreviewTokenPayload, PreviewTokenError> {
+    let payload = verify_preview_token_unbound(secret, token, now)?;
+    if payload.store_id != store_id {
+        return Err(PreviewTokenError::WrongStore);
+    }
+    Ok(payload)
+}
+
+/// Verifies a preview token without binding it to a store.
+///
+/// The token carries its own store identifier, so callers that only need to
+/// render (the preview route) can resolve the store from the signed payload
+/// instead of the request Host header.
+pub fn verify_preview_token_unbound(
+    secret: &str,
+    token: &str,
+    now: i64,
+) -> Result<PreviewTokenPayload, PreviewTokenError> {
     let (payload_b64, signature_b64) = token.split_once('.').ok_or(PreviewTokenError::Malformed)?;
     if signature_b64.contains('.') {
         return Err(PreviewTokenError::Malformed);
@@ -161,9 +178,6 @@ pub fn verify_preview_token(
 
     let payload: PreviewTokenPayload =
         serde_json::from_slice(&payload_json).map_err(|_| PreviewTokenError::Malformed)?;
-    if payload.store_id != store_id {
-        return Err(PreviewTokenError::WrongStore);
-    }
     if payload.exp <= now {
         return Err(PreviewTokenError::Expired);
     }
@@ -172,9 +186,10 @@ pub fn verify_preview_token(
 
 /// Renders a draft page through the configured runtime using a preview token.
 ///
-/// Both `/preview` and `/preview/{*path}` are handled here. The Host header
-/// resolves the store exactly like the storefront fallback. The token is the
-/// only credential: no admin session is required.
+/// Both `/preview` and `/preview/{*path}` are handled here. The signed token
+/// names the store, so preview works on any admin host without the store
+/// domain having to match. The token is the only credential: no admin session
+/// is required.
 pub(crate) async fn render(
     State(context): State<Arc<AppContext>>,
     Query(query): Query<PreviewQuery>,
@@ -189,30 +204,25 @@ pub(crate) async fn render(
     let Some(runtime) = context.storefront_runtime.clone() else {
         return ApiError::not_found("storefront route").into_response();
     };
-    let Some(host) = request
-        .headers()
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
-    else {
-        return ApiError::new(AppError::validation("missing Host header")).into_response();
-    };
-    let store = match context.resolver.resolve_active(&host).await {
-        Ok(store) => store,
-        Err(_) => return ApiError::not_found("store").into_response(),
-    };
     let now = now_timestamp();
     let Some(token) = query.token.as_deref() else {
         return rejected_token();
     };
-    let payload = match verify_preview_token(secret, token, store.id.as_str(), now) {
+    let payload = match verify_preview_token_unbound(secret, token, now) {
         Ok(payload) => payload,
         Err(error) => {
             tracing::debug!(reason = ?error, "preview token rejected");
             return rejected_token();
         }
     };
+    let store_id = fastcart_kernel::StoreId::from_string(payload.store_id.clone());
+    let store = match context.platform.get_store(&store_id).await {
+        Ok(Some(store)) if store.ensure_active().is_ok() => store,
+        Ok(_) => return ApiError::not_found("store").into_response(),
+        Err(error) => return ApiError::new(AppError::from(error)).into_response(),
+    };
 
+    let domain = store.primary_domain.clone().unwrap_or_default();
     let database = match context.databases.database(&store.id).await {
         Ok(database) => database,
         Err(error) => return ApiError::new(AppError::from(error)).into_response(),
@@ -266,7 +276,7 @@ pub(crate) async fn render(
             &database,
             request.headers(),
             &store,
-            &host,
+            &domain,
             &currency,
             &theme,
             DataMode::Preview,
@@ -312,11 +322,12 @@ pub(crate) async fn render(
                 .map(|value| (name.as_str().to_owned(), value.to_owned()))
         })
         .collect();
+    let capabilities = capability_grants(&database, &theme).await;
     let runtime_request = RuntimeRequest {
         request_id: request_id.clone(),
         store: StoreContext {
             store_id: store.id.clone(),
-            domain: host,
+            domain,
             locale: store.locale.clone(),
             currency,
             timezone: store.timezone.clone(),
@@ -331,11 +342,16 @@ pub(crate) async fn render(
             runtime: theme.manifest.runtime.clone(),
             bundle_path: theme.bundle_path.clone(),
             entry: theme.manifest.entry.clone(),
-            settings: theme.settings.clone(),
+            settings: theme
+                .draft_settings
+                .clone()
+                .unwrap_or_else(|| theme.settings.clone()),
+            assets_manifest: theme.assets_manifest.clone(),
+            assets_base_url: Some(THEME_ASSETS_BASE_URL.to_owned()),
         }),
         page: Some(compiled.page),
         data,
-        capabilities: BTreeMap::new(),
+        capabilities,
         mode: RuntimeMode::Preview,
         timeout_ms: context.config.storefront_timeout_ms.max(1),
     };
@@ -353,6 +369,26 @@ pub(crate) async fn render(
                 axum::http::header::HeaderName::from_static("x-robots-tag"),
                 axum::http::HeaderValue::from_static("noindex, nofollow"),
             );
+            // Keep the token-bearing preview URL out of Referer headers and
+            // restrict which origins may frame a draft.
+            response.headers_mut().insert(
+                axum::http::header::HeaderName::from_static("referrer-policy"),
+                axum::http::HeaderValue::from_static("no-referrer"),
+            );
+            let ancestors = &context.config.preview_frame_ancestors;
+            if !ancestors.is_empty() {
+                let mut frame_ancestors = String::from("frame-ancestors 'self'");
+                for ancestor in ancestors {
+                    frame_ancestors.push(' ');
+                    frame_ancestors.push_str(ancestor);
+                }
+                if let Ok(value) = axum::http::HeaderValue::from_str(&frame_ancestors) {
+                    response.headers_mut().insert(
+                        axum::http::header::HeaderName::from_static("content-security-policy"),
+                        value,
+                    );
+                }
+            }
             response
         }
         Err(RuntimeError::Timeout(timeout_ms)) => runtime_error(
@@ -361,6 +397,20 @@ pub(crate) async fn render(
             &format!("preview rendering timed out after {timeout_ms} ms"),
             &request_id,
         ),
+        Err(RuntimeError::WorkerUnavailable(message)) => {
+            tracing::warn!(error = %message, "preview runtime unavailable");
+            let mut response = runtime_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "RUNTIME_UNAVAILABLE",
+                "storefront preview is temporarily unavailable",
+                &request_id,
+            );
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("5"),
+            );
+            response
+        }
         Err(error) => {
             tracing::warn!(error = %error, "preview runtime failed");
             runtime_error(

@@ -6,6 +6,8 @@ import type {
 import { createStorefrontClient } from "@fastcart/storefront-sdk";
 import { useMemo, useState, type FormEvent } from "react";
 
+import { useThemeRuntime } from "../context";
+
 /** Props accepted by the default theme contact form. */
 export interface ContactFormProps {
   /** Published inquiry form resolved from the `inquiry_form` data binding. */
@@ -50,12 +52,14 @@ function ContactFormBody({
   onSubmitted,
 }: ContactFormProps & { form: StoreInquiryForm }) {
   const consentField = form.fields.find((field) => field.kind === "consent");
-  const consentRequired =
-    form.settings.consent_required || Boolean(consentField?.required);
+  const consentRequired = form.settings.consent_required || Boolean(consentField?.required);
   const consentText =
-    form.settings.consent_text ??
-    consentField?.label ??
-    "I agree to the privacy terms.";
+    form.settings.consent_text ?? consentField?.label ?? "I agree to the privacy terms.";
+  // The theme runtime supplies the API origin when the storefront is served
+  // from a different host (or behind a reverse proxy). An explicit prop still
+  // wins so a page can override the context.
+  const runtime = useThemeRuntime();
+  const resolvedApiBaseUrl = apiBaseUrl ?? runtime.apiBaseUrl;
   const [values, setValues] = useState<Record<string, FieldValue>>(() =>
     initialValues(form.fields),
   );
@@ -64,8 +68,8 @@ function ContactFormBody({
   const [status, setStatus] = useState<FormStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const client = useMemo(
-    () => createStorefrontClient(apiBaseUrl ? { baseUrl: apiBaseUrl } : {}),
-    [apiBaseUrl],
+    () => createStorefrontClient(resolvedApiBaseUrl ? { baseUrl: resolvedApiBaseUrl } : {}),
+    [resolvedApiBaseUrl],
   );
 
   function setValue(key: string, value: FieldValue) {
@@ -92,11 +96,7 @@ function ContactFormBody({
         }
         const ids: string[] = [];
         for (const file of selected) {
-          const result = await client.inquiryFiles.upload(
-            file,
-            form.handle,
-            field.key,
-          );
+          const result = await client.inquiryFiles.upload(file, form.handle, field.key);
           ids.push(result.id);
         }
         uploaded[field.key] = ids;
@@ -224,9 +224,7 @@ function FormField({
   onFilesChange: (files: File[]) => void;
 }) {
   const id = `inquiry-${field.key}`;
-  const help = field.help ? (
-    <small id={`${id}-help`}>{field.help}</small>
-  ) : null;
+  const help = field.help ? <small id={`${id}-help`}>{field.help}</small> : null;
   const describedBy = field.help ? `${id}-help` : undefined;
 
   if (field.kind === "hidden") {
@@ -249,9 +247,7 @@ function FormField({
           multiple={(field.file?.max_files ?? 1) > 1}
           required={field.required}
           aria-describedby={describedBy}
-          onChange={(event) =>
-            onFilesChange(Array.from(event.target.files ?? []))
-          }
+          onChange={(event) => onFilesChange(Array.from(event.target.files ?? []))}
         />
         {files.length > 0 ? (
           <small>
@@ -398,25 +394,18 @@ function FormField({
   );
 }
 
-function initialValues(
-  fields: InquiryFormField[],
-): Record<string, FieldValue> {
+function initialValues(fields: InquiryFormField[]): Record<string, FieldValue> {
   const values: Record<string, FieldValue> = {};
   for (const field of fields) {
     if (field.kind === "checkbox") {
       values[field.key] = Array.isArray(field.default)
-        ? field.default.filter(
-            (value): value is string => typeof value === "string",
-          )
+        ? field.default.filter((value): value is string => typeof value === "string")
         : [];
       continue;
     }
     if (typeof field.default === "string") {
       values[field.key] = field.default;
-    } else if (
-      typeof field.default === "number" ||
-      typeof field.default === "boolean"
-    ) {
+    } else if (typeof field.default === "number" || typeof field.default === "boolean") {
       values[field.key] = String(field.default);
     } else {
       values[field.key] = "";
@@ -444,11 +433,7 @@ function inputType(kind: InquiryFormField["kind"]): string {
   }
 }
 
-function assignCoreField(
-  body: CreateInquiryRequest,
-  key: string,
-  value: string,
-) {
+function assignCoreField(body: CreateInquiryRequest, key: string, value: string) {
   switch (key) {
     case "name":
       body.name = value;

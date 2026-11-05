@@ -9,7 +9,7 @@ use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::Metadata;
 use fastcart_module_cart::{CartService, CreateCartInput};
-use fastcart_module_content::{ContentService, CreatePageInput};
+use fastcart_module_content::{ContentService, CreatePageInput, UpdatePageInput};
 use fastcart_module_customer::{CustomerService, RegisterCustomerInput};
 use fastcart_module_theme::{RegisterThemeInput, ThemeService};
 use fastcart_platform::{CreateStoreInput, PlatformStore, StoreProvisioningService};
@@ -120,6 +120,7 @@ async fn fixture(
             },
             bundle_path: "themes/default".to_owned(),
             settings_schema: None,
+            assets_manifest: None,
             settings: Some(serde_json::json!({"brand_color": "#111111"})),
             editor_manifest: Some(editor_manifest()),
         })
@@ -212,6 +213,7 @@ async fn provision_with_theme(
             },
             bundle_path: "themes/default".to_owned(),
             settings_schema: None,
+            assets_manifest: None,
             settings: Some(serde_json::json!({ "brand_color": brand_color })),
             editor_manifest: Some(editor_manifest()),
         })
@@ -332,6 +334,189 @@ async fn injects_the_published_page_and_resolved_data() {
     // A deleted or missing reference degrades to null instead of failing.
     assert!(grid["collection"].is_null());
     assert_eq!(grid["products"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn serves_robots_and_a_published_page_sitemap() {
+    let (runtime, requests) = RecordingRuntime::new();
+    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let content = ContentService::new(fixture.database.clone());
+    for (title, handle, page_type) in [
+        ("Home", "home", "home"),
+        ("About", "about", "custom"),
+        ("Draft", "draft", "custom"),
+    ] {
+        let page = content
+            .create_page(CreatePageInput {
+                title: title.to_owned(),
+                handle: Some(handle.to_owned()),
+                page_type: Some(page_type.to_owned()),
+                body: serde_json::json!({ "schema_version": 1, "content": [] }),
+                seo: serde_json::json!({}),
+                metadata: Metadata::empty(),
+            })
+            .await
+            .unwrap();
+        if handle != "draft" {
+            content.publish_page(&page.id).await.unwrap();
+        }
+    }
+
+    let (status, robots) = send(&fixture.app, "/robots.txt", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{robots}");
+    assert!(robots.contains("Sitemap: https://shop.example.com/sitemap.xml"));
+
+    // A draft handle change must not leak into the sitemap: the storefront
+    // still serves the published handle.
+    let contact = content
+        .create_page(CreatePageInput {
+            title: "Contact".to_owned(),
+            handle: Some("contact".to_owned()),
+            page_type: Some("custom".to_owned()),
+            body: serde_json::json!({ "schema_version": 1, "content": [] }),
+            seo: serde_json::json!({}),
+            metadata: Metadata::empty(),
+        })
+        .await
+        .unwrap();
+    content.publish_page(&contact.id).await.unwrap();
+    content
+        .update_page(
+            &contact.id,
+            UpdatePageInput {
+                handle: Some("contact-us".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, sitemap) = send(&fixture.app, "/sitemap.xml", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{sitemap}");
+    assert!(
+        sitemap.contains("<loc>https://shop.example.com/</loc>"),
+        "{sitemap}"
+    );
+    assert!(
+        sitemap.contains("<loc>https://shop.example.com/about</loc>"),
+        "{sitemap}"
+    );
+    assert!(
+        sitemap.contains("<loc>https://shop.example.com/contact</loc>"),
+        "{sitemap}"
+    );
+    assert!(!sitemap.contains("contact-us"), "{sitemap}");
+    assert!(!sitemap.contains("draft"), "{sitemap}");
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "static discovery routes must not invoke the runtime"
+    );
+}
+
+#[tokio::test]
+async fn discovery_files_work_without_a_storefront_runtime() {
+    let fixture = fixture(None, None).await;
+    let (status, robots) = send(&fixture.app, "/robots.txt", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{robots}");
+    let (status, sitemap) = send(&fixture.app, "/sitemap.xml", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{sitemap}");
+    let (status, _) = send(&fixture.app, "/", "shop.example.com", &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn serves_theme_client_assets_and_rejects_traversal() {
+    let dir = tempfile::tempdir().unwrap();
+    let themes_root = dir.path().join("themes");
+    let bundle = themes_root.join("default");
+    tokio::fs::create_dir_all(bundle.join("dist/client"))
+        .await
+        .unwrap();
+    tokio::fs::write(bundle.join("dist/client/client.js"), "console.log('theme')")
+        .await
+        .unwrap();
+    tokio::fs::write(dir.path().join("secret.txt"), "do not serve")
+        .await
+        .unwrap();
+
+    let platform = PlatformStore::in_memory().await.unwrap();
+    let databases = Arc::new(StoreDatabaseManager::new(
+        dir.path().join("stores"),
+        DatabaseOptions::default().with_max_connections(2),
+    ));
+    let store = platform
+        .create_store(CreateStoreInput::new("Demo", "demo", "shop.example.com"))
+        .await
+        .unwrap();
+    StoreProvisioningService::new(platform.clone(), databases.clone())
+        .provision(&store.id, None)
+        .await
+        .unwrap();
+    let themes = ThemeService::new(databases.database(&store.id).await.unwrap());
+    let theme = themes
+        .register(RegisterThemeInput {
+            manifest: ThemeManifest {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                version: "1.0.0".to_owned(),
+                runtime: "node".to_owned(),
+                entry: "dist/server.js".to_owned(),
+                settings_schema: None,
+                assets_manifest: None,
+                editor: None,
+                requires: None,
+            },
+            bundle_path: "default".to_owned(),
+            settings_schema: None,
+            assets_manifest: Some(serde_json::json!({
+                "entries": { "client": "dist/client" }
+            })),
+            settings: None,
+            editor_manifest: None,
+        })
+        .await
+        .unwrap();
+    themes.activate(&theme.id).await.unwrap();
+
+    let app = build_router(Arc::new(AppContext::new(
+        ApiConfig {
+            cookie_secure: false,
+            backup_dir: dir.path().join("backups"),
+            themes_root,
+            ..ApiConfig::default()
+        },
+        platform,
+        databases,
+        StoreCache::default_capacity(),
+    )));
+
+    let (status, body) = send(
+        &app,
+        "/api/v1/store/theme-assets/client.js",
+        "shop.example.com",
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "console.log('theme')");
+
+    let (status, _) = send(
+        &app,
+        "/api/v1/store/theme-assets/missing.js",
+        "shop.example.com",
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Encoded traversal must not escape the bundle's client directory.
+    for path in [
+        "/api/v1/store/theme-assets/%2e%2e/%2e%2e/secret.txt",
+        "/api/v1/store/theme-assets/..%2f..%2fsecret.txt",
+    ] {
+        let (status, _) = send(&app, path, "shop.example.com", &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
 }
 
 #[tokio::test]

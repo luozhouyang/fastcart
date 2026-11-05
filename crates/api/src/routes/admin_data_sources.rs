@@ -197,6 +197,22 @@ async fn list_data_source(
                 .collect();
             Ok(Json(picker_response(page.count, pagination, items)))
         }
+        "inquiry_form" => {
+            authorize(&actor, "themes.read")?;
+            let page = fastcart_module_inquiry::InquiryFormService::new(db)
+                .list_published_forms(query.search.as_deref(), pagination)
+                .await?;
+            let items = page
+                .data
+                .into_iter()
+                .map(|form| DataPickerItem {
+                    id: form.id.as_str().to_owned(),
+                    handle: form.handle,
+                    label: form.name,
+                })
+                .collect();
+            Ok(Json(picker_response(page.count, pagination, items)))
+        }
         _ => Err(ApiError::new(AppError::not_found("data source", &source))),
     }
 }

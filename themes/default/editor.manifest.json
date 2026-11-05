@@ -4,6 +4,18 @@
     "forms": {
       "title": "Forms",
       "components": ["ContactForm"]
+    },
+    "text": {
+      "title": "Text",
+      "components": ["Text", "Heading"]
+    },
+    "media": {
+      "title": "Media",
+      "components": ["Image"]
+    },
+    "commerce": {
+      "title": "Commerce",
+      "components": ["ProductGrid"]
     }
   },
   "components": {
@@ -14,20 +26,223 @@
         "form": {
           "type": "data_source",
           "source": "inquiry_form",
-          "required": true
+          "required": true,
+          "label": "Inquiry form",
+          "description": "Published form resolved from the inquiry_form binding at render time.",
+          "picker": {
+            "source": "inquiry_form"
+          }
         },
         "title": {
           "type": "text",
-          "default": "Contact us"
+          "default": "Contact us",
+          "label": "Title"
         },
         "description": {
-          "type": "textarea"
+          "type": "textarea",
+          "label": "Description"
         }
       },
       "defaultProps": {
         "title": "Contact us"
       },
-      "slots": []
+      "slots": [],
+      "description": "Renders a published inquiry form and submits it through the storefront API.",
+      "icon": "mail"
+    },
+    "Text": {
+      "title": "Text",
+      "category": "text",
+      "fields": {
+        "text": {
+          "type": "textarea",
+          "default": "",
+          "label": "Text"
+        },
+        "className": {
+          "type": "text",
+          "label": "CSS class",
+          "description": "Optional class names added to the rendered element."
+        }
+      },
+      "defaultProps": {
+        "text": ""
+      },
+      "slots": [],
+      "description": "A paragraph of plain text.",
+      "icon": "type"
+    },
+    "Heading": {
+      "title": "Heading",
+      "category": "text",
+      "fields": {
+        "text": {
+          "type": "text",
+          "default": "Heading",
+          "label": "Text"
+        },
+        "level": {
+          "type": "select",
+          "options": [
+            {
+              "value": "1",
+              "label": "H1"
+            },
+            {
+              "value": "2",
+              "label": "H2"
+            },
+            {
+              "value": "3",
+              "label": "H3"
+            },
+            {
+              "value": "4",
+              "label": "H4"
+            },
+            {
+              "value": "5",
+              "label": "H5"
+            },
+            {
+              "value": "6",
+              "label": "H6"
+            }
+          ],
+          "default": "2",
+          "label": "Heading level",
+          "description": "Selects the h1-h6 element."
+        },
+        "className": {
+          "type": "text",
+          "label": "CSS class",
+          "description": "Optional class names added to the rendered element."
+        }
+      },
+      "defaultProps": {
+        "text": "Heading",
+        "level": "2"
+      },
+      "slots": [],
+      "description": "A section heading from h1 to h6.",
+      "icon": "heading"
+    },
+    "Image": {
+      "title": "Image",
+      "category": "media",
+      "fields": {
+        "asset": {
+          "type": "asset",
+          "source": "asset",
+          "label": "Image asset",
+          "description": "Media library asset resolved at render time.",
+          "picker": {
+            "source": "asset"
+          }
+        },
+        "alt": {
+          "type": "text",
+          "label": "Alt text",
+          "description": "Overrides the asset alt text when provided."
+        },
+        "width": {
+          "type": "number",
+          "min": 0,
+          "label": "Width"
+        },
+        "height": {
+          "type": "number",
+          "min": 0,
+          "label": "Height"
+        },
+        "href": {
+          "type": "text",
+          "label": "Link URL",
+          "description": "Optional destination wrapped around the image."
+        },
+        "loading": {
+          "type": "select",
+          "options": [
+            {
+              "value": "lazy",
+              "label": "Lazy"
+            },
+            {
+              "value": "eager",
+              "label": "Eager"
+            }
+          ],
+          "default": "lazy",
+          "label": "Loading",
+          "description": "Native image loading strategy."
+        },
+        "className": {
+          "type": "text",
+          "label": "CSS class",
+          "description": "Optional class names added to the rendered element."
+        }
+      },
+      "defaultProps": {
+        "loading": "lazy"
+      },
+      "slots": [],
+      "description": "A media library image with optional link.",
+      "icon": "image"
+    },
+    "ProductGrid": {
+      "title": "Product Grid",
+      "category": "commerce",
+      "fields": {
+        "products": {
+          "type": "data_source",
+          "source": "product_list",
+          "label": "Products",
+          "description": "Product list resolved from the catalog at render time.",
+          "picker": {
+            "source": "product_list"
+          }
+        },
+        "title": {
+          "type": "text",
+          "default": "Products",
+          "label": "Title"
+        },
+        "columns": {
+          "type": "number",
+          "min": 1,
+          "max": 6,
+          "default": 3,
+          "label": "Columns",
+          "description": "Number of columns between 1 and 6."
+        },
+        "emptyText": {
+          "type": "text",
+          "label": "Empty message",
+          "description": "Shown when the product list resolves to no items."
+        },
+        "className": {
+          "type": "text",
+          "label": "CSS class",
+          "description": "Optional class names added to the rendered element."
+        }
+      },
+      "defaultProps": {
+        "title": "Products",
+        "columns": 3
+      },
+      "slots": [],
+      "description": "A responsive grid of products from a collection or product list binding.",
+      "icon": "grid"
+    }
+  },
+  "zones": {
+    "header": {
+      "title": "Header",
+      "allowed_components": ["Heading", "Text", "Image"]
+    },
+    "footer": {
+      "title": "Footer",
+      "allowed_components": ["Heading", "Text", "Image"]
     }
   }
 }

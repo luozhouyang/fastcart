@@ -247,6 +247,20 @@ pub struct NavigationTreeItem {
     pub children: Vec<NavigationTreeItem>,
 }
 
+/// A storefront-visible page route.
+///
+/// Built from the published snapshot only, so sitemaps and route indexes never
+/// expose draft handles or classifiers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageRoute {
+    /// Page identifier.
+    pub id: PageId,
+    /// Published URL handle.
+    pub handle: String,
+    /// Published page classifier.
+    pub page_type: String,
+}
+
 /// An HTTP redirect registered by the storefront.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Redirect {

@@ -158,6 +158,7 @@ async fn fixture(preview_secret: Option<&str>) -> Fixture {
             },
             bundle_path: "themes/default".to_owned(),
             settings_schema: None,
+            assets_manifest: None,
             settings: Some(json!({ "brand_color": "#111111" })),
             editor_manifest: Some(editor_manifest()),
         })
@@ -273,12 +274,16 @@ async fn request(
 }
 
 async fn send_preview(app: &Router, uri: &str) -> (StatusCode, String) {
+    send_preview_with_host(app, uri, HOST).await
+}
+
+async fn send_preview_with_host(app: &Router, uri: &str, host: &str) -> (StatusCode, String) {
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .uri(uri)
-                .header("host", HOST)
+                .header("host", host)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -353,6 +358,24 @@ async fn preview_token_renders_the_draft_page_through_the_runtime() {
 }
 
 #[tokio::test]
+async fn preview_renders_on_an_admin_host() {
+    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let (token, _, _) = issue_token(&fixture).await;
+
+    // The admin is served from its own domain; the signed token names the
+    // store, so the iframe works without the Host matching the storefront.
+    let (status, body) = send_preview_with_host(
+        &fixture.app,
+        &format!("/preview/about?token={token}"),
+        "admin.example.com",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests[0].store.domain, HOST);
+}
+
+#[tokio::test]
 async fn revoked_tokens_stop_rendering_immediately() {
     let fixture = fixture(Some(PREVIEW_SECRET)).await;
     let (token, _, jti) = issue_token(&fixture).await;
@@ -409,11 +432,16 @@ async fn invalid_tokens_are_rejected_without_invoking_the_runtime() {
     .unwrap()
     .token;
 
-    for token in [tampered, expired, wrong_store, "malformed".to_owned()] {
+    for token in [tampered, expired, "malformed".to_owned()] {
         let uri = format!("/preview/about?token={token}");
         let (status, body) = send_preview(&fixture.app, &uri).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     }
+    // A signed token for a store that does not exist resolves to that store id;
+    // it must not fall back to the Host header.
+    let (status, body) =
+        send_preview(&fixture.app, &format!("/preview/about?token={wrong_store}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     let (status, body) = send_preview(&fixture.app, "/preview/about").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 
