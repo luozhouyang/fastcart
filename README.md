@@ -140,6 +140,22 @@ browser before the page tree finishes. Buffered themes and older hosts keep the
 existing JSON contract. Streaming requires the reverse proxy to pass chunked
 responses through without buffering.
 
+### Theme trust model
+
+Theme bundles are **trusted server-side code**. Registering and activating a
+theme is a privileged operation: the sidecar imports the bundle in a worker
+thread and the bundle can use Node APIs, including the filesystem and network.
+The worker isolates CPU, heap and time, but it is a reliability boundary, not
+an operating-system sandbox.
+
+Run the sidecar with the same care as any application server: a non-root user,
+a read-only root filesystem with only the theme directory writable during
+deploys, no unnecessary network egress, and an OS/container security profile.
+Keep the sidecar bound to loopback or behind `SIDECAR_SECRET`. If untrusted
+third-party themes become a requirement, use a separate sidecar per trust
+domain or wait for the embedded V8 runtime, which can restrict host access at
+the isolate level.
+
 Themes may also declare dynamic routes in `theme.json`, for example
 `"routes": { "product": "/products/{handle}", "collection": "/collections/{handle}" }`.
 A published page whose `page_type` matches the route kind is used as the
