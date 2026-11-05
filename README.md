@@ -150,6 +150,13 @@ preview path selects the handle, an optional `preview_handle` query parameter
 overrides it, and otherwise the first published record of the template's kind
 is used.
 
+Theme editor contract: `editor.manifest.json` is the stable, data-only contract
+used by the admin palette, inspector and server-side page validation.
+`editor.js` is an optional executable component registry for hosts that want to
+render theme components themselves. Theme bundles inline their own React copy,
+so `editor.js` must run in an isolated document such as a sandboxed iframe; it
+must not be imported into another React application's tree.
+
 Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
 
 ## HTTP API

@@ -12,8 +12,10 @@ import { Text } from "./components/text";
  *
  * The admin editor reads structural metadata from `editor.manifest.json`; this
  * entry is the render-side counterpart for hosts that load theme components.
- * `registry` additionally carries the public component names recorded by
- * `defineThemeComponent`.
+ * It bundles its own React, so it must run in an isolated document (for
+ * example a sandboxed iframe) rather than being imported into another React
+ * application. `registry` additionally carries the public component names
+ * recorded by `defineThemeComponent`.
  */
 export const components = {
   ContactForm,
