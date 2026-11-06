@@ -227,6 +227,12 @@ pnpm lint && pnpm typecheck && pnpm build
 
 The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries, openapi schema/type parity, SQLite write serialization under concurrency, and cross-store tenant isolation.
 
+## Documentation
+
+The living project docs — constitution, v1 PRD, decision records and architecture views — are in
+[`.livingdocs/`](.livingdocs/index.md). The design notes under `docs/` are local-only working
+material and are intentionally not versioned.
+
 ## Roadmap
 
 - React admin and storefront feature UIs.

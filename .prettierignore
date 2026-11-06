@@ -6,6 +6,8 @@ pnpm-lock.yaml
 Cargo.lock
 data
 docs/architecture
+.livingdocs/index.md
+.livingdocs/*/index.md
 apps/storefront/src/routeTree.gen.ts
 
 .claude
