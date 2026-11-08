@@ -53,7 +53,6 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
             .merge(super::admin_tax::router())
             .merge(super::admin_theme::router())
             .merge(super::admin_webhooks::router())
-            .merge(super::admin_workflows::router())
             .fallback(not_implemented),
     );
 

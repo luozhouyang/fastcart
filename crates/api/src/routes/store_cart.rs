@@ -193,6 +193,34 @@ pub struct CreateCheckoutRequestDto {
     pub province_code: Option<String>,
 }
 
+/// Enforces the store settings that the Admin exposes under Checkout.
+///
+/// Settings absent from the map keep their historical permissive behavior:
+/// guest checkout and confirmation emails are enabled, phone numbers are
+/// optional. Only the exact strings `"false"` / `"true"` opt in, matching the
+/// Admin's string-valued settings store.
+fn validate_checkout_settings(
+    settings: &std::collections::BTreeMap<String, String>,
+    customer_id: Option<&fastcart_kernel::CustomerId>,
+    phone: Option<&str>,
+) -> Result<(), &'static str> {
+    if settings
+        .get("guest_checkout")
+        .is_some_and(|value| value == "false")
+        && customer_id.is_none()
+    {
+        return Err("guest checkout is disabled; sign in before checking out");
+    }
+    if settings
+        .get("require_phone")
+        .is_some_and(|value| value == "true")
+        && phone.map(str::trim).unwrap_or_default().is_empty()
+    {
+        return Err("a phone number is required for this store's checkout");
+    }
+    Ok(())
+}
+
 /// Stable rate-limit key for a public storefront write.
 ///
 /// Direct router tests have no socket peer; they share the `unknown` bucket
@@ -750,8 +778,15 @@ async fn create_checkout(
         request.province_code,
     )
     .await?;
+    let settings = StoreService::new(db.clone()).get_all_settings().await?;
+    validate_checkout_settings(
+        &settings,
+        cart.customer_id.as_ref(),
+        cart.shipping_address.phone.as_deref(),
+    )
+    .map_err(ApiError::validation)?;
     let payment = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
-    let workflow = CheckoutWorkflow::new(db, payment);
+    let workflow = CheckoutWorkflow::new(db.clone(), payment);
     let mut checkout_request =
         CreateCheckoutRequest::new(cart_id, request.payment_provider, cart_context);
     checkout_request.email = request.email;
@@ -826,20 +861,35 @@ async fn complete_checkout(
     )
     .await?;
     let result = workflow.complete(&checkout_id, &cart_context).await?;
-    let message = EmailMessage::new(
-        result.order.email.clone(),
-        format!("Order #{} confirmed", result.order.display_number),
-    )
-    .with_text(format!(
-        "Thank you for your order. Total: {} {}.",
-        result.order.total, result.order.currency_code
-    ));
-    if let Err(error) = context
-        .email
-        .enqueue(&JobQueue::new(db.pool().clone()), message, Some(10))
+    // The order is already committed; a settings read failure must not turn a
+    // successful checkout into an error. Default to sending the email.
+    let confirmation_emails = match StoreService::new(db.clone())
+        .get_setting("confirmation_emails")
         .await
     {
-        tracing::warn!(order_id = %result.order.id, error = %error, "failed to enqueue order confirmation email");
+        Ok(Some(value)) => value != "false",
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!(order_id = %result.order.id, error = %error, "failed to read confirmation email setting");
+            true
+        }
+    };
+    if confirmation_emails {
+        let message = EmailMessage::new(
+            result.order.email.clone(),
+            format!("Order #{} confirmed", result.order.display_number),
+        )
+        .with_text(format!(
+            "Thank you for your order. Total: {} {}.",
+            result.order.total, result.order.currency_code
+        ));
+        if let Err(error) = context
+            .email
+            .enqueue(&JobQueue::new(db.pool().clone()), message, Some(10))
+            .await
+        {
+            tracing::warn!(order_id = %result.order.id, error = %error, "failed to enqueue order confirmation email");
+        }
     }
     Ok(Json(CheckoutCompleteResponse::order(result.order)))
 }
@@ -1001,4 +1051,42 @@ async fn cart_context(
         sales_channel_id: cart.sales_channel_id.clone(),
         at: now_timestamp(),
     })
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use std::collections::BTreeMap;
+
+    use fastcart_kernel::CustomerId;
+
+    use super::validate_checkout_settings;
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn guest_checkout_setting_blocks_anonymous_carts_only() {
+        let settings = map(&[("guest_checkout", "false")]);
+        assert!(validate_checkout_settings(&settings, None, None).is_err());
+
+        let customer = CustomerId::from_string("cus_test");
+        assert!(validate_checkout_settings(&settings, Some(&customer), None).is_ok());
+
+        // Absent or non-exact values keep the historical permissive behavior.
+        assert!(validate_checkout_settings(&BTreeMap::new(), None, None).is_ok());
+        assert!(validate_checkout_settings(&map(&[("guest_checkout", "0")]), None, None).is_ok());
+    }
+
+    #[test]
+    fn require_phone_setting_rejects_missing_or_blank_phone() {
+        let settings = map(&[("require_phone", "true")]);
+        assert!(validate_checkout_settings(&settings, None, None).is_err());
+        assert!(validate_checkout_settings(&settings, None, Some("   ")).is_err());
+        assert!(validate_checkout_settings(&settings, None, Some("+1 555 0100")).is_ok());
+        assert!(validate_checkout_settings(&BTreeMap::new(), None, None).is_ok());
+    }
 }

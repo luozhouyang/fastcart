@@ -46,8 +46,6 @@ use crate::state::AppContext;
     crate::routes::admin_campaigns::CreateCampaignRequest,
     crate::routes::admin_campaigns::LinkPromotionRequest,
     crate::routes::admin_campaigns::UpdateCampaignRequest,
-    crate::routes::admin_workflows::WorkflowExecutionDto,
-    crate::routes::admin_workflows::WorkflowStepDto,
     crate::routes::admin_regions::CreatePublishableKeyRequest,
     crate::routes::admin_regions::CreateRegionRequest,
     crate::routes::admin_regions::CreatedPublishableKeyDto,
@@ -572,8 +570,7 @@ fn generated_api() -> utoipa::openapi::OpenApi {
         .merge(crate::routes::admin_theme::openapi_router())
         .merge(crate::routes::admin_webhooks::openapi_router())
         .merge(crate::routes::admin_inquiry::openapi_router())
-        .merge(crate::routes::admin_notifications::openapi_router())
-        .merge(crate::routes::admin_workflows::openapi_router());
+        .merge(crate::routes::admin_notifications::openapi_router());
 
     let store = OpenApiRouter::new()
         .merge(crate::routes::store_assets::openapi_router())
@@ -977,12 +974,12 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 193);
+        assert_eq!(count("/api/v1/admin"), 191);
         assert_eq!(count("/api/v1/store"), 46);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/internal/storefront"), 46);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 310);
+        assert_eq!(paths.len(), 308);
 
         for key in [
             "/api/v1/platform/stores",
@@ -1096,7 +1093,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 425);
+        assert_eq!(operation_count, 423);
     }
 
     #[test]
