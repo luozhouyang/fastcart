@@ -1045,6 +1045,15 @@ async fn cart_context(
         })?;
     let country =
         CountryCode::new(country).map_err(|error| ApiError::new(AppError::from(error)))?;
+    let tax_region_id = match cart.region_id.as_deref() {
+        Some(region_id) => {
+            RegionService::new(db.clone())
+                .get_region(region_id)
+                .await?
+                .tax_region_id
+        }
+        None => None,
+    };
     let mut customer_group_ids = Vec::new();
     if let Some(customer_id) = actor.customer_id.as_ref() {
         let groups = CustomerService::new(db.clone())
@@ -1057,6 +1066,7 @@ async fn cart_context(
         province_code: province_code.or_else(|| cart.shipping_address.province.clone()),
         customer_group_ids,
         sales_channel_id: cart.sales_channel_id.clone(),
+        tax_region_id,
         at: now_timestamp(),
     })
 }

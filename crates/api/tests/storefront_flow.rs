@@ -1226,3 +1226,104 @@ async fn cart_creation_is_rate_limited() {
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
 }
+
+#[tokio::test]
+async fn cart_uses_the_regions_tax_region_instead_of_the_destination_country() {
+    let fixture = fixture().await;
+    let store_id = bootstrap_store(&fixture, "tax-region.example.com").await;
+    let db = fixture.context.databases.database(&store_id).await.unwrap();
+    let host = [("host", "tax-region.example.com")];
+
+    let tax_region = TaxService::new(db.clone())
+        .create_region(CreateTaxRegionInput {
+            name: "Germany".to_owned(),
+            country_code: CountryCode::new("DE").unwrap(),
+            province_code: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    TaxService::new(db.clone())
+        .create_rate(CreateTaxRateInput {
+            tax_region_id: tax_region.id.clone(),
+            tax_category_id: None,
+            name: "VAT".to_owned(),
+            rate_bps: 1_900,
+            is_inclusive: false,
+            is_default: true,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let region = RegionService::new(db.clone())
+        .create_region(CreateRegionInput {
+            name: "United States".to_owned(),
+            currency_code: "USD".to_owned(),
+            countries: vec!["US".to_owned()],
+            tax_region_id: Some(tax_region.id.to_string()),
+            payment_providers: Vec::new(),
+            is_default: true,
+            metadata: Metadata::empty(),
+        })
+        .await
+        .unwrap();
+
+    let catalog = CatalogService::new(db.clone());
+    let product = catalog
+        .create_product(CreateProductInput {
+            title: "Taxed product".to_owned(),
+            variants: vec![CreateVariantInput {
+                title: "Default".to_owned(),
+                sku: Some("TAX-1".to_owned()),
+                manage_inventory: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog.publish_product(&product.id).await.unwrap();
+    let variant_id = product.variants[0].id.clone();
+    PricingService::new(db.clone())
+        .create_price(CreatePriceInput::new(
+            &variant_id,
+            CurrencyCode::new("USD").unwrap(),
+            1_000,
+        ))
+        .await
+        .unwrap();
+
+    let (status, cart) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/carts",
+        Some(serde_json::json!({
+            "currency_code": "USD",
+            "region_id": region.id
+        })),
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{cart}");
+    assert_eq!(cart["cart"]["region_id"], region.id);
+    let cart_id = cart["cart"]["id"].as_str().unwrap().to_owned();
+
+    let (status, cart) = request(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/store/carts/{cart_id}/items"),
+        Some(serde_json::json!({
+            "variant_id": variant_id,
+            "quantity": 1,
+            "country_code": "US"
+        })),
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cart}");
+    // DE is not the destination country, so this only happens when the region's
+    // tax_region_id is honored.
+    assert_eq!(cart["cart"]["totals"]["tax_total"], 190);
+    assert_eq!(cart["cart"]["totals"]["total"], 1_190);
+}

@@ -35,6 +35,8 @@ pub struct CartContext {
     pub customer_group_ids: Vec<String>,
     /// Sales channel used for channel-scoped prices.
     pub sales_channel_id: Option<String>,
+    /// Tax region pinned by the cart's store region, when configured.
+    pub tax_region_id: Option<String>,
     /// Evaluation timestamp.
     pub at: Timestamp,
 }
@@ -48,6 +50,7 @@ impl CartContext {
             province_code: None,
             customer_group_ids: Vec::new(),
             sales_channel_id: None,
+            tax_region_id: None,
             at: now_timestamp(),
         }
     }
@@ -63,6 +66,13 @@ impl CartContext {
     #[must_use]
     pub fn with_customer_groups(mut self, groups: Vec<String>) -> Self {
         self.customer_group_ids = groups;
+        self
+    }
+
+    /// Pins tax calculation to a store-configured tax region.
+    #[must_use]
+    pub fn with_tax_region(mut self, region_id: impl Into<String>) -> Self {
+        self.tax_region_id = Some(region_id.into());
         self
     }
 }
@@ -438,16 +448,29 @@ impl CartWorkflow {
                 .ok()
                 .and_then(|variant| variant.tax_category_id)
                 .map(TaxCategoryId::from_string);
-            let tax = self
-                .tax
-                .calculate_for_line(
-                    &context.country_code,
-                    context.province_code.as_deref(),
-                    category.as_ref(),
-                    taxable,
-                    Some(item.is_tax_inclusive),
-                )
-                .await?;
+            let tax = match context.tax_region_id.as_deref() {
+                Some(region_id) => {
+                    self.tax
+                        .calculate_for_line_in_region(
+                            region_id,
+                            category.as_ref(),
+                            taxable,
+                            Some(item.is_tax_inclusive),
+                        )
+                        .await?
+                }
+                None => {
+                    self.tax
+                        .calculate_for_line(
+                            &context.country_code,
+                            context.province_code.as_deref(),
+                            category.as_ref(),
+                            taxable,
+                            Some(item.is_tax_inclusive),
+                        )
+                        .await?
+                }
+            };
             if tax.rate.is_some() {
                 tax_lines.push(TaxLineInput {
                     name: tax
@@ -465,16 +488,29 @@ impl CartWorkflow {
         if let Some(method) = cart.shipping_methods.first() {
             let shipping_discount = cart.totals.shipping_discount_total;
             let taxable = (method.amount - shipping_discount).max(0);
-            let tax = self
-                .tax
-                .calculate_for_line(
-                    &context.country_code,
-                    context.province_code.as_deref(),
-                    None,
-                    taxable,
-                    Some(method.is_tax_inclusive),
-                )
-                .await?;
+            let tax = match context.tax_region_id.as_deref() {
+                Some(region_id) => {
+                    self.tax
+                        .calculate_for_line_in_region(
+                            region_id,
+                            None,
+                            taxable,
+                            Some(method.is_tax_inclusive),
+                        )
+                        .await?
+                }
+                None => {
+                    self.tax
+                        .calculate_for_line(
+                            &context.country_code,
+                            context.province_code.as_deref(),
+                            None,
+                            taxable,
+                            Some(method.is_tax_inclusive),
+                        )
+                        .await?
+                }
+            };
             if tax.rate.is_some() {
                 tax_lines.push(TaxLineInput {
                     name: tax

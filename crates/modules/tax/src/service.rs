@@ -755,6 +755,55 @@ impl TaxService {
         Ok(None)
     }
 
+    /// Calculates tax for one line using a store-configured tax region.
+    ///
+    /// Region-scoped pricing must use the region's tax region even when the
+    /// destination country or province would resolve to a different tax region.
+    pub async fn calculate_for_line_in_region(
+        &self,
+        region_id: &str,
+        category_id: Option<&TaxCategoryId>,
+        amount_minor: i64,
+        inclusive_override: Option<bool>,
+    ) -> Result<TaxLine, AppError> {
+        if amount_minor < 0 {
+            return Err(AppError::validation("amount_minor must not be negative"));
+        }
+        let region = self
+            .get_region(&TaxRegionId::from_string(region_id.to_owned()))
+            .await?;
+        let rates = self.rates_for_region(&region.id, None).await?;
+        let rate = pick_rate(&rates, category_id);
+        let (rate, rate_bps, is_inclusive, breakdown) = match rate {
+            Some(rate) => {
+                let is_inclusive = inclusive_override.unwrap_or(rate.is_inclusive);
+                let breakdown = calculate_tax(amount_minor, rate.rate_bps, is_inclusive);
+                (Some(rate.clone()), rate.rate_bps, is_inclusive, breakdown)
+            }
+            None => (
+                None,
+                0,
+                false,
+                TaxBreakdown {
+                    tax_amount: 0,
+                    net_amount: amount_minor,
+                    gross_amount: amount_minor,
+                },
+            ),
+        };
+        Ok(TaxLine {
+            country_code: region.country_code.clone(),
+            province_code: region.province_code.clone(),
+            category_id: category_id.cloned(),
+            rate,
+            region: Some(region),
+            amount_minor,
+            rate_bps,
+            is_inclusive,
+            breakdown,
+        })
+    }
+
     /// Calculates tax for one line, optionally overriding inclusive pricing.
     pub async fn calculate_for_line(
         &self,
