@@ -46,6 +46,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { demoNotifications } from "@/lib/demo";
 import { demoUnreadInquiries } from "@/lib/demo-inquiries";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { initials } from "@/lib/format";
 import type { NotificationView } from "@/lib/models";
 import { useTheme } from "@/components/theme-provider";
@@ -70,6 +71,8 @@ interface NavItem {
     | "/settings";
   label: string;
   icon: typeof LayoutGrid;
+  /** Read permission required to see this section. */
+  permission?: Permission;
 }
 
 const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
@@ -77,30 +80,50 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     label: "Workspace",
     items: [
       { to: "/", label: "Overview", icon: LayoutGrid },
-      { to: "/pages", label: "Pages", icon: LayoutTemplate },
+      { to: "/pages", label: "Pages", icon: LayoutTemplate, permission: PERMISSIONS.themes.read },
     ],
   },
   {
     label: "Operations",
     items: [
-      { to: "/orders", label: "Orders", icon: ReceiptText },
-      { to: "/products", label: "Products", icon: Package },
-      { to: "/inventory", label: "Inventory", icon: Layers3 },
-      { to: "/customers", label: "Customers", icon: Users },
-      { to: "/promotions", label: "Promotions", icon: TicketPercent },
-      { to: "/forms", label: "Forms", icon: FileText },
-      { to: "/inbox", label: "Inbox", icon: Inbox },
+      { to: "/orders", label: "Orders", icon: ReceiptText, permission: PERMISSIONS.orders.read },
+      { to: "/products", label: "Products", icon: Package, permission: PERMISSIONS.products.read },
+      {
+        to: "/inventory",
+        label: "Inventory",
+        icon: Layers3,
+        permission: PERMISSIONS.inventory.read,
+      },
+      { to: "/customers", label: "Customers", icon: Users, permission: PERMISSIONS.customers.read },
+      {
+        to: "/promotions",
+        label: "Promotions",
+        icon: TicketPercent,
+        permission: PERMISSIONS.promotions.read,
+      },
+      { to: "/forms", label: "Forms", icon: FileText, permission: PERMISSIONS.settings.read },
+      { to: "/inbox", label: "Inbox", icon: Inbox, permission: PERMISSIONS.settings.read },
     ],
   },
   {
     label: "Configuration",
     items: [
-      { to: "/themes", label: "Themes", icon: Palette },
-      { to: "/notifications", label: "Notifications", icon: Bell },
-      { to: "/regions", label: "Regions", icon: Globe2 },
-      { to: "/shipping", label: "Shipping", icon: Truck },
-      { to: "/tax", label: "Tax", icon: Percent },
-      { to: "/settings", label: "Settings", icon: SettingsIcon },
+      { to: "/themes", label: "Themes", icon: Palette, permission: PERMISSIONS.themes.read },
+      {
+        to: "/notifications",
+        label: "Notifications",
+        icon: Bell,
+        permission: PERMISSIONS.settings.read,
+      },
+      { to: "/regions", label: "Regions", icon: Globe2, permission: PERMISSIONS.settings.read },
+      { to: "/shipping", label: "Shipping", icon: Truck, permission: PERMISSIONS.settings.read },
+      { to: "/tax", label: "Tax", icon: Percent, permission: PERMISSIONS.settings.read },
+      {
+        to: "/settings",
+        label: "Settings",
+        icon: SettingsIcon,
+        permission: PERMISSIONS.settings.read,
+      },
     ],
   },
 ];
@@ -226,7 +249,7 @@ function SidebarBody({
   unread: number;
   onNavigate?: () => void;
 }) {
-  const { mode, stores, store, selectStore } = useAuth();
+  const { mode, stores, store, selectStore, can } = useAuth();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   return (
@@ -286,60 +309,64 @@ function SidebarBody({
       </div>
 
       <nav className="mt-6 flex-1 overflow-y-auto px-3 pb-4" aria-label="Admin sections">
-        {NAV_GROUPS.map((group) => (
-          <div key={group.label} className="mb-5">
-            <p className="px-3 pb-1.5 text-[11.5px] font-medium text-muted-foreground">
-              {group.label}
-            </p>
-            <ul className="space-y-0.5">
-              {group.items.map((item) => {
-                const active = item.to === "/" ? pathname === "/" : pathname.startsWith(item.to);
-                const Icon = item.icon;
-                return (
-                  <li key={item.to}>
-                    <Link
-                      to={item.to}
-                      onClick={onNavigate}
-                      aria-current={active ? "page" : undefined}
-                      className={cn(
-                        "relative flex h-9 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors duration-150",
-                        "outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30",
-                        active
-                          ? "bg-accent font-medium text-foreground"
-                          : "text-ink-soft hover:bg-accent/70 hover:text-foreground",
-                      )}
-                    >
-                      {active ? (
-                        <span
-                          className="absolute inset-y-2 left-0 w-[2px] rounded-full bg-brand"
+        {NAV_GROUPS.map((group) => {
+          const items = group.items.filter((item) => !item.permission || can(item.permission));
+          if (items.length === 0) return null;
+          return (
+            <div key={group.label} className="mb-5">
+              <p className="px-3 pb-1.5 text-[11.5px] font-medium text-muted-foreground">
+                {group.label}
+              </p>
+              <ul className="space-y-0.5">
+                {items.map((item) => {
+                  const active = item.to === "/" ? pathname === "/" : pathname.startsWith(item.to);
+                  const Icon = item.icon;
+                  return (
+                    <li key={item.to}>
+                      <Link
+                        to={item.to}
+                        onClick={onNavigate}
+                        aria-current={active ? "page" : undefined}
+                        className={cn(
+                          "relative flex h-9 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors duration-150",
+                          "outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30",
+                          active
+                            ? "bg-accent font-medium text-foreground"
+                            : "text-ink-soft hover:bg-accent/70 hover:text-foreground",
+                        )}
+                      >
+                        {active ? (
+                          <span
+                            className="absolute inset-y-2 left-0 w-[2px] rounded-full bg-brand"
+                            aria-hidden="true"
+                          />
+                        ) : null}
+                        <Icon
+                          className={cn(
+                            "size-[17px] shrink-0",
+                            active ? "text-foreground" : "text-faint",
+                          )}
+                          strokeWidth={1.8}
                           aria-hidden="true"
                         />
-                      ) : null}
-                      <Icon
-                        className={cn(
-                          "size-[17px] shrink-0",
-                          active ? "text-foreground" : "text-faint",
-                        )}
-                        strokeWidth={1.8}
-                        aria-hidden="true"
-                      />
-                      <span className="flex-1">{item.label}</span>
-                      {item.to === "/orders" && pending > 0 ? (
-                        <span className="rounded-full bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground tnum">
-                          {pending}
-                        </span>
-                      ) : item.to === "/inbox" && unread > 0 ? (
-                        <span className="rounded-full bg-brand-soft px-1.5 py-0.5 font-mono text-[10px] text-brand-ink tnum">
-                          {unread}
-                        </span>
-                      ) : null}
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        ))}
+                        <span className="flex-1">{item.label}</span>
+                        {item.to === "/orders" && pending > 0 ? (
+                          <span className="rounded-full bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground tnum">
+                            {pending}
+                          </span>
+                        ) : item.to === "/inbox" && unread > 0 ? (
+                          <span className="rounded-full bg-brand-soft px-1.5 py-0.5 font-mono text-[10px] text-brand-ink tnum">
+                            {unread}
+                          </span>
+                        ) : null}
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          );
+        })}
       </nav>
 
       <div className="px-4 pb-3">

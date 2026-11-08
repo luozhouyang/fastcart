@@ -67,6 +67,7 @@ import {
 } from "@/components/ui/table";
 import { errorMessage } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { consumePendingCommand, onCommand } from "@/lib/commands";
 import { fromUnixSeconds, shortDate } from "@/lib/format";
 import {
@@ -272,7 +273,7 @@ function demoCouponSeed(): Record<string, string> {
 }
 
 export function PromotionsPage() {
-  const { mode, client, store, dataKey } = useAuth();
+  const { mode, client, store, dataKey, can } = useAuth();
   const [statusFilter, setStatusFilter] = useState<PromotionStatus | "all">("all");
   const [page, setPage] = useState(1);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -675,12 +676,12 @@ export function PromotionsPage() {
         title: "No promotions yet",
         description:
           "Create an automatic discount or a coupon code to start driving repeat orders.",
-        action: (
+        action: can(PERMISSIONS.promotions.write) ? (
           <Button onClick={openCreate}>
             <Plus className="size-4" aria-hidden="true" />
             New promotion
           </Button>
-        ),
+        ) : null,
       };
     }
     return {
@@ -721,10 +722,12 @@ export function PromotionsPage() {
             >
               <RefreshCw className={cn("size-4", loading && "animate-spin")} aria-hidden="true" />
             </Button>
-            <Button onClick={openCreate}>
-              <Plus className="size-4" aria-hidden="true" />
-              New promotion
-            </Button>
+            {can(PERMISSIONS.promotions.write) ? (
+              <Button onClick={openCreate}>
+                <Plus className="size-4" aria-hidden="true" />
+                New promotion
+              </Button>
+            ) : null}
           </>
         }
       />

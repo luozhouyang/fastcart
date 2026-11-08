@@ -16,6 +16,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { errorMessage } from "@/lib/api";
 import { initials, money, monthDay, timeOfDay } from "@/lib/format";
 import type { OrderView } from "@/lib/models";
@@ -44,6 +46,7 @@ export function OrderDrawer({
   onFulfill: (order: OrderView, tracking: string) => Promise<void>;
   onRefund: (order: OrderView, amount: number, reason: string) => Promise<void>;
 }) {
+  const { can } = useAuth();
   const [action, setAction] = useState<Action | null>(null);
   const [tracking, setTracking] = useState("");
   const [amount, setAmount] = useState("");
@@ -272,14 +275,14 @@ export function OrderDrawer({
               <Button
                 variant="outline"
                 className="flex-1"
-                disabled={!order.canRefund}
+                disabled={!order.canRefund || !can(PERMISSIONS.orders.write)}
                 onClick={() => setAction("refund")}
               >
                 Refund
               </Button>
               <Button
                 className="flex-1"
-                disabled={!order.canFulfill}
+                disabled={!order.canFulfill || !can(PERMISSIONS.orders.write)}
                 onClick={() => setAction("fulfill")}
               >
                 {order.canFulfill ? "Fulfill order" : "Fulfilled"}

@@ -45,6 +45,7 @@ import {
 } from "@/components/ui/table";
 import { errorMessage, fetchAll } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { consumePendingCommand, onCommand } from "@/lib/commands";
 import { demoTaxCategories, demoTaxRates, demoTaxRegions } from "@/lib/demo-operations";
 import { fromUnixSeconds, shortDate } from "@/lib/format";
@@ -77,7 +78,7 @@ interface RateDraft {
 }
 
 export function TaxPage() {
-  const { mode, client, store, dataKey } = useAuth();
+  const { mode, client, store, dataKey, can } = useAuth();
   const [demoCategories, setDemoCategories] = useState<TaxCategory[]>(demoTaxCategories);
   const [demoRegions, setDemoRegions] = useState<TaxRegion[]>(demoTaxRegions);
   const [demoRates, setDemoRates] = useState<TaxRate[]>(demoTaxRates);
@@ -459,10 +460,12 @@ export function TaxPage() {
             >
               <RefreshCw className={cn("size-4", loading && "animate-spin")} aria-hidden="true" />
             </Button>
-            <Button onClick={openCreateRate} disabled={regions.length === 0}>
-              <Plus className="size-4" aria-hidden="true" />
-              New rate
-            </Button>
+            {can(PERMISSIONS.settings.write) ? (
+              <Button onClick={openCreateRate} disabled={regions.length === 0}>
+                <Plus className="size-4" aria-hidden="true" />
+                New rate
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -481,10 +484,12 @@ export function TaxPage() {
               Products reference a category; rates are defined per category within a region.
             </p>
           </div>
-          <Button variant="outline" size="sm" onClick={openCreateCategory}>
-            <Plus className="size-3.5" aria-hidden="true" />
-            New category
-          </Button>
+          {can(PERMISSIONS.settings.write) ? (
+            <Button variant="outline" size="sm" onClick={openCreateCategory}>
+              <Plus className="size-3.5" aria-hidden="true" />
+              New category
+            </Button>
+          ) : null}
         </div>
 
         <Table>
@@ -573,10 +578,12 @@ export function TaxPage() {
               A tax region groups the rates that apply to one country or province.
             </p>
           </div>
-          <Button variant="outline" size="sm" onClick={openCreateRegion}>
-            <Plus className="size-3.5" aria-hidden="true" />
-            New tax region
-          </Button>
+          {can(PERMISSIONS.settings.write) ? (
+            <Button variant="outline" size="sm" onClick={openCreateRegion}>
+              <Plus className="size-3.5" aria-hidden="true" />
+              New tax region
+            </Button>
+          ) : null}
         </div>
 
         <Table>
@@ -747,10 +754,12 @@ export function TaxPage() {
                     title="No tax rates"
                     description="Add a rate to start calculating tax for a region."
                     action={
-                      <Button onClick={openCreateRate} disabled={regions.length === 0}>
-                        <Plus className="size-4" aria-hidden="true" />
-                        New rate
-                      </Button>
+                      can(PERMISSIONS.settings.write) ? (
+                        <Button onClick={openCreateRate} disabled={regions.length === 0}>
+                          <Plus className="size-4" aria-hidden="true" />
+                          New rate
+                        </Button>
+                      ) : null
                     }
                   />
                 </TableCell>

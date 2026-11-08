@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { errorMessage } from "@/lib/api";
 import { demoSettings } from "@/lib/demo";
 import { addDomain, loadSettings, saveStoreProfile, setPrimaryDomain } from "@/lib/loaders";
@@ -88,7 +89,7 @@ function SelectField({
 }
 
 export function SettingsPage() {
-  const { mode, client, store, dataKey, refreshStores } = useAuth();
+  const { mode, client, store, dataKey, refreshStores, can } = useAuth();
   const [draft, setDraft] = useState<StoreProfileView | null>(null);
   const [saving, setSaving] = useState(false);
   const [newDomain, setNewDomain] = useState("");
@@ -215,7 +216,11 @@ export function SettingsPage() {
         title="Settings"
         description="Store profile, domains and checkout behavior"
         actions={
-          <Button onClick={() => void save()} disabled={saving}>
+          <Button
+            onClick={() => void save()}
+            disabled={saving || !can(PERMISSIONS.settings.write)}
+            title={can(PERMISSIONS.settings.write) ? undefined : "Requires settings.write"}
+          >
             {saving ? (
               <Loader2 className="size-4 animate-spin" aria-hidden="true" />
             ) : (

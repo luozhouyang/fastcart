@@ -49,6 +49,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { errorMessage } from "@/lib/api";
 import { consumePendingCommand, onCommand } from "@/lib/commands";
 import { demoProducts } from "@/lib/demo";
@@ -83,7 +84,7 @@ function stockTone(available: number): "brand" | "warning" | "destructive" {
 }
 
 export function ProductsPage() {
-  const { mode, client, store, dataKey } = useAuth();
+  const { mode, client, store, dataKey, can } = useAuth();
   const [status, setStatus] = useState<"all" | ProductStatusView>("all");
   const [query, setQuery] = useState("");
   const [collection, setCollection] = useState<string | null>(null);
@@ -187,10 +188,12 @@ export function ProductsPage() {
               <Download className="size-4" aria-hidden="true" />
               Export
             </Button>
-            <Button onClick={() => setAddOpen(true)}>
-              <Plus className="size-4" aria-hidden="true" />
-              Add product
-            </Button>
+            {can(PERMISSIONS.products.write) ? (
+              <Button onClick={() => setAddOpen(true)}>
+                <Plus className="size-4" aria-hidden="true" />
+                Add product
+              </Button>
+            ) : null}
           </>
         }
       />

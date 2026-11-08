@@ -35,6 +35,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { errorMessage } from "@/lib/api";
 import { consumePendingCommand, onCommand } from "@/lib/commands";
 import { demoInventory } from "@/lib/demo";
@@ -57,7 +58,7 @@ function available(row: InventoryRowView): number {
 }
 
 export function InventoryPage() {
-  const { mode, client, store, dataKey } = useAuth();
+  const { mode, client, store, dataKey, can } = useAuth();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<StockFilter>("all");
   const [locationId, setLocationId] = useState<string | null>(null);
@@ -193,10 +194,12 @@ export function InventoryPage() {
               <Download className="size-4" aria-hidden="true" />
               Export
             </Button>
-            <Button onClick={() => openAdjust(null)}>
-              <SlidersHorizontal className="size-4" aria-hidden="true" />
-              Adjust stock
-            </Button>
+            {can(PERMISSIONS.inventory.write) ? (
+              <Button onClick={() => openAdjust(null)}>
+                <SlidersHorizontal className="size-4" aria-hidden="true" />
+                Adjust stock
+              </Button>
+            ) : null}
           </>
         }
       />

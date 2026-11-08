@@ -52,6 +52,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { errorMessage, fetchAll } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { consumePendingCommand, onCommand } from "@/lib/commands";
 import {
   demoPublishableKeys,
@@ -85,7 +86,7 @@ interface RegionDraft {
 }
 
 export function RegionsPage() {
-  const { mode, client, store, dataKey } = useAuth();
+  const { mode, client, store, dataKey, can } = useAuth();
   const [demoRegionList, setDemoRegionList] = useState<Region[]>(demoRegions);
   const [demoKeyList, setDemoKeyList] = useState<PublishableApiKey[]>(demoPublishableKeys);
 
@@ -373,10 +374,12 @@ export function RegionsPage() {
             >
               <RefreshCw className={cn("size-4", loading && "animate-spin")} aria-hidden="true" />
             </Button>
-            <Button onClick={openCreateRegion}>
-              <Plus className="size-4" aria-hidden="true" />
-              New region
-            </Button>
+            {can(PERMISSIONS.settings.write) ? (
+              <Button onClick={openCreateRegion}>
+                <Plus className="size-4" aria-hidden="true" />
+                New region
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -513,10 +516,12 @@ export function RegionsPage() {
               more sales channels. The full key is shown once, at creation.
             </p>
           </div>
-          <Button variant="outline" onClick={() => setKeyDialogOpen(true)}>
-            <Plus className="size-4" aria-hidden="true" />
-            Create key
-          </Button>
+          {can(PERMISSIONS.settings.write) ? (
+            <Button variant="outline" onClick={() => setKeyDialogOpen(true)}>
+              <Plus className="size-4" aria-hidden="true" />
+              Create key
+            </Button>
+          ) : null}
         </div>
 
         {keysError ? (

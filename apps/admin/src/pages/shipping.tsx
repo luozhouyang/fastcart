@@ -59,6 +59,7 @@ import {
 } from "@/components/ui/table";
 import { errorMessage, fetchAll } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { consumePendingCommand, onCommand } from "@/lib/commands";
 import {
   demoShippingOptions,
@@ -111,7 +112,7 @@ interface RateDraft {
 }
 
 export function ShippingPage() {
-  const { mode, client, store, dataKey } = useAuth();
+  const { mode, client, store, dataKey, can } = useAuth();
   const [demoProfiles, setDemoProfiles] = useState<ShippingProfile[]>(demoShippingProfiles);
   const [demoOptions, setDemoOptions] = useState<ShippingOptionRecord[]>(demoShippingOptions);
   const [demoRates, setDemoRates] = useState<Record<string, ShippingRate[]>>(demoShippingRates);
@@ -491,10 +492,12 @@ export function ShippingPage() {
             >
               <RefreshCw className={cn("size-4", loading && "animate-spin")} aria-hidden="true" />
             </Button>
-            <Button onClick={openCreateOption} disabled={profiles.length === 0}>
-              <Plus className="size-4" aria-hidden="true" />
-              New option
-            </Button>
+            {can(PERMISSIONS.settings.write) ? (
+              <Button onClick={openCreateOption} disabled={profiles.length === 0}>
+                <Plus className="size-4" aria-hidden="true" />
+                New option
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -513,10 +516,12 @@ export function ShippingPage() {
               Products are assigned to a profile so their rates stay independent.
             </p>
           </div>
-          <Button variant="outline" size="sm" onClick={openCreateProfile}>
-            <Plus className="size-3.5" aria-hidden="true" />
-            New profile
-          </Button>
+          {can(PERMISSIONS.settings.write) ? (
+            <Button variant="outline" size="sm" onClick={openCreateProfile}>
+              <Plus className="size-3.5" aria-hidden="true" />
+              New profile
+            </Button>
+          ) : null}
         </div>
 
         <Table>
@@ -764,16 +769,18 @@ export function ShippingPage() {
                     title="No destination rates"
                     description="The flat amount applies everywhere. Add a rate to charge a different amount for a country, province or subtotal range."
                     action={
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          setEditingRate(null);
-                          setRateDialogOpen(true);
-                        }}
-                      >
-                        <Plus className="size-4" aria-hidden="true" />
-                        Add rate
-                      </Button>
+                      can(PERMISSIONS.settings.write) ? (
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setEditingRate(null);
+                            setRateDialogOpen(true);
+                          }}
+                        >
+                          <Plus className="size-4" aria-hidden="true" />
+                          Add rate
+                        </Button>
+                      ) : null
                     }
                   />
                 ) : (
@@ -843,16 +850,18 @@ export function ShippingPage() {
               </div>
 
               <SheetFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setEditingRate(null);
-                    setRateDialogOpen(true);
-                  }}
-                >
-                  <Plus className="size-4" aria-hidden="true" />
-                  Add rate
-                </Button>
+                {can(PERMISSIONS.settings.write) ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setEditingRate(null);
+                      setRateDialogOpen(true);
+                    }}
+                  >
+                    <Plus className="size-4" aria-hidden="true" />
+                    Add rate
+                  </Button>
+                ) : null}
                 <Button variant="ghost" onClick={() => setRatesOption(null)}>
                   Close
                 </Button>

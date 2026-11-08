@@ -1,8 +1,11 @@
+import React from "react";
 import { Link, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
 import { AppShell } from "@/components/app-shell";
 import { ThemeProvider, useTheme } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
+import { PermissionGate } from "@/components/permission-gate";
+import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { CustomersPage } from "@/pages/customers";
 import { FormEditorPage } from "@/pages/form-editor";
@@ -68,6 +71,14 @@ function NotFoundPage() {
   );
 }
 
+function guarded(component: React.ComponentType, permission: Permission) {
+  return function PermissionGuardedPage() {
+    return (
+      <PermissionGate permission={permission}>{React.createElement(component)}</PermissionGate>
+    );
+  };
+}
+
 const rootRoute = createRootRoute({
   component: RootLayout,
   notFoundComponent: NotFoundPage,
@@ -82,37 +93,37 @@ const overviewRoute = createRoute({
 const ordersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/orders",
-  component: OrdersPage,
+  component: guarded(OrdersPage, PERMISSIONS.orders.read),
 });
 
 const productsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/products",
-  component: ProductsPage,
+  component: guarded(ProductsPage, PERMISSIONS.products.read),
 });
 
 const inventoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/inventory",
-  component: InventoryPage,
+  component: guarded(InventoryPage, PERMISSIONS.inventory.read),
 });
 
 const customersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/customers",
-  component: CustomersPage,
+  component: guarded(CustomersPage, PERMISSIONS.customers.read),
 });
 
 const promotionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/promotions",
-  component: PromotionsPage,
+  component: guarded(PromotionsPage, PERMISSIONS.promotions.read),
 });
 
 const formsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/forms",
-  component: FormsPage,
+  component: guarded(FormsPage, PERMISSIONS.settings.read),
 });
 
 const formEditorRoute = createRoute({
@@ -124,19 +135,19 @@ const formEditorRoute = createRoute({
 const inboxRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/inbox",
-  component: InboxPage,
+  component: guarded(InboxPage, PERMISSIONS.settings.read),
 });
 
 const notificationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/notifications",
-  component: NotificationsPage,
+  component: guarded(NotificationsPage, PERMISSIONS.settings.read),
 });
 
 const themesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/themes",
-  component: ThemesPage,
+  component: guarded(ThemesPage, PERMISSIONS.themes.read),
 });
 
 const themeDetailRoute = createRoute({
@@ -148,7 +159,7 @@ const themeDetailRoute = createRoute({
 const pagesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/pages",
-  component: PagesPage,
+  component: guarded(PagesPage, PERMISSIONS.themes.read),
 });
 
 const pageEditorRoute = createRoute({
@@ -160,25 +171,25 @@ const pageEditorRoute = createRoute({
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
-  component: SettingsPage,
+  component: guarded(SettingsPage, PERMISSIONS.settings.read),
 });
 
 const regionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/regions",
-  component: RegionsPage,
+  component: guarded(RegionsPage, PERMISSIONS.settings.read),
 });
 
 const shippingRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/shipping",
-  component: ShippingPage,
+  component: guarded(ShippingPage, PERMISSIONS.settings.read),
 });
 
 const taxRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/tax",
-  component: TaxPage,
+  component: guarded(TaxPage, PERMISSIONS.settings.read),
 });
 
 const routeTree = rootRoute.addChildren([
