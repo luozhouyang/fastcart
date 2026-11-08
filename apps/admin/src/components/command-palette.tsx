@@ -29,23 +29,34 @@ import {
   CommandSeparator,
 } from "@/components/ui/command";
 import { useAuth } from "@/lib/auth";
+import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { requestCommand, type AdminCommand } from "@/lib/commands";
 import { useTheme } from "@/components/theme-provider";
 
-const PAGES = [
+const PAGES: Array<{
+  to: string;
+  label: string;
+  icon: typeof LayoutGrid;
+  permission?: Permission;
+}> = [
   { to: "/", label: "Overview", icon: LayoutGrid },
-  { to: "/orders", label: "Orders", icon: ReceiptText },
-  { to: "/products", label: "Products", icon: Package },
-  { to: "/inventory", label: "Inventory", icon: Layers3 },
-  { to: "/customers", label: "Customers", icon: Users },
-  { to: "/promotions", label: "Promotions", icon: TicketPercent },
-  { to: "/pages", label: "Pages", icon: LayoutTemplate },
-  { to: "/themes", label: "Themes", icon: Palette },
-  { to: "/regions", label: "Regions", icon: Globe2 },
-  { to: "/shipping", label: "Shipping", icon: Truck },
-  { to: "/tax", label: "Tax", icon: Percent },
-  { to: "/settings", label: "Settings", icon: Settings2 },
-] as const;
+  { to: "/orders", label: "Orders", icon: ReceiptText, permission: PERMISSIONS.orders.read },
+  { to: "/products", label: "Products", icon: Package, permission: PERMISSIONS.products.read },
+  { to: "/inventory", label: "Inventory", icon: Layers3, permission: PERMISSIONS.inventory.read },
+  { to: "/customers", label: "Customers", icon: Users, permission: PERMISSIONS.customers.read },
+  {
+    to: "/promotions",
+    label: "Promotions",
+    icon: TicketPercent,
+    permission: PERMISSIONS.promotions.read,
+  },
+  { to: "/pages", label: "Pages", icon: LayoutTemplate, permission: PERMISSIONS.themes.read },
+  { to: "/themes", label: "Themes", icon: Palette, permission: PERMISSIONS.themes.read },
+  { to: "/regions", label: "Regions", icon: Globe2, permission: PERMISSIONS.settings.read },
+  { to: "/shipping", label: "Shipping", icon: Truck, permission: PERMISSIONS.settings.read },
+  { to: "/tax", label: "Tax", icon: Percent, permission: PERMISSIONS.settings.read },
+  { to: "/settings", label: "Settings", icon: Settings2, permission: PERMISSIONS.settings.read },
+];
 
 export function CommandPalette({
   open,
@@ -55,10 +66,10 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void;
 }) {
   const navigate = useNavigate();
-  const { store, logout, mode } = useAuth();
+  const { store, logout, mode, can } = useAuth();
   const { toggleTheme } = useTheme();
 
-  const go = (to: (typeof PAGES)[number]["to"], command?: AdminCommand) => {
+  const go = (to: string, command?: AdminCommand) => {
     onOpenChange(false);
     if (command) requestCommand(command);
     void navigate({ to });
@@ -75,7 +86,7 @@ export function CommandPalette({
       <CommandList>
         <CommandEmpty>No matches.</CommandEmpty>
         <CommandGroup heading="Go to">
-          {PAGES.map((page) => {
+          {PAGES.filter((page) => !page.permission || can(page.permission)).map((page) => {
             const Icon = page.icon;
             return (
               <CommandItem
