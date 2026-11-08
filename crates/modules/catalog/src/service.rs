@@ -3348,3 +3348,25 @@ fn fts_query(query: &str) -> Option<String> {
         Some(terms.join(" AND "))
     }
 }
+
+impl CatalogService {
+    /// Links a price set to a variant inside the caller's transaction.
+    ///
+    /// The link table is owned by the catalog module. Pricing calls this while
+    /// creating the price set so the two rows commit or roll back together.
+    pub async fn attach_price_set(
+        transaction: &mut Transaction<'_, Sqlite>,
+        variant_id: &str,
+        price_set_id: &str,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO product_variant_price_set (variant_id, price_set_id) VALUES (?, ?)",
+        )
+        .bind(variant_id)
+        .bind(price_set_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+        Ok(())
+    }
+}

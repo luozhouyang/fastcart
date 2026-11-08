@@ -1132,12 +1132,7 @@ async fn ensure_price_set_tx(
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
-    sqlx::query("INSERT INTO product_variant_price_set (variant_id, price_set_id) VALUES (?, ?)")
-        .bind(variant_id)
-        .bind(&id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(database_error)?;
+    fastcart_module_catalog::CatalogService::attach_price_set(transaction, variant_id, &id).await?;
     Ok(PriceSet {
         id,
         title: Some(title),

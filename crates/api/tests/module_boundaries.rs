@@ -22,11 +22,7 @@ const SHARED_TABLES: &[&str] = &[
 ///
 /// Keep this list small and add the reason; new entries should not be accepted
 /// without an owner review.
-const ALLOWED: &[(&str, &str, &str)] = &[(
-    "pricing",
-    "product_variant_price_set",
-    "pricing attaches a price set to a variant; catalog owns the link table",
-)];
+const ALLOWED: &[(&str, &str, &str)] = &[];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

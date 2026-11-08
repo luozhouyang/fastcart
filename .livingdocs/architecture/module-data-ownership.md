@@ -49,9 +49,9 @@ data ownership, so this document is the reviewed contract and
 The guard records these in `ALLOWED` with a reason. They are debt, not a
 license for new violations.
 
-- `pricing` writes `product_variant_price_set` when attaching a price set to a
-  catalog variant. This link is catalog-owned; it should move to a catalog
-  service call in a later boundary pass.
+None. The former order→inventory and pricing→catalog link writes now go through
+`InventoryService::reverse_return_write_off` and
+`CatalogService::attach_price_set` respectively.
 
 Adding an exception requires a reviewer and a concrete removal plan; the
 `allowed_exceptions_still_exist` test rejects stale entries.
