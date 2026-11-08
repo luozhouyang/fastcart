@@ -610,7 +610,7 @@ async fn process_job(
         "dispatch_outbox" => Ok(()),
         "send_email" => match serde_json::from_str(&job.payload) {
             Ok(payload) => email
-                .process_job(&payload)
+                .process_job_for_store(store_id, &payload)
                 .await
                 .map(|_| ())
                 .map_err(AppError::from),

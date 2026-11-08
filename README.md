@@ -237,8 +237,13 @@ Required and recommended environment:
   provider overrides. `<STORE>` is the store ID upper-cased with every
   non-alphanumeric byte replaced by `_` (for example
   `store_01abc` → `STORE_01ABC`). Stores without overrides use the global
-  `FASTCART_STRIPE_*` / `FASTCART_PAYMENT_WEBHOOK_SECRET` values. Email
-  credentials are still process-global.
+  `FASTCART_STRIPE_*` / `FASTCART_PAYMENT_WEBHOOK_SECRET` values.
+- `FASTCART_STORE_<STORE>_EMAIL_PROVIDER`, `_EMAIL_FROM`, `_SMTP_HOST`,
+  `_SMTP_PORT`, `_SMTP_USERNAME`, `_SMTP_PASSWORD`, `_SMTP_SECURITY` and
+  `_RESEND_API_KEY` — optional per-store transactional-email overrides. They
+  take effect when a queued email is delivered, so a restart is enough to pick
+  up changed credentials. Stores without overrides inherit the global email
+  configuration.
 - `FASTCART_TRUSTED_PROXIES` — comma-separated IP addresses/CIDRs whose
   `X-Forwarded-For` chain the server may trust (for example the external TLS
   proxy). Empty means forwarding headers are ignored and the socket peer is

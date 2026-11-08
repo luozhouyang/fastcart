@@ -1,25 +1,80 @@
 //! Application service coordinating validation, the job queue and providers.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use fastcart_infrastructure::{JobQueue, NewJob};
-use fastcart_kernel::JobId;
+use fastcart_kernel::{JobId, StoreId};
 use serde_json::Value;
 
 use crate::message::{EmailMessage, EmailReceipt, SEND_EMAIL_JOB_TYPE, SendEmailJob};
 use crate::provider::{EmailError, EmailProviderRegistry, LogEmailProvider};
 
+/// Resolves the provider registry for one store.
+pub type StoreEmailFactory = Arc<dyn Fn(&StoreId) -> EmailProviderRegistry + Send + Sync>;
+
 /// Sends transactional email through the default registered provider.
-#[derive(Clone, Debug)]
+///
+/// A service may carry a per-store factory so a multi-store deployment can use
+/// different SMTP/Resend credentials without exposing secrets in the store
+/// database. The factory is optional: tests and single-store deployments keep
+/// using one registry.
+#[derive(Clone)]
 pub struct EmailService {
     registry: EmailProviderRegistry,
+    store_factory: Option<StoreEmailFactory>,
+    store_cache: Arc<Mutex<HashMap<String, EmailProviderRegistry>>>,
+}
+
+impl std::fmt::Debug for EmailService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmailService")
+            .field("default_provider", &self.default_provider_id())
+            .field("has_store_factory", &self.store_factory.is_some())
+            .finish()
+    }
 }
 
 impl EmailService {
     /// Creates a service over an existing provider registry.
     #[must_use]
     pub fn new(registry: EmailProviderRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            store_factory: None,
+            store_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Attaches a lazy per-store registry factory.
+    #[must_use]
+    pub fn with_store_factory(mut self, factory: StoreEmailFactory) -> Self {
+        self.store_factory = Some(factory);
+        self
+    }
+
+    /// Returns the registry for one store, falling back to the global registry.
+    #[must_use]
+    pub fn registry_for_store(&self, store_id: &StoreId) -> EmailProviderRegistry {
+        let Some(factory) = self.store_factory.as_ref() else {
+            return self.registry.clone();
+        };
+        let key = store_id.to_string();
+        if let Some(registry) = self
+            .store_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            return registry.clone();
+        }
+        let registry = factory(store_id);
+        self.store_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, registry.clone());
+        registry
     }
 
     /// Creates a service with the logging provider registered as `log`.
@@ -51,6 +106,20 @@ impl EmailService {
     pub async fn send(&self, message: EmailMessage) -> Result<EmailReceipt, EmailError> {
         message.validate()?;
         let provider = self.registry.default_provider().ok_or_else(|| {
+            EmailError::Unavailable("no default email provider is configured".to_owned())
+        })?;
+        provider.send(message).await
+    }
+
+    /// Validates and sends a message through the store's default provider.
+    pub async fn send_for_store(
+        &self,
+        store_id: &StoreId,
+        message: EmailMessage,
+    ) -> Result<EmailReceipt, EmailError> {
+        message.validate()?;
+        let registry = self.registry_for_store(store_id);
+        let provider = registry.default_provider().ok_or_else(|| {
             EmailError::Unavailable("no default email provider is configured".to_owned())
         })?;
         provider.send(message).await
@@ -91,6 +160,18 @@ impl EmailService {
             EmailError::Validation(format!("invalid send_email job payload: {error}"))
         })?;
         self.send(job.into_message()).await
+    }
+
+    /// Processes a claimed job using the store's provider.
+    pub async fn process_job_for_store(
+        &self,
+        store_id: &StoreId,
+        payload: &Value,
+    ) -> Result<EmailReceipt, EmailError> {
+        let job: SendEmailJob = serde_json::from_value(payload.clone()).map_err(|error| {
+            EmailError::Validation(format!("invalid send_email job payload: {error}"))
+        })?;
+        self.send_for_store(store_id, job.into_message()).await
     }
 }
 
@@ -254,5 +335,52 @@ mod tests {
 
         let error = service.process_job(&payload).await.unwrap_err();
         assert!(matches!(error, EmailError::Validation(_)));
+    }
+    #[test]
+    fn store_factory_resolves_and_caches_registries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use fastcart_kernel::StoreId;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let default_registry = EmailProviderRegistry::new();
+        default_registry
+            .register(Arc::new(MemoryEmailProvider::new("default")))
+            .unwrap();
+        let store_registry = EmailProviderRegistry::new();
+        store_registry
+            .register(Arc::new(MemoryEmailProvider::new("store_provider")))
+            .unwrap();
+
+        let calls_for_factory = calls.clone();
+        let default_for_factory = default_registry.clone();
+        let store_for_factory = store_registry.clone();
+        let service =
+            EmailService::new(default_registry).with_store_factory(Arc::new(move |store_id| {
+                calls_for_factory.fetch_add(1, Ordering::SeqCst);
+                if store_id.as_str() == "store_a" {
+                    store_for_factory.clone()
+                } else {
+                    default_for_factory.clone()
+                }
+            }));
+
+        let store_a = StoreId::from_string("store_a");
+        let store_b = StoreId::from_string("store_b");
+        assert_eq!(
+            service.registry_for_store(&store_a).default_id().as_deref(),
+            Some("store_provider")
+        );
+        assert_eq!(
+            service.registry_for_store(&store_b).default_id().as_deref(),
+            Some("default")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Cached: a second lookup does not consult the factory again.
+        assert_eq!(
+            service.registry_for_store(&store_a).default_id().as_deref(),
+            Some("store_provider")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

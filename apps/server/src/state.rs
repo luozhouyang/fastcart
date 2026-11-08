@@ -6,9 +6,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use fastcart_api::{ApiConfig, AppContext};
 use fastcart_email::{
-    EmailService, ResendConfig, ResendEmailProvider, SmtpConfig, SmtpEmailProvider, SmtpSecurity,
+    EmailProviderRegistry, EmailService, ResendConfig, ResendEmailProvider, SmtpConfig,
+    SmtpEmailProvider, SmtpSecurity,
 };
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
+use fastcart_kernel::StoreId;
 use fastcart_platform::PlatformStore;
 use fastcart_runtime_api::StorefrontRuntime;
 use fastcart_runtime_node::NodeRuntime;
@@ -134,6 +136,31 @@ impl AppState {
 }
 
 fn build_email_service(config: &crate::config::EmailConfig) -> Result<EmailService> {
+    let registry = build_email_registry(config)?;
+    let global_registry = registry.clone();
+    let base = config.clone();
+    Ok(
+        EmailService::new(registry).with_store_factory(Arc::new(move |store_id| {
+            if !has_store_email_override(store_id) {
+                return global_registry.clone();
+            }
+            let resolved = resolve_store_email_config(&base, store_id);
+            match build_email_registry(&resolved) {
+                Ok(registry) => registry,
+                Err(error) => {
+                    tracing::warn!(
+                        store_id = %store_id,
+                        error = %error,
+                        "invalid per-store email configuration; falling back to the global provider"
+                    );
+                    global_registry.clone()
+                }
+            }
+        })),
+    )
+}
+
+fn build_email_registry(config: &crate::config::EmailConfig) -> Result<EmailProviderRegistry> {
     let service = EmailService::with_default_registry();
     match config.provider.as_str() {
         "log" => {}
@@ -187,7 +214,81 @@ fn build_email_service(config: &crate::config::EmailConfig) -> Result<EmailServi
         }
         other => anyhow::bail!("unsupported email provider: {other}"),
     }
-    Ok(service)
+    Ok(service.registry().clone())
+}
+
+/// Env names that can override the global email configuration per store.
+const STORE_EMAIL_KEYS: &[&str] = &[
+    "EMAIL_PROVIDER",
+    "EMAIL_FROM",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USERNAME",
+    "SMTP_PASSWORD",
+    "SMTP_SECURITY",
+    "RESEND_API_KEY",
+];
+
+fn has_store_email_override(store_id: &StoreId) -> bool {
+    STORE_EMAIL_KEYS
+        .iter()
+        .any(|key| store_email_env(store_id, key).is_some())
+}
+
+fn resolve_store_email_config(
+    base: &crate::config::EmailConfig,
+    store_id: &StoreId,
+) -> crate::config::EmailConfig {
+    use crate::config::{ResendSettings, SmtpSettings};
+
+    let mut config = base.clone();
+    if let Some(value) = store_email_env(store_id, "EMAIL_PROVIDER") {
+        config.provider = value;
+    }
+    if let Some(value) = store_email_env(store_id, "EMAIL_FROM") {
+        config.from = value;
+    }
+    let smtp = config.smtp.get_or_insert_with(SmtpSettings::default);
+    if let Some(value) = store_email_env(store_id, "SMTP_HOST") {
+        smtp.host = value;
+    }
+    if let Some(value) = store_email_env(store_id, "SMTP_PORT")
+        && let Ok(port) = value.parse()
+    {
+        smtp.port = port;
+    }
+    if let Some(value) = store_email_env(store_id, "SMTP_USERNAME") {
+        smtp.username = Some(value);
+    }
+    if let Some(value) = store_email_env(store_id, "SMTP_PASSWORD") {
+        smtp.password = Some(value);
+    }
+    if let Some(value) = store_email_env(store_id, "SMTP_SECURITY") {
+        smtp.security = value;
+    }
+    let resend = config.resend.get_or_insert_with(ResendSettings::default);
+    if let Some(value) = store_email_env(store_id, "RESEND_API_KEY") {
+        resend.api_key = value;
+    }
+    config
+}
+
+fn store_email_env(store_id: &StoreId, key: &str) -> Option<String> {
+    let normalized: String = store_id
+        .as_str()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::var(format!("FASTCART_STORE_{normalized}_{key}"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn build_storefront_runtime(
