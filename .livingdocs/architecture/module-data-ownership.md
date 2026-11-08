@@ -49,10 +49,6 @@ data ownership, so this document is the reviewed contract and
 The guard records these in `ALLOWED` with a reason. They are debt, not a
 license for new violations.
 
-- `order` writes `inventory_movements` / `inventory_levels` inside the
-  after-sales transaction for write-off reversal. Moving this to
-  `InventoryService` requires accepting an external SQLite transaction; the
-  guard stays until that refactor lands.
 - `pricing` writes `product_variant_price_set` when attaching a price set to a
   catalog variant. This link is catalog-owned; it should move to a catalog
   service call in a later boundary pass.

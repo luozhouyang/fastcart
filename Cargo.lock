@@ -1120,6 +1120,7 @@ dependencies = [
  "async-trait",
  "fastcart-infrastructure",
  "fastcart-kernel",
+ "fastcart-module-inventory",
  "serde",
  "serde_json",
  "sqlx",

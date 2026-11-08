@@ -12,7 +12,8 @@ use fastcart_kernel::{
     OrderEditId, OrderId, ProductId, RefundId, ReturnId, StoreId, Timestamp, VariantId,
     now_timestamp, validate_length, validate_metadata, validate_quantity,
 };
-use sqlx::{Row, SqliteConnection};
+use fastcart_module_inventory::{InventoryService, ReverseWriteOffRequest};
+use sqlx::SqliteConnection;
 
 use crate::after_sales::{
     AfterSalesFulfillment, AfterSalesFulfillmentItem, ClaimItemStatus, ClaimStatus,
@@ -716,13 +717,15 @@ impl OrderService {
             if increment > 0 {
                 // Written-off units are received but not resold, so reverse
                 // the stock that receiving placed back on the shelf.
-                reversed_units += reverse_return_restock_for_write_off(
+                reversed_units += InventoryService::reverse_return_write_off(
                     &mut tx,
-                    return_id,
-                    &item.order_item_id,
-                    written_off,
-                    increment,
-                    now,
+                    ReverseWriteOffRequest {
+                        return_id: return_id.as_str(),
+                        order_item_id: item.order_item_id.as_str(),
+                        written_off_quantity: written_off,
+                        increment,
+                        now,
+                    },
                 )
                 .await?;
             }
@@ -2423,111 +2426,6 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     error
         .as_database_error()
         .is_some_and(|database| database.is_unique_violation())
-}
-
-/// Reverses the restock for units written off on a returned order line.
-///
-/// A compensating movement is written only when receiving actually restocked
-/// the line, and only once per written-off unit. The returned count is the
-/// number of units taken back out of stock.
-async fn reverse_return_restock_for_write_off(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    return_id: &ReturnId,
-    order_item_id: &LineItemId,
-    written_off_quantity: i64,
-    increment: i64,
-    now: Timestamp,
-) -> Result<i64, AppError> {
-    let restock_prefix = format!(
-        "return-restock:{}:{}:%",
-        return_id.as_str(),
-        order_item_id.as_str()
-    );
-    let restocked: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(quantity_delta), 0) FROM inventory_movements \
-         WHERE reason = 'return_restock' AND reference LIKE ?",
-    )
-    .bind(&restock_prefix)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    if restocked <= 0 {
-        return Ok(0);
-    }
-    let write_off_prefix = format!(
-        "return-writeoff:{}:{}:%",
-        return_id.as_str(),
-        order_item_id.as_str()
-    );
-    let already_reversed: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(-quantity_delta), 0) FROM inventory_movements \
-         WHERE reason = 'return_writeoff' AND reference LIKE ?",
-    )
-    .bind(&write_off_prefix)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    let reversible = restocked.saturating_sub(already_reversed);
-    let quantity = increment.min(reversible);
-    if quantity <= 0 {
-        return Ok(0);
-    }
-    let movement = sqlx::query(
-        "SELECT inventory_item_id, location_id FROM inventory_movements \
-         WHERE reason = 'return_restock' AND reference LIKE ? \
-         ORDER BY created_at DESC, rowid DESC LIMIT 1",
-    )
-    .bind(&restock_prefix)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    let Some(movement) = movement else {
-        return Ok(0);
-    };
-    let item_id: String = movement
-        .try_get("inventory_item_id")
-        .map_err(database_error)?;
-    let location_id: String = movement.try_get("location_id").map_err(database_error)?;
-    let reference = format!(
-        "return-writeoff:{}:{}:{}",
-        return_id.as_str(),
-        order_item_id.as_str(),
-        written_off_quantity
-    );
-    sqlx::query(
-        "INSERT INTO inventory_movements \
-         (id, inventory_item_id, location_id, quantity_delta, reason, reference, \
-          actor_id, metadata, created_at) \
-         VALUES (?, ?, ?, ?, 'return_writeoff', ?, NULL, '{}', ?)",
-    )
-    .bind(format!("imvt_{}", EventId::new().as_str()))
-    .bind(&item_id)
-    .bind(&location_id)
-    .bind(-quantity)
-    .bind(&reference)
-    .bind(now)
-    .execute(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    let affected = sqlx::query(
-        "UPDATE inventory_levels \
-         SET stocked_quantity = stocked_quantity - ?, updated_at = ? \
-         WHERE inventory_item_id = ? AND location_id = ? AND stocked_quantity >= ?",
-    )
-    .bind(quantity)
-    .bind(now)
-    .bind(&item_id)
-    .bind(&location_id)
-    .bind(quantity)
-    .execute(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    if affected.rows_affected() != 1 {
-        return Err(AppError::conflict(
-            "inventory level no longer matches the write-off reversal",
-        ));
-    }
-    Ok(quantity)
 }
 
 async fn fetch_order_item(
