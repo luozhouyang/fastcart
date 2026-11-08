@@ -180,8 +180,19 @@ fn require_permission(actor: &ActorContext, permission: &str) -> ApiResult<()> {
     actor.require_permission(permission).map_err(ApiError::new)
 }
 
-fn payment_service(context: &AppContext, db: &StoreDatabase) -> PaymentService {
-    PaymentService::with_registry(db.clone(), context.payment_providers.clone())
+fn payment_service(
+    context: &AppContext,
+    actor: &ActorContext,
+    db: &StoreDatabase,
+) -> ApiResult<PaymentService> {
+    let store_id = actor
+        .store_id
+        .as_ref()
+        .ok_or_else(|| ApiError::new(fastcart_kernel::AppError::Unauthorized))?;
+    Ok(PaymentService::with_registry(
+        db.clone(),
+        context.payment_providers_for(store_id),
+    ))
 }
 
 #[utoipa::path(
@@ -217,7 +228,7 @@ async fn list_payments(
     }
     filter.pagination = pagination;
 
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let page = service.list_payments(filter).await?;
     Ok(Json(PageResponse::from_page(
         page.map(|payment| payment_dto(&payment)),
@@ -239,7 +250,7 @@ async fn get_payment(
     Path(id): Path<String>,
 ) -> ApiResult<Json<PaymentDto>> {
     require_permission(&actor, "payments.read")?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let payment = service.get_payment(&id).await?;
     Ok(Json(payment_dto(&payment)))
 }
@@ -259,7 +270,7 @@ async fn list_refunds(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<RefundDto>>> {
     require_permission(&actor, "payments.read")?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let refunds = service.list_refunds(&id).await?;
     Ok(Json(refunds.iter().map(refund_dto).collect()))
 }
@@ -281,7 +292,7 @@ async fn create_refund(
     ApiJson(request): ApiJson<CreateRefundRequest>,
 ) -> ApiResult<(StatusCode, Json<RefundDto>)> {
     require_permission(&actor, "payments.write")?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let refund = match request.idempotency_key {
         Some(idempotency_key) => {
             service
@@ -322,7 +333,7 @@ async fn get_payment_session(
     Path(id): Path<String>,
 ) -> ApiResult<Json<PaymentSessionDto>> {
     require_permission(&actor, "payments.read")?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let session = service.get_session(&id).await?;
     Ok(Json(payment_session_dto(&session)))
 }
@@ -342,7 +353,7 @@ async fn capture_session(
     Path(id): Path<String>,
 ) -> ApiResult<Json<PaymentDto>> {
     require_permission(&actor, "payments.write")?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let payment = service.capture(&id).await?;
     Ok(Json(payment_dto(&payment)))
 }
@@ -362,7 +373,7 @@ async fn cancel_session(
     Path(id): Path<String>,
 ) -> ApiResult<Json<PaymentSessionDto>> {
     require_permission(&actor, "payments.write")?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let session = service.cancel_session(&id).await?;
     Ok(Json(payment_session_dto(&session)))
 }
@@ -387,7 +398,7 @@ async fn fail_session(
     let reason = request
         .reason
         .unwrap_or_else(|| "payment session failed".to_owned());
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let session = service.fail_session(&id, reason).await?;
     Ok(Json(payment_session_dto(&session)))
 }
@@ -407,7 +418,7 @@ async fn list_payment_attempts(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<PaymentAttemptDto>>> {
     require_permission(&actor, "payments.read")?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let attempts = service.list_attempts(&id).await?;
     Ok(Json(attempts.iter().map(payment_attempt_dto).collect()))
 }
@@ -429,7 +440,7 @@ async fn list_webhooks(
 ) -> ApiResult<Json<PageResponse<PaymentWebhookDto>>> {
     require_permission(&actor, "payments.read")?;
     let pagination = PaginationQuery { limit, offset }.pagination()?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let page = service.list_webhooks(None, pagination).await?;
     Ok(Json(PageResponse::from_page(
         page.map(|webhook| payment_webhook_dto(&webhook)),
@@ -451,7 +462,7 @@ async fn get_webhook(
     Path(id): Path<String>,
 ) -> ApiResult<Json<PaymentWebhookDto>> {
     require_permission(&actor, "payments.read")?;
-    let service = payment_service(&context, &db);
+    let service = payment_service(&context, &actor, &db)?;
     let webhook = service.get_webhook(&id).await?;
     Ok(Json(payment_webhook_dto(&webhook)))
 }

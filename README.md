@@ -231,6 +231,14 @@ Required and recommended environment:
   calls that boundary.
 - `FASTCART_COOKIE_SECURE=true` — required behind TLS so session and CSRF
   cookies are marked `Secure`.
+- `FASTCART_STORE_<STORE>_STRIPE_SECRET_KEY`,
+  `FASTCART_STORE_<STORE>_STRIPE_WEBHOOK_SECRET` and
+  `FASTCART_STORE_<STORE>_MANUAL_PAYMENT_SECRET` — optional per-store payment
+  provider overrides. `<STORE>` is the store ID upper-cased with every
+  non-alphanumeric byte replaced by `_` (for example
+  `store_01abc` → `STORE_01ABC`). Stores without overrides use the global
+  `FASTCART_STRIPE_*` / `FASTCART_PAYMENT_WEBHOOK_SECRET` values. Email
+  credentials are still process-global.
 - `FASTCART_TRUSTED_PROXIES` — comma-separated IP addresses/CIDRs whose
   `X-Forwarded-For` chain the server may trust (for example the external TLS
   proxy). Empty means forwarding headers are ignored and the socket peer is

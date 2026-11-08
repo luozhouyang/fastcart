@@ -12,7 +12,7 @@ use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use fastcart_email::EmailMessage;
-use fastcart_http::{ApiError, ApiJson, ApiQuery, ApiResult, ClientIp, CustomerActor};
+use fastcart_http::{ApiError, ApiJson, ApiQuery, ApiResult, ClientIp, CustomerActor, StoreCtx};
 use fastcart_infrastructure::{JobQueue, StoreDatabase};
 use fastcart_kernel::{
     ActorContext, AppError, CartId, CountryCode, CurrencyCode, LineItemId, Metadata,
@@ -757,6 +757,7 @@ async fn create_checkout(
     State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
     client_ip: Option<Extension<ClientIp>>,
+    StoreCtx(store): StoreCtx,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateCheckoutRequestDto>,
 ) -> ApiResult<(StatusCode, Json<CheckoutResponse>)> {
@@ -785,7 +786,8 @@ async fn create_checkout(
         cart.shipping_address.phone.as_deref(),
     )
     .map_err(ApiError::validation)?;
-    let payment = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
+    let payment =
+        PaymentService::with_registry(db.clone(), context.payment_providers_for(&store.store_id));
     let workflow = CheckoutWorkflow::new(db.clone(), payment);
     let mut checkout_request =
         CreateCheckoutRequest::new(cart_id, request.payment_provider, cart_context);
@@ -834,6 +836,7 @@ async fn complete_checkout(
     State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
     client_ip: Option<Extension<ClientIp>>,
+    StoreCtx(store): StoreCtx,
     StoreDb(db): StoreDb,
     Path(checkout_id): Path<String>,
     ApiJson(request): ApiJson<CompleteCheckoutRequest>,
@@ -845,7 +848,8 @@ async fn complete_checkout(
         return Err(ApiError::new(AppError::RateLimited));
     }
     let checkout_id = fastcart_kernel::CheckoutId::from_string(checkout_id);
-    let payment = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
+    let payment =
+        PaymentService::with_registry(db.clone(), context.payment_providers_for(&store.store_id));
     let workflow = CheckoutWorkflow::new(db.clone(), payment);
     let checkout = workflow.get(&checkout_id).await?;
     let cart = CartWorkflow::new(db.clone())
@@ -905,6 +909,7 @@ async fn complete_checkout(
 async fn cancel_checkout(
     State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    StoreCtx(store): StoreCtx,
     StoreDb(db): StoreDb,
     Path(checkout_id): Path<String>,
 ) -> ApiResult<Json<CheckoutResponse>> {
@@ -929,7 +934,10 @@ async fn cancel_checkout(
             .await?
     };
     if let Some(session_id) = checkout.payment_session_id.as_ref() {
-        let payment = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
+        let payment = PaymentService::with_registry(
+            db.clone(),
+            context.payment_providers_for(&store.store_id),
+        );
         if let Err(error) = payment.cancel_session(session_id.as_str()).await {
             tracing::warn!(checkout_id = %checkout_id, error = %error, "failed to cancel payment session");
         }

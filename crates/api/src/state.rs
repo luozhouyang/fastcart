@@ -1,7 +1,8 @@
 //! API process state shared by all routes.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
@@ -9,6 +10,7 @@ use tokio::sync::Mutex;
 use fastcart_email::EmailService;
 use fastcart_http::{Metrics, RateLimiter};
 use fastcart_infrastructure::{EventBus, LocalStorage, Storage, StoreCache, StoreDatabaseManager};
+use fastcart_kernel::StoreId;
 use fastcart_module_payment::{ManualProvider, ProviderRegistry, StripeProvider};
 use fastcart_platform::{AuthService, PlatformStore, StoreProvisioningService, StoreResolver};
 use fastcart_runtime_api::StorefrontRuntime;
@@ -218,6 +220,8 @@ pub struct AppContext {
     pub bootstrap_lock: Arc<Mutex<()>>,
     /// Registered payment providers shared by all stores.
     pub payment_providers: ProviderRegistry,
+    /// Per-store provider registries, built lazily from env overrides.
+    payment_providers_cache: Arc<StdMutex<HashMap<String, ProviderRegistry>>>,
     /// Registered fulfillment providers shared by all stores.
     pub shipping_providers: fastcart_module_shipping::FulfillmentProviderRegistry,
     /// HTTP request metrics.
@@ -254,6 +258,93 @@ pub struct AppContext {
     pub inquiry_limiter: RateLimiter,
     /// Attachment upload limiter, keyed by store and client address.
     pub upload_limiter: RateLimiter,
+}
+
+impl AppContext {
+    /// Returns the payment providers for one store.
+    ///
+    /// Global providers are reused when a store has no env overrides. Stripe
+    /// credentials can be scoped per store with:
+    ///
+    /// - `FASTCART_STORE_<NORMALIZED_STORE_ID>_STRIPE_SECRET_KEY`
+    /// - `FASTCART_STORE_<NORMALIZED_STORE_ID>_STRIPE_WEBHOOK_SECRET`
+    /// - `FASTCART_STORE_<NORMALIZED_STORE_ID>_MANUAL_PAYMENT_SECRET`
+    ///
+    /// The store ID is upper-cased and every non-alphanumeric byte becomes `_`.
+    /// Global `FASTCART_STRIPE_*` values remain the fallback for stores without
+    /// overrides. Registries are cached per store because env is immutable for
+    /// the lifetime of the process.
+    #[must_use]
+    pub fn payment_providers_for(&self, store_id: &StoreId) -> ProviderRegistry {
+        let key = store_id.to_string();
+        if let Some(registry) = self
+            .payment_providers_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            return registry.clone();
+        }
+
+        let store_secret = store_provider_env(store_id, "STRIPE_SECRET_KEY");
+        let store_webhook = store_provider_env(store_id, "STRIPE_WEBHOOK_SECRET");
+        let store_manual = store_provider_env(store_id, "MANUAL_PAYMENT_SECRET");
+        let registry = if store_secret.is_none()
+            && store_webhook.is_none()
+            && store_manual.is_none()
+        {
+            self.payment_providers.clone()
+        } else {
+            let registry = ProviderRegistry::new();
+            let manual = ManualProvider::new(
+                "manual",
+                store_manual.or_else(|| self.config.manual_payment_secret.clone()),
+            );
+            if let Err(error) = registry.register(std::sync::Arc::new(manual)) {
+                tracing::warn!(error = %error, "failed to register the manual payment provider");
+            }
+            register_stripe_provider_with(
+                &registry,
+                store_secret
+                    .as_deref()
+                    .or(self.config.stripe_secret_key.as_deref()),
+                store_webhook
+                    .as_deref()
+                    .or(self.config.stripe_webhook_secret.as_deref()),
+            );
+            registry
+        };
+
+        self.payment_providers_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, registry.clone());
+        registry
+    }
+}
+
+/// Reads a per-store provider override from the environment.
+fn store_provider_env(store_id: &StoreId, name: &str) -> Option<String> {
+    let normalized = store_env_suffix(store_id);
+    std::env::var(format!("FASTCART_STORE_{normalized}_{name}"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Upper-cases a store ID and replaces every non-alphanumeric byte with `_`.
+fn store_env_suffix(store_id: &StoreId) -> String {
+    store_id
+        .as_str()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 impl std::fmt::Debug for AppContext {
@@ -304,6 +395,7 @@ impl AppContext {
             customer_email_limiter: RateLimiter::new(5, Duration::from_secs(15 * 60)),
             bootstrap_lock: Arc::new(Mutex::new(())),
             payment_providers,
+            payment_providers_cache: Arc::new(StdMutex::new(HashMap::new())),
             shipping_providers:
                 fastcart_module_shipping::FulfillmentProviderRegistry::with_defaults(),
             metrics: Arc::new(Metrics::new()),
@@ -367,14 +459,20 @@ impl AppContext {
 
 /// Registers the Stripe provider when both credentials are present.
 fn register_stripe_provider(registry: &ProviderRegistry, config: &ApiConfig) {
-    let secret_key = config
-        .stripe_secret_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let webhook_secret = config
-        .stripe_webhook_secret
-        .as_deref()
+    register_stripe_provider_with(
+        registry,
+        config.stripe_secret_key.as_deref(),
+        config.stripe_webhook_secret.as_deref(),
+    );
+}
+
+fn register_stripe_provider_with(
+    registry: &ProviderRegistry,
+    secret_key: Option<&str>,
+    webhook_secret: Option<&str>,
+) {
+    let secret_key = secret_key.map(str::trim).filter(|value| !value.is_empty());
+    let webhook_secret = webhook_secret
         .map(str::trim)
         .filter(|value| !value.is_empty());
     match (secret_key, webhook_secret) {
@@ -395,5 +493,20 @@ fn register_stripe_provider(registry: &ProviderRegistry, config: &ApiConfig) {
             );
         }
         (None, None) => {}
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use fastcart_kernel::StoreId;
+
+    use super::store_env_suffix;
+
+    #[test]
+    fn store_env_suffix_is_uppercase_and_safe() {
+        let store = StoreId::from_string("store_01ab-cd.ef");
+        assert_eq!(store_env_suffix(&store), "STORE_01AB_CD_EF");
+        let plain = StoreId::from_string("abc123");
+        assert_eq!(store_env_suffix(&plain), "ABC123");
     }
 }

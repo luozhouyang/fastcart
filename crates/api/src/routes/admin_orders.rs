@@ -11,9 +11,10 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiQuery, ApiResult, PaginationQuery};
+use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{
-    ClaimId, CustomerId, ExchangeId, LineItemId, Metadata, OrderEditId, OrderId, PaymentId,
-    ProductId, RefundId, ReturnId, VariantId,
+    ActorContext, AppError, ClaimId, CustomerId, ExchangeId, LineItemId, Metadata, OrderEditId,
+    OrderId, PaymentId, ProductId, RefundId, ReturnId, VariantId,
 };
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::{
@@ -274,6 +275,22 @@ pub struct ExchangeFulfillmentResponse {
 // -------------------------------------------------------------------------
 // Pure request mapping
 // -------------------------------------------------------------------------
+
+/// Builds a payment service scoped to the administrator's selected store.
+fn payment_service(
+    context: &AppContext,
+    actor: &ActorContext,
+    db: &StoreDatabase,
+) -> ApiResult<PaymentService> {
+    let store_id = actor
+        .store_id
+        .as_ref()
+        .ok_or_else(|| ApiError::new(AppError::Unauthorized))?;
+    Ok(PaymentService::with_registry(
+        db.clone(),
+        context.payment_providers_for(store_id),
+    ))
+}
 
 fn map_order_filter(query: OrderListQuery) -> OrderFilter {
     OrderFilter {
@@ -812,7 +829,7 @@ async fn create_refund(
     let payment_id = request.payment_id.clone();
     let amount = request.amount;
     let reason = request.reason.clone();
-    let payments = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
+    let payments = payment_service(&context, &actor, &db)?;
     let payment = payments.get_payment(payment_id.as_str()).await?;
     if payment.order_id.as_ref() != Some(&id) {
         return Err(ApiError::validation(
@@ -982,11 +999,8 @@ async fn receive_return(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let return_id = ReturnId::from_string(return_id);
-    let workflow = AfterSalesWorkflow::new(
-        db.clone(),
-        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
-    )
-    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let workflow = AfterSalesWorkflow::new(db.clone(), payment_service(&context, &actor, &db)?)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow
         .receive_return(&id, &return_id, map_receive_input(request))
         .await?;
@@ -1015,11 +1029,8 @@ async fn refund_return(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let return_id = ReturnId::from_string(return_id);
-    let workflow = AfterSalesWorkflow::new(
-        db.clone(),
-        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
-    )
-    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let workflow = AfterSalesWorkflow::new(db.clone(), payment_service(&context, &actor, &db)?)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow
         .refund_return(&id, &return_id, request.reason)
         .await?;
@@ -1208,11 +1219,8 @@ async fn refund_claim(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let claim_id = ClaimId::from_string(claim_id);
-    let workflow = AfterSalesWorkflow::new(
-        db.clone(),
-        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
-    )
-    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let workflow = AfterSalesWorkflow::new(db.clone(), payment_service(&context, &actor, &db)?)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow
         .refund_claim(&id, &claim_id, request.reason)
         .await?;
@@ -1351,7 +1359,7 @@ async fn accept_exchange(
     let exchange_id = ExchangeId::from_string(exchange_id);
     let workflow = AfterSalesWorkflow::with_shipping_providers(
         db.clone(),
-        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+        payment_service(&context, &actor, &db)?,
         context.shipping_providers.clone(),
     )
     .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
@@ -1382,7 +1390,7 @@ async fn fulfill_claim(
     let claim_id = ClaimId::from_string(claim_id);
     let workflow = AfterSalesWorkflow::with_shipping_providers(
         db.clone(),
-        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+        payment_service(&context, &actor, &db)?,
         context.shipping_providers.clone(),
     )
     .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
@@ -1425,7 +1433,7 @@ async fn fulfill_exchange(
     let exchange_id = ExchangeId::from_string(exchange_id);
     let workflow = AfterSalesWorkflow::with_shipping_providers(
         db.clone(),
-        PaymentService::with_registry(db.clone(), context.payment_providers.clone()),
+        payment_service(&context, &actor, &db)?,
         context.shipping_providers.clone(),
     )
     .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));

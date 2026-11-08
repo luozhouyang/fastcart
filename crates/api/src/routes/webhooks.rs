@@ -15,7 +15,7 @@ use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::middleware;
 use axum::routing::post;
-use fastcart_http::{ApiResult, ClientIp, StoreResolutionState};
+use fastcart_http::{ApiResult, ClientIp, StoreCtx, StoreResolutionState};
 use fastcart_module_payment::{PaymentService, PaymentWebhookRecord};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -59,6 +59,7 @@ async fn payment_webhook(
     StoreDb(database): StoreDb,
     Path(provider): Path<String>,
     client_ip: Option<Extension<ClientIp>>,
+    StoreCtx(store): StoreCtx,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<PaymentWebhookRecord>> {
@@ -79,7 +80,8 @@ async fn payment_webhook(
                 .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
         })
         .collect();
-    let service = PaymentService::with_registry(database, context.payment_providers.clone());
+    let service =
+        PaymentService::with_registry(database, context.payment_providers_for(&store.store_id));
     let record = service
         .process_webhook(&provider, header_map, &body)
         .await?;
