@@ -10,6 +10,7 @@ use axum::middleware;
 use axum::routing::{delete, get, post};
 use fastcart_http::{AdminActor, AdminAuthState, ApiError, ApiJson, ApiResult, PaginationQuery};
 use fastcart_kernel::{ActorContext, AppError, Pagination, StoreId, UserId};
+use fastcart_module_content::ContentService;
 use fastcart_module_theme::{RegisterThemeInput, ThemeService};
 use fastcart_platform::{CreateStoreInput, CreateUserInput, NewAudit, UpdateStoreInput};
 use fastcart_storefront::ThemeManifest;
@@ -792,6 +793,7 @@ async fn ensure_default_theme(context: &AppContext, store_id: &StoreId) {
             return;
         }
     };
+    let content_db = database.clone();
     let service = ThemeService::new(database);
     match service.active().await {
         Ok(Some(_)) => return,
@@ -857,6 +859,9 @@ async fn ensure_default_theme(context: &AppContext, store_id: &StoreId) {
                 let _ = service.activate(&theme.id).await;
             }
         }
+    }
+    if let Err(error) = ContentService::new(content_db).ensure_system_pages().await {
+        tracing::warn!(store_id = %store_id, error = %error, "could not seed cart/checkout pages");
     }
 }
 

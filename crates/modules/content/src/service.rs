@@ -310,6 +310,42 @@ impl ContentService {
     /// back per field to the draft value when that snapshot value is absent,
     /// and always clears [`Page::published_body`] so the draft can never leak to
     /// storefronts.
+    /// Ensures the default theme's system pages exist and are published.
+    ///
+    /// The cart and checkout funnels are client-side drawers, but deep links
+    /// still need a routable page so `/cart` and `/checkout` render instead of
+    /// returning 404. Existing pages (including drafts) are left untouched.
+    pub async fn ensure_system_pages(&self) -> Result<(), AppError> {
+        for (handle, title) in [("cart", "Cart"), ("checkout", "Checkout")] {
+            match self.get_page_by_handle(handle).await {
+                Ok(_) => continue,
+                Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+            let body = serde_json::json!({
+                "schema_version": 1,
+                "root": { "props": {} },
+                "content": [{
+                    "type": "Heading",
+                    "props": { "id": format!("{handle}-title"), "level": 1, "text": title }
+                }],
+                "zones": {}
+            });
+            let page = self
+                .create_page(CreatePageInput {
+                    title: title.to_owned(),
+                    handle: Some(handle.to_owned()),
+                    page_type: Some("custom".to_owned()),
+                    body,
+                    seo: serde_json::json!({ "noindex": true }),
+                    metadata: fastcart_kernel::Metadata::empty(),
+                })
+                .await?;
+            self.publish_page(&page.id).await?;
+        }
+        Ok(())
+    }
+
     pub async fn get_published_page_by_handle(&self, handle: &str) -> Result<Page, AppError> {
         let sql = format!(
             "SELECT {PAGE_COLUMNS} FROM pages \

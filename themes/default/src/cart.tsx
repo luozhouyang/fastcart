@@ -237,6 +237,20 @@ export function CartProvider({ apiBaseUrl, children }: CartProviderProps) {
     void ensureBootstrap();
   }, [ensureBootstrap]);
 
+  // `/cart` and `/checkout` are real, server-rendered pages seeded with the
+  // default theme. Open the drawer on those deep links after hydration so the
+  // URL remains shareable without making the drawer part of the SSR tree.
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const path = window.location.pathname.replace(/\/+$/, "");
+    if (path.endsWith("/cart") || path.endsWith("/checkout")) {
+      setStepState("cart");
+      setIsOpen(true);
+    }
+  }, []);
+
   function resetCheckoutState() {
     setDetailsReady(false);
     setCheckoutDetails(null);

@@ -2153,3 +2153,23 @@ async fn validate_all_pages_skips_empty_and_deleted_pages() {
     assert_eq!(issues[0].handle, "bad-block");
     assert!(issues[0].error.contains("unknown block type"));
 }
+
+#[tokio::test]
+async fn system_pages_are_seeded_and_idempotent() {
+    let service = service().await;
+
+    service.ensure_system_pages().await.unwrap();
+    let cart = service.get_published_page_by_handle("cart").await.unwrap();
+    let checkout = service
+        .get_published_page_by_handle("checkout")
+        .await
+        .unwrap();
+    assert_eq!(cart.title, "Cart");
+    assert_eq!(checkout.title, "Checkout");
+    assert_eq!(cart.body["content"][0]["type"], "Heading");
+
+    // A second bootstrap must not create duplicates or change the existing page.
+    service.ensure_system_pages().await.unwrap();
+    let again = service.get_published_page_by_handle("cart").await.unwrap();
+    assert_eq!(again.id, cart.id);
+}
