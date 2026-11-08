@@ -49,9 +49,10 @@ pub struct ProvisioningJob {
 /// Options for completing store deletion.
 #[derive(Clone, Debug, Default)]
 pub struct DeleteStoreOptions {
-    /// When set, a consistent backup is written into this directory first.
+    /// When set, a consistent, verified backup is written into this directory
+    /// first. Required when [`Self::purge_data`] is true.
     pub backup_dir: Option<PathBuf>,
-    /// When true, the store database file is removed after backup.
+    /// When true, the store database file is removed after the backup verifies.
     pub purge_data: bool,
 }
 
@@ -233,7 +234,11 @@ impl StoreProvisioningService {
             .await
     }
 
-    /// Completes deletion after an optional backup.
+    /// Completes deletion after a backup that must verify before any data is
+    /// removed.
+    ///
+    /// `purge_data` requires a backup directory: destructive removal without a
+    /// verified backup is rejected instead of silently skipping the backup.
     pub async fn complete_deletion(
         &self,
         store_id: &StoreId,
@@ -249,10 +254,16 @@ impl StoreProvisioningService {
                 "store {store_id} must be in deleting state"
             )));
         }
+        if options.purge_data && options.backup_dir.is_none() {
+            return Err(PlatformError::InvalidInput(
+                "purging store data requires a backup directory".to_owned(),
+            ));
+        }
         if let Some(directory) = options.backup_dir.as_ref() {
             tokio::fs::create_dir_all(directory).await?;
             let path = directory.join(format!("{store_id}-{}.sqlite", now_timestamp()));
             self.databases.backup(store_id, &path).await?;
+            StoreDatabaseManager::verify_backup(&path).await?;
         }
         self.databases.close(store_id).await;
         let store = self
@@ -466,7 +477,56 @@ mod tests {
                 .unwrap()
                 .exists()
         );
-        assert!(dir.path().join("backups").exists());
+        let backup = std::fs::read_dir(dir.path().join("backups"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.to_string_lossy() == "sqlite")
+            })
+            .expect("deletion wrote a backup before purging");
+        StoreDatabaseManager::verify_backup(&backup).await.unwrap();
+        assert!(StoreDatabaseManager::manifest_path(&backup).is_file());
+    }
+
+    #[tokio::test]
+    async fn destructive_deletion_without_a_backup_keeps_the_database() {
+        let (service, _platform, store_id, owner, _dir) = fixture().await;
+        service.provision(&store_id, Some(&owner)).await.unwrap();
+        service.start_deletion(&store_id).await.unwrap();
+
+        let database_path = service.databases().database_path(&store_id).unwrap();
+        assert!(database_path.exists());
+
+        let error = service
+            .complete_deletion(
+                &store_id,
+                DeleteStoreOptions {
+                    backup_dir: None,
+                    purge_data: true,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("backup"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            database_path.exists(),
+            "a rejected deletion must leave the store database in place"
+        );
+        assert_eq!(
+            service
+                .platform()
+                .get_store(&store_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::store::StoreStatus::Deleting
+        );
     }
 
     #[tokio::test]

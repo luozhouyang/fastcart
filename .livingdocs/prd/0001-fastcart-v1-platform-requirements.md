@@ -32,7 +32,7 @@ Fastcart maintainers and self-hosted independent-store operators. The repository
 - Marketplace or multi-vendor functionality, subscriptions, and enterprise multi-region replication.
 - Arbitrary untrusted server-side code execution. Theme bundles remain trusted code; plugins do not execute inside the host process.
 - Full storefront i18n, a production data-import pipeline, a plugin contribution marketplace and autonomous AI operations in v1. These are separately scoped and must not silently expand this PRD.
-- Replacing the current block editor with Puck in v1. The editor contract is a separate decision.
+- Replacing the current block editor with Puck in v1. The versioned `PageBody` remains the canonical schema, and the migration is tracked as next-scope work in [Issue 0002](../issues/0002-migrate-the-admin-page-editor-to-puck.md); it is not a v1 acceptance criterion.
 
 ## Requirements
 
@@ -42,7 +42,7 @@ Fastcart maintainers and self-hosted independent-store operators. The repository
 - **Cart, checkout and orders.** Carts support guest and authenticated customers with server-derived totals. Checkout is a persisted state machine whose completion is idempotent. Orders store immutable commercial snapshots. Returns, claims, exchanges, order edits and refunds are supported. Verified by workflow and API tests.
 - **Payments.** A provider interface supports manual and Stripe payment flows with sessions, captures, refunds, signed webhooks and idempotent event handling. A provider failure must not leave a paid order or double-count inventory.
 - **Storefront.** Themes are versioned, registered per store, activated and rolled back with validation. SSR serves published records only and streams HTML. The embedded V8 runtime is the default when available, with the Node sidecar as a configuration-selected fallback. Dynamic product and collection routes resolve published resources. Draft content is reachable only through signed, revocable preview tokens. Sitemap and robots reflect the active routes. The default theme must implement the complete purchase funnel named in the Goals.
-- **Admin.** The core resources listed in `Acceptance criteria` are manageable from the Admin UI with permission-aware actions, loading/empty/error states and CSRF protection. Page editing uses Puck while the versioned `PageBody` remains the canonical schema. Settings that the UI exposes must be read and enforced by the backend.
+- **Admin.** The core resources listed in `Acceptance criteria` are manageable from the Admin UI with permission-aware actions, loading/empty/error states and CSRF protection. Page editing keeps the versioned `PageBody` as the canonical schema; the Puck migration is tracked by [Issue 0002](../issues/0002-migrate-the-admin-page-editor-to-puck.md) as next-scope work and is not a v1 acceptance criterion. Settings that the UI exposes must be read and enforced by the backend.
 - **Content and SEO.** Pages have revisions, draft and published bodies, preview and publish workflows, navigation and redirects. Each rendered page exposes title, description, canonical, Open Graph and Twitter metadata; the sitemap carries `<lastmod>`; dynamic routes expose a canonical URL.
 - **Extensibility.** Provider registries, webhook subscriptions with retries and replay, a transactional outbox, a persistent job queue and a durable workflow engine are available. Theme capability grants are scoped and short-lived.
 - **Security and operations.** Admin authentication uses hashed sessions or API tokens with RBAC; cookie mutations require CSRF; login and public writes are rate-limited; request and response sizes are capped; security headers and request IDs are present; audit records cover privileged mutations. Backups can be created and verified.
@@ -67,7 +67,7 @@ Fastcart maintainers and self-hosted independent-store operators. The repository
 
 ## Current implementation baseline
 
-As of 2026-11-07, the Rust backend covers the commerce modules, multi-store isolation, provider registries, outbox/jobs, workflows, webhooks, theme lifecycle, streaming SSR, dynamic routes, previews and sitemap `lastmod`. Admin has overview, orders, products (create/list/export), inventory, customers, forms, inbox, notifications, themes, pages and settings. The default theme browses products and collections but has no cart, checkout, payment, account or search UI. Region data is not yet threaded through cart, checkout, tax and payment-provider selection. i18n, data import, plugin contributions and AI execution are not implemented.
+As of 2026-11-08, the Rust backend covers the commerce modules, multi-store isolation, provider registries, outbox/jobs, workflows, webhooks, theme lifecycle, streaming SSR, dynamic routes, previews and sitemap `lastmod`. Admin defines 14 routes: overview, orders, catalog products (draft create/list/export), inventory, customers, forms, inbox, notifications, themes, pages and settings. It has no price-authoring, promotion, region, shipping or tax screens, although the backend provides those operations. Page editing still uses the bespoke editor; Puck is not adopted. The default theme browses products and collections but has no cart, checkout, payment, account or search UI. Region data is not yet threaded through cart, checkout, tax and payment-provider selection. i18n, data import, plugin contributions and AI execution are not implemented.
 
 ## Open questions
 
@@ -79,6 +79,6 @@ As of 2026-11-07, the Rust backend covers the commerce modules, multi-store isol
 ## Related
 
 - Constitution: [constitution.md](../constitution.md)
-- ADRs: [0001](/adr/0001-single-node-modular-monolith-with-sqlite.md), [0002](/adr/0002-embedded-v8-ssr-with-a-switchable-node-fallback.md), [0003](/adr/0003-trusted-theme-bundles-with-worker-limits.md), [0004](/adr/0004-puck-as-the-admin-page-editor.md), [0005](/adr/0005-theme-bundle-as-the-product-storefront.md), [0006](/adr/0006-per-store-sqlite-database-for-tenant-isolation.md).
+- ADRs: [0001](../adr/0001-single-node-modular-monolith-with-sqlite.md), [0002](../adr/0002-embedded-v8-ssr-with-a-switchable-node-fallback.md), [0003](../adr/0003-trusted-theme-bundles-with-worker-limits.md), [0004](../adr/0004-puck-as-the-admin-page-editor.md), [0005](../adr/0005-theme-bundle-as-the-product-storefront.md), [0006](../adr/0006-per-store-sqlite-database-for-tenant-isolation.md).
 - Source design notes (local-only, not versioned): `docs/architecture/fastcart_platform_architecture.md`, `fastcart_platform_implementation.md`, `fastcart_ssr_architecture.md`, `theme-editor-plugin-ai-roadmap.md`, `docs/data-import-architecture.md`, `docs/storefront-i18n-architecture.md`.
-- Issues: [0001 — embedded V8 SSR](/issues/0001-implement-embedded-v8-ssr-with-runtime-switching.md), [0002 — Puck editor](/issues/0002-migrate-the-admin-page-editor-to-puck.md). More issues are opened as requirements enter implementation.
+- Issues: [0001 — embedded V8 SSR](../issues/0001-implement-embedded-v8-ssr-with-runtime-switching.md), [0002 — Puck editor](../issues/0002-migrate-the-admin-page-editor-to-puck.md). More issues are opened as requirements enter implementation.

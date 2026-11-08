@@ -71,3 +71,18 @@ The platform database owns the store registry, domains, users, sessions, members
 ## Amendment Log
 
 Amendments are appended here as `## Amendment N — YYYY-MM-DD: summary`; the sections above are not edited once ratified.
+
+## Amendment 1 — 2026-11-08: implementation status of Phase 1 deliverables
+
+This amendment records delivery status only; the scope sections above are unchanged.
+
+- The embedded V8 SSR runtime and the Puck page editor are listed in Phase 1 but
+  are not implemented as of this amendment. ADR 0002 and ADR 0004 remain Accepted
+  decisions with `implementation: not-started`. The shipped implementations are
+  the Node sidecar and the bespoke block editor.
+- The theme-runtime non-negotiable says worker limits bound "CPU, heap and time".
+  The Node worker implementation bounds heap and wall-clock time; it does not cap
+  CPU. CPU isolation remains an operator concern (container limits or a separate
+  sidecar per trust domain).
+- The default theme does not yet implement the purchase funnel named in the v1
+  PRD. That gap is tracked as product work, not claimed as complete here.

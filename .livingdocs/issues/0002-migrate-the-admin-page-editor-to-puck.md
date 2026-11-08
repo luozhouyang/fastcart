@@ -9,7 +9,7 @@ timestamp: 2026-11-06T16:18:26Z
 
 ## 0002. Migrate the admin page editor to Puck
 
-Implements [ADR 0004](/adr/0004-puck-as-the-admin-page-editor.md) and the admin requirement in [PRD 0001](/prd/0001-fastcart-v1-platform-requirements.md). The current editor is a bespoke block tree, palette and field inspector. This work adopts Puck for the canvas while keeping the versioned `PageBody` as the canonical page schema.
+Implements [ADR 0004](../adr/0004-puck-as-the-admin-page-editor.md) and the admin requirement in [PRD 0001](../prd/0001-fastcart-v1-platform-requirements.md). The current editor is a bespoke block tree, palette and field inspector. This work adopts Puck for the canvas while keeping the versioned `PageBody` as the canonical page schema.
 
 ### Scope
 

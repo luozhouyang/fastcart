@@ -1,5 +1,7 @@
 //! SQLite-backed theme registry and activation service.
 
+use std::net::{IpAddr, Ipv4Addr};
+
 use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, PageResult, Pagination, ThemeActivationId, ThemeId, Timestamp, now_timestamp,
@@ -1072,13 +1074,128 @@ fn validate_absolute_url(endpoint: &str) -> Result<(), AppError> {
             "capability endpoint must be an absolute http(s) URL",
         ));
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() {
+        return Err(AppError::validation(
+            "capability endpoint must include a host",
+        ));
+    }
+    // In `user[:password]@host` the host starts after the last `@`.
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let Some(host) = endpoint_host(authority) else {
+        return Err(AppError::validation(
+            "capability endpoint must include a valid host",
+        ));
+    };
+    let host = host.trim_end_matches('.');
     if host.is_empty() {
         return Err(AppError::validation(
             "capability endpoint must include a host",
         ));
     }
+    if let Some(reason) = forbidden_host_reason(host) {
+        return Err(AppError::validation(format!(
+            "capability endpoint host {host:?} is not allowed: {reason}"
+        )));
+    }
     Ok(())
+}
+
+/// Extracts the host from a URL authority, dropping any port.
+fn endpoint_host(authority: &str) -> Option<&str> {
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, suffix) = bracketed.split_once(']')?;
+        if !suffix.is_empty() && !suffix.starts_with(':') {
+            return None;
+        }
+        return Some(host);
+    }
+    if authority.matches(':').count() > 1 {
+        // Unbracketed IPv6 literal; such an authority cannot also carry a port.
+        return Some(authority);
+    }
+    Some(authority.split(':').next().unwrap_or_default())
+}
+
+/// Returns why `host` must not be used as a capability endpoint.
+///
+/// Only literal hosts present in the URL are inspected. DNS names other than
+/// `localhost` are accepted without resolution, so a name that resolves to an
+/// internal address, and DNS rebinding after this validation, are out of scope
+/// for this guard.
+fn forbidden_host_reason(host: &str) -> Option<&'static str> {
+    if host == "localhost" {
+        return Some("loopback hosts are not allowed");
+    }
+    // Percent-encoding (`%31%32%37...`) and IPv6 zone identifiers are not
+    // meaningful in a public endpoint and complicate host classification.
+    if host.contains('%') {
+        return Some("percent-encoded or scoped hosts are not allowed");
+    }
+    let Ok(address) = host.parse::<IpAddr>() else {
+        if looks_like_legacy_ipv4(host) {
+            return Some("non-canonical numeric addresses are not allowed");
+        }
+        return None;
+    };
+    match address {
+        IpAddr::V4(address) => forbidden_ipv4_reason(address),
+        IpAddr::V6(address) => {
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return forbidden_ipv4_reason(mapped);
+            }
+            if address.is_loopback() {
+                return Some("loopback addresses are not allowed");
+            }
+            if address.is_unspecified() {
+                return Some("unspecified addresses are not allowed");
+            }
+            let prefix = address.segments()[0];
+            if prefix & 0xffc0 == 0xfe80 {
+                return Some("link-local addresses are not allowed");
+            }
+            if prefix & 0xfe00 == 0xfc00 {
+                return Some("unique local addresses are not allowed");
+            }
+            None
+        }
+    }
+}
+
+/// Returns why an IPv4 address is not a safe capability endpoint host.
+fn forbidden_ipv4_reason(address: Ipv4Addr) -> Option<&'static str> {
+    if address == Ipv4Addr::new(169, 254, 169, 254) {
+        return Some("cloud metadata addresses are not allowed");
+    }
+    if address.is_loopback() {
+        return Some("loopback addresses are not allowed");
+    }
+    if address.is_unspecified() {
+        return Some("unspecified addresses are not allowed");
+    }
+    if address.is_link_local() {
+        return Some("link-local addresses are not allowed");
+    }
+    if address.is_private() {
+        return Some("private addresses are not allowed");
+    }
+    None
+}
+
+/// Returns true for numeric host forms such as `127.1`, `2130706433` and
+/// `0x7f000001` that URL parsers may normalize to an IPv4 address but that
+/// `IpAddr` does not parse.
+fn looks_like_legacy_ipv4(host: &str) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    if host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return true;
+    }
+    let Some(hex) = host.strip_prefix("0x") else {
+        return false;
+    };
+    !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit() || c == '.')
 }
 
 fn serialize_json<T: serde::Serialize>(value: &T, field: &str) -> Result<String, AppError> {
@@ -1221,5 +1338,60 @@ impl ThemeCapabilityBindingRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fastcart_kernel::AppError;
+
+    use super::validate_absolute_url;
+
+    #[test]
+    fn capability_endpoints_reject_internal_hosts() {
+        for endpoint in [
+            "http://localhost/hook",
+            "http://localhost.:8080/hook",
+            "http://127.0.0.1/hook",
+            "http://127.1.2.3:8080/hook",
+            "http://127.1/hook",
+            "http://2130706433/hook",
+            "http://0x7f000001/hook",
+            "http://017700000001/hook",
+            "http://127%2e0%2e0%2e1/hook",
+            "http://%6cocalhost/hook",
+            "https://[::1]:8788/render",
+            "http://0.0.0.0:8080/hook",
+            "http://[::]/hook",
+            "http://169.254.169.254/latest/meta-data",
+            "http://10.0.0.5/hook",
+            "http://172.16.5.4/hook",
+            "http://192.168.1.10/hook",
+            "http://[fe80::1]/hook",
+            "http://[fe80::1%25eth0]/hook",
+            "http://[fd00::1]/hook",
+            "http://[::ffff:127.0.0.1]/hook",
+            "http://[::ffff:169.254.169.254]/hook",
+            "http://user:password@127.0.0.1/hook",
+        ] {
+            let error = validate_absolute_url(endpoint).unwrap_err();
+            assert!(
+                matches!(error, AppError::Validation(_)),
+                "{endpoint} must be rejected as a validation error"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_endpoints_accept_public_hosts() {
+        for endpoint in [
+            "https://plugins.example.com/chat",
+            "http://93.184.216.34:8080/hook",
+            "https://[2001:db8::1]:8443/hook",
+            "https://localhost.example.com/hook",
+        ] {
+            validate_absolute_url(endpoint)
+                .unwrap_or_else(|error| panic!("{endpoint} must be accepted: {error}"));
+        }
     }
 }

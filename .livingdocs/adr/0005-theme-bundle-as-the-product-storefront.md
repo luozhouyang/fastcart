@@ -4,6 +4,7 @@ title: Theme bundle as the product storefront
 description: The theme bundle and Rust SSR pipeline are the storefront; the TanStack app is a harness.
 owner: luozhouyang
 status: Accepted
+implementation: partial
 timestamp: 2026-11-06T16:17:43Z
 ---
 
@@ -54,3 +55,16 @@ We will treat the theme bundle plus the Rust SSR pipeline as the product storefr
 - The storefront end-to-end test runs against a theme bundle and does not start `apps/storefront`.
 - The default theme renders every documented customer route without a TanStack Start server.
 - The repository layout and README identify `apps/storefront` as a harness, not a production surface.
+
+## Implementation status
+
+Partial. Theme bundles are registered, versioned, activated and rolled back per
+store, and the default theme renders through the theme runtime with dynamic
+product and collection routes (`crates/modules/theme`,
+`crates/api/src/routes/admin_theme.rs`, `themes/default/theme.json`,
+`themes/default/src/server.tsx`). `apps/storefront` is a non-production
+development harness and is marked as such in its README. The default theme has
+no cart, checkout, payment, account or search UI, so the documented purchase
+funnel is not complete.
+
+This ADR is a decision, not a claim of completion.

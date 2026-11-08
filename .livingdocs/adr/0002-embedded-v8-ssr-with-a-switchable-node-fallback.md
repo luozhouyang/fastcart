@@ -4,6 +4,7 @@ title: Embedded V8 SSR with a switchable Node fallback
 description: Implement deno_core V8 rendering and keep Node as a config-selectable fallback.
 owner: luozhouyang
 status: Accepted
+implementation: not-started
 timestamp: 2026-11-06T16:17:43Z
 ---
 
@@ -47,7 +48,7 @@ The V8 adapter will provide the Web APIs the theme contract requires (module loa
 
 - Build the V8 adapter and the theme server bundle changes as one vertical slice.
 - Keep the Node sidecar protocol tests as the behavioral oracle for both adapters.
-- Implementation is tracked in [Issue 0001](/issues/0001-implement-embedded-v8-ssr-with-runtime-switching.md).
+- Implementation is tracked in [Issue 0001](../issues/0001-implement-embedded-v8-ssr-with-runtime-switching.md).
 
 ## Verification
 
@@ -60,3 +61,16 @@ The V8 adapter will provide the Web APIs the theme contract requires (module loa
 - A theme declaring `runtime: "node"` cannot activate while `storefront.runtime = "v8"`.
 - Changing `FASTCART_STOREFRONT_RUNTIME` between `v8` and `node` starts the server with the same database and theme without a rebuild.
 - `cargo test --workspace` and the sidecar protocol tests pass.
+
+## Implementation status
+
+Not started. `runtime-v8` is a stub whose render and health check return
+`NotInitialized`; `deno_core` is not wired into the workspace
+(`crates/storefront-runtime/runtime-v8/src/lib.rs`). The Node sidecar is the
+only working adapter (`crates/storefront-runtime/runtime-node`,
+`apps/theme-sidecar`). Runtime selection accepts `v8` or `node` only, so `auto`
+is rejected (`apps/server/src/config.rs`), and selecting `v8` logs a warning and
+starts without SSR (`apps/server/src/state.rs`). Self-contained theme server
+bundles, V8 deadlines/heap limits and V8/Node parity tests do not exist.
+
+This ADR is a decision, not a claim of completion.

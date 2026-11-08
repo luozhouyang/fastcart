@@ -1,9 +1,9 @@
 # Fastcart Admin
 
 The web admin for a self-hosted Fastcart store. React 19, TanStack Router, Tailwind CSS 4 and
-shadcn/ui primitives on Radix. The visual system is described in
-[`docs/design/README.md`](../../docs/design/README.md) and sourced from
-[`docs/fastcart-admin-design.pen`](../../docs/fastcart-admin-design.pen).
+shadcn/ui primitives on Radix. The visual system is implemented with the UI primitives under
+`src/components/ui`; the design notes that informed it are local-only and are not versioned in this
+repository.
 
 ## Run
 

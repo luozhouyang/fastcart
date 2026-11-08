@@ -8,7 +8,9 @@ cookie_secure = false
 cors_origins = ["http://localhost:5173", "http://localhost:5174"]
 # Optional signing secret enabling draft page preview. When absent, preview
 # token issuance and GET /preview/{path} respond with 501 Not Implemented.
-# preview_secret = "long-random-preview-secret"
+# Must be at least 32 bytes when set; replace this example with a random value
+# (for example `openssl rand -base64 32`).
+# preview_secret = "replace-with-32-plus-random-preview-secret"
 # Origins allowed to embed the preview in an iframe. Use the admin app origin.
 # preview_frame_ancestors = ["https://admin.example.com"]
 # Admin application origin used in Feishu notification deep links.
@@ -58,12 +60,16 @@ streaming_enabled = true
 # request_timeout_ms.
 stream_timeout_ms = 30000
 node_url = "http://127.0.0.1:8788"
-# node_secret = "shared-sidecar-secret"
+# Bearer token sent to the sidecar. Required when node_url is not loopback;
+# set SIDECAR_SECRET on the sidecar to the same value. Optional for a loopback
+# sidecar that runs without authentication.
+# node_secret = "replace-with-a-long-random-sidecar-secret"
 # Enables the secret-authenticated /internal/storefront HTTP surface for the sidecar.
 # internal_fetch_secret = "long-random-internal-secret"
 # Signs theme capability grants; capability endpoints sharing this secret can
-# verify tokens without a database lookup.
-# capability_secret = "long-random-capability-secret"
+# verify tokens without a database lookup. Recommended in production; use a
+# long random value.
+# capability_secret = "replace-with-a-long-random-capability-secret"
 
 [jobs]
 enabled = true

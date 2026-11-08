@@ -371,6 +371,23 @@ impl CheckoutService {
         Ok((result.rows_affected() == 1).then_some(token))
     }
 
+    /// Returns true while `token` still holds the completion claim.
+    ///
+    /// Compensation uses this fence to avoid undoing work that a runner which
+    /// took over an expired lease is still performing.
+    pub async fn holds_placement(&self, id: &CheckoutId, token: &str) -> Result<bool, AppError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM checkout_sessions
+             WHERE id = ? AND placement_token = ?",
+        )
+        .bind(id.as_str())
+        .bind(token)
+        .fetch_one(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(count == 1)
+    }
+
     /// Releases a completion claim held by `token`.
     ///
     /// The update is conditional on the token so a runner whose lease expired

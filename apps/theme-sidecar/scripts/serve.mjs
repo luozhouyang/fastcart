@@ -15,7 +15,8 @@
 // - HOST            listener host (default 127.0.0.1; set 0.0.0.0 in containers)
 // - THEME_ROOT      directory containing theme bundles (default <repo>/themes;
 //                   relative values resolve from the repository root)
-// - SIDECAR_SECRET  optional bearer token required on /render
+// - SIDECAR_SECRET  optional bearer token required on /render. Mandatory when
+//                   HOST is anything other than 127.0.0.1, ::1 or localhost.
 
 import { timingSafeEqual } from "node:crypto";
 import { createReadStream, promises as fs } from "node:fs";
@@ -23,6 +24,8 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+
+import { assertSafeBind } from "./bind-guard.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(HERE, "..");
@@ -69,6 +72,13 @@ class HttpError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+try {
+  assertSafeBind(HOST, SECRET);
+} catch (error) {
+  console.error(`theme sidecar ${error.message}`);
+  process.exit(1);
 }
 
 const server = createServer((request, response) => {

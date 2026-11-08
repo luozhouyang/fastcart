@@ -9,7 +9,7 @@ timestamp: 2026-11-06T16:18:26Z
 
 ## 0001. Implement embedded V8 SSR with runtime switching
 
-Implements [ADR 0002](/adr/0002-embedded-v8-ssr-with-a-switchable-node-fallback.md) and the storefront requirement in [PRD 0001](/prd/0001-fastcart-v1-platform-requirements.md). The Node sidecar is the only working SSR adapter today; `runtime-v8` is a stub. This work makes V8 a real adapter and lets a deployment choose `v8`, `node` or `auto` without rebuilding.
+Implements [ADR 0002](../adr/0002-embedded-v8-ssr-with-a-switchable-node-fallback.md) and the storefront requirement in [PRD 0001](../prd/0001-fastcart-v1-platform-requirements.md). The Node sidecar is the only working SSR adapter today; `runtime-v8` is a stub. This work makes V8 a real adapter and lets a deployment choose `v8`, `node` or `auto` without rebuilding.
 
 ### Scope
 

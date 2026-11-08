@@ -10,6 +10,7 @@ use fastcart_infrastructure::{DatabaseOptions, StoreDatabaseManager};
 use fastcart_kernel::{Pagination, StoreId, UserId};
 use fastcart_platform::{
     AuthService, CreateStoreInput, CreateUserInput, PlatformStore, StoreProvisioningService,
+    StoreStatus,
 };
 
 #[derive(Debug, Parser)]
@@ -41,6 +42,36 @@ enum Command {
     },
     /// Validate configuration and print environment details.
     Doctor {
+        /// Configuration file path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Create a consistent backup of a store database.
+    Backup {
+        /// Store identifier.
+        #[arg(long)]
+        store: String,
+        /// Destination file for the backup.
+        #[arg(long)]
+        output: PathBuf,
+        /// Configuration file path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Verify a backup file without modifying it.
+    Verify {
+        /// Backup file to verify.
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Restore a store database from a verified backup.
+    Restore {
+        /// Store identifier.
+        #[arg(long)]
+        store: String,
+        /// Backup file to restore.
+        #[arg(long)]
+        file: PathBuf,
         /// Configuration file path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -197,9 +228,111 @@ async fn main() -> Result<()> {
         }
         Command::Init { dir } => init(&dir),
         Command::Doctor { config } => doctor(config),
+        Command::Backup {
+            config,
+            store,
+            output,
+        } => backup_command(config, store, output).await,
+        Command::Verify { file } => verify_command(file).await,
+        Command::Restore {
+            config,
+            store,
+            file,
+        } => restore_command(config, store, file).await,
         Command::Store { config, command } => store_command(config, command).await,
         Command::User { config, command } => user_command(config, command).await,
     }
+}
+
+async fn backup_command(config: Option<PathBuf>, store: String, output: PathBuf) -> Result<()> {
+    let context = CliContext::open(config).await?;
+    let store_id = StoreId::from_string(store);
+    let store = context
+        .platform
+        .get_store(&store_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("store not found: {store_id}"))?;
+    if store.status == StoreStatus::Deleted {
+        anyhow::bail!("store {store_id} is deleted and cannot be backed up");
+    }
+    let database_path = context.databases.database_path(&store_id)?;
+    if !tokio::fs::try_exists(&database_path).await.unwrap_or(false) {
+        anyhow::bail!(
+            "store database not found at {}; provision the store first",
+            database_path.display()
+        );
+    }
+
+    let manifest = context.databases.backup(&store_id, &output).await?;
+    StoreDatabaseManager::verify_backup(&output).await?;
+
+    println!("backup: {}", output.display());
+    println!(
+        "manifest: {}",
+        StoreDatabaseManager::manifest_path(&output).display()
+    );
+    println!("checksum: sha256:{}", manifest.sha256);
+    println!("bytes: {}", manifest.bytes);
+    Ok(())
+}
+
+async fn verify_command(file: PathBuf) -> Result<()> {
+    let manifest = StoreDatabaseManager::verify_backup_with_manifest(&file).await?;
+    println!("verified: {}", file.display());
+    match manifest {
+        Some(manifest) => {
+            println!("store: {}", manifest.store_id);
+            println!("created_at: {}", manifest.created_at);
+            println!("bytes: {}", manifest.bytes);
+            println!("checksum: sha256:{}", manifest.sha256);
+            println!(
+                "manifest: {}",
+                StoreDatabaseManager::manifest_path(&file).display()
+            );
+        }
+        None => println!("manifest: not found (integrity check passed)"),
+    }
+    Ok(())
+}
+
+async fn restore_command(config: Option<PathBuf>, store: String, file: PathBuf) -> Result<()> {
+    let context = CliContext::open(config).await?;
+    let store_id = StoreId::from_string(store);
+    let store = context
+        .platform
+        .get_store(&store_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("store not found: {store_id}"))?;
+    let destination = context.databases.database_path(&store_id)?;
+    let provisioning =
+        StoreProvisioningService::new(context.platform.clone(), context.databases.clone());
+
+    let suspended = provisioning.suspend(&store_id).await?;
+    println!("suspended store {} (was {})", suspended.id, store.status);
+    context.databases.close(&store_id).await;
+    println!("closed store database pool for {}", store_id);
+
+    context
+        .databases
+        .restore(&store_id, &file)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to restore store {store_id} from {}; it remains suspended",
+                file.display()
+            )
+        })?;
+
+    let previous = destination.with_extension("sqlite.pre-restore");
+    println!("restored {} from {}", destination.display(), file.display());
+    if previous.exists() {
+        println!("previous database saved to {}", previous.display());
+    }
+    println!(
+        "store {} is {}; resume it with `fastcart store resume {}`",
+        suspended.id, suspended.status, suspended.id
+    );
+    Ok(())
 }
 
 async fn store_command(config: Option<PathBuf>, command: StoreCommand) -> Result<()> {

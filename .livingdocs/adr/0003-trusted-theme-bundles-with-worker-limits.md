@@ -4,6 +4,7 @@ title: Trusted theme bundles with worker limits
 description: Treat theme bundles as trusted server-side code isolated by worker resource limits, not an OS sandbox.
 owner: luozhouyang
 status: Accepted
+implementation: partial
 timestamp: 2026-11-06T16:17:43Z
 ---
 
@@ -53,3 +54,17 @@ We will treat theme bundles as trusted server-side code. Theme execution runs in
 - A traversal asset path is rejected and never escapes the registered bundle.
 - Response size and render timeout caps are covered by sidecar tests.
 - The documented deployment binds the sidecar to loopback or a private network and requires a bearer secret off-loopback.
+
+## Implementation status
+
+Partial. The Node sidecar runs each render in a short-lived worker thread with
+heap limits, a hard wall-clock deadline, a 10 MiB response cap and asset paths
+confined to the registered bundle; it binds to loopback by default and refuses a
+non-loopback bind without a bearer secret (`apps/theme-sidecar/scripts/serve.mjs`,
+`apps/theme-sidecar/scripts/render-worker.mjs`). Theme registration and
+activation are audited (`crates/api/src/routes/admin_theme.rs`). The sidecar does
+not cap CPU time or total concurrent renders, and a worker can still use
+filesystem and network APIs. The stronger isolate-level boundary remains future
+work, so untrusted themes are out of scope.
+
+This ADR is a decision, not a claim of completion.

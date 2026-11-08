@@ -14,6 +14,7 @@ use fastcart_kernel::{
     validate_metadata, validate_non_negative_amount,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Sqlite, Transaction};
 
 use crate::domain::{
@@ -418,18 +419,27 @@ impl PaymentService {
     }
 
     /// Refunds part or all of a captured payment.
+    ///
+    /// Keyless calls derive a deterministic idempotency key from the payment,
+    /// amount and trimmed reason, so an identical retry returns the existing
+    /// refund instead of refunding the provider twice.
     pub async fn refund(
         &self,
         payment_id: &str,
         amount: i64,
         reason: Option<String>,
     ) -> Result<Refund, AppError> {
-        self.refund_with_idempotency(payment_id, amount, reason, None)
+        let idempotency_key = keyless_refund_idempotency_key(payment_id, amount, reason.as_deref());
+        self.refund_with_idempotency(payment_id, amount, reason, Some(idempotency_key))
             .await
     }
 
     /// Refunds part or all of a captured payment with an optional provider
     /// idempotency key.
+    ///
+    /// When no key is supplied, one is derived deterministically from the
+    /// payment, amount and trimmed reason. Callers that need two identical
+    /// refunds must pass distinct explicit keys.
     pub async fn refund_with_idempotency(
         &self,
         payment_id: &str,
@@ -443,7 +453,10 @@ impl PaymentService {
         let payment = self.get_payment(payment_id).await?;
         let idempotency_key = idempotency_key
             .map(|key| key.trim().to_owned())
-            .filter(|key| !key.is_empty());
+            .filter(|key| !key.is_empty())
+            .unwrap_or_else(|| {
+                keyless_refund_idempotency_key(payment_id, amount, reason.as_deref())
+            });
 
         // The existing-key lookup, the claim and the amount cap share one
         // BEGIN IMMEDIATE transaction. Concurrent callers with the same key
@@ -451,20 +464,16 @@ impl PaymentService {
         // The lookup happens before state validation so a duplicate request
         // still returns the winning refund after a full refund.
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        let existing = if let Some(key) = idempotency_key.as_deref() {
-            sqlx::query_as::<_, RefundRow>(
-                "SELECT id, payment_id, order_id, amount, currency_code, status,
-                        provider_refund_id, idempotency_key, reason, created_at, updated_at
-                 FROM refunds WHERE payment_id = ? AND idempotency_key = ?",
-            )
-            .bind(payment.id.as_str())
-            .bind(key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(database_error)?
-        } else {
-            None
-        };
+        let existing = sqlx::query_as::<_, RefundRow>(
+            "SELECT id, payment_id, order_id, amount, currency_code, status,
+                    provider_refund_id, idempotency_key, reason, created_at, updated_at
+             FROM refunds WHERE payment_id = ? AND idempotency_key = ?",
+        )
+        .bind(payment.id.as_str())
+        .bind(&idempotency_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?;
         if let Some(existing) = existing.as_ref()
             && RefundStatus::parse(&existing.status) == Some(RefundStatus::Succeeded)
         {
@@ -494,9 +503,7 @@ impl PaymentService {
         let refund_id = existing
             .as_ref()
             .map_or_else(RefundId::new, |row| RefundId::from_string(row.id.clone()));
-        let provider_key = idempotency_key
-            .clone()
-            .unwrap_or_else(|| format!("refund:{}", refund_id.as_str()));
+        let provider_key = idempotency_key.clone();
         let now = now_timestamp();
 
         let current_total: i64 = sqlx::query_scalar(
@@ -588,15 +595,23 @@ impl PaymentService {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                sqlx::query(
-                    "UPDATE refunds SET status = 'failed', updated_at = ?
-                     WHERE id = ? AND status IN ('pending', 'failed')",
-                )
-                .bind(now_timestamp())
-                .bind(refund_id.as_str())
-                .execute(self.db.pool())
-                .await
-                .map_err(database_error)?;
+                // `PaymentError::Provider` covers both a provider rejection
+                // and a transport failure where the provider may already have
+                // accepted the refund. Only `InvalidRequest` is known to have
+                // been rejected without side effects. An unknown outcome stays
+                // `pending`, which keeps it counted by the over-refund cap
+                // above until a webhook or retry reconciles it.
+                if matches!(error, PaymentError::InvalidRequest(_)) {
+                    sqlx::query(
+                        "UPDATE refunds SET status = 'failed', updated_at = ?
+                         WHERE id = ? AND status IN ('pending', 'failed')",
+                    )
+                    .bind(now_timestamp())
+                    .bind(refund_id.as_str())
+                    .execute(self.db.pool())
+                    .await
+                    .map_err(database_error)?;
+                }
                 return Err(error.into());
             }
         };
@@ -702,7 +717,9 @@ impl PaymentService {
     /// Verifies and persists a webhook event, applying known event types.
     ///
     /// Duplicate `(provider, provider_event_id)` deliveries return the existing
-    /// processed record without reprocessing. Processing failures are stored on
+    /// processed record without reprocessing. A duplicate whose row is still
+    /// `received` or `failed` is re-applied, because the first delivery may
+    /// have crashed after inserting the row. Processing failures are stored on
     /// the record and returned as a retryable error so the provider redelivers
     /// the event instead of it being silently dropped.
     pub async fn process_webhook(
@@ -718,34 +735,7 @@ impl PaymentService {
         let event = provider.verify_webhook(&headers, body)?;
 
         if let Some(existing) = self.find_webhook(provider_id, &event.event_id).await? {
-            if existing.status == WebhookStatus::Processed {
-                return Ok(existing);
-            }
-            let applied = self.apply_webhook_event(provider_id, &event).await;
-            let (status, last_error) = match &applied {
-                Ok(()) => (WebhookStatus::Processed, None),
-                Err(error) => (WebhookStatus::Failed, Some(error.to_string())),
-            };
-            sqlx::query(
-                "UPDATE payment_webhooks
-                 SET status = ?, attempts = attempts + 1, processed_at = ?, last_error = ?
-                 WHERE id = ?",
-            )
-            .bind(status.as_str())
-            .bind(if status == WebhookStatus::Processed {
-                Some(now_timestamp())
-            } else {
-                None
-            })
-            .bind(last_error)
-            .bind(existing.id.as_str())
-            .execute(self.db.pool())
-            .await
-            .map_err(database_error)?;
-            if let Err(error) = applied {
-                return Err(retryable_webhook_error(&error));
-            }
-            return self.get_webhook(existing.id.as_str()).await;
+            return self.apply_existing_webhook(existing, &event).await;
         }
 
         let id = WebhookId::new();
@@ -771,20 +761,47 @@ impl PaymentService {
                 .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
                 && let Some(existing) = self.find_webhook(provider_id, &event.event_id).await?
             {
-                return Ok(existing);
+                // Another delivery inserted the event after our lookup but
+                // before this insert. It may not have applied the event yet,
+                // or may have crashed after the insert, so recover instead of
+                // acknowledging an unapplied event.
+                return self.apply_existing_webhook(existing, &event).await;
             }
             return Err(database_error(error));
         }
 
-        let applied = self.apply_webhook_event(provider_id, &event).await;
+        let record = self.get_webhook(id.as_str()).await?;
+        self.apply_existing_webhook(record, &event).await
+    }
+
+    /// Applies a verified event whose webhook row already exists.
+    ///
+    /// A unique-conflict loser can observe the row a concurrent winner
+    /// inserted before the winner applies it (or after the winner crashed
+    /// following the insert). Returning the unprocessed row would ACK an event
+    /// that was never applied, so every delivery re-applies non-processed
+    /// rows. `apply_webhook_event` is idempotent because each state write is
+    /// guarded by the expected source status, making concurrent recovery safe.
+    async fn apply_existing_webhook(
+        &self,
+        existing: PaymentWebhookRecord,
+        event: &VerifiedWebhook,
+    ) -> Result<PaymentWebhookRecord, AppError> {
+        if existing.status == WebhookStatus::Processed {
+            return Ok(existing);
+        }
+        let applied = self
+            .apply_webhook_event(existing.provider.as_str(), event)
+            .await;
         let (status, last_error) = match &applied {
             Ok(()) => (WebhookStatus::Processed, None),
             Err(error) => (WebhookStatus::Failed, Some(error.to_string())),
         };
+        // Do not downgrade a row another delivery already marked processed.
         sqlx::query(
-            "UPDATE payment_webhooks \
-             SET status = ?, attempts = attempts + 1, processed_at = ?, last_error = ? \
-             WHERE id = ?",
+            "UPDATE payment_webhooks
+             SET status = ?, attempts = attempts + 1, processed_at = ?, last_error = ?
+             WHERE id = ? AND status != 'processed'",
         )
         .bind(status.as_str())
         .bind(if status == WebhookStatus::Processed {
@@ -793,14 +810,14 @@ impl PaymentService {
             None
         })
         .bind(last_error)
-        .bind(id.as_str())
+        .bind(existing.id.as_str())
         .execute(self.db.pool())
         .await
         .map_err(database_error)?;
         if let Err(error) = applied {
             return Err(retryable_webhook_error(&error));
         }
-        self.get_webhook(id.as_str()).await
+        self.get_webhook(existing.id.as_str()).await
     }
 
     /// Loads a payment session.
@@ -995,6 +1012,7 @@ impl PaymentService {
         error: Option<&str>,
     ) -> Result<PaymentSession, AppError> {
         let now = now_timestamp();
+        let stale_cutoff = now.saturating_sub(120);
         let mut data = session.data.clone();
         if let Some(error) = error {
             data.insert("last_error", Value::String(error.to_owned()));
@@ -1010,16 +1028,40 @@ impl PaymentService {
             created_at: now,
         };
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        sqlx::query(
-            "UPDATE payment_sessions SET status = ?, data = ?, updated_at = ? WHERE id = ?",
+        // Compare-and-set against the status the caller observed. A capture or
+        // webhook may have advanced the session after that read; never
+        // overwrite the newer state with this stale transition. A live capture
+        // claim also blocks the transition: the capture sets the claim while
+        // the status is still pending, so ignoring it would erase the claim
+        // and let cancel/fail win a race against a provider-side capture.
+        let updated = sqlx::query(
+            "UPDATE payment_sessions SET status = ?, data = ?, updated_at = ? \
+             WHERE id = ? AND status = ? \
+               AND (json_extract(data, '$.capture_claim') IS NULL \
+                    OR json_extract(data, '$.capture_claim_at') <= ?)",
         )
         .bind(status.as_str())
         .bind(data.to_json_string())
         .bind(now)
         .bind(session.id.as_str())
+        .bind(session.status.as_str())
+        .bind(stale_cutoff)
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            let latest = self.get_session(session.id.as_str()).await?;
+            if latest.status != session.status {
+                return Err(AppError::conflict(format!(
+                    "payment session status changed from {} to {}",
+                    session.status, latest.status
+                )));
+            }
+            return Err(AppError::conflict(
+                "payment capture is already in progress for this session",
+            ));
+        }
         insert_attempt(&mut tx, &attempt).await?;
         if status == PaymentStatus::Failed
             && let Some(order_id) = session.order_id.as_ref()
@@ -1076,10 +1118,16 @@ impl PaymentService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            let latest = self.get_session(session.id.as_str()).await?;
+            return Err(AppError::conflict(format!(
+                "cannot fail a payment session in status {}",
+                latest.status
+            )));
+        }
         insert_attempt(&mut tx, &attempt).await?;
-        if updated.rows_affected() > 0
-            && let Some(order_id) = session.order_id.as_ref()
-        {
+        if let Some(order_id) = session.order_id.as_ref() {
             append_payment_event(
                 &mut tx,
                 self.db.store_id(),
@@ -1601,6 +1649,29 @@ fn string_field(data: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
+/// Derives the deterministic provider idempotency key used by keyless refunds.
+///
+/// The reason is trimmed and blank reasons normalize to `None`, so a retry that
+/// only changes surrounding whitespace still maps to the same refund. The
+/// length-prefixed fields keep the digest unambiguous for arbitrary reasons.
+fn keyless_refund_idempotency_key(payment_id: &str, amount: i64, reason: Option<&str>) -> String {
+    let reason = reason.map(str::trim).filter(|reason| !reason.is_empty());
+    let mut hasher = Sha256::new();
+    hasher.update(b"fastcart.refund.v1\0");
+    hasher.update((payment_id.len() as u64).to_be_bytes());
+    hasher.update(payment_id.as_bytes());
+    hasher.update(amount.to_be_bytes());
+    match reason {
+        Some(reason) => {
+            hasher.update([1]);
+            hasher.update((reason.len() as u64).to_be_bytes());
+            hasher.update(reason.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    format!("refund:auto:{}", hex::encode(hasher.finalize()))
+}
+
 /// Wraps a webhook apply failure so the provider redelivers the event.
 fn retryable_webhook_error(error: &AppError) -> AppError {
     AppError::ExternalService(format!("payment webhook processing failed: {error}"))
@@ -2070,6 +2141,7 @@ mod tests {
         invalid_capture: bool,
         capture_failures_remaining: AtomicUsize,
         fail_refund: bool,
+        invalid_refund: bool,
         create_calls: AtomicUsize,
         capture_calls: AtomicUsize,
         refund_calls: AtomicUsize,
@@ -2084,6 +2156,7 @@ mod tests {
                 invalid_capture: false,
                 capture_failures_remaining: AtomicUsize::new(0),
                 fail_refund: false,
+                invalid_refund: false,
                 create_calls: AtomicUsize::new(0),
                 capture_calls: AtomicUsize::new(0),
                 refund_calls: AtomicUsize::new(0),
@@ -2107,6 +2180,13 @@ mod tests {
         fn failing_refund(id: &str) -> Self {
             Self {
                 fail_refund: true,
+                ..Self::new(id)
+            }
+        }
+
+        fn invalid_refund(id: &str) -> Self {
+            Self {
+                invalid_refund: true,
                 ..Self::new(id)
             }
         }
@@ -2174,6 +2254,11 @@ mod tests {
 
         async fn refund(&self, request: RefundRequest) -> Result<RefundResult, PaymentError> {
             self.refund_calls.fetch_add(1, Ordering::SeqCst);
+            if self.invalid_refund {
+                return Err(PaymentError::InvalidRequest(
+                    "refund request is invalid".to_owned(),
+                ));
+            }
             if self.fail_refund {
                 return Err(PaymentError::Provider("refund failed".to_owned()));
             }
@@ -2446,10 +2531,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refund_failure_returns_external_service_and_keeps_payment() {
+    async fn definitive_refund_rejection_marks_the_refund_failed() {
         let (service, _db) = setup().await;
         service
-            .register_provider(Arc::new(TestProvider::failing_refund("broken")))
+            .register_provider(Arc::new(TestProvider::invalid_refund("broken")))
             .unwrap();
         let session = service.create_session(input("broken", 1000)).await.unwrap();
         let payment = service.capture(session.id.as_str()).await.unwrap();
@@ -2458,7 +2543,7 @@ mod tests {
             .refund(payment.id.as_str(), 100, None)
             .await
             .unwrap_err();
-        assert!(matches!(error, AppError::ExternalService(_)));
+        assert!(matches!(error, AppError::Validation(_)));
         let refunds = service.list_refunds(payment.id.as_str()).await.unwrap();
         assert_eq!(refunds.len(), 1);
         assert_eq!(refunds[0].status, RefundStatus::Failed);
@@ -2469,6 +2554,52 @@ mod tests {
                 .unwrap()
                 .status,
             PaymentStatus::Captured
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_refund_failure_stays_pending_and_consumes_the_cap() {
+        let (service, _db) = setup().await;
+        let provider = Arc::new(TestProvider::failing_refund("unknown"));
+        service.register_provider(provider.clone()).unwrap();
+        let session = service
+            .create_session(input("unknown", 1000))
+            .await
+            .unwrap();
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+
+        let error = service
+            .refund(payment.id.as_str(), 700, Some("first".to_owned()))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::ExternalService(_)));
+        let refunds = service.list_refunds(payment.id.as_str()).await.unwrap();
+        assert_eq!(refunds.len(), 1);
+        assert_eq!(refunds[0].status, RefundStatus::Pending);
+        assert_eq!(
+            service
+                .get_payment(payment.id.as_str())
+                .await
+                .unwrap()
+                .status,
+            PaymentStatus::Captured
+        );
+
+        // 400 more would fit only if the unknown 700 were excluded from the
+        // cap. Pending refunds count, so this must be rejected.
+        let over = service
+            .refund(payment.id.as_str(), 400, Some("second".to_owned()))
+            .await
+            .unwrap_err();
+        assert!(matches!(over, AppError::Conflict(_)));
+        assert_eq!(provider.refund_count(), 1);
+        assert_eq!(
+            service
+                .list_refunds(payment.id.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 
@@ -2510,6 +2641,67 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn keyless_refund_retry_reuses_the_same_refund() {
+        let (service, _db) = setup().await;
+        let provider = Arc::new(TestProvider::new("keyless"));
+        service.register_provider(provider.clone()).unwrap();
+        let session = service
+            .create_session(input("keyless", 1000))
+            .await
+            .unwrap();
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+
+        let first = service
+            .refund(payment.id.as_str(), 400, Some("damaged".to_owned()))
+            .await
+            .unwrap();
+        // Only surrounding whitespace differs: the normalized reason must map
+        // to the same deterministic idempotency key.
+        let second = service
+            .refund(payment.id.as_str(), 400, Some(" damaged ".to_owned()))
+            .await
+            .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.status, RefundStatus::Succeeded);
+        assert_eq!(provider.refund_count(), 1);
+        let refunds = service.list_refunds(payment.id.as_str()).await.unwrap();
+        assert_eq!(refunds.len(), 1);
+        assert_eq!(refunds[0].id, first.id);
+    }
+
+    #[tokio::test]
+    async fn omitted_refund_key_is_derived_and_idempotent() {
+        let (service, _db) = setup().await;
+        let provider = Arc::new(TestProvider::new("derived"));
+        service.register_provider(provider.clone()).unwrap();
+        let session = service
+            .create_session(input("derived", 1000))
+            .await
+            .unwrap();
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+
+        let first = service
+            .refund_with_idempotency(payment.id.as_str(), 300, Some("goodwill".to_owned()), None)
+            .await
+            .unwrap();
+        let second = service
+            .refund_with_idempotency(
+                payment.id.as_str(),
+                300,
+                Some(" goodwill ".to_owned()),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(provider.refund_count(), 1);
+        let refunds = service.list_refunds(payment.id.as_str()).await.unwrap();
+        assert_eq!(refunds.len(), 1);
     }
 
     #[tokio::test]
@@ -2760,6 +2952,50 @@ mod tests {
         assert_eq!(record.attempts, 2);
         let updated = service.get_session(session.id.as_str()).await.unwrap();
         assert_eq!(updated.status, PaymentStatus::Captured);
+    }
+
+    #[tokio::test]
+    async fn received_webhook_is_applied_by_a_later_delivery() {
+        let (service, db) = setup().await;
+        service.register_provider(manual(Some("secret"))).unwrap();
+        let session = service.create_session(input("manual", 1000)).await.unwrap();
+        let provider_session_id = session.provider_session_id.clone().unwrap();
+        let body = format!(
+            r#"{{"id":"evt_received","type":"payment.captured","data":{{"provider_session_id":"{provider_session_id}"}}}}"#
+        );
+        // Simulate a first delivery that inserted the row and then crashed
+        // before applying the event.
+        sqlx::query(
+            "INSERT INTO payment_webhooks
+             (id, provider, provider_event_id, event_type, payload, status, attempts,
+              processed_at, last_error, created_at)
+             VALUES ('wh_received', 'manual', 'evt_received', 'payment.captured', '{}',
+                     'received', 0, NULL, NULL, 0)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let record = service
+            .process_webhook(
+                "manual",
+                headers("secret", body.as_bytes()),
+                body.as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(record.id.as_str(), "wh_received");
+        assert_eq!(record.status, WebhookStatus::Processed);
+        assert_eq!(record.attempts, 1);
+        assert_eq!(
+            service
+                .get_session(session.id.as_str())
+                .await
+                .unwrap()
+                .status,
+            PaymentStatus::Captured
+        );
     }
 
     #[tokio::test]
@@ -3126,6 +3362,60 @@ mod tests {
                 .status,
             PaymentStatus::PartiallyRefunded
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_cannot_overwrite_a_session_captured_after_the_read() {
+        let (service, _db) = setup().await;
+        service.register_provider(manual(Some("secret"))).unwrap();
+        let session = service.create_session(input("manual", 1000)).await.unwrap();
+
+        // Simulate cancel observing `pending`, then a capture completing
+        // before the stale cancel write is issued.
+        let stale = service.get_session(session.id.as_str()).await.unwrap();
+        assert_eq!(stale.status, PaymentStatus::Pending);
+        let payment = service.capture(session.id.as_str()).await.unwrap();
+        assert_eq!(payment.status, PaymentStatus::Captured);
+
+        let error = service
+            .transition_session(&stale, PaymentStatus::Canceled, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+        let stored = service.get_session(session.id.as_str()).await.unwrap();
+        assert_eq!(stored.status, PaymentStatus::Captured);
+    }
+
+    #[tokio::test]
+    async fn cancel_conflicts_while_a_capture_claim_is_live() {
+        let (service, db) = setup().await;
+        service.register_provider(manual(Some("secret"))).unwrap();
+        let session = service.create_session(input("manual", 1000)).await.unwrap();
+        let now = now_timestamp();
+        // Simulate capture() having claimed the session but not yet completed
+        // its provider call. The status is still `pending`.
+        sqlx::query(
+            "UPDATE payment_sessions
+             SET data = json_set(data, '$.capture_claim', 'capture:live',
+                                 '$.capture_claim_at', ?),
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(session.id.as_str())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let error = service
+            .cancel_session(session.id.as_str())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+        let stored = service.get_session(session.id.as_str()).await.unwrap();
+        assert_eq!(stored.status, PaymentStatus::Pending);
+        assert!(stored.data.get("capture_claim").is_some());
     }
 
     #[tokio::test]

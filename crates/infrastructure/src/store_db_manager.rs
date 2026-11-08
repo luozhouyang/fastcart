@@ -6,12 +6,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Duration;
 
 use fastcart_kernel::{StoreId, now_timestamp};
 use sha2::{Digest, Sha256};
 use sqlx::migrate::Migrator;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{SqlitePool, Transaction};
 use tokio::sync::RwLock;
 
@@ -266,7 +267,8 @@ impl StoreDatabaseManager {
     /// Creates a consistent SQLite backup without copying an active WAL file.
     ///
     /// `VACUUM INTO` produces a transactionally consistent snapshot regardless
-    /// of concurrent readers and writers.
+    /// of concurrent readers and writers. A sibling `<backup>.manifest.json`
+    /// manifest is written after the checksum is computed.
     pub async fn backup(
         &self,
         store_id: &StoreId,
@@ -288,29 +290,58 @@ impl StoreDatabaseManager {
             .execute(database.pool())
             .await?;
 
-        let mut file = tokio::fs::File::open(destination).await?;
-        let mut hasher = Sha256::new();
-        let mut bytes = 0_u64;
-        let mut buffer = vec![0_u8; 64 * 1024];
-        loop {
-            let read = tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-            bytes += u64::try_from(read).unwrap_or(u64::MAX);
-        }
-
-        Ok(BackupManifest {
+        let (bytes, sha256) = Self::sha256_file(destination).await?;
+        let manifest = BackupManifest {
             store_id: store_id.to_string(),
             created_at: now_timestamp(),
             file: destination.to_string_lossy().into_owned(),
             bytes,
-            sha256: hex::encode(hasher.finalize()),
-        })
+            sha256,
+        };
+        let manifest_path = Self::manifest_path(destination);
+        let encoded = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+            InfrastructureError::InvalidInput(format!(
+                "failed to serialize backup manifest: {error}"
+            ))
+        })?;
+        tokio::fs::write(&manifest_path, encoded).await?;
+        Ok(manifest)
+    }
+
+    /// Returns the sibling manifest path for a backup file.
+    ///
+    /// The manifest is appended to the file name, so a backup at
+    /// `store.sqlite` has a manifest at `store.sqlite.manifest.json`.
+    #[must_use]
+    pub fn manifest_path(backup: impl AsRef<Path>) -> PathBuf {
+        let mut path = backup.as_ref().as_os_str().to_owned();
+        path.push(".manifest.json");
+        PathBuf::from(path)
+    }
+
+    /// Loads the sibling manifest for a backup file, when one exists.
+    pub async fn load_backup_manifest(backup: impl AsRef<Path>) -> Result<Option<BackupManifest>> {
+        let manifest_path = Self::manifest_path(backup);
+        match tokio::fs::read(&manifest_path).await {
+            Ok(bytes) => {
+                let manifest = serde_json::from_slice(&bytes).map_err(|error| {
+                    InfrastructureError::InvalidInput(format!(
+                        "invalid backup manifest {}: {error}",
+                        manifest_path.display()
+                    ))
+                })?;
+                Ok(Some(manifest))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Verifies a backup file without creating or modifying it.
+    ///
+    /// The file is opened through a read-only SQLite connection. No
+    /// create-if-missing, WAL or journal pragmas are applied, so verification
+    /// never creates the database or `-wal`/`-shm` sidecars.
     pub async fn verify_backup(path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let metadata = tokio::fs::metadata(path).await.map_err(|error| {
@@ -321,7 +352,14 @@ impl StoreDatabaseManager {
                 "backup file is empty or not a regular file".to_owned(),
             ));
         }
-        let pool = connect_sqlite(path, &DatabaseOptions::default()).await?;
+        let connect_options = SqliteConnectOptions::from_str(&path.to_string_lossy())
+            .map_err(|error| InfrastructureError::InvalidInput(error.to_string()))?
+            .read_only(true)
+            .create_if_missing(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(connect_options)
+            .await?;
         let result = async {
             verify_integrity(&pool).await?;
             let objects: i64 =
@@ -340,10 +378,61 @@ impl StoreDatabaseManager {
         result
     }
 
+    /// Verifies a backup file and, when present, its sibling manifest.
+    ///
+    /// The checksum and byte count in the manifest must match the backup.
+    /// Returns the manifest that was checked, if one exists.
+    pub async fn verify_backup_with_manifest(
+        backup: impl AsRef<Path>,
+    ) -> Result<Option<BackupManifest>> {
+        let backup = backup.as_ref();
+        Self::verify_backup(backup).await?;
+        let manifest = Self::load_backup_manifest(backup).await?;
+        if let Some(manifest) = manifest.as_ref() {
+            Self::verify_manifest(backup, manifest).await?;
+        }
+        Ok(manifest)
+    }
+
+    async fn verify_manifest(path: &Path, manifest: &BackupManifest) -> Result<()> {
+        let (bytes, sha256) = Self::sha256_file(path).await?;
+        if bytes != manifest.bytes {
+            return Err(InfrastructureError::Integrity(format!(
+                "backup size {bytes} does not match manifest size {}",
+                manifest.bytes
+            )));
+        }
+        if !sha256.eq_ignore_ascii_case(&manifest.sha256) {
+            return Err(InfrastructureError::Integrity(
+                "backup checksum does not match its manifest".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn sha256_file(path: &Path) -> Result<(u64, String)> {
+        let mut file = tokio::fs::File::open(path).await?;
+        let mut hasher = Sha256::new();
+        let mut bytes = 0_u64;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            let read = tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            bytes += u64::try_from(read).unwrap_or(u64::MAX);
+        }
+        Ok((bytes, hex::encode(hasher.finalize())))
+    }
+
     /// Restores a verified backup into a store database file.
     ///
-    /// The store must be closed first; callers are expected to suspend the
-    /// store before invoking this operation.
+    /// When a sibling manifest exists, the backup must belong to `store_id`
+    /// and match the manifest checksum. The store pool is closed first, and
+    /// destination `-wal`/`-shm` files are removed so a stale write-ahead log
+    /// cannot be replayed over the restored database. The restored database is
+    /// left closed and reopens lazily on the next access.
     pub async fn restore(&self, store_id: &StoreId, backup: impl AsRef<Path>) -> Result<()> {
         let backup = backup.as_ref();
         let destination = self.database_path(store_id)?;
@@ -358,15 +447,41 @@ impl StoreDatabaseManager {
                 "backup and restore paths must differ".to_owned(),
             ));
         }
+        let manifest = Self::load_backup_manifest(backup).await?;
+        if let Some(manifest) = manifest.as_ref()
+            && manifest.store_id != store_id.as_str()
+        {
+            return Err(InfrastructureError::InvalidInput(format!(
+                "backup belongs to store {} but restore targets {store_id}",
+                manifest.store_id
+            )));
+        }
         Self::verify_backup(&canonical_backup).await?;
+        if let Some(manifest) = manifest.as_ref() {
+            Self::verify_manifest(&canonical_backup, manifest).await?;
+        }
         self.close(store_id).await;
+        Self::remove_sidecars(&destination).await?;
         if destination.exists() {
             let previous = destination.with_extension("sqlite.pre-restore");
             tokio::fs::copy(&destination, &previous).await?;
         }
         tokio::fs::copy(&canonical_backup, &destination).await?;
+        Self::remove_sidecars(&destination).await?;
         self.migrated.write().await.remove(store_id.as_str());
-        self.database(store_id).await?;
+        Ok(())
+    }
+
+    async fn remove_sidecars(path: &Path) -> Result<()> {
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = path.as_os_str().to_owned();
+            sidecar.push(suffix);
+            match tokio::fs::remove_file(PathBuf::from(sidecar)).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
 
@@ -412,11 +527,11 @@ impl StoreDatabaseManager {
             let Some(victim) = victim else {
                 break;
             };
-            if let Some(entry) = self.pools.write().await.remove(&victim) {
-                tokio::time::sleep(Duration::from_millis(0)).await;
-                let _ = checkpoint(&entry.pool).await;
-                entry.pool.close().await;
-            }
+            // Eviction only forgets the pool. Calls already holding a cloned
+            // `StoreDatabase` keep a live `SqlitePool` handle, so force-closing
+            // here would make their later queries fail. The pool and its
+            // connections close when the last handle is dropped.
+            let _ = self.pools.write().await.remove(&victim);
         }
     }
 }
@@ -425,7 +540,7 @@ impl StoreDatabaseManager {
 mod tests {
     use fastcart_kernel::StoreId;
 
-    use super::StoreDatabaseManager;
+    use super::{BackupManifest, StoreDatabase, StoreDatabaseManager};
     use crate::database::DatabaseOptions;
 
     fn manager(dir: &tempfile::TempDir) -> StoreDatabaseManager {
@@ -433,6 +548,12 @@ mod tests {
             dir.path().join("stores"),
             DatabaseOptions::default().with_max_connections(2),
         )
+    }
+
+    fn sidecar(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        std::path::PathBuf::from(sidecar)
     }
 
     #[tokio::test]
@@ -460,6 +581,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn migrations_create_operational_indexes() {
+        let database = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+
+        for (index, table) in [
+            ("idx_inventory_reservations_order", "inventory_reservations"),
+            ("idx_order_items_variant", "order_items"),
+            ("idx_cart_items_variant", "cart_items"),
+        ] {
+            let indexed_table: Option<String> = sqlx::query_scalar(
+                "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            )
+            .bind(index)
+            .fetch_optional(database.pool())
+            .await
+            .unwrap();
+            assert_eq!(
+                indexed_table.as_deref(),
+                Some(table),
+                "migration did not create index {index} on {table}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -514,6 +659,153 @@ mod tests {
             .unwrap();
         assert_eq!(value, "a");
     }
+
+    #[tokio::test]
+    async fn backup_writes_a_manifest_and_verify_accepts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(&dir);
+        let store = StoreId::new();
+        manager.database(&store).await.unwrap();
+
+        let backup_path = dir.path().join("backups/store.sqlite");
+        let manifest = manager.backup(&store, &backup_path).await.unwrap();
+
+        let manifest_path = StoreDatabaseManager::manifest_path(&backup_path);
+        assert!(manifest_path.is_file(), "backup manifest is written");
+        let loaded: BackupManifest =
+            serde_json::from_slice(&tokio::fs::read(&manifest_path).await.unwrap()).unwrap();
+        assert_eq!(loaded.store_id, store.to_string());
+        assert_eq!(loaded.bytes, manifest.bytes);
+        assert_eq!(loaded.sha256, manifest.sha256);
+
+        StoreDatabaseManager::verify_backup(&backup_path)
+            .await
+            .unwrap();
+        let verified = StoreDatabaseManager::verify_backup_with_manifest(&backup_path)
+            .await
+            .unwrap()
+            .expect("the manifest is present");
+        assert_eq!(verified.sha256, manifest.sha256);
+    }
+
+    #[tokio::test]
+    async fn verify_backup_does_not_create_wal_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(&dir);
+        let store = StoreId::new();
+        manager.database(&store).await.unwrap();
+
+        let backup_path = dir.path().join("backups/store.sqlite");
+        manager.backup(&store, &backup_path).await.unwrap();
+        let wal = sidecar(&backup_path, "-wal");
+        let shm = sidecar(&backup_path, "-shm");
+        let _ = tokio::fs::remove_file(&wal).await;
+        let _ = tokio::fs::remove_file(&shm).await;
+
+        StoreDatabaseManager::verify_backup(&backup_path)
+            .await
+            .unwrap();
+
+        assert!(
+            !tokio::fs::try_exists(&wal).await.unwrap(),
+            "verify must not create a -wal file next to the backup"
+        );
+        assert!(
+            !tokio::fs::try_exists(&shm).await.unwrap(),
+            "verify must not create a -shm file next to the backup"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_a_manifest_from_another_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(&dir);
+        let store = StoreId::new();
+        manager.database(&store).await.unwrap();
+
+        let backup_path = dir.path().join("backups/store.sqlite");
+        let manifest = manager.backup(&store, &backup_path).await.unwrap();
+        let mut foreign = manifest;
+        foreign.store_id = StoreId::new().to_string();
+        let manifest_path = StoreDatabaseManager::manifest_path(&backup_path);
+        tokio::fs::write(&manifest_path, serde_json::to_vec_pretty(&foreign).unwrap())
+            .await
+            .unwrap();
+
+        let error = manager.restore(&store, &backup_path).await.unwrap_err();
+        assert!(
+            error.to_string().contains("belongs to store"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_removes_stale_destination_wal_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(&dir);
+        let store = StoreId::new();
+        let database = manager.database(&store).await.unwrap();
+
+        sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('name', 'original', 0)")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let backup_path = dir.path().join("backups/store.sqlite");
+        manager.backup(&store, &backup_path).await.unwrap();
+
+        sqlx::query("UPDATE settings SET value = 'changed' WHERE key = 'name'")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        manager.close(&store).await;
+
+        let destination = manager.database_path(&store).unwrap();
+        let wal = sidecar(&destination, "-wal");
+        let shm = sidecar(&destination, "-shm");
+        tokio::fs::write(&wal, b"stale wal").await.unwrap();
+        tokio::fs::write(&shm, b"stale shm").await.unwrap();
+
+        manager.restore(&store, &backup_path).await.unwrap();
+
+        assert!(
+            !tokio::fs::try_exists(&wal).await.unwrap(),
+            "stale destination WAL must be removed"
+        );
+        assert!(
+            !tokio::fs::try_exists(&shm).await.unwrap(),
+            "stale destination SHM must be removed"
+        );
+
+        let restored = manager.database(&store).await.unwrap();
+        let value: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'name'")
+            .fetch_one(restored.pool())
+            .await
+            .unwrap();
+        assert_eq!(value, "original");
+    }
+
+    #[tokio::test]
+    async fn evicting_a_pool_keeps_live_store_handles_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(&dir).with_max_pools(1);
+        let first = StoreId::new();
+        let second = StoreId::new();
+
+        let held = manager.database(&first).await.unwrap();
+        manager.database(&second).await.unwrap();
+        assert_eq!(manager.open_pool_count().await, 1);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings")
+            .fetch_one(held.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('evicted', 'ok', 0)")
+            .execute(held.pool())
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn immediate_transactions_serialize_concurrent_writers() {
         let dir = tempfile::tempdir().unwrap();

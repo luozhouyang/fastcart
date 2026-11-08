@@ -4,6 +4,7 @@ title: Puck as the admin page editor
 description: Migrate the admin page editor to Puck while keeping PageBody as the canonical schema.
 owner: luozhouyang
 status: Accepted
+implementation: not-started
 timestamp: 2026-11-06T16:17:43Z
 ---
 
@@ -44,7 +45,7 @@ We will migrate the admin page editor to `@measured/puck` and keep the existing 
 - Implement the adapter and Puck host behind the existing page route.
 - Keep the JSON view, versions and preview dialog while the canvas changes.
 - Remove the old editor components only after a parity review.
-- Implementation is tracked in [Issue 0002](/issues/0002-migrate-the-admin-page-editor-to-puck.md).
+- Implementation is tracked in [Issue 0002](../issues/0002-migrate-the-admin-page-editor-to-puck.md).
 
 ## Verification
 
@@ -57,3 +58,14 @@ We will migrate the admin page editor to `@measured/puck` and keep the existing 
 - Data-source and asset fields still resolve through the platform pickers.
 - Preview, publish, version restore and optimistic concurrency still work from the editor.
 - Admin typecheck, lint, build and tests pass.
+
+## Implementation status
+
+Not started. The Admin page editor is still the bespoke block tree, palette and
+field inspector (`apps/admin/src/pages/page-editor.tsx`); `@measured/puck` is not
+a dependency (`apps/admin/package.json`) and no manifest-to-Puck or
+`PageBody`-to-Puck adapter exists. The versioned `PageBody` type
+(`packages/shared-types/src/index.ts`) remains the persisted and server-validated
+page schema.
+
+This ADR is a decision, not a claim of completion.

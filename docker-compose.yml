@@ -13,14 +13,18 @@ services:
       FASTCART_SERVER_PORT: "8080"
       FASTCART_LOG_LEVEL: ${FASTCART_LOG_LEVEL:-info}
       RUST_LOG: ${RUST_LOG:-info}
-      # Storefront SSR. Enable the Node runtime only when a sidecar is reachable.
+      # Storefront SSR. The Node runtime is the supported provider; enable it
+      # only when a sidecar is reachable.
       FASTCART_STOREFRONT_ENABLED: ${FASTCART_STOREFRONT_ENABLED:-false}
-      FASTCART_STOREFRONT_RUNTIME: ${FASTCART_STOREFRONT_RUNTIME:-v8}
+      FASTCART_STOREFRONT_RUNTIME: ${FASTCART_STOREFRONT_RUNTIME:-node}
       FASTCART_STOREFRONT_NODE_URL: ${FASTCART_STOREFRONT_NODE_URL:-}
       FASTCART_STOREFRONT_NODE_SECRET: ${FASTCART_STOREFRONT_NODE_SECRET:-}
+      FASTCART_THEMES_DIR: ${FASTCART_THEMES_DIR:-}
       # Secrets. Provide real values through the environment or Docker secrets;
       # empty values disable the corresponding feature rather than defaulting to
       # a well-known secret.
+      FASTCART_PREVIEW_SECRET: ${FASTCART_PREVIEW_SECRET:-}
+      FASTCART_CAPABILITY_SECRET: ${FASTCART_CAPABILITY_SECRET:-}
       FASTCART_INTERNAL_FETCH_SECRET: ${FASTCART_INTERNAL_FETCH_SECRET:-}
       FASTCART_PAYMENT_WEBHOOK_SECRET: ${FASTCART_PAYMENT_WEBHOOK_SECRET:-}
       FASTCART_STRIPE_SECRET_KEY: ${FASTCART_STRIPE_SECRET_KEY:-}

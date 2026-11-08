@@ -4,12 +4,17 @@ A lightweight, self-hosted, multi-store commerce platform built with Rust and Re
 
 Fastcart aims to deliver the developer experience of modern headless commerce platforms while keeping deployment simple: a single Rust modular monolith, one SQLite database per store, a React admin application, and an embedded storefront runtime.
 
-> **Status: backend implementation complete; UI is still a shell.**
-> The platform, commerce modules, workflows, HTTP APIs, theme registry, webhook
-> delivery, email delivery, observability, OpenAPI document and typed
-> TypeScript SDKs are implemented and covered by unit and integration tests.
-> The React admin/storefront applications are shells. Storefront SSR is wired
-> through the Node sidecar runtime; the embedded V8 adapter remains future work.
+> **Status: broad Rust backend, a narrow but functional Admin, and a storefront shell.**
+> The Rust platform, commerce modules, workflows, HTTP APIs, theme registry,
+> webhook and email delivery, observability and OpenAPI document are implemented
+> and covered by unit and integration tests. Typed TypeScript SDKs provide the
+> front-end client surface. The React Admin is a real application covering
+> orders, catalog draft create/list/export, inventory, customers, content,
+> themes, forms, inbox, notifications and settings, but it has no price-authoring,
+> promotion, region, shipping or tax screens even though the backend exposes
+> those operations. `apps/storefront` is a non-production development harness.
+> Storefront SSR is wired through the Node sidecar; the embedded V8 adapter is
+> still a stub, and selecting it disables SSR.
 
 ## Why Fastcart
 
@@ -27,7 +32,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - Domain registry with normalization, primary-domain rules and duplicate detection.
 - Platform users, Argon2id credentials, server-side admin sessions, CSRF-protected cookie auth and hashed API tokens.
 - Roles and permissions: `products.*`, `orders.*`, `customers.*`, `inventory.*`, `promotions.*`, `settings.*`, `themes.*`, `users.*`, `payments.*`.
-- Audit log, per-store SQLite pools, migrations, consistent `VACUUM INTO` backups, integrity checks and restore.
+- Audit log, per-store SQLite pools, migrations, and a consistent `VACUUM INTO` backup path for destructive store deletion; `scripts/verify-backup.sh` verifies a backup file's integrity and schema. The CLI also exposes `backup`, `verify` and `restore` commands (`crates/cli/src/main.rs`).
 
 ### Commerce modules
 
@@ -55,7 +60,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - SQLite-backed persistent job queue with atomic claiming and lease expiry.
 - Signed webhook delivery from outbox events with idempotent fan-out, retry/backoff, crash recovery and replay.
 - Provider-independent transactional email with queued `send_email` jobs, SMTP (`lettre`) and Resend (`resend-rs`) providers, plus log and in-memory test providers.
-- Storefront SSR rendering through a bounded Node sidecar pool, with active theme context, trusted store resolution and streamed HTML shells.
+- Storefront SSR through the Node sidecar: `worker_count` creates that many HTTP clients behind a Rust semaphore with `queue_capacity` in-flight slots and fail-fast rejection, while the sidecar runs each render in its own worker thread with heap and wall-clock limits. The sidecar itself has no global concurrency cap, and the worker cap is not CPU isolation. Active theme context and trusted store resolution are applied before rendering.
 - Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; email jobs; simple job handlers.
 - Store-scoped Moka cache with generation-based invalidation.
 - Prometheus-compatible `/metrics` with latency histograms, plus baseline security response headers.
@@ -69,8 +74,8 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 | Path                         | Purpose                                                          |
 | ---------------------------- | ---------------------------------------------------------------- |
 | `apps/server`                | Axum server bootstrap, configuration, graceful shutdown          |
-| `apps/admin`                 | React admin shell                                                |
-| `apps/storefront`            | TanStack Start storefront shell                                  |
+| `apps/admin`                 | React Admin application for the implemented store operations     |
+| `apps/storefront`            | TanStack Start harness (non-production; see README)              |
 | `crates/kernel`              | IDs, money, contexts, validation, errors                         |
 | `crates/platform`            | Platform DB, stores, domains, auth, RBAC, provisioning           |
 | `crates/infrastructure`      | SQLite pools, migrations, cache, outbox, jobs, storage           |
@@ -135,7 +140,7 @@ Themes may return a `ReadableStream` or async iterable from `render`. When
 `streaming_enabled` is on, the sidecar forwards the theme's status and headers
 and then the HTML bytes as they are produced, marking the response with
 `x-fastcart-mode: stream`. The bundled default theme uses
-`renderToPipeableStream`, so the document head, styles and shell reach the
+`renderToReadableStream`, so the document head, styles and shell reach the
 browser before the page tree finishes. Buffered themes and older hosts keep the
 existing JSON contract. Streaming requires the reverse proxy to pass chunked
 responses through without buffering.
@@ -145,8 +150,8 @@ responses through without buffering.
 Theme bundles are **trusted server-side code**. Registering and activating a
 theme is a privileged operation: the sidecar imports the bundle in a worker
 thread and the bundle can use Node APIs, including the filesystem and network.
-The worker isolates CPU, heap and time, but it is a reliability boundary, not
-an operating-system sandbox.
+The worker caps heap and wall-clock time; it does not cap CPU or provide an
+operating-system sandbox. It is a reliability boundary, not a security boundary.
 
 Run the sidecar with the same care as any application server: a non-root user,
 a read-only root filesystem with only the theme directory writable during
@@ -222,10 +227,10 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 pnpm install
-pnpm lint && pnpm typecheck && pnpm build
+pnpm lint && pnpm typecheck && pnpm test && pnpm build
 ```
 
-The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries, openapi schema/type parity, SQLite write serialization under concurrency, and cross-store tenant isolation.
+The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries, SQLite write serialization under concurrency, and cross-store tenant isolation. The OpenAPI tests assert a 3.1.0 document, namespace coverage and resolvable schema references; there is no TypeScript code-generation or type-parity check in the repository.
 
 ## Documentation
 

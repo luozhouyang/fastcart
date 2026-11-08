@@ -4,6 +4,7 @@ title: Single-node modular monolith with SQLite
 description: Ship Fastcart as one Rust process with SQLite as the only required datastore.
 owner: luozhouyang
 status: Accepted
+implementation: partial
 timestamp: 2026-11-06T16:17:43Z
 ---
 
@@ -55,3 +56,14 @@ We will ship Fastcart as one Rust modular monolith deployable as a single proces
 - `cargo test --workspace` passes without a PostgreSQL or Redis service.
 - The isolation suite provisions two stores and observes no shared commerce rows.
 - The Docker health check reaches `/health/ready` with no external datastore.
+
+## Implementation status
+
+Partial. The single-process Rust server, platform database, per-store SQLite
+databases and in-process outbox/job queue exist (`Cargo.toml`,
+`apps/server/src/main.rs`, `crates/infrastructure/src/store_db_manager.rs`,
+`crates/infrastructure/src/event_bus.rs`, `crates/infrastructure/src/jobs.rs`,
+`migrations/platform`, `migrations/store`). The PostgreSQL adapter and a written
+single-node deployment-limits/scale-up guide do not exist yet.
+
+This ADR is a decision, not a claim of completion.

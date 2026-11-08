@@ -4,6 +4,7 @@ title: Per-store SQLite database for tenant isolation
 description: Each store owns a SQLite database and pool; the platform database holds registry and auth data only.
 owner: luozhouyang
 status: Accepted
+implementation: implemented
 timestamp: 2026-11-06T16:17:43Z
 ---
 
@@ -55,3 +56,18 @@ We will enforce tenancy with one SQLite database and connection pool per store. 
 - A store migration runner applies only to that store's database.
 - Cache entries and job leases are scoped by store ID.
 - Backup and restore operate on a single store database without touching another store.
+
+## Implementation status
+
+Implemented. Each store gets its own SQLite database and pool, migrated from
+`migrations/store`; the platform database under `migrations/platform` holds the
+registry and auth data (`crates/infrastructure/src/store_db_manager.rs`).
+Requests resolve a store before opening its database
+(`crates/http/src/middleware.rs`, `crates/api/src/state.rs`), and the isolation
+suite covers cross-store reads and writes (`crates/api/tests/store_isolation.rs`).
+Backup, verify and restore are implemented in the store database manager and
+exposed as the `fastcart backup`, `fastcart verify` and `fastcart restore`
+commands (`crates/infrastructure/src/store_db_manager.rs`,
+`crates/cli/src/main.rs`).
+
+This ADR is a decision, not a claim of completion.

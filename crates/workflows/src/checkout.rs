@@ -461,7 +461,8 @@ impl CheckoutWorkflow {
                             CheckoutStatus::Failed | CheckoutStatus::Canceled => {
                                 // The checkout was expired while we captured.
                                 // Refund the customer rather than orphan money.
-                                self.compensate(&latest, &payment, None).await;
+                                self.compensate(&latest, &payment, None, placement_token)
+                                    .await;
                                 return Err(error);
                             }
                             _ => return Err(error),
@@ -597,7 +598,8 @@ impl CheckoutWorkflow {
         {
             Ok(order) => order,
             Err(error) => {
-                self.compensate(&checkout, &payment, None).await;
+                self.compensate(&checkout, &payment, None, placement_token)
+                    .await;
                 return Err(error);
             }
         };
@@ -608,7 +610,8 @@ impl CheckoutWorkflow {
         {
             Ok(order) => order,
             Err(error) => {
-                self.compensate(&checkout, &payment, Some(&order)).await;
+                self.compensate(&checkout, &payment, Some(&order), placement_token)
+                    .await;
                 return Err(error);
             }
         };
@@ -641,6 +644,18 @@ impl CheckoutWorkflow {
             .await?;
         if let Ok(cart) = self.carts.get_cart(&checkout.cart_id).await {
             self.record_promotion_usage(&cart, &order).await;
+            // A crash between placement and cart completion leaves an open
+            // cart behind an already placed checkout. Completing it here makes
+            // replay converge without touching money or stock.
+            if cart.status == fastcart_module_cart::CartStatus::Open
+                && let Err(error) = self.carts.complete_cart(&cart.id).await
+            {
+                tracing::warn!(
+                    cart_id = %cart.id,
+                    error = %error,
+                    "failed to complete the cart of an already placed checkout"
+                );
+            }
         }
         Ok(CompleteCheckoutResult {
             order,
@@ -690,6 +705,14 @@ impl CheckoutWorkflow {
                 }
             }
         }
+        // Commit inventory before confirming the order. `confirm` moves the
+        // order into a state that compensation must not cancel, so a later
+        // `commit` failure (for example because reservations expired while the
+        // customer paid) would leave a captured payment and a confirmed order
+        // with no stock movement. With the commit first, a failed commit is
+        // still compensable: the order is pending, so the refund path runs.
+        self.inventory.commit(&checkout.id, &order.id).await?;
+
         if order.status == OrderStatus::Pending {
             match self.order.confirm(&order.id).await {
                 Ok(confirmed) => order = confirmed,
@@ -706,8 +729,6 @@ impl CheckoutWorkflow {
                 }
             }
         }
-
-        self.inventory.commit(&checkout.id, &order.id).await?;
 
         if let Err(error) = self
             .checkout
@@ -743,15 +764,23 @@ impl CheckoutWorkflow {
         Ok(order)
     }
 
+    /// Undoes a failed completion attempt.
+    ///
+    /// Compensation is fenced by the placement token: a runner whose lease was
+    /// taken over must not release reservations or refund a payment that the
+    /// new owner is still placing. A terminal checkout (`failed` / `canceled`)
+    /// can still hold captured money, so it is refunded even though it no
+    /// longer carries a claim.
     async fn compensate(
         &self,
         checkout: &CheckoutSession,
         payment: &Payment,
         order: Option<&Order>,
+        placement_token: &str,
     ) {
         // Re-read persisted state before undoing anything. A concurrent runner
         // may have placed the order after this runner observed a failure; only
-        // compensate when the checkout and order are still unplaced.
+        // compensate when the checkout is still unplaced.
         let latest_checkout = match self.checkout.get(&checkout.id).await {
             Ok(latest) => Some(latest),
             Err(error) => {
@@ -763,41 +792,106 @@ impl CheckoutWorkflow {
                 None
             }
         };
-        if latest_checkout.as_ref().is_some_and(|latest| {
-            latest.status == CheckoutStatus::OrderPlaced
-                || order.is_some_and(|order| latest.order_id.as_ref() == Some(&order.id))
-        }) {
+        let Some(latest_checkout) = latest_checkout else {
+            return;
+        };
+        if latest_checkout.status == CheckoutStatus::OrderPlaced
+            || order.is_some_and(|order| latest_checkout.order_id.as_ref() == Some(&order.id))
+        {
             return;
         }
-
-        if let Some(order) = order {
-            match self.order.get(&order.id).await {
-                Ok(latest) if is_placed_order_status(latest.status) => {
-                    // Another runner placed this order; never cancel it.
+        if !latest_checkout.status.is_terminal() {
+            match self
+                .checkout
+                .holds_placement(&checkout.id, placement_token)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        checkout_id = %checkout.id,
+                        "checkout placement was taken over; skipping compensation"
+                    );
                     return;
                 }
-                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        checkout_id = %checkout.id,
+                        error = %error,
+                        "could not verify the placement claim; skipping compensation"
+                    );
+                    return;
+                }
+            }
+        }
+
+        let mut refundable = true;
+        if let Some(order) = order {
+            match self.order.get(&order.id).await {
+                // Another runner already compensated this order.
+                Ok(latest) if latest.status == OrderStatus::Canceled => {}
+                Ok(latest)
+                    if matches!(latest.status, OrderStatus::Pending | OrderStatus::Confirmed) =>
+                {
+                    if let Err(error) = self.inventory.restock_order(&order.id).await {
+                        tracing::warn!(
+                            order_id = %order.id,
+                            error = %error,
+                            "checkout compensation could not restock inventory"
+                        );
+                    }
+                    if let Err(error) = self
+                        .order
+                        .cancel(&order.id, Some("checkout compensation"))
+                        .await
+                    {
+                        tracing::warn!(
+                            order_id = %order.id,
+                            error = %error,
+                            "checkout compensation could not cancel the order"
+                        );
+                    }
+                    if let Err(error) = self
+                        .order
+                        .set_payment_status(&order.id, OrderPaymentStatus::Refunded)
+                        .await
+                    {
+                        tracing::warn!(
+                            order_id = %order.id,
+                            error = %error,
+                            "checkout compensation could not mark the order refunded"
+                        );
+                    }
+                }
+                Ok(latest) => {
+                    // The order moved into fulfilment: refunding and canceling
+                    // it automatically would undo an operator's decision.
+                    tracing::error!(
+                        order_id = %order.id,
+                        status = latest.status.as_str(),
+                        "order cannot be compensated automatically; manual reconciliation is required"
+                    );
+                    refundable = false;
+                }
                 Err(error) => {
                     tracing::warn!(
                         order_id = %order.id,
                         error = %error,
                         "could not re-read order before compensation"
                     );
+                    // Refunding without knowing whether the order is still
+                    // pending could leave a paid, active order behind.
+                    refundable = false;
                 }
             }
-            let _ = self.inventory.restock_order(&order.id).await;
-            let _ = self
-                .order
-                .cancel(&order.id, Some("checkout compensation"))
-                .await;
-            let _ = self
-                .order
-                .set_payment_status(&order.id, OrderPaymentStatus::Refunded)
-                .await;
         }
+        if !refundable {
+            return;
+        }
+
         let _ = self.inventory.release_checkout(&checkout.id).await;
         let refund_key = format!("checkout-compensation:{}", checkout.id.as_str());
-        if let Err(error) = self
+        let refunded = match self
             .payment
             .refund_with_idempotency(
                 payment.id.as_str(),
@@ -807,10 +901,39 @@ impl CheckoutWorkflow {
             )
             .await
         {
-            tracing::error!(
-                payment_id = %payment.id,
+            Ok(_) => true,
+            Err(error) => {
+                tracing::error!(
+                    payment_id = %payment.id,
+                    error = %error,
+                    "checkout compensation refund failed; manual reconciliation is required"
+                );
+                false
+            }
+        };
+
+        // Mark the checkout failed only once the money is back with the
+        // customer. A failed refund keeps the session retryable so a later
+        // attempt can finish the compensation instead of hiding captured money
+        // behind a terminal state.
+        if refunded
+            && matches!(
+                latest_checkout.status,
+                CheckoutStatus::PaymentPending | CheckoutStatus::PaymentConfirmed
+            )
+            && let Err(error) = self
+                .checkout
+                .transition(
+                    &checkout.id,
+                    CheckoutStatus::Failed,
+                    Some("checkout compensation"),
+                )
+                .await
+        {
+            tracing::warn!(
+                checkout_id = %checkout.id,
                 error = %error,
-                "checkout compensation refund failed; manual reconciliation is required"
+                "failed to mark the compensated checkout as failed"
             );
         }
     }

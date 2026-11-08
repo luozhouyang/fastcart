@@ -363,6 +363,9 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_LOG_LEVEL") {
             self.server.log_level = value;
         }
+        let cookie_secure = env::var("FASTCART_COOKIE_SECURE").ok();
+        let cors_origins = env::var("FASTCART_CORS_ORIGINS").ok();
+        self.apply_server_env(cookie_secure.as_deref(), cors_origins.as_deref())?;
         if let Ok(value) = env::var("FASTCART_PAYMENT_WEBHOOK_SECRET") {
             self.payments.webhook_secret = Some(value);
         }
@@ -402,11 +405,15 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_CAPABILITY_SECRET") {
             self.storefront.capability_secret = Some(value);
         }
-        if let Ok(value) = env::var("FASTCART_THEMES_DIR") {
+        if let Ok(value) = env::var("FASTCART_THEMES_DIR")
+            && !value.trim().is_empty()
+        {
             self.storefront.themes_dir = PathBuf::from(value);
         }
         if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
-            self.server.preview_secret = Some(value);
+            // An empty pass-through value (for example from docker-compose)
+            // disables preview rather than configuring a zero-byte secret.
+            self.server.preview_secret = (!value.trim().is_empty()).then_some(value);
         }
         if let Ok(value) = env::var("FASTCART_PREVIEW_FRAME_ANCESTORS") {
             self.server.preview_frame_ancestors = value
@@ -491,6 +498,21 @@ impl Config {
         Ok(())
     }
 
+    /// Applies the listener environment overrides that are parsed with helpers.
+    fn apply_server_env(
+        &mut self,
+        cookie_secure: Option<&str>,
+        cors_origins: Option<&str>,
+    ) -> Result<()> {
+        if let Some(value) = cookie_secure {
+            self.server.cookie_secure = parse_env_bool(value, "FASTCART_COOKIE_SECURE")?;
+        }
+        if let Some(value) = cors_origins {
+            self.server.cors_origins = parse_origin_list(value, "FASTCART_CORS_ORIGINS")?;
+        }
+        Ok(())
+    }
+
     /// Validates configuration invariants.
     pub fn validate(&self) -> Result<()> {
         if self.storefront.worker_count == 0 {
@@ -508,15 +530,28 @@ impl Config {
         if !matches!(self.storefront.runtime.as_str(), "v8" | "node") {
             bail!("storefront.runtime must be either \"v8\" or \"node\"");
         }
-        if self.storefront.enabled
-            && self.storefront.runtime == "node"
-            && self
+        if self.storefront.enabled && self.storefront.runtime == "node" {
+            let Some(node_url) = self
                 .storefront
                 .node_url
                 .as_deref()
-                .is_none_or(str::is_empty)
-        {
-            bail!("storefront.node_url is required when the node runtime is enabled");
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+            else {
+                bail!("storefront.node_url is required when the node runtime is enabled");
+            };
+            let node_secret = self
+                .storefront
+                .node_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|secret| !secret.is_empty());
+            if node_secret.is_none() && !is_loopback_sidecar_url(node_url) {
+                bail!(
+                    "storefront.node_secret is required when storefront.node_url ({node_url:?}) is \
+                     not loopback; set the same value as SIDECAR_SECRET on the sidecar"
+                );
+            }
         }
         if self.jobs.enabled && self.jobs.worker_count == 0 {
             bail!("jobs.worker_count must be greater than zero when jobs are enabled");
@@ -528,6 +563,7 @@ impl Config {
             bail!("database.max_connections must be greater than zero");
         }
         if let Some(secret) = self.server.preview_secret.as_deref()
+            && !secret.trim().is_empty()
             && secret.trim().len() < 32
         {
             bail!("server.preview_secret must be at least 32 bytes when configured");
@@ -625,13 +661,155 @@ fn valid_origin(origin: &str) -> bool {
         && !rest.chars().any(char::is_whitespace)
 }
 
+/// Returns true when `url` points at a loopback sidecar host.
+///
+/// Recognizes `127.0.0.1`, `localhost` and `[::1]`, with or without an
+/// `http(s)://` scheme, port, path, or trailing dot. Only these literal forms
+/// count; hostnames are not resolved.
+fn is_loopback_sidecar_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(lower.as_str());
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // `user:password@host` — the last `@` starts the actual host.
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        match bracketed.split_once(']') {
+            Some((host, suffix)) if suffix.is_empty() || suffix.starts_with(':') => host,
+            _ => return false,
+        }
+    } else if authority.matches(':').count() == 1 {
+        authority.split(':').next().unwrap_or_default()
+    } else {
+        authority
+    };
+    matches!(
+        host.trim_end_matches('.'),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+/// Parses a boolean environment variable value.
+fn parse_env_bool(value: &str, variable: &str) -> Result<bool> {
+    value
+        .trim()
+        .parse()
+        .with_context(|| format!("{variable} must be true or false"))
+}
+
+/// Parses a comma-separated environment variable, trimming entries.
+///
+/// A wholly empty value clears the list; an empty entry between values is an
+/// error because it usually hides a typo.
+fn parse_origin_list(value: &str, variable: &str) -> Result<Vec<String>> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let origins: Vec<String> = value.split(',').map(str::trim).map(str::to_owned).collect();
+    if let Some(index) = origins.iter().position(String::is_empty) {
+        bail!("{variable} entry {} must not be empty", index + 1);
+    }
+    Ok(origins)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
 
+    fn node_config(node_url: &str, node_secret: Option<&str>) -> Config {
+        let mut config = Config::default();
+        config.storefront.enabled = true;
+        config.storefront.runtime = "node".to_owned();
+        config.storefront.node_url = Some(node_url.to_owned());
+        config.storefront.node_secret = node_secret.map(str::to_owned);
+        config
+    }
+
     #[test]
     fn defaults_are_valid() {
         Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn node_runtime_accepts_loopback_sidecar_without_secret() {
+        for url in [
+            "http://127.0.0.1:8788",
+            "http://localhost:8788",
+            "https://[::1]:8788",
+            "http://LOCALHOST",
+            "127.0.0.1:8788",
+        ] {
+            node_config(url, None)
+                .validate()
+                .unwrap_or_else(|error| panic!("{url} must be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn node_runtime_rejects_non_loopback_sidecar_without_secret() {
+        for url in ["https://sidecar.example.com:8788", "http://10.1.2.3:8788"] {
+            let error = node_config(url, None).validate().unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("storefront.node_secret"), "{message}");
+            assert!(message.contains(url), "{message}");
+        }
+
+        let error = node_config("https://sidecar.example.com:8788", Some("   "))
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("storefront.node_secret"));
+    }
+
+    #[test]
+    fn node_runtime_accepts_non_loopback_sidecar_with_secret() {
+        node_config("https://sidecar.example.com:8788", Some("test-secret"))
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn cookie_secure_and_cors_origins_overrides_apply() {
+        let mut config = Config::default();
+        config
+            .apply_server_env(
+                Some("false"),
+                Some(" https://admin.example.com , https://shop.example.com "),
+            )
+            .unwrap();
+        assert!(!config.server.cookie_secure);
+        assert_eq!(
+            config.server.cors_origins,
+            vec![
+                "https://admin.example.com".to_owned(),
+                "https://shop.example.com".to_owned()
+            ]
+        );
+
+        assert!(
+            config
+                .apply_server_env(Some("yes"), None)
+                .unwrap_err()
+                .to_string()
+                .contains("FASTCART_COOKIE_SECURE")
+        );
+        assert!(
+            config
+                .apply_server_env(
+                    None,
+                    Some("https://admin.example.com,,https://shop.example.com")
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("FASTCART_CORS_ORIGINS")
+        );
+
+        config
+            .apply_server_env(None, Some("   "))
+            .expect("an empty value clears the list");
+        assert!(config.server.cors_origins.is_empty());
+        assert!(config.apply_server_env(None, Some(",")).is_err());
     }
 
     #[test]
@@ -642,6 +820,16 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.server.port, 8080);
         assert_eq!(config.storefront.worker_count, 2);
+    }
+
+    #[test]
+    fn empty_preview_secret_is_treated_as_unset() {
+        let mut config = Config::default();
+        config.server.preview_secret = Some("   ".to_owned());
+        config.validate().unwrap();
+
+        config.server.preview_secret = Some("too-short".to_owned());
+        assert!(config.validate().is_err());
     }
 
     #[test]
