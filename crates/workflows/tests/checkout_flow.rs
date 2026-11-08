@@ -168,6 +168,7 @@ async fn complete_checkout_flow_is_consistent_and_idempotent() {
             customer_id: None,
             email: Some("buyer@example.com".to_owned()),
             sales_channel_id: None,
+            region_id: None,
             metadata: Metadata::empty(),
             expires_in_seconds: None,
         })
@@ -335,6 +336,7 @@ async fn completion_recovers_after_crash_between_capture_and_confirmation() {
             customer_id: None,
             email: Some("buyer@example.com".to_owned()),
             sales_channel_id: None,
+            region_id: None,
             metadata: Metadata::empty(),
             expires_in_seconds: None,
         })
@@ -467,6 +469,7 @@ async fn checkout_requires_stock_availability() {
             customer_id: None,
             email: Some("buyer@example.com".to_owned()),
             sales_channel_id: None,
+            region_id: None,
             metadata: Metadata::empty(),
             expires_in_seconds: None,
         })
@@ -605,6 +608,7 @@ async fn expired_reservations_refund_and_fail_the_checkout() {
             customer_id: None,
             email: Some("buyer@example.com".to_owned()),
             sales_channel_id: None,
+            region_id: None,
             metadata: Metadata::empty(),
             expires_in_seconds: None,
         })

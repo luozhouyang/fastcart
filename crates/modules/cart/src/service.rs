@@ -26,8 +26,8 @@ use crate::domain::{
 };
 
 const CART_COLUMNS: &str = "SELECT id, currency_code, customer_id, email, sales_channel_id, \
-     status, shipping_address, billing_address, metadata, created_at, updated_at, completed_at, \
-     expires_at FROM carts WHERE id = ?";
+     region_id, status, shipping_address, billing_address, metadata, created_at, updated_at, \
+     completed_at, expires_at FROM carts WHERE id = ?";
 
 const ITEM_COLUMNS: &str = "SELECT id, cart_id, product_id, variant_id, quantity, title, \
      variant_title, sku, thumbnail, unit_price, currency_code, is_tax_inclusive, \
@@ -95,15 +95,17 @@ impl CartService {
 
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         sqlx::query(
-            "INSERT INTO carts (id, currency_code, customer_id, email, sales_channel_id, status, \
-             shipping_address, billing_address, metadata, created_at, updated_at, completed_at, \
-             expires_at) VALUES (?, ?, ?, ?, ?, 'open', '{}', '{}', ?, ?, ?, NULL, ?)",
+            "INSERT INTO carts (id, currency_code, customer_id, email, sales_channel_id, region_id, \
+             status, shipping_address, billing_address, metadata, created_at, updated_at, \
+             completed_at, expires_at) \
+             VALUES (?, ?, ?, ?, ?, ?, 'open', '{}', '{}', ?, ?, ?, NULL, ?)",
         )
         .bind(cart_id.as_str())
         .bind(currency.as_str())
         .bind(input.customer_id.as_ref().map(CustomerId::as_str))
         .bind(email.as_deref())
         .bind(input.sales_channel_id.as_deref())
+        .bind(input.region_id.as_deref())
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
@@ -162,6 +164,7 @@ impl CartService {
             customer_id: row.customer_id.map(CustomerId::from_string),
             email: row.email,
             sales_channel_id: row.sales_channel_id,
+            region_id: row.region_id,
             status: CartStatus::from_db(&row.status),
             shipping_address,
             billing_address,
@@ -1288,6 +1291,7 @@ struct CartRow {
     customer_id: Option<String>,
     email: Option<String>,
     sales_channel_id: Option<String>,
+    region_id: Option<String>,
     status: String,
     shipping_address: String,
     billing_address: String,
@@ -1596,12 +1600,38 @@ mod tests {
 
         assert_eq!(cart.currency_code.as_str(), "USD");
         assert_eq!(cart.status, CartStatus::Open);
+        assert!(cart.region_id.is_none());
         assert!(cart.items.is_empty());
         assert_eq!(cart.totals.total, 0);
         assert!(cart.expires_at.is_some());
 
         let loaded = service.get_cart(&cart.id).await.unwrap();
         assert_eq!(loaded.id, cart.id);
+    }
+
+    #[tokio::test]
+    async fn persists_the_resolved_region_id() {
+        let service = service().await;
+        let cart = service
+            .create_cart(CreateCartInput {
+                region_id: Some("reg_test".to_owned()),
+                ..create_input("USD")
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(cart.region_id.as_deref(), Some("reg_test"));
+        let loaded = service.get_cart(&cart.id).await.unwrap();
+        assert_eq!(loaded.region_id.as_deref(), Some("reg_test"));
+
+        // Carts without a region keep a NULL column and load as `None`.
+        let legacy = create_cart(&service, "USD").await;
+        let stored: Option<String> = sqlx::query_scalar("SELECT region_id FROM carts WHERE id = ?")
+            .bind(legacy.id.as_str())
+            .fetch_one(service.db.pool())
+            .await
+            .unwrap();
+        assert!(stored.is_none());
     }
 
     #[tokio::test]

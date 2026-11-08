@@ -111,6 +111,10 @@ fn with_common_layers(router: Router, context: &AppContext, body_limit: usize) -
             fastcart_http::security_headers_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
+            context.client_ip.clone(),
+            fastcart_http::client_ip_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
             context.metrics.clone(),
             fastcart_http::metrics_middleware,
         ))

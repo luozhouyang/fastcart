@@ -11,11 +11,11 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::middleware;
 use axum::routing::post;
-use fastcart_http::{ApiResult, StoreResolutionState};
+use fastcart_http::{ApiResult, ClientIp, StoreResolutionState};
 use fastcart_module_payment::{PaymentService, PaymentWebhookRecord};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -58,9 +58,18 @@ async fn payment_webhook(
     State(context): State<Arc<AppContext>>,
     StoreDb(database): StoreDb,
     Path(provider): Path<String>,
+    client_ip: Option<Extension<ClientIp>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<PaymentWebhookRecord>> {
+    let client = client_ip
+        .map(|Extension(ip)| ip.as_key())
+        .unwrap_or_else(|| "unknown".to_owned());
+    if !context.webhook_limiter.check(&client) {
+        return Err(fastcart_http::ApiError::new(
+            fastcart_kernel::AppError::RateLimited,
+        ));
+    }
     let header_map: BTreeMap<String, String> = headers
         .iter()
         .filter_map(|(name, value)| {

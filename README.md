@@ -231,6 +231,13 @@ Required and recommended environment:
   calls that boundary.
 - `FASTCART_COOKIE_SECURE=true` — required behind TLS so session and CSRF
   cookies are marked `Secure`.
+- `FASTCART_TRUSTED_PROXIES` — comma-separated IP addresses/CIDRs whose
+  `X-Forwarded-For` chain the server may trust (for example the external TLS
+  proxy). Empty means forwarding headers are ignored and the socket peer is
+  used; this prevents clients from rotating `X-Forwarded-For` to bypass
+  cart/checkout/inquiry limits. The Admin nginx container proxies only `/api/`
+  for the Admin, not storefront writes, so it normally does not need to be
+  listed.
 - `FASTCART_PREVIEW_FRAME_ANCESTORS` — the Admin origin allowed to embed the
   preview iframe, for example `https://admin.example.com`.
 - `FASTCART_ADMIN_BASE_URL` — absolute Admin URL used in notification deep

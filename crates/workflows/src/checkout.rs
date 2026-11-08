@@ -18,6 +18,7 @@ use fastcart_module_payment::{
     CreatePaymentSessionInput, Payment, PaymentService, PaymentStatus as PaymentSessionStatus,
 };
 use fastcart_module_promotion::PromotionService;
+use fastcart_module_store::{Region, RegionService};
 
 use crate::cart::{CartContext, CartWorkflow};
 
@@ -59,6 +60,26 @@ impl CreateCheckoutRequest {
     }
 }
 
+/// Rejects a payment provider the cart's region does not enable.
+///
+/// An empty `payment_providers` list means the region does not restrict
+/// providers, so the payment registry remains the only gate.
+fn validate_region_payment_provider(region: &Region, provider: &str) -> Result<(), AppError> {
+    if region.payment_providers.is_empty()
+        || region
+            .payment_providers
+            .iter()
+            .any(|allowed| allowed == provider)
+    {
+        return Ok(());
+    }
+    Err(AppError::validation(format!(
+        "payment provider {provider} is not enabled for region {}; allowed providers: {}",
+        region.name,
+        region.payment_providers.join(", ")
+    )))
+}
+
 /// Result of a completed checkout.
 #[derive(Clone, Debug)]
 pub struct CompleteCheckoutResult {
@@ -79,6 +100,7 @@ pub struct CheckoutWorkflow {
     order: OrderService,
     payment: PaymentService,
     promotion: PromotionService,
+    regions: RegionService,
 }
 
 impl CheckoutWorkflow {
@@ -95,7 +117,8 @@ impl CheckoutWorkflow {
             checkout: CheckoutService::new(db.clone()),
             order: OrderService::new(db.clone()),
             payment,
-            promotion: PromotionService::new(db),
+            promotion: PromotionService::new(db.clone()),
+            regions: RegionService::new(db),
         }
     }
 
@@ -152,6 +175,15 @@ impl CheckoutWorkflow {
             request.expires_in_seconds
         };
 
+        // The cart's region constrains the payment providers the checkout may
+        // use. Validate before creating a session so a rejected provider cannot
+        // leave an orphaned checkout row behind.
+        let region_id = cart.region_id.clone();
+        if let Some(region_id) = region_id.as_deref() {
+            let region = self.regions.get_region(region_id).await?;
+            validate_region_payment_provider(&region, &request.payment_provider)?;
+        }
+
         let checkout = self
             .checkout
             .create(CreateCheckoutInput {
@@ -159,6 +191,7 @@ impl CheckoutWorkflow {
                 customer_id: cart.customer_id.clone(),
                 email: Some(email),
                 currency_code: cart.currency_code.to_string(),
+                region_id,
                 shipping_address: serde_json::to_value(&cart.shipping_address)
                     .map_err(|error| AppError::validation(error.to_string()))?,
                 billing_address: serde_json::to_value(&cart.billing_address)

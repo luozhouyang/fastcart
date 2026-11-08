@@ -769,6 +769,7 @@ export interface CreateCartRequest {
   currency_code: CurrencyCode;
   email?: string | null;
   sales_channel_id?: string | null;
+  region_id?: string | null;
   expires_in_seconds?: number | null;
 }
 
@@ -2480,6 +2481,7 @@ export interface StoreContextResponse {
   domain: string;
   locale: string;
   currency_code: string;
+  default_region_id: string | null;
   timezone: string;
 }
 

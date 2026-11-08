@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Extension, Multipart, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::{get, post};
-use fastcart_http::{ApiError, ApiJson, ApiQuery, ApiResult, StoreCtx};
+use fastcart_http::{ApiError, ApiJson, ApiQuery, ApiResult, ClientIp, StoreCtx};
 use fastcart_kernel::{AppError, InquiryFileId, now_timestamp};
 use fastcart_module_inquiry::{
     CreateInquiryInput, InquiryFileService, InquiryFormField, InquiryFormService, InquiryService,
@@ -187,10 +187,11 @@ async fn create_inquiry(
     State(context): State<Arc<AppContext>>,
     StoreCtx(store): StoreCtx,
     StoreDb(db): StoreDb,
+    client_ip: Option<Extension<ClientIp>>,
     headers: HeaderMap,
     ApiJson(request): ApiJson<CreateInquiryRequest>,
 ) -> ApiResult<(StatusCode, axum::Json<CreateInquiryResponse>)> {
-    let address = client_address(&headers);
+    let address = client_address(client_ip.as_ref());
     if !context
         .inquiry_limiter
         .check(&format!("{}:{address}", store.store_id))
@@ -263,10 +264,10 @@ pub(crate) async fn upload_file(
     StoreCtx(store): StoreCtx,
     StoreDb(db): StoreDb,
     ApiQuery(query): ApiQuery<UploadQuery>,
-    headers: HeaderMap,
+    client_ip: Option<Extension<ClientIp>>,
     mut multipart: Multipart,
 ) -> ApiResult<(StatusCode, axum::Json<UploadFileResponse>)> {
-    let address = client_address(&headers);
+    let address = client_address(client_ip.as_ref());
     if !context
         .upload_limiter
         .check(&format!("{}:{address}", store.store_id))
@@ -400,15 +401,14 @@ pub(crate) async fn upload_file(
     ))
 }
 
-fn client_address(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(',').next().unwrap_or_default().trim())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown")
-        .to_owned()
+/// Returns the trusted client address inserted by the middleware.
+///
+/// Direct router tests have no socket peer, so they fall back to `unknown`
+/// rather than trusting request headers.
+fn client_address(client_ip: Option<&Extension<ClientIp>>) -> String {
+    client_ip
+        .map(|Extension(ip)| ip.as_key())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn hash_client_address(store_id: &fastcart_kernel::StoreId, address: &str) -> String {

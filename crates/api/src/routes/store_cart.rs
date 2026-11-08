@@ -12,18 +12,18 @@ use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use fastcart_email::EmailMessage;
-use fastcart_http::{ApiError, ApiJson, ApiQuery, ApiResult, CustomerActor};
+use fastcart_http::{ApiError, ApiJson, ApiQuery, ApiResult, ClientIp, CustomerActor};
 use fastcart_infrastructure::{JobQueue, StoreDatabase};
 use fastcart_kernel::{
-    ActorContext, AppError, CartId, CountryCode, LineItemId, Metadata, ShippingOptionId, VariantId,
-    now_timestamp,
+    ActorContext, AppError, CartId, CountryCode, CurrencyCode, LineItemId, Metadata,
+    ShippingOptionId, VariantId, now_timestamp,
 };
 use fastcart_module_cart::{AddressInput, Cart, CreateCartInput, UpdateItemInput};
 use fastcart_module_checkout::{CheckoutService, CheckoutStatus};
 use fastcart_module_customer::CustomerService;
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_payment::PaymentService;
-use fastcart_module_store::StoreService;
+use fastcart_module_store::{RegionService, StoreService};
 use fastcart_workflows::{CartContext, CartWorkflow, CheckoutWorkflow, CreateCheckoutRequest};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -88,6 +88,8 @@ pub struct CreateCartRequest {
     pub email: Option<String>,
     /// Optional sales channel.
     pub sales_channel_id: Option<String>,
+    /// Optional store region; resolved and validated before the cart is created.
+    pub region_id: Option<String>,
     /// Lifetime in seconds.
     pub expires_in_seconds: Option<i64>,
 }
@@ -191,6 +193,16 @@ pub struct CreateCheckoutRequestDto {
     pub province_code: Option<String>,
 }
 
+/// Stable rate-limit key for a public storefront write.
+///
+/// Direct router tests have no socket peer; they share the `unknown` bucket
+/// rather than trusting request headers.
+fn client_key(client_ip: Option<&Extension<ClientIp>>) -> String {
+    client_ip
+        .map(|Extension(ip)| ip.as_key())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 fn default_payment_provider() -> String {
     "manual".to_owned()
 }
@@ -213,12 +225,19 @@ pub struct CompleteCheckoutRequest {
     responses((status = 201, body = CartResponse))
 )]
 async fn create_cart(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    client_ip: Option<Extension<ClientIp>>,
     publishable_key: Option<Extension<super::PublishableKeyContext>>,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateCartRequest>,
 ) -> ApiResult<(StatusCode, Json<CartResponse>)> {
+    if !context
+        .cart_create_limiter
+        .check(&client_key(client_ip.as_ref()))
+    {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
     let mut sales_channel_id = request.sales_channel_id;
     if let Some(Extension(key)) = publishable_key {
         match sales_channel_id.as_deref() {
@@ -239,13 +258,51 @@ async fn create_cart(
             return Err(ApiError::validation("sales channel is disabled"));
         }
     }
-    let mut input = CreateCartInput::new(request.currency_code);
+    let currency = CurrencyCode::new(request.currency_code.clone())
+        .map(|currency| currency.as_str().to_owned())
+        .map_err(|error| ApiError::new(AppError::from(error)))?;
+    let region_id = resolve_cart_region(&db, request.region_id, &currency).await?;
+    let mut input = CreateCartInput::new(currency);
     input.email = request.email;
     input.sales_channel_id = sales_channel_id;
+    input.region_id = region_id;
     input.expires_in_seconds = request.expires_in_seconds;
     input.customer_id = actor.customer_id.clone();
     let cart = CartWorkflow::new(db).create_cart(input).await?;
     Ok((StatusCode::CREATED, Json(CartResponse { cart })))
+}
+
+/// Resolves the region a new cart should be attached to.
+///
+/// Rules, in order:
+///
+/// 1. An explicit `region_id` must exist and its currency must equal the cart
+///    currency; a mismatch is rejected instead of silently repricing the cart.
+/// 2. Without `region_id`, the store's default region is attached only when its
+///    currency matches the requested cart currency. A default region in
+///    another currency is ignored, preserving pre-region behavior for clients
+///    that only send `currency_code`.
+/// 3. Otherwise the cart keeps no region.
+async fn resolve_cart_region(
+    db: &StoreDatabase,
+    requested: Option<String>,
+    currency: &str,
+) -> ApiResult<Option<String>> {
+    let regions = RegionService::new(db.clone());
+    let Some(region_id) = requested else {
+        return Ok(match regions.default_region().await? {
+            Some(region) if region.currency_code == currency => Some(region.id),
+            _ => None,
+        });
+    };
+    let region = regions.get_region(&region_id).await?;
+    if region.currency_code != currency {
+        return Err(ApiError::validation(format!(
+            "cart currency {currency} does not match region {} currency {}",
+            region.id, region.currency_code
+        )));
+    }
+    Ok(Some(region.id))
 }
 
 #[utoipa::path(
@@ -279,16 +336,29 @@ async fn get_cart(
     responses((status = 200, body = CartResponse))
 )]
 async fn add_item(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    client_ip: Option<Extension<ClientIp>>,
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
     ApiJson(request): ApiJson<AddItemRequest>,
 ) -> ApiResult<Json<CartResponse>> {
+    if !context
+        .cart_write_limiter
+        .check(&client_key(client_ip.as_ref()))
+    {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
+
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
+    let destination = request
+        .country_code
+        .as_deref()
+        .or(cart.shipping_address.country_code.as_deref());
+    ensure_region_country(&db, &cart, destination).await?;
     let context = cart_context(
         &db,
         &actor,
@@ -319,13 +389,21 @@ async fn add_item(
     responses((status = 200, body = CartResponse))
 )]
 async fn update_item(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    client_ip: Option<Extension<ClientIp>>,
     StoreDb(db): StoreDb,
     Path((cart_id, item_id)): Path<(String, String)>,
     ApiQuery(query): ApiQuery<DestinationQuery>,
     ApiJson(request): ApiJson<UpdateItemRequest>,
 ) -> ApiResult<Json<CartResponse>> {
+    if !context
+        .cart_write_limiter
+        .check(&client_key(client_ip.as_ref()))
+    {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
+
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
@@ -356,12 +434,20 @@ async fn update_item(
     responses((status = 200, body = CartResponse))
 )]
 async fn remove_item(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    client_ip: Option<Extension<ClientIp>>,
     StoreDb(db): StoreDb,
     Path((cart_id, item_id)): Path<(String, String)>,
     ApiQuery(query): ApiQuery<DestinationQuery>,
 ) -> ApiResult<Json<CartResponse>> {
+    if !context
+        .cart_write_limiter
+        .check(&client_key(client_ip.as_ref()))
+    {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
+
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
@@ -386,12 +472,20 @@ async fn remove_item(
     responses((status = 200, body = CartResponse))
 )]
 async fn clear_items(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    client_ip: Option<Extension<ClientIp>>,
     StoreDb(db): StoreDb,
     Path(cart_id): Path<String>,
     ApiQuery(query): ApiQuery<DestinationQuery>,
 ) -> ApiResult<Json<CartResponse>> {
+    if !context
+        .cart_write_limiter
+        .check(&client_key(client_ip.as_ref()))
+    {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
+
     let cart_id = parse_cart_id(&cart_id)?;
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
@@ -478,6 +572,10 @@ async fn set_address(
     let workflow = CartWorkflow::new(db.clone());
     let cart = workflow.get_cart(&cart_id).await?;
     ensure_cart_access(&cart, &actor)?;
+    if request.address_type == "shipping" {
+        // Billing addresses are not constrained: regions model destinations.
+        ensure_region_country(&db, &cart, request.country_code.as_deref()).await?;
+    }
     let input = AddressInput {
         first_name: request.first_name.clone(),
         last_name: request.last_name.clone(),
@@ -630,9 +728,16 @@ async fn remove_discount(
 async fn create_checkout(
     State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    client_ip: Option<Extension<ClientIp>>,
     StoreDb(db): StoreDb,
     ApiJson(request): ApiJson<CreateCheckoutRequestDto>,
 ) -> ApiResult<(StatusCode, Json<CheckoutResponse>)> {
+    if !context
+        .checkout_limiter
+        .check(&client_key(client_ip.as_ref()))
+    {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
     let cart_id = parse_cart_id(&request.cart_id)?;
     let carts = CartWorkflow::new(db.clone());
     let cart = carts.get_cart(&cart_id).await?;
@@ -693,10 +798,17 @@ async fn get_checkout(
 async fn complete_checkout(
     State(context): State<Arc<AppContext>>,
     Extension(actor): Extension<ActorContext>,
+    client_ip: Option<Extension<ClientIp>>,
     StoreDb(db): StoreDb,
     Path(checkout_id): Path<String>,
     ApiJson(request): ApiJson<CompleteCheckoutRequest>,
 ) -> ApiResult<Json<CheckoutCompleteResponse>> {
+    if !context
+        .checkout_limiter
+        .check(&client_key(client_ip.as_ref()))
+    {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
     let checkout_id = fastcart_kernel::CheckoutId::from_string(checkout_id);
     let payment = PaymentService::with_registry(db.clone(), context.payment_providers.clone());
     let workflow = CheckoutWorkflow::new(db.clone(), payment);
@@ -816,6 +928,40 @@ pub struct DestinationQuery {
 
 fn checkout_service(db: StoreDatabase) -> CheckoutService {
     CheckoutService::new(db)
+}
+
+/// Rejects a destination country the cart's region does not serve.
+///
+/// Carts without a region are unrestricted, as are regions without a country
+/// list (which region creation never produces, but imported rows may carry).
+async fn ensure_region_country(
+    db: &StoreDatabase,
+    cart: &Cart,
+    country_code: Option<&str>,
+) -> ApiResult<()> {
+    let Some(region_id) = cart.region_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(country_code) = country_code else {
+        return Ok(());
+    };
+    let country =
+        CountryCode::new(country_code).map_err(|error| ApiError::new(AppError::from(error)))?;
+    let region = RegionService::new(db.clone()).get_region(region_id).await?;
+    if !region.countries.is_empty()
+        && !region
+            .countries
+            .iter()
+            .any(|allowed| allowed == country.as_str())
+    {
+        return Err(ApiError::validation(format!(
+            "country {} is not served by region {}; supported countries: {}",
+            country.as_str(),
+            region.name,
+            region.countries.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 fn parse_cart_id(value: &str) -> ApiResult<CartId> {

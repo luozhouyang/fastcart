@@ -24,6 +24,8 @@ pub struct ApiConfig {
     pub cookie_secure: bool,
     /// Exact browser origins allowed to call the API with credentials.
     pub allowed_origins: Vec<String>,
+    /// Exact addresses or CIDRs whose forwarded headers are trusted.
+    pub trusted_proxies: Vec<String>,
     /// Maximum accepted request body size in bytes.
     pub max_body_bytes: usize,
     /// Directory used for store backups requested through the API.
@@ -104,6 +106,7 @@ impl Default for ApiConfig {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             cookie_secure: true,
             allowed_origins: Vec::new(),
+            trusted_proxies: Vec::new(),
             max_body_bytes: 2 * 1024 * 1024,
             backup_dir: PathBuf::from("./data/backups"),
             manual_payment_secret: None,
@@ -195,6 +198,18 @@ pub struct AppContext {
     pub events: EventBus,
     /// Store-aware cache.
     pub cache: StoreCache,
+    /// Resolved trusted client-IP configuration.
+    pub client_ip: fastcart_http::ClientIpConfig,
+    /// Cart creation limiter, keyed by client address.
+    pub cart_create_limiter: RateLimiter,
+    /// Cart line mutation limiter, keyed by client address.
+    pub cart_write_limiter: RateLimiter,
+    /// Checkout creation/completion limiter, keyed by client address.
+    pub checkout_limiter: RateLimiter,
+    /// Draft preview render limiter, keyed by client address.
+    pub preview_limiter: RateLimiter,
+    /// Payment webhook limiter, keyed by client address.
+    pub webhook_limiter: RateLimiter,
     /// Login attempt limiter.
     pub login_limiter: RateLimiter,
     /// Customer email-verification and password-reset request limiter.
@@ -269,6 +284,7 @@ impl AppContext {
         }
         register_stripe_provider(&payment_providers, &config);
         let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(config.storage_root.clone()));
+        let client_ip = fastcart_http::ClientIpConfig::parse(&config.trusted_proxies);
         Self {
             config,
             platform,
@@ -278,6 +294,12 @@ impl AppContext {
             databases,
             events: EventBus::new(1024),
             cache,
+            client_ip,
+            cart_create_limiter: RateLimiter::new(30, Duration::from_secs(60)),
+            cart_write_limiter: RateLimiter::new(120, Duration::from_secs(60)),
+            checkout_limiter: RateLimiter::new(20, Duration::from_secs(60)),
+            preview_limiter: RateLimiter::new(120, Duration::from_secs(60)),
+            webhook_limiter: RateLimiter::new(600, Duration::from_secs(60)),
             login_limiter: RateLimiter::new(10, Duration::from_secs(5 * 60)),
             customer_email_limiter: RateLimiter::new(5, Duration::from_secs(15 * 60)),
             bootstrap_lock: Arc::new(Mutex::new(())),

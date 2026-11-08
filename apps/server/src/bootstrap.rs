@@ -1,5 +1,7 @@
 //! Server bootstrap and lifecycle.
 
+use std::net::SocketAddr;
+
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -30,10 +32,13 @@ pub async fn run(config: Config) -> Result<()> {
 
     let maintenance = tokio::spawn(crate::maintenance::maintenance_loop(state.context.clone()));
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server failed")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server failed")?;
 
     maintenance.abort();
     if let Some(runtime) = &state.storefront_runtime

@@ -20,6 +20,7 @@ struct CheckoutRow {
     customer_id: Option<String>,
     email: Option<String>,
     currency_code: String,
+    region_id: Option<String>,
     status: String,
     shipping_address: String,
     billing_address: String,
@@ -45,6 +46,7 @@ impl CheckoutRow {
                 .map(fastcart_kernel::CustomerId::from_string),
             email: self.email,
             currency_code: self.currency_code,
+            region_id: self.region_id,
             status: CheckoutStatus::from_stored(&self.status)?,
             shipping_address: json_value(&self.shipping_address),
             billing_address: json_value(&self.billing_address),
@@ -238,17 +240,18 @@ impl CheckoutService {
         let id = CheckoutId::new();
         sqlx::query(
             "INSERT INTO checkout_sessions (
-                id, cart_id, customer_id, email, currency_code, status,
+                id, cart_id, customer_id, email, currency_code, region_id, status,
                 shipping_address, billing_address, shipping_method, totals, cart_items,
                 promotion_codes, payment_session_id, order_id, idempotency_key,
                 expires_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
         )
         .bind(id.as_str())
         .bind(&cart_id)
         .bind(input.customer_id.as_ref().map(|value| value.as_str()))
         .bind(email.as_deref())
         .bind(&currency)
+        .bind(input.region_id.as_deref())
         .bind(CheckoutStatus::Created.as_str())
         .bind(json_text(&input.shipping_address)?)
         .bind(json_text(&input.billing_address)?)
@@ -284,7 +287,7 @@ impl CheckoutService {
     /// Loads a checkout session by identifier.
     pub async fn get(&self, id: &CheckoutId) -> Result<CheckoutSession, AppError> {
         let row = sqlx::query_as::<_, CheckoutRow>(
-            "SELECT id, cart_id, customer_id, email, currency_code, status,
+            "SELECT id, cart_id, customer_id, email, currency_code, region_id, status,
                     shipping_address, billing_address, shipping_method, totals, cart_items,
                     promotion_codes, payment_session_id, order_id, idempotency_key,
                     expires_at, created_at, updated_at
@@ -303,7 +306,7 @@ impl CheckoutService {
     /// Loads the checkout session for a cart, if one exists.
     pub async fn get_by_cart(&self, cart_id: &CartId) -> Result<Option<CheckoutSession>, AppError> {
         let row = sqlx::query_as::<_, CheckoutRow>(
-            "SELECT id, cart_id, customer_id, email, currency_code, status,
+            "SELECT id, cart_id, customer_id, email, currency_code, region_id, status,
                     shipping_address, billing_address, shipping_method, totals, cart_items,
                     promotion_codes, payment_session_id, order_id, idempotency_key,
                     expires_at, created_at, updated_at
@@ -322,7 +325,7 @@ impl CheckoutService {
         key: &str,
     ) -> Result<Option<CheckoutSession>, AppError> {
         let row = sqlx::query_as::<_, CheckoutRow>(
-            "SELECT id, cart_id, customer_id, email, currency_code, status,
+            "SELECT id, cart_id, customer_id, email, currency_code, region_id, status,
                     shipping_address, billing_address, shipping_method, totals, cart_items,
                     promotion_codes, payment_session_id, order_id, idempotency_key,
                     expires_at, created_at, updated_at
@@ -413,7 +416,7 @@ impl CheckoutService {
         status: CheckoutStatus,
     ) -> Result<Vec<CheckoutSession>, AppError> {
         let rows = sqlx::query_as::<_, CheckoutRow>(
-            "SELECT id, cart_id, customer_id, email, currency_code, status,
+            "SELECT id, cart_id, customer_id, email, currency_code, region_id, status,
                     shipping_address, billing_address, shipping_method, totals, cart_items,
                     promotion_codes, payment_session_id, order_id, idempotency_key,
                     expires_at, created_at, updated_at
@@ -927,6 +930,7 @@ mod tests {
             customer_id: None,
             email: Some("buyer@example.com".to_owned()),
             currency_code: "USD".to_owned(),
+            region_id: None,
             shipping_address: json!({"city": "Berlin"}),
             billing_address: json!({"city": "Berlin"}),
             shipping_method: json!({"name": "Standard"}),
@@ -953,6 +957,20 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].to_state, CheckoutStatus::Created);
         assert_eq!(history[0].from_state, None);
+    }
+
+    #[tokio::test]
+    async fn persists_the_region_id() {
+        let service = service().await;
+        let cart = CartId::new();
+        let mut request = input(cart);
+        request.region_id = Some("reg_test".to_owned());
+
+        let session = service.create(request).await.unwrap();
+        assert_eq!(session.region_id.as_deref(), Some("reg_test"));
+
+        let loaded = service.get(&session.id).await.unwrap();
+        assert_eq!(loaded.region_id.as_deref(), Some("reg_test"));
     }
 
     #[tokio::test]

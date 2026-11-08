@@ -9,14 +9,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Query, Request, State};
+use axum::extract::{Extension, Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::Uri;
 use axum::http::header::HOST;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use fastcart_http::{ApiError, RequestId};
+use fastcart_http::{ApiError, ClientIp, RequestId};
 use fastcart_infrastructure::{StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, CurrencyCode, PageId, Pagination, StoreContext, now_timestamp, validate_handle,
@@ -201,9 +201,16 @@ pub fn verify_preview_token_unbound(
 /// is required.
 pub(crate) async fn render(
     State(context): State<Arc<AppContext>>,
+    client_ip: Option<Extension<ClientIp>>,
     Query(query): Query<PreviewQuery>,
     request: Request,
 ) -> Response {
+    let client = client_ip
+        .map(|Extension(ip)| ip.as_key())
+        .unwrap_or_else(|| "unknown".to_owned());
+    if !context.preview_limiter.check(&client) {
+        return ApiError::new(AppError::RateLimited).into_response();
+    }
     let Some(secret) = configured_secret(&context) else {
         return ApiError::new(AppError::NotImplemented(
             "page preview is not configured".to_owned(),

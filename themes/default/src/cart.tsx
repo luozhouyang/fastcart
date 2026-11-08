@@ -75,6 +75,12 @@ export interface CartProviderProps {
 
 const CART_STORAGE_KEY = "fastcart:cart-id";
 
+/** Store defaults fetched once per client. */
+interface StoreDefaults {
+  currency: string;
+  regionId: string | null;
+}
+
 const CartContext = createContext<CartContextValue | null>(null);
 
 /**
@@ -111,8 +117,9 @@ export function CartProvider({ apiBaseUrl, children }: CartProviderProps) {
 
   const cartIdRef = useRef<string | null>(null);
   const currencyRef = useRef<string | null>(null);
+  const defaultsRef = useRef<StoreDefaults | null>(null);
   const countryRef = useRef<string>(DEFAULT_COUNTRY_CODE);
-  const contextRequestRef = useRef<Promise<string> | null>(null);
+  const contextRequestRef = useRef<Promise<StoreDefaults> | null>(null);
   const bootstrapRef = useRef<Promise<void> | null>(null);
   const updateLockRef = useRef(false);
   const detailsLockRef = useRef(false);
@@ -133,8 +140,8 @@ export function CartProvider({ apiBaseUrl, children }: CartProviderProps) {
     }
   }, []);
 
-  const ensureCurrency = useCallback(async (): Promise<string> => {
-    const current = currencyRef.current;
+  const loadContext = useCallback(async (): Promise<StoreDefaults> => {
+    const current = defaultsRef.current;
     if (current) {
       return current;
     }
@@ -150,9 +157,16 @@ export function CartProvider({ apiBaseUrl, children }: CartProviderProps) {
           throw new Error("The store currency is unavailable.");
         }
         const normalized = code.trim().toUpperCase();
+        const rawRegionId = context.default_region_id;
+        const regionId =
+          typeof rawRegionId === "string" && rawRegionId.trim().length > 0
+            ? rawRegionId.trim()
+            : null;
+        const defaults: StoreDefaults = { currency: normalized, regionId };
+        defaultsRef.current = defaults;
         currencyRef.current = normalized;
         setCurrencyCode(normalized);
-        return normalized;
+        return defaults;
       })
       .catch((cause: unknown) => {
         contextRequestRef.current = null;
@@ -161,6 +175,14 @@ export function CartProvider({ apiBaseUrl, children }: CartProviderProps) {
     contextRequestRef.current = request;
     return request;
   }, [client]);
+
+  const ensureCurrency = useCallback(async (): Promise<string> => {
+    const current = currencyRef.current;
+    if (current) {
+      return current;
+    }
+    return (await loadContext()).currency;
+  }, [loadContext]);
 
   const bootstrap = useCallback(async () => {
     const storedCartId = readStoredCartId();
@@ -233,8 +255,18 @@ export function CartProvider({ apiBaseUrl, children }: CartProviderProps) {
   }
 
   async function createCart(): Promise<Cart> {
-    const currency = currencyRef.current ?? (await ensureCurrency());
-    const response = await client.cart.create({ currency_code: currency });
+    // The default region id comes from the same store-context call as the
+    // fallback currency. If the context is unavailable, creation still proceeds
+    // with the known currency so region-less stores behave as before.
+    const defaults = await loadContext().catch(() => null);
+    const currency = currencyRef.current ?? defaults?.currency;
+    if (!currency) {
+      throw new Error("The store currency is unavailable.");
+    }
+    const response = await client.cart.create({
+      currency_code: currency,
+      ...(defaults?.regionId ? { region_id: defaults.regionId } : {}),
+    });
     applyCart(response.cart);
     return response.cart;
   }

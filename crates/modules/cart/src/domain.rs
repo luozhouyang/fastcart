@@ -296,6 +296,8 @@ pub struct Cart {
     pub email: Option<String>,
     /// Sales channel identifier.
     pub sales_channel_id: Option<String>,
+    /// Store region this cart is priced for, when a region applies.
+    pub region_id: Option<String>,
     /// Lifecycle state.
     pub status: CartStatus,
     /// Shipping address snapshot.
@@ -339,6 +341,11 @@ pub struct CreateCartInput {
     pub email: Option<String>,
     /// Optional sales channel identifier.
     pub sales_channel_id: Option<String>,
+    /// Optional store region identifier resolved by the caller.
+    ///
+    /// The cart module never reads the store module's `regions` table; callers
+    /// resolve a region and pass its identifier here.
+    pub region_id: Option<String>,
     /// Extension metadata.
     pub metadata: Metadata,
     /// Lifetime in seconds; defaults to 30 days.
@@ -354,6 +361,7 @@ impl CreateCartInput {
             customer_id: None,
             email: None,
             sales_channel_id: None,
+            region_id: None,
             metadata: Metadata::empty(),
             expires_in_seconds: None,
         }

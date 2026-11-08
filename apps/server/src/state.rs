@@ -61,6 +61,7 @@ impl AppState {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             cookie_secure: config.server.cookie_secure,
             allowed_origins: config.server.cors_origins.clone(),
+            trusted_proxies: config.server.trusted_proxies.clone(),
             max_body_bytes: 2 * 1024 * 1024,
             backup_dir: config.database.backup_dir.clone(),
             manual_payment_secret: config

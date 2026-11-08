@@ -47,6 +47,8 @@ pub struct ServerConfig {
     pub cookie_secure: bool,
     /// Exact browser origins permitted to call the API with credentials.
     pub cors_origins: Vec<String>,
+    /// Exact addresses or CIDRs whose `X-Forwarded-For` chain is trusted.
+    pub trusted_proxies: Vec<String>,
     /// Optional signing secret enabling draft page preview.
     ///
     /// When absent, preview token issuance and the `/preview` render surface
@@ -69,6 +71,7 @@ impl Default for ServerConfig {
             log_level: "info".to_owned(),
             cookie_secure: true,
             cors_origins: Vec::new(),
+            trusted_proxies: Vec::new(),
             preview_secret: None,
             preview_frame_ancestors: Vec::new(),
             admin_base_url: None,
@@ -365,6 +368,14 @@ impl Config {
         }
         let cookie_secure = env::var("FASTCART_COOKIE_SECURE").ok();
         let cors_origins = env::var("FASTCART_CORS_ORIGINS").ok();
+        if let Ok(value) = env::var("FASTCART_TRUSTED_PROXIES") {
+            self.server.trusted_proxies = value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
         self.apply_server_env(cookie_secure.as_deref(), cors_origins.as_deref())?;
         if let Ok(value) = env::var("FASTCART_PAYMENT_WEBHOOK_SECRET") {
             self.payments.webhook_secret = Some(value);
@@ -561,6 +572,13 @@ impl Config {
         }
         if self.database.max_connections == 0 {
             bail!("database.max_connections must be greater than zero");
+        }
+        for proxy in &self.server.trusted_proxies {
+            if fastcart_http::TrustedProxy::parse(proxy).is_none() {
+                bail!(
+                    "server.trusted_proxies entries must be IP addresses or CIDRs (found {proxy:?})"
+                );
+            }
         }
         if let Some(secret) = self.server.preview_secret.as_deref()
             && !secret.trim().is_empty()

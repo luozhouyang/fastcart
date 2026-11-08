@@ -8,9 +8,11 @@ use axum::extract::Extension;
 use axum::routing::get;
 use fastcart_http::ApiResult;
 use fastcart_kernel::StoreContext;
+use fastcart_module_store::RegionService;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use super::StoreDb;
 use crate::state::AppContext;
 
 /// Builds the storefront context routes.
@@ -34,6 +36,8 @@ pub struct StoreContextDto {
     pub locale: String,
     /// Display currency in ISO 4217 form.
     pub currency_code: String,
+    /// Default region of the store, when one is configured.
+    pub default_region_id: Option<String>,
     /// IANA time zone identifier.
     pub timezone: String,
 }
@@ -47,12 +51,18 @@ pub struct StoreContextDto {
 )]
 async fn store_context(
     Extension(store): Extension<StoreContext>,
+    StoreDb(db): StoreDb,
 ) -> ApiResult<Json<StoreContextDto>> {
+    let default_region_id = RegionService::new(db)
+        .default_region()
+        .await?
+        .map(|region| region.id);
     Ok(Json(StoreContextDto {
         store_id: store.store_id.to_string(),
         domain: store.domain,
         locale: store.locale,
         currency_code: store.currency.to_string(),
+        default_region_id,
         timezone: store.timezone,
     }))
 }

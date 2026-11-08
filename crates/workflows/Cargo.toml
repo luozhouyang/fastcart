@@ -28,6 +28,7 @@ fastcart-module-payment.workspace = true
 fastcart-module-pricing.workspace = true
 fastcart-module-promotion.workspace = true
 fastcart-module-shipping.workspace = true
+fastcart-module-store.workspace = true
 fastcart-module-tax.workspace = true
 fastcart-module-webhook.workspace = true
 fastcart-notifications.workspace = true

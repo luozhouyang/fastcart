@@ -28,6 +28,10 @@ services:
       # Set to true behind TLS. The Admin nginx container forwards the
       # external scheme, but cookie security is configured explicitly here.
       FASTCART_COOKIE_SECURE: ${FASTCART_COOKIE_SECURE:-false}
+      # Only the listed proxy addresses/CIDRs may supply X-Forwarded-For.
+      # Leave empty unless an external TLS proxy is the direct peer of the
+      # server; the Admin nginx proxy does not carry storefront traffic.
+      FASTCART_TRUSTED_PROXIES: ${FASTCART_TRUSTED_PROXIES:-}
       # Draft preview and theme capabilities. Empty values disable preview and
       # leave capability grants unsigned; set strong values in production.
       FASTCART_PREVIEW_SECRET: ${FASTCART_PREVIEW_SECRET:-}

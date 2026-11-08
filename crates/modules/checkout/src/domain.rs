@@ -137,6 +137,8 @@ pub struct CheckoutSession {
     pub email: Option<String>,
     /// ISO-style currency code.
     pub currency_code: String,
+    /// Store region this checkout is priced for, when one applied to the cart.
+    pub region_id: Option<String>,
     /// Current lifecycle state.
     pub status: CheckoutStatus,
     /// Shipping address snapshot.
@@ -193,6 +195,8 @@ pub struct CreateCheckoutInput {
     pub email: Option<String>,
     /// ISO-style currency code.
     pub currency_code: String,
+    /// Store region inherited from the cart, when one applied.
+    pub region_id: Option<String>,
     /// Shipping address snapshot.
     pub shipping_address: Value,
     /// Billing address snapshot.

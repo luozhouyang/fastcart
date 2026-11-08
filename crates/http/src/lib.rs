@@ -1,6 +1,7 @@
 //! Shared HTTP building blocks: error responses, extractors, cookies and
 //! middleware for request correlation, store resolution and authentication.
 
+pub mod client_ip;
 pub mod cookies;
 pub mod error;
 pub mod extractors;
@@ -9,6 +10,9 @@ pub mod middleware;
 pub mod rate_limit;
 pub mod security;
 
+pub use client_ip::{
+    ClientIp, ClientIpConfig, TrustedProxy, client_ip_middleware, resolve_client_ip,
+};
 pub use cookies::{csrf_cookie, parse_cookies, session_cookie, session_cookie_clear};
 pub use error::{ApiError, ApiResult};
 pub use extractors::{AdminActor, ApiJson, ApiQuery, CustomerActor, PaginationQuery, StoreCtx};
