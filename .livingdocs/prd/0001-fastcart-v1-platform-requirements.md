@@ -71,8 +71,9 @@ As of 2026-11-09, the Rust backend covers the commerce modules, multi-store isol
 
 ## Open questions
 
-- Does v1 require region-driven cart currency, country validation, tax region and payment-provider selection, or is the current store-level currency sufficient? This is an ADR-level decision.
-- Is the full Phase 12 admin scope required for v1, or only the six-screen dispatch desk plus themes/pages/forms? This determines the acceptance bar for "without direct API calls".
+- Region-driven currency, country validation, tax region and payment-provider selection are v1 requirements and are implemented; the store-level currency remains the fallback when no region applies.
+- The full Phase 12 Admin scope is v1: variants/prices, promotions, regions, shipping and tax screens are implemented, so "without direct API calls" is the acceptance bar.
+- Embedded V8 SSR and Puck are post-v1; the Node sidecar and the bespoke page editor are the supported v1 implementations (ADR 0002 and 0004).
 - Are gift cards, draft orders, product types and a return-reason catalogue v1 requirements or later parity work?
 - Does the plugin system need a working contribution/capability vertical slice in v1, or is the manifest foundation sufficient?
 

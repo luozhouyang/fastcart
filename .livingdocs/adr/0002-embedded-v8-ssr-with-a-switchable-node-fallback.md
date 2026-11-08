@@ -74,3 +74,15 @@ starts without SSR (`apps/server/src/state.rs`). Self-contained theme server
 bundles, V8 deadlines/heap limits and V8/Node parity tests do not exist.
 
 This ADR is a decision, not a claim of completion.
+
+## v1 scope decision (2026-11-09)
+
+For v1, the Node sidecar is the only supported storefront runtime. The embedded
+V8 adapter stays a documented, tested-contract stub and is not a release
+blocker: `runtime-v8` continues to return `NotInitialized`, and selecting
+`storefront.runtime = "v8"` is an explicit unsupported configuration rather
+than a silent fallback. `auto` remains unsupported. The deployment image ships
+the Node sidecar, and the README states this limitation.
+
+This keeps the `StorefrontRuntime` boundary and the runtime-selection config in
+place for a post-v1 implementation without claiming V8 support in v1.

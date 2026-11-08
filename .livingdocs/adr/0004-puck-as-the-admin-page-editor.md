@@ -69,3 +69,10 @@ a dependency (`apps/admin/package.json`) and no manifest-to-Puck or
 page schema.
 
 This ADR is a decision, not a claim of completion.
+
+## v1 scope decision (2026-11-09)
+
+Puck is not a v1 deliverable. The bespoke block-tree editor remains the Admin
+page editor, and `PageBody` stays the canonical, server-validated schema so a
+future Puck adapter can translate at the boundary without a data migration.
+The PRD tracks Puck as next-scope rather than a v1 acceptance criterion.
