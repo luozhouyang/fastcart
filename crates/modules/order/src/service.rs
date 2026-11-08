@@ -50,6 +50,46 @@ struct OrderRow {
     canceled_at: Option<i64>,
 }
 
+impl OrderRow {
+    fn into_order(
+        self,
+        items: Vec<OrderItem>,
+        adjustments: Vec<OrderAdjustment>,
+        status_history: Vec<OrderStatusHistory>,
+        fulfillments: Vec<OrderFulfillment>,
+        refunds: Vec<OrderRefund>,
+    ) -> Result<Order, AppError> {
+        Ok(Order {
+            id: OrderId::from_string(self.id),
+            display_number: self.display_number,
+            customer_id: self.customer_id.map(CustomerId::from_string),
+            email: self.email,
+            currency_code: self.currency_code,
+            status: OrderStatus::from_stored(&self.status)?,
+            payment_status: PaymentStatus::from_stored(&self.payment_status)?,
+            fulfillment_status: FulfillmentStatus::from_stored(&self.fulfillment_status)?,
+            refund_status: RefundStatus::from_stored(&self.refund_status)?,
+            subtotal: self.subtotal,
+            discount_total: self.discount_total,
+            shipping_total: self.shipping_total,
+            tax_total: self.tax_total,
+            total: self.total,
+            shipping_address: json_value(&self.shipping_address),
+            billing_address: json_value(&self.billing_address),
+            shipping_methods: parse_shipping_methods(&self.shipping_methods)?,
+            metadata: Metadata::from_json_str(&self.metadata),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            canceled_at: self.canceled_at,
+            items,
+            adjustments,
+            status_history,
+            fulfillments,
+            refunds,
+        })
+    }
+}
+
 /// Persistence row for `order_items`.
 #[derive(sqlx::FromRow)]
 struct OrderItemRow {
@@ -497,10 +537,7 @@ impl OrderService {
             .await
             .map_err(database_error)?;
 
-        let mut data = Vec::with_capacity(rows.len());
-        for row in rows {
-            data.push(self.load_order(&OrderId::from_string(row.id)).await?);
-        }
+        let data = self.load_orders(rows).await?;
         Ok(fastcart_kernel::PageResult::new(data, count, pagination))
     }
 
@@ -1511,6 +1548,203 @@ impl OrderService {
         Ok(order_id)
     }
 
+    /// Loads a page of orders with a constant number of child-table queries.
+    ///
+    /// `load_order` is intentionally query-per-aggregate for single-order reads;
+    /// list pages must not issue seven queries per row.
+    async fn load_orders(&self, rows: Vec<OrderRow>) -> Result<Vec<Order>, AppError> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+        let order_placeholders = placeholders(ids.len());
+
+        let items_query_sql = format!(
+            "SELECT id, order_id, product_id, variant_id, product_title, variant_title, \
+                    sku, thumbnail, unit_price, quantity, subtotal, discount_total, \
+                    tax_total, total, is_tax_inclusive, requires_shipping, metadata \
+             FROM order_items WHERE order_id IN ({order_placeholders}) \
+             ORDER BY order_id ASC, rowid ASC"
+        );
+        let mut items_query = sqlx::query_as::<_, OrderItemRow>(&items_query_sql);
+        for id in &ids {
+            items_query = items_query.bind(id);
+        }
+        let item_rows = items_query
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+
+        let item_ids: Vec<String> = item_rows.iter().map(|row| row.id.clone()).collect();
+        let mut adjustments_by_item: HashMap<String, Vec<OrderItemAdjustment>> = HashMap::new();
+        if !item_ids.is_empty() {
+            let item_placeholders = placeholders(item_ids.len());
+            let query_sql = format!(
+                "SELECT a.id, a.order_item_id, a.promotion_id, a.code, a.amount, \
+                        a.description, a.created_at \
+                 FROM order_item_adjustments a \
+                 WHERE a.order_item_id IN ({item_placeholders}) \
+                 ORDER BY a.created_at ASC, a.rowid ASC"
+            );
+            let mut query = sqlx::query_as::<_, ItemAdjustmentRow>(&query_sql);
+            for id in &item_ids {
+                query = query.bind(id);
+            }
+            for row in query
+                .fetch_all(self.db.pool())
+                .await
+                .map_err(database_error)?
+            {
+                let adjustment = row.into_domain();
+                adjustments_by_item
+                    .entry(adjustment.order_item_id.as_str().to_owned())
+                    .or_default()
+                    .push(adjustment);
+            }
+        }
+
+        let mut items_by_order: HashMap<String, Vec<OrderItem>> = HashMap::new();
+        for row in item_rows {
+            let order_id = row.order_id.clone();
+            let adjustments = adjustments_by_item.remove(&row.id).unwrap_or_default();
+            items_by_order
+                .entry(order_id)
+                .or_default()
+                .push(row.into_domain(adjustments));
+        }
+
+        let mut adjustments_by_order: HashMap<String, Vec<OrderAdjustment>> = HashMap::new();
+        let adjustments_query_sql = format!(
+            "SELECT id, order_id, code, amount, description, created_at \
+             FROM order_adjustments WHERE order_id IN ({order_placeholders}) \
+             ORDER BY created_at ASC, rowid ASC"
+        );
+        let mut adjustments_query = sqlx::query_as::<_, AdjustmentRow>(&adjustments_query_sql);
+        for id in &ids {
+            adjustments_query = adjustments_query.bind(id);
+        }
+        for row in adjustments_query
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?
+        {
+            let order_id = row.order_id.clone();
+            adjustments_by_order
+                .entry(order_id)
+                .or_default()
+                .push(row.into_domain());
+        }
+
+        let mut history_by_order: HashMap<String, Vec<OrderStatusHistory>> = HashMap::new();
+        let history_query_sql = format!(
+            "SELECT id, order_id, status, previous_status, note, created_at \
+             FROM order_status_history WHERE order_id IN ({order_placeholders}) \
+             ORDER BY created_at ASC, rowid ASC"
+        );
+        let mut history_query = sqlx::query_as::<_, HistoryRow>(&history_query_sql);
+        for id in &ids {
+            history_query = history_query.bind(id);
+        }
+        for row in history_query
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?
+        {
+            let order_id = row.order_id.clone();
+            let history = row.into_domain()?;
+            history_by_order.entry(order_id).or_default().push(history);
+        }
+
+        let mut fulfillments_by_order: HashMap<String, Vec<OrderFulfillment>> = HashMap::new();
+        let fulfillments_query_sql = format!(
+            "SELECT id, order_id, status, provider_id, provider_fulfillment_id, provider_data, \
+                    tracking_numbers, shipped_at, delivered_at, metadata, created_at, updated_at \
+             FROM order_fulfillments WHERE order_id IN ({order_placeholders}) \
+             ORDER BY created_at ASC, rowid ASC"
+        );
+        let mut fulfillments_query = sqlx::query_as::<_, FulfillmentRow>(&fulfillments_query_sql);
+        for id in &ids {
+            fulfillments_query = fulfillments_query.bind(id);
+        }
+        let fulfillment_rows = fulfillments_query
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        let fulfillment_ids: Vec<String> =
+            fulfillment_rows.iter().map(|row| row.id.clone()).collect();
+        let mut items_by_fulfillment: HashMap<String, Vec<OrderFulfillmentItem>> = HashMap::new();
+        if !fulfillment_ids.is_empty() {
+            let fulfillment_placeholders = placeholders(fulfillment_ids.len());
+            let query_sql = format!(
+                "SELECT id, fulfillment_id, order_item_id, variant_id, quantity, created_at \
+                 FROM order_fulfillment_items WHERE fulfillment_id IN ({fulfillment_placeholders}) \
+                 ORDER BY created_at ASC, rowid ASC"
+            );
+            let mut query = sqlx::query_as::<_, FulfillmentItemRow>(&query_sql);
+            for id in &fulfillment_ids {
+                query = query.bind(id);
+            }
+            for row in query
+                .fetch_all(self.db.pool())
+                .await
+                .map_err(database_error)?
+            {
+                let item = row.into_domain();
+                items_by_fulfillment
+                    .entry(item.fulfillment_id.as_str().to_owned())
+                    .or_default()
+                    .push(item);
+            }
+        }
+        for row in fulfillment_rows {
+            let order_id = row.order_id.clone();
+            let mut fulfillment = row.into_domain();
+            fulfillment.items = items_by_fulfillment
+                .remove(fulfillment.id.as_str())
+                .unwrap_or_default();
+            fulfillments_by_order
+                .entry(order_id)
+                .or_default()
+                .push(fulfillment);
+        }
+
+        let mut refunds_by_order: HashMap<String, Vec<OrderRefund>> = HashMap::new();
+        let refunds_query_sql = format!(
+            "SELECT id, order_id, payment_id, amount, currency_code, status, reason, \
+                    provider_refund_id, created_at, updated_at \
+             FROM order_refunds WHERE order_id IN ({order_placeholders}) \
+             ORDER BY created_at ASC, rowid ASC"
+        );
+        let mut refunds_query = sqlx::query_as::<_, RefundRow>(&refunds_query_sql);
+        for id in &ids {
+            refunds_query = refunds_query.bind(id);
+        }
+        for row in refunds_query
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?
+        {
+            let order_id = row.order_id.clone();
+            refunds_by_order
+                .entry(order_id)
+                .or_default()
+                .push(row.into_domain());
+        }
+
+        let mut orders = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = row.id.clone();
+            orders.push(row.into_order(
+                items_by_order.remove(&id).unwrap_or_default(),
+                adjustments_by_order.remove(&id).unwrap_or_default(),
+                history_by_order.remove(&id).unwrap_or_default(),
+                fulfillments_by_order.remove(&id).unwrap_or_default(),
+                refunds_by_order.remove(&id).unwrap_or_default(),
+            )?);
+        }
+        Ok(orders)
+    }
+
     async fn load_order(&self, id: &OrderId) -> Result<Order, AppError> {
         let row = sqlx::query_as::<_, OrderRow>(
             "SELECT id, display_number, customer_id, email, currency_code, status,
@@ -1647,34 +1881,7 @@ impl OrderService {
             .map(RefundRow::into_domain)
             .collect();
 
-        Ok(Order {
-            id: OrderId::from_string(row.id),
-            display_number: row.display_number,
-            customer_id: row.customer_id.map(CustomerId::from_string),
-            email: row.email,
-            currency_code: row.currency_code,
-            status: OrderStatus::from_stored(&row.status)?,
-            payment_status: PaymentStatus::from_stored(&row.payment_status)?,
-            fulfillment_status: FulfillmentStatus::from_stored(&row.fulfillment_status)?,
-            refund_status: RefundStatus::from_stored(&row.refund_status)?,
-            subtotal: row.subtotal,
-            discount_total: row.discount_total,
-            shipping_total: row.shipping_total,
-            tax_total: row.tax_total,
-            total: row.total,
-            shipping_address: json_value(&row.shipping_address),
-            billing_address: json_value(&row.billing_address),
-            shipping_methods: parse_shipping_methods(&row.shipping_methods)?,
-            metadata: Metadata::from_json_str(&row.metadata),
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-            canceled_at: row.canceled_at,
-            items,
-            adjustments,
-            status_history,
-            fulfillments,
-            refunds,
-        })
+        row.into_order(items, adjustments, status_history, fulfillments, refunds)
     }
 }
 
@@ -1709,6 +1916,12 @@ async fn insert_history(
         note: note.map(str::to_owned),
         created_at,
     })
+}
+
+fn placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// A bound value used by the dynamic order filter.
@@ -2072,6 +2285,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.count, 3);
+        assert_eq!(all.data.len(), 3);
+        for order in &all.data {
+            assert!(!order.items.is_empty(), "order {} lost its items", order.id);
+            assert!(
+                order.items.iter().all(|item| item.order_id == order.id),
+                "items leaked across orders in the batched list loader"
+            );
+            assert!(order.status_history.iter().all(|h| h.order_id == order.id));
+            assert!(
+                order
+                    .fulfillments
+                    .iter()
+                    .all(|fulfillment| fulfillment.order_id == order.id)
+            );
+            assert!(
+                order
+                    .refunds
+                    .iter()
+                    .all(|refund| refund.order_id == order.id)
+            );
+        }
 
         let filtered = service
             .list(
