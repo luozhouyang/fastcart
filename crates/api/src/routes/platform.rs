@@ -142,6 +142,18 @@ async fn create_store(
     ApiJson(request): ApiJson<CreateStoreRequest>,
 ) -> ApiResult<(StatusCode, Json<StoreDto>)> {
     let user_id = actor.require_user().map_err(ApiError::new)?.clone();
+    // The first store bootstraps the platform. After that, only existing store
+    // owners and admins may create stores; a support agent or any other
+    // authenticated user must not be able to mint tenants (and become their
+    // owner) by calling this endpoint.
+    if context.platform.store_count().await? > 0
+        && !context
+            .platform
+            .has_any_store_role(&user_id, &["owner", "admin"])
+            .await?
+    {
+        return Err(ApiError::new(AppError::Forbidden));
+    }
     let mut input = CreateStoreInput::new(request.name, request.slug, request.primary_domain);
     input.locale = request.locale;
     input.currency_code = request.currency_code;

@@ -16,6 +16,7 @@ import { OverviewPage } from "@/pages/overview";
 import { PageEditorPage } from "@/pages/page-editor";
 import { PagesPage } from "@/pages/pages";
 import { ProductsPage } from "@/pages/products";
+import { PromotionsPage } from "@/pages/promotions";
 import { SettingsPage } from "@/pages/settings";
 import { ThemeDetailPage } from "@/pages/theme-detail";
 import { ThemesPage } from "@/pages/themes";
@@ -99,6 +100,12 @@ const customersRoute = createRoute({
   component: CustomersPage,
 });
 
+const promotionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/promotions",
+  component: PromotionsPage,
+});
+
 const formsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/forms",
@@ -159,6 +166,7 @@ const routeTree = rootRoute.addChildren([
   productsRoute,
   inventoryRoute,
   customersRoute,
+  promotionsRoute,
   formsRoute,
   formEditorRoute,
   inboxRoute,

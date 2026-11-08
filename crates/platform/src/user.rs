@@ -692,6 +692,42 @@ impl PlatformStore {
         Ok(count > 0)
     }
 
+    /// Returns true when the user holds any of `roles` in an active store.
+    ///
+    /// Platform-level actions that are not tied to a single store use this to
+    /// require existing store ownership instead of accepting any authenticated
+    /// user.
+    pub async fn has_any_store_role(
+        &self,
+        user_id: &UserId,
+        roles: &[&str],
+    ) -> PlatformResult<bool> {
+        if roles.is_empty() {
+            return Ok(false);
+        }
+        let placeholders = vec!["?"; roles.len()].join(", ");
+        let sql = format!(
+            "SELECT COUNT(*) FROM store_memberships m
+             JOIN membership_roles mr ON mr.membership_id = m.id
+             JOIN roles r ON r.id = mr.role_id
+             WHERE m.user_id = ? AND m.status = 'active' AND r.name IN ({placeholders})"
+        );
+        let mut query = sqlx::query_scalar::<_, i64>(&sql).bind(user_id.as_str());
+        for role in roles {
+            query = query.bind(*role);
+        }
+        let count: i64 = query.fetch_one(self.pool()).await?;
+        Ok(count > 0)
+    }
+
+    /// Returns the number of registered stores.
+    pub async fn store_count(&self) -> PlatformResult<i64> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stores")
+            .fetch_one(self.pool())
+            .await?;
+        Ok(count)
+    }
+
     /// Lists available system roles.
     pub async fn list_roles(&self) -> PlatformResult<Vec<(String, String)>> {
         let rows = sqlx::query(

@@ -1,7 +1,9 @@
 import type { PageBlock, PageBody, RenderMode, RenderRouteContext } from "@fastcart/theme-sdk";
 import type { ReactNode } from "react";
 
+import { CartProvider } from "../cart";
 import { ThemeProvider } from "../context";
+import { CartDrawer } from "./cart-drawer";
 import { UnknownBlock } from "./unknown-block";
 import { getThemeComponent } from "./registry";
 
@@ -46,21 +48,24 @@ export function PageRenderer({
       settings={settings}
       route={route}
     >
-      <div className="fc-page" data-theme="default">
-        {beforeZones.map(([name, blocks]) => (
-          <div key={name} className="fc-zone" data-zone={name}>
-            {renderBlocks(blocks, data)}
-          </div>
-        ))}
-        <main className="fc-content" data-zone="content">
-          {renderBlocks(body?.content ?? [], data)}
-        </main>
-        {afterZones.map(([name, blocks]) => (
-          <div key={name} className="fc-zone" data-zone={name}>
-            {renderBlocks(blocks, data)}
-          </div>
-        ))}
-      </div>
+      <CartProvider apiBaseUrl={apiBaseUrl}>
+        <div className="fc-page" data-theme="default">
+          {beforeZones.map(([name, blocks]) => (
+            <div key={name} className="fc-zone" data-zone={name}>
+              {renderBlocks(blocks, data)}
+            </div>
+          ))}
+          <main className="fc-content" data-zone="content">
+            {renderBlocks(body?.content ?? [], data)}
+          </main>
+          {afterZones.map(([name, blocks]) => (
+            <div key={name} className="fc-zone" data-zone={name}>
+              {renderBlocks(blocks, data)}
+            </div>
+          ))}
+        </div>
+        <CartDrawer />
+      </CartProvider>
     </ThemeProvider>
   );
 }

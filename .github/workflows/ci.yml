@@ -62,4 +62,3 @@ jobs:
           tags: fastcart-server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-

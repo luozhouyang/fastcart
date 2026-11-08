@@ -58,6 +58,7 @@ fn scoped(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
             .merge(super::store_catalog::router())
             .merge(super::store_customer::router())
             .merge(super::store_content::router())
+            .merge(super::store_context::router())
             .merge(super::store_inventory::router())
             .merge(super::store_inquiry::router())
             .merge(super::store_theme::router())

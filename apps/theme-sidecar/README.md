@@ -19,11 +19,11 @@ per-request worker startup cost.
 
 ## Environment
 
-| Variable         | Default         | Description                                                                                                                            |
-| ---------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`           | `8788`          | Listener port. Matches `storefront.node_url` in `config/config.example.toml`.                                                          |
-| `HOST`           | `127.0.0.1`     | Listener host. Set `0.0.0.0` only in containers or behind a private network.                                                           |
-| `THEME_ROOT`     | `<repo>/themes` | Directory containing bundles. Relative values resolve from the repo root.                                                              |
+| Variable         | Default         | Description                                                                                                                                                                                                                      |
+| ---------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`           | `8788`          | Listener port. Matches `storefront.node_url` in `config/config.example.toml`.                                                                                                                                                    |
+| `HOST`           | `127.0.0.1`     | Listener host. Set `0.0.0.0` only in containers or behind a private network.                                                                                                                                                     |
+| `THEME_ROOT`     | `<repo>/themes` | Directory containing bundles. Relative values resolve from the repo root.                                                                                                                                                        |
 | `SIDECAR_SECRET` | unset           | When set, `POST /render` requires `Authorization: Bearer <secret>`. Mandatory whenever `HOST` is not `127.0.0.1`, `::1` or `localhost`; the sidecar exits non-zero instead of starting an unauthenticated non-loopback listener. |
 
 `THEME_ROOT` and `bundle_path` compose: the entry is resolved at

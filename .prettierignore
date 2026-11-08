@@ -11,3 +11,9 @@ docs/architecture
 apps/storefront/src/routeTree.gen.ts
 
 .claude
+
+.cargo-home
+.pnpm-store
+
+# Email templates are hand-formatted for mail clients
+crates/notifications/templates/*.html

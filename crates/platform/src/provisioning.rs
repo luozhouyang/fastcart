@@ -195,6 +195,30 @@ impl StoreProvisioningService {
         .bind(now)
         .execute(database.pool())
         .await?;
+        // A fresh store must be checkout-able without first configuring
+        // shipping. Seed a free manual option; merchants can edit or disable it
+        // from the Admin.
+        sqlx::query(
+            "INSERT OR IGNORE INTO shipping_profiles
+             (id, name, type, metadata, created_at, updated_at)
+             VALUES ('prof_default', 'Default', 'default', '{}', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO shipping_options
+             (id, profile_id, name, price_type, amount, currency_code, is_enabled,
+              metadata, provider_id, provider_data, fulfillment_set_id, created_at, updated_at)
+             VALUES ('ship_default', 'prof_default', 'Standard shipping', 'flat', 0, ?,
+                     1, '{}', 'manual', '{}', 'fset_default', ?, ?)",
+        )
+        .bind(store.currency_code.as_str())
+        .bind(now)
+        .bind(now)
+        .execute(database.pool())
+        .await?;
         steps.push("seed_settings".to_owned());
 
         if let Some(owner_id) = owner_id {
@@ -527,6 +551,28 @@ mod tests {
                 .status,
             crate::store::StoreStatus::Deleting
         );
+    }
+
+    #[tokio::test]
+    async fn provisioning_seeds_a_default_shipping_option() {
+        let (service, _platform, store_id, owner, _dir) = fixture().await;
+        service.provision(&store_id, Some(&owner)).await.unwrap();
+        let database = service.databases().database(&store_id).await.unwrap();
+        let (name, amount, currency): (String, i64, String) = sqlx::query_as(
+            "SELECT name, amount, currency_code FROM shipping_options WHERE id = 'ship_default'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(name, "Standard shipping");
+        assert_eq!(amount, 0);
+        assert_eq!(currency, "USD");
+        let profile: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM shipping_profiles WHERE id = 'prof_default'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(profile, 1);
     }
 
     #[tokio::test]

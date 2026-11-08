@@ -5,6 +5,9 @@ import type {
   InquiryFormRevision,
   NotificationChannel,
   NotificationChannelEvent,
+  Price,
+  PriceList,
+  Product,
 } from "@fastcart/shared-types";
 
 export type OrderStatusView =
@@ -97,6 +100,16 @@ export interface ProductView {
   status: ProductStatusView;
   updatedAt: string;
   swatch: [string, string];
+}
+
+/** Full record used by the product edit drawer. */
+export interface ProductDetailView {
+  product: Product;
+  priceLists: PriceList[];
+  /** Prices in the store currency, keyed by variant id. */
+  pricesByVariant: Map<string, Price[]>;
+  /** Inventory availability keyed by variant id; null when it could not be read. */
+  availabilityByVariant: Map<string, number | null>;
 }
 
 export interface CollectionView {

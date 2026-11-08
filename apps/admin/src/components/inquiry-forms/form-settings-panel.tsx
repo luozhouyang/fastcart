@@ -150,8 +150,7 @@ export function FormSettingsPanel({
             {selectableFields.map((field) => {
               const checked = settings.notification_fields.includes(field.key);
               const disabled =
-                !checked &&
-                settings.notification_fields.length >= MAX_NOTIFICATION_FIELDS;
+                !checked && settings.notification_fields.length >= MAX_NOTIFICATION_FIELDS;
               return (
                 <li key={field.key}>
                   <label
@@ -171,9 +170,7 @@ export function FormSettingsPanel({
                       className="size-3.5 accent-[var(--brand)]"
                     />
                     <span className="min-w-0 flex-1 truncate">{field.label}</span>
-                    <span className="truncate font-mono text-[10px] text-faint">
-                      {field.key}
-                    </span>
+                    <span className="truncate font-mono text-[10px] text-faint">{field.key}</span>
                   </label>
                 </li>
               );

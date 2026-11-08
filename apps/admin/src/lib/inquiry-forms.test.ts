@@ -77,9 +77,7 @@ describe("validateInquiryDraft", () => {
       notification_fields: ["missing"],
     };
     const errors = validateInquiryDraft(contactFields(), settings);
-    expect(errors.some((error) => error.includes('"missing" is not part of this form'))).toBe(
-      true,
-    );
+    expect(errors.some((error) => error.includes('"missing" is not part of this form'))).toBe(true);
   });
 });
 

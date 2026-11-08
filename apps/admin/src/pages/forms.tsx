@@ -234,7 +234,10 @@ export function FormsPage() {
                   <TableCell className="hidden text-[11.5px] text-muted-foreground md:table-cell">
                     {shortDate(fromUnixSeconds(form.updated_at))}
                   </TableCell>
-                  <TableCell className="pr-5 text-right" onClick={(event) => event.stopPropagation()}>
+                  <TableCell
+                    className="pr-5 text-right"
+                    onClick={(event) => event.stopPropagation()}
+                  >
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
@@ -330,7 +333,10 @@ export function FormsPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={archiveTarget !== null} onOpenChange={(open) => !open && setArchiveTarget(null)}>
+      <Dialog
+        open={archiveTarget !== null}
+        onOpenChange={(open) => !open && setArchiveTarget(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Archive {archiveTarget?.name}?</DialogTitle>

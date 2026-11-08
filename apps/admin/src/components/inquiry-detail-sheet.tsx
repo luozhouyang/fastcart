@@ -18,7 +18,13 @@ import { fromUnixSeconds, shortDate, timeOfDay } from "@/lib/format";
 const STATUS_ACTIONS: InquiryStatus[] = ["new", "read", "replied", "closed", "spam"];
 
 function coreValue(inquiry: Inquiry, key: string): unknown {
-  if (key === "name" || key === "email" || key === "phone" || key === "subject" || key === "message") {
+  if (
+    key === "name" ||
+    key === "email" ||
+    key === "phone" ||
+    key === "subject" ||
+    key === "message"
+  ) {
     return inquiry[key];
   }
   return inquiry.data[key];
@@ -128,14 +134,13 @@ export function InquiryDetailSheet({
                       .filter((field) => field.kind !== "hidden")
                       .map((field) => {
                         const raw = coreValue(inquiry, field.key);
-                        const value = field.options.length > 0
-                          ? fieldOptionLabel(field, raw)
-                          : fieldValueLabel(raw);
+                        const value =
+                          field.options.length > 0
+                            ? fieldOptionLabel(field, raw)
+                            : fieldValueLabel(raw);
                         return (
                           <div key={field.key}>
-                            <p className="text-[10.5px] font-medium text-faint">
-                              {field.label}
-                            </p>
+                            <p className="text-[10.5px] font-medium text-faint">{field.label}</p>
                             <p className="mt-0.5 whitespace-pre-wrap break-words text-[12.5px] text-foreground">
                               {value}
                             </p>
@@ -149,9 +154,7 @@ export function InquiryDetailSheet({
                         if (value === null || value === undefined || value === "") return null;
                         return (
                           <div key={key}>
-                            <p className="text-[10.5px] font-medium text-faint capitalize">
-                              {key}
-                            </p>
+                            <p className="text-[10.5px] font-medium text-faint capitalize">{key}</p>
                             <p className="mt-0.5 whitespace-pre-wrap break-words text-[12.5px] text-foreground">
                               {value}
                             </p>
@@ -193,11 +196,7 @@ export function InquiryDetailSheet({
                               {file.content_type} · {fileSize(file.size_bytes)}
                             </p>
                           </div>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => onDownload(file)}
-                          >
+                          <Button variant="outline" size="sm" onClick={() => onDownload(file)}>
                             <Download className="size-3.5" aria-hidden="true" />
                             Download
                           </Button>
@@ -211,9 +210,7 @@ export function InquiryDetailSheet({
           </>
         ) : (
           <div className="flex flex-1 items-center justify-center px-6 py-16 text-center">
-            <p className="text-[12.5px] text-muted-foreground">
-              This inquiry could not be loaded.
-            </p>
+            <p className="text-[12.5px] text-muted-foreground">This inquiry could not be loaded.</p>
           </div>
         )}
       </SheetContent>

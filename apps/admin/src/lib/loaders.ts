@@ -21,6 +21,8 @@ import type {
   Order,
   OrderStatus,
   Payment,
+  Price,
+  PriceList,
   Product,
   Store,
   Variant,
@@ -53,6 +55,7 @@ import {
   type OrdersPageView,
   type OrderView,
   type OverviewView,
+  type ProductDetailView,
   type ProductView,
   type ProductsPageView,
   type RevenuePointView,
@@ -711,6 +714,65 @@ export async function loadProducts(
   };
 }
 
+/** Loads every price for one variant in a currency. */
+export async function loadVariantPrices(
+  client: AdminClient,
+  variantId: string,
+  currency: string,
+  signal: AbortSignal,
+): Promise<Price[]> {
+  return fetchAll(
+    (query) => client.prices.list({ ...query, variant_id: variantId, currency }, { signal }),
+    500,
+  );
+}
+
+/**
+ * Loads the full product record used by the edit drawer. The main catalog list
+ * keeps its single batched price request; this detail load only runs when a
+ * product is opened and fans out per variant on purpose.
+ */
+export async function loadProductDetail(
+  client: AdminClient,
+  productId: string,
+  currency: string,
+  signal: AbortSignal,
+): Promise<ProductDetailView> {
+  const [product, priceLists] = await Promise.all([
+    client.products.get(productId, { signal }),
+    fetchAll((query) => client.priceLists.list(query, { signal }), 200).catch(
+      () => [] as PriceList[],
+    ),
+  ]);
+
+  const [priceEntries, availabilityEntries] = await Promise.all([
+    Promise.all(
+      product.variants.map(async (variant) => {
+        const prices = await loadVariantPrices(client, variant.id, currency, signal).catch(
+          () => [] as Price[],
+        );
+        return [variant.id, prices] as const;
+      }),
+    ),
+    Promise.all(
+      product.variants.map(async (variant) => {
+        const available = await client.inventory
+          .availability(variant.id, { signal })
+          .then((response) => response.available)
+          .catch(() => null);
+        return [variant.id, available] as const;
+      }),
+    ),
+  ]);
+
+  return {
+    product,
+    priceLists,
+    pricesByVariant: new Map(priceEntries),
+    availabilityByVariant: new Map(availabilityEntries),
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Inventory                                                          */
 /* ------------------------------------------------------------------ */
@@ -1079,10 +1141,7 @@ export async function createInquiryForm(
   });
 }
 
-export async function archiveInquiryForm(
-  client: AdminClient,
-  formId: string,
-): Promise<void> {
+export async function archiveInquiryForm(client: AdminClient, formId: string): Promise<void> {
   await client.inquiryForms.delete(formId);
 }
 

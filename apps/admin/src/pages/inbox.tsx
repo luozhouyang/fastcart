@@ -21,11 +21,7 @@ import {
 } from "@/components/ui/table";
 import { useAuth } from "@/lib/auth";
 import { API_BASE_URL, errorMessage } from "@/lib/api";
-import {
-  demoInquiries,
-  demoInquiryDetail,
-  demoInquiryForms,
-} from "@/lib/demo-inquiries";
+import { demoInquiries, demoInquiryDetail, demoInquiryForms } from "@/lib/demo-inquiries";
 import { fromUnixSeconds, shortDate } from "@/lib/format";
 import {
   downloadInquiryFile,
@@ -56,7 +52,13 @@ function inquiryFileCount(inquiry: Inquiry): number {
 
 function demoPage(
   items: Inquiry[],
-  filters: { status: InquiryStatus | "all"; formId: string; query: string; from: string; to: string },
+  filters: {
+    status: InquiryStatus | "all";
+    formId: string;
+    query: string;
+    from: string;
+    to: string;
+  },
   offset: number,
 ): InquiriesPageView {
   const needle = filters.query.trim().toLowerCase();
@@ -110,9 +112,7 @@ export function InboxPage() {
   const loader = useCallback(
     (signal: AbortSignal) => {
       if (mode === "demo") {
-        return Promise.resolve(
-          demoPage(demoItems, { status, formId, query, from, to }, offset),
-        );
+        return Promise.resolve(demoPage(demoItems, { status, formId, query, from, to }, offset));
       }
       if (!client) return Promise.reject(new Error("No store is selected."));
       return loadInquiries(
@@ -155,9 +155,7 @@ export function InboxPage() {
     if (mode === "demo") {
       const entry = demoInquiryDetail(selectedId);
       setDetail(
-        entry
-          ? { inquiry: entry.inquiry, revision: entry.revision, files: entry.files }
-          : null,
+        entry ? { inquiry: entry.inquiry, revision: entry.revision, files: entry.files } : null,
       );
       return;
     }
@@ -182,9 +180,7 @@ export function InboxPage() {
     try {
       if (mode === "demo") {
         setDemoItems((current) =>
-          current.map((entry) =>
-            entry.id === inquiry.id ? { ...entry, status: next } : entry,
-          ),
+          current.map((entry) => (entry.id === inquiry.id ? { ...entry, status: next } : entry)),
         );
         setDetail((current) =>
           current ? { ...current, inquiry: { ...current.inquiry, status: next } } : current,
@@ -350,7 +346,9 @@ export function InboxPage() {
         <div className="flex items-start justify-between gap-4 px-6 pt-5 pb-2">
           <div>
             <p className="text-[13.5px] font-medium text-foreground">
-              {status === "all" ? "All inquiries" : `${STATUS_TABS.find((tab) => tab.value === status)?.label ?? ""} inquiries`}
+              {status === "all"
+                ? "All inquiries"
+                : `${STATUS_TABS.find((tab) => tab.value === status)?.label ?? ""} inquiries`}
             </p>
             <p className="mt-1 text-[11.5px] text-muted-foreground">
               {total.toLocaleString("en-US")} matched
@@ -397,9 +395,7 @@ export function InboxPage() {
                       {inquiry.subject || inquiry.message || "—"}
                     </p>
                     {inquiry.subject && inquiry.message ? (
-                      <p className="mt-0.5 truncate text-[10.5px] text-faint">
-                        {inquiry.message}
-                      </p>
+                      <p className="mt-0.5 truncate text-[10.5px] text-faint">{inquiry.message}</p>
                     ) : null}
                   </TableCell>
                   <TableCell className="text-center">
@@ -421,9 +417,7 @@ export function InboxPage() {
           <p className="text-[11.5px] text-muted-foreground">
             {total === 0
               ? "No inquiries to show"
-              : `Showing ${offset + 1}–${offset + rows.length} of ${total.toLocaleString(
-                  "en-US",
-                )}`}
+              : `Showing ${offset + 1}–${offset + rows.length} of ${total.toLocaleString("en-US")}`}
           </p>
           <Pagination page={currentPage} pages={pages} onChange={setPage} />
         </div>

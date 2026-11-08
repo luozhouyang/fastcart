@@ -46,9 +46,6 @@ export const DELIVERY_STATUS_TONES: Record<
   skipped: "warning",
 };
 
-export function eventLabel(
-  events: NotificationChannelEvent[],
-  type: string,
-): string {
+export function eventLabel(events: NotificationChannelEvent[], type: string): string {
   return events.find((event) => event.type === type)?.label ?? type;
 }

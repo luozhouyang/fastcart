@@ -24,6 +24,7 @@ import type {
   CreateInventoryLocationRequest,
   CreatePageRequest,
   CreatePriceListRequest,
+  CreatePriceRequest,
   CreateProductRequest,
   CreatePromotionRequest,
   CreateReservationsRequest,
@@ -135,6 +136,7 @@ import type {
   UpdateInventoryLocationRequest,
   UpdatePageRequest,
   UpdatePriceListRequest,
+  UpdatePriceRequest,
   UpdateProductRequest,
   UpdatePromotionRequest,
   UpdateShippingOptionRequest,
@@ -188,6 +190,11 @@ export interface AdminClientOptions extends ApiClientOptions {
 export interface AdminRequestOptions extends CallOptions {
   /** Overrides the client-level CSRF token for this request. */
   csrfToken?: string;
+}
+
+/** Body accepted by the bulk price upsert endpoint. */
+export interface BulkPriceRequest {
+  prices: CreatePriceRequest[];
 }
 
 /** Typed administration SDK for the `/api/v1/admin` and platform namespaces. */
@@ -594,6 +601,17 @@ export interface AdminClient {
     ): Promise<PriceList>;
     delete(id: string, options?: AdminRequestOptions): Promise<void>;
     prices(query?: PriceListQuery, options?: AdminRequestOptions): Promise<PageResult<Price>>;
+  };
+
+  prices: {
+    list(query?: PriceListQuery, options?: AdminRequestOptions): Promise<PageResult<Price>>;
+    create(body: CreatePriceRequest, options?: AdminRequestOptions): Promise<Price>;
+    update(id: string, body: UpdatePriceRequest, options?: AdminRequestOptions): Promise<Price>;
+    delete(id: string, options?: AdminRequestOptions): Promise<void>;
+    bulk(
+      body: BulkPriceRequest | CreatePriceRequest[],
+      options?: AdminRequestOptions,
+    ): Promise<Price[]>;
   };
 
   shipping: {
@@ -1809,6 +1827,37 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
         request<PageResult<Price>>("/api/v1/admin/prices", {
           ...requestOptions,
           query,
+        }),
+    },
+
+    prices: {
+      list: (query, requestOptions) =>
+        request<PageResult<Price>>("/api/v1/admin/prices", {
+          ...requestOptions,
+          query,
+        }),
+      create: (body, requestOptions) =>
+        request<Price>("/api/v1/admin/prices", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      update: (priceId, body, requestOptions) =>
+        request<Price>(`/api/v1/admin/prices/${id(priceId)}`, {
+          ...requestOptions,
+          method: "PATCH",
+          body,
+        }),
+      delete: (priceId, requestOptions) =>
+        request<void>(`/api/v1/admin/prices/${id(priceId)}`, {
+          ...requestOptions,
+          method: "DELETE",
+        }),
+      bulk: (body, requestOptions) =>
+        request<Price[]>("/api/v1/admin/prices/bulk", {
+          ...requestOptions,
+          method: "POST",
+          body: Array.isArray(body) ? { prices: body } : body,
         }),
     },
 

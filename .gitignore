@@ -46,3 +46,6 @@ test-results/
 
 # Local cargo cache used by sandboxed builds
 /.cargo-home/
+
+# Local pnpm store used by sandboxed installs
+/.pnpm-store/

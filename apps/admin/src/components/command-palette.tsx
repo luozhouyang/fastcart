@@ -12,6 +12,7 @@ import {
   Settings2,
   SlidersHorizontal,
   SunMoon,
+  TicketPercent,
   Users,
 } from "lucide-react";
 
@@ -25,7 +26,7 @@ import {
   CommandSeparator,
 } from "@/components/ui/command";
 import { useAuth } from "@/lib/auth";
-import { requestCommand } from "@/lib/commands";
+import { requestCommand, type AdminCommand } from "@/lib/commands";
 import { useTheme } from "@/components/theme-provider";
 
 const PAGES = [
@@ -34,6 +35,7 @@ const PAGES = [
   { to: "/products", label: "Products", icon: Package },
   { to: "/inventory", label: "Inventory", icon: Layers3 },
   { to: "/customers", label: "Customers", icon: Users },
+  { to: "/promotions", label: "Promotions", icon: TicketPercent },
   { to: "/pages", label: "Pages", icon: LayoutTemplate },
   { to: "/themes", label: "Themes", icon: Palette },
   { to: "/settings", label: "Settings", icon: Settings2 },
@@ -50,7 +52,7 @@ export function CommandPalette({
   const { store, logout, mode } = useAuth();
   const { toggleTheme } = useTheme();
 
-  const go = (to: (typeof PAGES)[number]["to"], command?: "new-product" | "adjust-stock") => {
+  const go = (to: (typeof PAGES)[number]["to"], command?: AdminCommand) => {
     onOpenChange(false);
     if (command) requestCommand(command);
     void navigate({ to });
@@ -86,6 +88,13 @@ export function CommandPalette({
           <CommandItem value="new product add" onSelect={() => go("/products", "new-product")}>
             <Plus aria-hidden="true" />
             Add product
+          </CommandItem>
+          <CommandItem
+            value="new promotion discount coupon"
+            onSelect={() => go("/promotions", "new-promotion")}
+          >
+            <Plus aria-hidden="true" />
+            Create promotion
           </CommandItem>
           <CommandItem
             value="adjust stock inventory"

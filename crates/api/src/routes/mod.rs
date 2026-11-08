@@ -29,6 +29,7 @@ pub mod store_assets;
 pub mod store_cart;
 pub mod store_catalog;
 pub mod store_content;
+pub mod store_context;
 pub mod store_customer;
 pub mod store_inquiry;
 pub mod store_inventory;

@@ -1,13 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  Bell,
-  History,
-  Loader2,
-  Pencil,
-  Plus,
-  Send,
-  Trash2,
-} from "lucide-react";
+import { Bell, History, Loader2, Pencil, Plus, Send, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type {
   NotificationChannel,
@@ -48,10 +40,7 @@ import {
   demoNotificationEvents,
 } from "@/lib/demo-inquiries";
 import { fromUnixSeconds, shortDate, timeOfDay } from "@/lib/format";
-import {
-  loadNotificationDeliveries,
-  loadNotifications,
-} from "@/lib/loaders";
+import { loadNotificationDeliveries, loadNotifications } from "@/lib/loaders";
 import {
   channelEndpointLabel,
   channelSecretLabel,
@@ -69,8 +58,7 @@ export function NotificationsPage() {
   const [editing, setEditing] = useState<NotificationChannel | null>(null);
   const [busy, setBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<NotificationChannel | null>(null);
-  const [deliveriesChannel, setDeliveriesChannel] =
-    useState<NotificationChannel | null>(null);
+  const [deliveriesChannel, setDeliveriesChannel] = useState<NotificationChannel | null>(null);
   const [deliveries, setDeliveries] = useState<NotificationChannelDelivery[]>([]);
   const [deliveriesLoading, setDeliveriesLoading] = useState(false);
 
@@ -88,11 +76,7 @@ export function NotificationsPage() {
     [mode, client],
   );
 
-  const { data, error, loading, reload } = useAsyncData(loader, [
-    mode,
-    store?.id,
-    dataKey,
-  ]);
+  const { data, error, loading, reload } = useAsyncData(loader, [mode, store?.id, dataKey]);
 
   const channels = mode === "demo" ? demoChannels : (data?.channels ?? []);
   const events = mode === "demo" ? demoNotificationEvents() : (data?.events ?? []);
@@ -193,9 +177,7 @@ export function NotificationsPage() {
             endpoint_url: draft.endpointUrl.trim(),
             events: draft.events,
             is_active: draft.isActive,
-            ...(draft.signingSecret.length > 0
-              ? { signing_secret: draft.signingSecret }
-              : {}),
+            ...(draft.signingSecret.length > 0 ? { signing_secret: draft.signingSecret } : {}),
           });
         }
         setDialogOpen(false);
@@ -232,9 +214,7 @@ export function NotificationsPage() {
     setBusy(true);
     try {
       if (mode === "demo") {
-        setDemoChannels((current) =>
-          current.filter((channel) => channel.id !== deleteTarget.id),
-        );
+        setDemoChannels((current) => current.filter((channel) => channel.id !== deleteTarget.id));
       } else {
         if (!client) throw new Error("No store is selected.");
         await client.notificationChannels.remove(deleteTarget.id);
@@ -341,11 +321,7 @@ export function NotificationsPage() {
                   <Send className="size-3.5" aria-hidden="true" />
                   Test
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setDeliveriesChannel(channel)}
-                >
+                <Button variant="outline" size="sm" onClick={() => setDeliveriesChannel(channel)}>
                   <History className="size-3.5" aria-hidden="true" />
                   Deliveries
                 </Button>
@@ -377,10 +353,7 @@ export function NotificationsPage() {
         onSubmit={(draft) => void save(draft)}
       />
 
-      <Dialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => !open && setDeleteTarget(null)}
-      >
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete {deleteTarget?.name}?</DialogTitle>
@@ -440,9 +413,7 @@ export function NotificationsPage() {
                       </span>
                     </div>
                     {delivery.last_error ? (
-                      <p className="mt-1.5 text-[10.5px] text-destructive">
-                        {delivery.last_error}
-                      </p>
+                      <p className="mt-1.5 text-[10.5px] text-destructive">{delivery.last_error}</p>
                     ) : null}
                   </li>
                 ))}

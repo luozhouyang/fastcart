@@ -6,12 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import {
-  FIELD_KINDS,
-  FIELD_KIND_LABELS,
-  defaultOptions,
-  isChoiceKind,
-} from "@/lib/inquiry-forms";
+import { FIELD_KINDS, FIELD_KIND_LABELS, defaultOptions, isChoiceKind } from "@/lib/inquiry-forms";
 
 const selectClass =
   "h-9 w-full cursor-pointer appearance-none rounded-md border border-input bg-card px-3 text-[12.5px] text-foreground shadow-xs outline-none transition-colors hover:border-line-strong focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/25";

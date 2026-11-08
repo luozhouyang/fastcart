@@ -45,6 +45,7 @@ import type {
   SetShippingMethodRequest,
   ShippingOptionsQuery,
   ShippingOptionsResponse,
+  StoreContextResponse,
   StoreInquiryFormResponse,
   UploadInquiryFileResponse,
   StorePageResponse,
@@ -86,6 +87,9 @@ export type StoreCart = Cart;
 export interface StorefrontClient {
   /** Updates the CSRF token captured from register or login. */
   setCsrfToken(token: string | null): void;
+
+  /** Returns the public store identity resolved from the request host. */
+  context(options?: StorefrontRequestOptions): Promise<StoreContextResponse>;
 
   products: {
     list(
@@ -330,6 +334,9 @@ export function createStorefrontClient(options: StorefrontClientOptions = {}): S
     setCsrfToken: (token) => {
       sessionCsrf = token;
     },
+
+    context: (requestOptions) =>
+      request<StoreContextResponse>("/api/v1/store/context", requestOptions),
 
     products: {
       list: (query, requestOptions) =>

@@ -23,6 +23,7 @@ import {
   Settings as SettingsIcon,
   Settings2,
   SunMoon,
+  TicketPercent,
   Users,
 } from "lucide-react";
 
@@ -54,6 +55,7 @@ interface NavItem {
     | "/products"
     | "/inventory"
     | "/customers"
+    | "/promotions"
     | "/forms"
     | "/inbox"
     | "/pages"
@@ -79,6 +81,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { to: "/products", label: "Products", icon: Package },
       { to: "/inventory", label: "Inventory", icon: Layers3 },
       { to: "/customers", label: "Customers", icon: Users },
+      { to: "/promotions", label: "Promotions", icon: TicketPercent },
       { to: "/forms", label: "Forms", icon: FileText },
       { to: "/inbox", label: "Inbox", icon: Inbox },
     ],
@@ -99,6 +102,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/products": "Products",
   "/inventory": "Inventory",
   "/customers": "Customers",
+  "/promotions": "Promotions",
   "/forms": "Forms",
   "/inbox": "Inbox",
   "/pages": "Pages",

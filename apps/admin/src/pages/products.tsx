@@ -7,13 +7,16 @@ import {
   LayoutGrid,
   List,
   Loader2,
+  Pencil,
   Plus,
   Search,
   X,
 } from "lucide-react";
+import type { Product } from "@fastcart/shared-types";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
+import { ProductDetailSheet } from "@/components/product-detail-sheet";
 import { ProductThumb } from "@/components/product-thumb";
 import { ProgressBar } from "@/components/progress-bar";
 import { ProductStatusPill } from "@/components/status-pill";
@@ -49,7 +52,7 @@ import { useAuth } from "@/lib/auth";
 import { errorMessage } from "@/lib/api";
 import { consumePendingCommand, onCommand } from "@/lib/commands";
 import { demoProducts } from "@/lib/demo";
-import { downloadCsv, moneyShort, shortDate } from "@/lib/format";
+import { downloadCsv, fromUnixSeconds, moneyShort, shortDate } from "@/lib/format";
 import { createProduct, loadProducts } from "@/lib/loaders";
 import { swatchFor, type ProductStatusView, type ProductView } from "@/lib/models";
 import { useAsyncData } from "@/lib/use-async-data";
@@ -57,6 +60,8 @@ import { cn } from "@/lib/utils";
 
 type ViewMode = "grid" | "list";
 type SortMode = "newest" | "name" | "price";
+
+type CreatedProduct = { mode: "demo"; product: ProductView } | { mode: "api"; product: Product };
 
 const STATUS_TABS: Array<{ value: "all" | ProductStatusView; label: string }> = [
   { value: "all", label: "All" },
@@ -86,9 +91,11 @@ export function ProductsPage() {
   const [sort, setSort] = useState<SortMode>("newest");
   const [extra, setExtra] = useState<ProductView[]>([]);
   const [addOpen, setAddOpen] = useState(false);
+  const [editing, setEditing] = useState<ProductView | null>(null);
 
   useEffect(() => {
     setExtra([]);
+    setEditing(null);
     setCollection(null);
     setStatus("all");
     setQuery("");
@@ -357,6 +364,20 @@ export function ProductsPage() {
                     tone={stockTone(product.stock)}
                   />
                 </div>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className="text-[10.5px] text-faint">
+                    Updated {shortDate(product.updatedAt)}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setEditing(product)}
+                    aria-label={`Edit ${product.title}`}
+                  >
+                    <Pencil className="size-3.5" aria-hidden="true" />
+                    Edit
+                  </Button>
+                </div>
               </div>
             </Card>
           ))}
@@ -371,7 +392,8 @@ export function ProductsPage() {
                 <TableHead className="w-[120px]">Status</TableHead>
                 <TableHead className="w-[110px] text-right">Price</TableHead>
                 <TableHead className="w-[110px] text-right">Stock</TableHead>
-                <TableHead className="w-[120px] pr-6 text-right">Updated</TableHead>
+                <TableHead className="w-[120px] text-right">Updated</TableHead>
+                <TableHead className="w-[80px] pr-6 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -416,8 +438,18 @@ export function ProductsPage() {
                   >
                     {product.stock}
                   </TableCell>
-                  <TableCell className="pr-6 text-right text-[11.5px] text-muted-foreground">
+                  <TableCell className="text-right text-[11.5px] text-muted-foreground">
                     {shortDate(product.updatedAt)}
+                  </TableCell>
+                  <TableCell className="pr-6 text-right">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => setEditing(product)}
+                      aria-label={`Edit ${product.title}`}
+                    >
+                      <Pencil className="size-3.5" aria-hidden="true" />
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -483,11 +515,36 @@ export function ProductsPage() {
       <AddProductDialog
         open={addOpen}
         onOpenChange={setAddOpen}
-        onCreated={(product) => {
-          if (mode === "demo") setExtra((current) => [product, ...current]);
-          else reload();
+        onCreated={(created) => {
+          if (created.mode === "demo") {
+            setExtra((current) => [created.product, ...current]);
+            return;
+          }
+          const product = created.product;
+          setEditing({
+            id: product.id,
+            title: product.title,
+            handle: product.handle,
+            collection: product.collections[0]?.title ?? "Uncategorized",
+            price: null,
+            stock: 0,
+            status: product.status,
+            updatedAt: fromUnixSeconds(product.updated_at),
+            swatch: swatchFor(product.id),
+          });
+          reload();
         }}
       />
+
+      {editing ? (
+        <ProductDetailSheet
+          product={editing}
+          mode={mode}
+          storeCurrency={currency}
+          onClose={() => setEditing(null)}
+          onMutated={reload}
+        />
+      ) : null}
     </div>
   );
 }
@@ -499,7 +556,7 @@ function AddProductDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: (product: ProductView) => void;
+  onCreated: (created: CreatedProduct) => void;
 }) {
   const { mode, client } = useAuth();
   const [title, setTitle] = useState("");
@@ -537,23 +594,13 @@ function AddProductDialog({
           updatedAt: new Date().toISOString(),
           swatch: swatchFor(title),
         };
-        onCreated(product);
+        onCreated({ mode: "demo", product });
         toast.success("Draft product added to the demo catalog");
       } else {
         if (!client) throw new Error("No store is selected.");
-        await createProduct(client, { title, sku, description });
-        onCreated({
-          id: "created",
-          title: title.trim(),
-          handle: "",
-          collection: "Uncategorized",
-          price: null,
-          stock: 0,
-          status: "draft",
-          updatedAt: new Date().toISOString(),
-          swatch: swatchFor(title),
-        });
-        toast.success("Draft product created. Add prices in a price list.");
+        const product = await createProduct(client, { title, sku, description });
+        onCreated({ mode: "api", product });
+        toast.success("Draft product created. Add variants and prices.");
       }
       reset();
       onOpenChange(false);

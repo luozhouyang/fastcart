@@ -503,12 +503,13 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{shipping_options}");
-    assert_eq!(
+    assert!(
         shipping_options["shipping_options"]
             .as_array()
             .unwrap()
-            .len(),
-        1
+            .iter()
+            .any(|resolved| resolved["option"]["id"] == option.id.to_string()),
+        "{shipping_options}"
     );
 
     // Anonymous cart.
@@ -726,4 +727,188 @@ async fn storefront_cart_checkout_and_order_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn storefront_context_reports_store_identity_and_currency() {
+    let fixture = fixture().await;
+    let _store_id = bootstrap_store(&fixture, "context.example.com").await;
+
+    let (status, body) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/store/context",
+        None,
+        &[("host", "context.example.com")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["domain"], "context.example.com");
+    assert_eq!(body["locale"], "en-US");
+    assert_eq!(body["currency_code"], "USD");
+    assert!(body["store_id"].as_str().is_some_and(|id| !id.is_empty()));
+}
+
+#[tokio::test]
+async fn fresh_store_completes_checkout_with_provisioned_shipping() {
+    let fixture = fixture().await;
+    let store_id = bootstrap_store(&fixture, "fresh.example.com").await;
+    let db = fixture.context.databases.database(&store_id).await.unwrap();
+    let host = [("host", "fresh.example.com")];
+
+    // Provisioning seeds a free default shipping option; a merchant only needs
+    // to add a product, stock and a price before the first real purchase.
+    let (status, context) =
+        request(&fixture.app, "GET", "/api/v1/store/context", None, &host).await;
+    assert_eq!(status, StatusCode::OK, "{context}");
+    assert_eq!(context["currency_code"], "USD");
+
+    let catalog = CatalogService::new(db.clone());
+    let product = catalog
+        .create_product(CreateProductInput {
+            title: "First product".to_owned(),
+            variants: vec![CreateVariantInput {
+                title: "Default".to_owned(),
+                sku: Some("FIRST-1".to_owned()),
+                manage_inventory: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog.publish_product(&product.id).await.unwrap();
+    let variant_id = product.variants[0].id.clone();
+    PricingService::new(db.clone())
+        .create_price(CreatePriceInput::new(
+            &variant_id,
+            CurrencyCode::new("USD").unwrap(),
+            1_000,
+        ))
+        .await
+        .unwrap();
+    let inventory = InventoryService::new(db.clone());
+    let location = inventory
+        .create_location(CreateLocationInput {
+            name: "Main".to_owned(),
+            address: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let item = inventory
+        .create_item(CreateInventoryItemInput {
+            sku: Some("FIRST-1".to_owned()),
+            variant_id: Some(VariantId::from_string(variant_id.clone())),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    inventory
+        .adjust_stock(&item.id, &location.id, 3, "restock", None)
+        .await
+        .unwrap();
+
+    let (status, cart) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/carts",
+        Some(serde_json::json!({"currency_code": "USD"})),
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{cart}");
+    let cart_id = cart["cart"]["id"].as_str().unwrap().to_owned();
+
+    let (status, cart) = request(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/store/carts/{cart_id}/items"),
+        Some(serde_json::json!({
+            "variant_id": variant_id,
+            "quantity": 1,
+            "country_code": "US"
+        })),
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cart}");
+
+    let (status, cart) = request(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/store/carts/{cart_id}/email"),
+        Some(serde_json::json!({"email": "buyer@example.com"})),
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cart}");
+
+    let (status, options) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/store/shipping/options?country_code=US&subtotal=1000",
+        None,
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    let seeded = options["shipping_options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["option"]["id"] == "ship_default")
+        .expect("provisioned default shipping option");
+    assert_eq!(seeded["amount_minor"], 0);
+
+    let (status, cart) = request(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/store/carts/{cart_id}/shipping-method"),
+        Some(serde_json::json!({
+            "shipping_option_id": "ship_default",
+            "country_code": "US"
+        })),
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cart}");
+    assert_eq!(cart["cart"]["totals"]["total"], 1_000);
+
+    let (status, checkout) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/store/checkouts",
+        Some(serde_json::json!({
+            "cart_id": cart_id,
+            "email": "buyer@example.com",
+            "payment_provider": "manual",
+            "country_code": "US"
+        })),
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{checkout}");
+    let checkout_id = checkout["checkout"]["id"].as_str().unwrap().to_owned();
+
+    let (status, completed) = request(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/store/checkouts/{checkout_id}/complete"),
+        Some(serde_json::json!({"country_code": "US"})),
+        &host,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["order"]["status"], "confirmed");
+    assert_eq!(completed["order"]["payment_status"], "captured");
+    assert_eq!(completed["order"]["total"], 1_000);
+    assert_eq!(
+        inventory
+            .variant_availability(&VariantId::from_string(variant_id))
+            .await
+            .unwrap(),
+        2
+    );
 }

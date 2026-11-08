@@ -88,9 +88,9 @@ function PreviewField({ field }: { field: InquiryFormField }) {
         <div className="flex items-center gap-2 rounded-md border border-dashed border-line-strong bg-background px-3 py-4 text-[11.5px] text-faint">
           <Paperclip className="size-3.5" aria-hidden="true" />
           {field.file
-            ? `Up to ${field.file.max_files} files, ${Math.round(
-                (field.file.max_bytes / (1024 * 1024)) * 10,
-              ) / 10} MB each`
+            ? `Up to ${field.file.max_files} files, ${
+                Math.round((field.file.max_bytes / (1024 * 1024)) * 10) / 10
+              } MB each`
             : "File upload"}
         </div>
       ) : (

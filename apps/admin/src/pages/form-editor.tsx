@@ -82,12 +82,7 @@ export function FormEditorPage() {
     [mode, client, formId],
   );
 
-  const { data, error, loading, reload } = useAsyncData(loader, [
-    mode,
-    store?.id,
-    dataKey,
-    formId,
-  ]);
+  const { data, error, loading, reload } = useAsyncData(loader, [mode, store?.id, dataKey, formId]);
 
   const revisions = useMemo(() => {
     if (mode === "demo" && demoRevisions !== null) return demoRevisions;
@@ -109,7 +104,6 @@ export function FormEditorPage() {
     setSelectedIndex(nextFields.length > 0 ? 0 : null);
     setErrors([]);
     // Only re-initialize when fresh server data arrives.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
   const fingerprint = draftFingerprint(fields, settings);
@@ -161,9 +155,7 @@ export function FormEditorPage() {
       removed
         ? {
             ...current,
-            notification_fields: current.notification_fields.filter(
-              (key) => key !== removed.key,
-            ),
+            notification_fields: current.notification_fields.filter((key) => key !== removed.key),
           }
         : current,
     );
@@ -176,9 +168,7 @@ export function FormEditorPage() {
 
   const updateField = (next: InquiryFormField) => {
     if (selectedIndex === null) return;
-    setFields((current) =>
-      current.map((field, index) => (index === selectedIndex ? next : field)),
-    );
+    setFields((current) => current.map((field, index) => (index === selectedIndex ? next : field)));
   };
 
   const runValidation = (): boolean => {
@@ -314,11 +304,7 @@ export function FormEditorPage() {
               <History className="size-4" aria-hidden="true" />
               Revisions
             </Button>
-            <Button
-              variant="outline"
-              onClick={() => void saveDraft()}
-              disabled={busy !== null}
-            >
+            <Button variant="outline" onClick={() => void saveDraft()} disabled={busy !== null}>
               {busy === "save" ? (
                 <Loader2 className="size-4 animate-spin" aria-hidden="true" />
               ) : (
@@ -404,11 +390,7 @@ export function FormEditorPage() {
         <TabsContent value="settings" className="mt-4">
           <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
             <Card className="p-5">
-              <FormSettingsPanel
-                settings={settings}
-                fields={fields}
-                onChange={setSettings}
-              />
+              <FormSettingsPanel settings={settings} fields={fields} onChange={setSettings} />
             </Card>
             <Card className="p-5">
               <FormPreview fields={fields} settings={settings} />
@@ -432,13 +414,11 @@ export function FormEditorPage() {
               </p>
             ) : (
               revisions.map((revision) => {
-                const published = revision.published_at !== null && revision.published_at !== undefined;
+                const published =
+                  revision.published_at !== null && revision.published_at !== undefined;
                 const isLive = form.published_version === revision.version;
                 return (
-                  <div
-                    key={revision.id}
-                    className="rounded-xl border border-border bg-card p-3.5"
-                  >
+                  <div key={revision.id} className="rounded-xl border border-border bg-card p-3.5">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-[12px] font-medium text-foreground">

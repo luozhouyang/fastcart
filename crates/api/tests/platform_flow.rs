@@ -623,3 +623,112 @@ async fn admins_manage_webhook_endpoints_without_leaking_secrets() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+#[tokio::test]
+async fn store_creation_requires_an_existing_owner_or_admin() {
+    let fixture = fixture().await;
+
+    let (status, _, cookies) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/auth/setup",
+        Some(serde_json::json!({
+            "email": "owner@example.com",
+            "password": "hunter2hunter2"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let owner_session = cookie_value(&cookies, "fc_admin_session").unwrap();
+    let owner_csrf = cookie_value(&cookies, "fc_csrf").unwrap();
+    let owner_headers = [
+        (
+            "cookie",
+            format!("fc_admin_session={owner_session}; fc_csrf={owner_csrf}"),
+        ),
+        ("x-csrf-token", owner_csrf.clone()),
+    ];
+    let owner_header_refs: Vec<(&str, &str)> = owner_headers
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+
+    let (status, store, _) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(serde_json::json!({
+            "name": "First",
+            "slug": "first",
+            "primary_domain": "first.example.com"
+        })),
+        &owner_header_refs,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{store}");
+    let store_id = store["id"].as_str().unwrap().to_owned();
+
+    let (status, user, _) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/users",
+        Some(serde_json::json!({
+            "email": "agent@example.com",
+            "password": "hunter2hunter2",
+            "store_id": store_id,
+            "roles": ["support-agent"]
+        })),
+        &owner_header_refs,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{user}");
+
+    let (status, _, agent_cookies) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/auth/login",
+        Some(serde_json::json!({
+            "email": "agent@example.com",
+            "password": "hunter2hunter2"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let agent_session = cookie_value(&agent_cookies, "fc_admin_session").unwrap();
+    let agent_csrf = cookie_value(&agent_cookies, "fc_csrf").unwrap();
+    let agent_cookie = format!("fc_admin_session={agent_session}; fc_csrf={agent_csrf}");
+
+    let (status, body, _) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(serde_json::json!({
+            "name": "Escalated",
+            "slug": "escalated",
+            "primary_domain": "escalated.example.com"
+        })),
+        &[
+            ("cookie", agent_cookie.as_str()),
+            ("x-csrf-token", agent_csrf.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // An existing owner may still create another store.
+    let (status, second, _) = json_request(
+        &fixture.app,
+        "POST",
+        "/api/v1/platform/stores",
+        Some(serde_json::json!({
+            "name": "Second",
+            "slug": "second",
+            "primary_domain": "second.example.com"
+        })),
+        &owner_header_refs,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+}

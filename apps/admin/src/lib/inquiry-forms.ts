@@ -75,7 +75,10 @@ export function defaultOptions(): InquiryFieldOption[] {
 }
 
 /** Creates a new field with a key that starts unique against the supplied fields. */
-export function createField(kind: InquiryFieldKind, existing: InquiryFormField[]): InquiryFormField {
+export function createField(
+  kind: InquiryFieldKind,
+  existing: InquiryFormField[],
+): InquiryFormField {
   const used = new Set(existing.map((field) => field.key));
   let suffix = existing.length + 1;
   let key = `${kind}_${suffix}`;
@@ -123,9 +126,7 @@ export function createField(kind: InquiryFieldKind, existing: InquiryFormField[]
 }
 
 /** Picks the draft revision if one exists, otherwise the newest revision. */
-export function revisionForEditing(
-  revisions: InquiryFormRevision[],
-): InquiryFormRevision | null {
+export function revisionForEditing(revisions: InquiryFormRevision[]): InquiryFormRevision | null {
   const draft = revisions.find(
     (revision) => revision.published_at === null || revision.published_at === undefined,
   );

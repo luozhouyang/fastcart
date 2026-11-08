@@ -2474,6 +2474,15 @@ export interface StoreThemeResponse {
   theme: StoreTheme;
 }
 
+/** Store identity and defaults resolved from the request host. */
+export interface StoreContextResponse {
+  store_id: string;
+  domain: string;
+  locale: string;
+  currency_code: string;
+  timezone: string;
+}
+
 export interface VariantAvailabilityResponse {
   variants: VariantAvailability[];
 }

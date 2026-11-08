@@ -1,6 +1,15 @@
 import type { ThemeManifest } from "@fastcart/theme-sdk";
 import theme from "../theme.json";
 
+export {
+  CartProvider,
+  useCart,
+  useOptionalCart,
+  MAX_ADD_QUANTITY,
+  MAX_LINE_QUANTITY,
+} from "./cart";
+export type { CartContextValue, CartProviderProps, CartStep, CheckoutDetails } from "./cart";
+export { CartDrawer } from "./components/cart-drawer";
 export { ContactForm } from "./components/contact-form";
 export type { ContactFormProps } from "./components/contact-form";
 export { CollectionDetail } from "./components/collection-detail";
@@ -18,6 +27,7 @@ export type {
   ProductGridItem,
   ProductGridPrice,
   ProductGridProps,
+  ProductGridVariant,
 } from "./components/product-grid";
 export { getThemeComponent, components as componentRegistry } from "./components/registry";
 export { Text } from "./components/text";
