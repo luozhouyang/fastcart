@@ -65,6 +65,7 @@ import type {
   LoginResponse,
   Membership,
   MembershipRequest,
+  Metadata,
   MeResponse,
   Order,
   OrderListQuery,
@@ -94,6 +95,7 @@ import type {
   PublishThemeSettingsRequest,
   PreviewTokenResponse,
   Refund,
+  Region,
   RegisterThemeRequest,
   ReleasedResponse,
   ResolvedShippingOption,
@@ -195,6 +197,60 @@ export interface AdminRequestOptions extends CallOptions {
 /** Body accepted by the bulk price upsert endpoint. */
 export interface BulkPriceRequest {
   prices: CreatePriceRequest[];
+}
+
+/**
+ * Region creation body.
+ *
+ * `countries` and `currency_code` are normalized by the API: countries are
+ * upper-cased ISO 3166-1 alpha-2 codes and the currency is an ISO 4217 code.
+ */
+export interface CreateRegionRequest {
+  name: string;
+  currency_code: string;
+  countries: string[];
+  tax_region_id?: string | null;
+  payment_providers?: string[];
+  is_default?: boolean;
+  metadata?: Metadata | null;
+}
+
+/** Region update body; `tax_region_id: null` clears the tax region link. */
+export interface UpdateRegionRequest {
+  name?: string;
+  currency_code?: string;
+  countries?: string[];
+  tax_region_id?: string | null;
+  payment_providers?: string[];
+  is_default?: boolean;
+  metadata?: Metadata | null;
+}
+
+/**
+ * A storefront publishable API key.
+ *
+ * The API only returns the display prefix after creation; the full `pk_...`
+ * secret is returned exactly once by {@link CreatedPublishableApiKey}.
+ */
+export interface PublishableApiKey {
+  id: string;
+  title: string;
+  token_prefix: string;
+  sales_channel_ids: string[];
+  revoked_at: number | null;
+  last_used_at: number | null;
+  created_at: number;
+}
+
+/** A newly created publishable key; `token` is the one-time secret. */
+export interface CreatedPublishableApiKey extends PublishableApiKey {
+  token: string;
+}
+
+/** Publishable key creation body. At least one sales channel is required. */
+export interface CreatePublishableApiKeyRequest {
+  title: string;
+  sales_channel_ids: string[];
 }
 
 /** Typed administration SDK for the `/api/v1/admin` and platform namespaces. */
@@ -614,7 +670,26 @@ export interface AdminClient {
     ): Promise<Price[]>;
   };
 
+  regions: {
+    list(query?: PaginationQuery, options?: AdminRequestOptions): Promise<PageResult<Region>>;
+    get(id: string, options?: AdminRequestOptions): Promise<Region>;
+    create(body: CreateRegionRequest, options?: AdminRequestOptions): Promise<Region>;
+    update(id: string, body: UpdateRegionRequest, options?: AdminRequestOptions): Promise<Region>;
+    delete(id: string, options?: AdminRequestOptions): Promise<void>;
+    /** Publishable storefront keys scoped to sales channels. */
+    publishableKeys: {
+      list(options?: AdminRequestOptions): Promise<PublishableApiKey[]>;
+      create(
+        body: CreatePublishableApiKeyRequest,
+        options?: AdminRequestOptions,
+      ): Promise<CreatedPublishableApiKey>;
+      revoke(id: string, options?: AdminRequestOptions): Promise<void>;
+    };
+  };
+
   shipping: {
+    /** Registered fulfillment provider identifiers (for example `manual`). */
+    providers(options?: AdminRequestOptions): Promise<string[]>;
     profiles: {
       list(
         query?: PaginationQuery,
@@ -1861,7 +1936,51 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
         }),
     },
 
+    regions: {
+      list: (query, requestOptions) =>
+        request<PageResult<Region>>("/api/v1/admin/regions", {
+          ...requestOptions,
+          query,
+        }),
+      get: (regionId, requestOptions) =>
+        request<Region>(`/api/v1/admin/regions/${id(regionId)}`, requestOptions),
+      create: (body, requestOptions) =>
+        request<Region>("/api/v1/admin/regions", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      update: (regionId, body, requestOptions) =>
+        request<Region>(`/api/v1/admin/regions/${id(regionId)}`, {
+          ...requestOptions,
+          method: "PATCH",
+          body,
+        }),
+      delete: (regionId, requestOptions) =>
+        request<void>(`/api/v1/admin/regions/${id(regionId)}`, {
+          ...requestOptions,
+          method: "DELETE",
+        }),
+      publishableKeys: {
+        list: (requestOptions) =>
+          request<PublishableApiKey[]>("/api/v1/admin/publishable-api-keys", requestOptions),
+        create: (body, requestOptions) =>
+          request<CreatedPublishableApiKey>("/api/v1/admin/publishable-api-keys", {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        revoke: (keyId, requestOptions) =>
+          request<void>(`/api/v1/admin/publishable-api-keys/${id(keyId)}`, {
+            ...requestOptions,
+            method: "DELETE",
+          }),
+      },
+    },
+
     shipping: {
+      providers: (requestOptions) =>
+        request<string[]>("/api/v1/admin/shipping/providers", requestOptions),
       profiles: {
         list: (query, requestOptions) =>
           request<PageResult<ShippingProfile>>("/api/v1/admin/shipping/profiles", {

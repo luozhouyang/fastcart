@@ -87,6 +87,12 @@ fn scoped_layers(
             },
             actor_store_database_middleware,
         ))
+        // Runs after authentication (outer layer) and before the handler, so
+        // the actor is available when the response comes back.
+        .layer(middleware::from_fn_with_state(
+            context.clone(),
+            super::admin_audit_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             AdminAuthState {
                 auth: context.auth.clone(),

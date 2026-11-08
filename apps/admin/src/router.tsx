@@ -17,7 +17,10 @@ import { PageEditorPage } from "@/pages/page-editor";
 import { PagesPage } from "@/pages/pages";
 import { ProductsPage } from "@/pages/products";
 import { PromotionsPage } from "@/pages/promotions";
+import { RegionsPage } from "@/pages/regions";
 import { SettingsPage } from "@/pages/settings";
+import { ShippingPage } from "@/pages/shipping";
+import { TaxPage } from "@/pages/tax";
 import { ThemeDetailPage } from "@/pages/theme-detail";
 import { ThemesPage } from "@/pages/themes";
 
@@ -160,6 +163,24 @@ const settingsRoute = createRoute({
   component: SettingsPage,
 });
 
+const regionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/regions",
+  component: RegionsPage,
+});
+
+const shippingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/shipping",
+  component: ShippingPage,
+});
+
+const taxRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/tax",
+  component: TaxPage,
+});
+
 const routeTree = rootRoute.addChildren([
   overviewRoute,
   ordersRoute,
@@ -176,6 +197,9 @@ const routeTree = rootRoute.addChildren([
   pagesRoute,
   pageEditorRoute,
   settingsRoute,
+  regionsRoute,
+  shippingRoute,
+  taxRoute,
 ]);
 
 export const router = createRouter({

@@ -7,29 +7,38 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    depends_on:
+      theme-sidecar:
+        condition: service_healthy
     environment:
       # Listener and logging.
       FASTCART_SERVER_HOST: 0.0.0.0
       FASTCART_SERVER_PORT: "8080"
       FASTCART_LOG_LEVEL: ${FASTCART_LOG_LEVEL:-info}
       RUST_LOG: ${RUST_LOG:-info}
-      # Storefront SSR. The Node runtime is the supported provider; enable it
-      # only when a sidecar is reachable.
-      FASTCART_STOREFRONT_ENABLED: ${FASTCART_STOREFRONT_ENABLED:-false}
-      FASTCART_STOREFRONT_RUNTIME: ${FASTCART_STOREFRONT_RUNTIME:-node}
-      FASTCART_STOREFRONT_NODE_URL: ${FASTCART_STOREFRONT_NODE_URL:-}
-      FASTCART_STOREFRONT_NODE_SECRET: ${FASTCART_STOREFRONT_NODE_SECRET:-}
-      FASTCART_THEMES_DIR: ${FASTCART_THEMES_DIR:-}
-      # Secrets. Provide real values through the environment or Docker secrets;
-      # empty values disable the corresponding feature rather than defaulting to
-      # a well-known secret.
+      # Storefront SSR. The Node runtime is the supported provider and the
+      # sidecar below is always part of this stack.
+      FASTCART_STOREFRONT_ENABLED: "true"
+      FASTCART_STOREFRONT_RUNTIME: node
+      FASTCART_STOREFRONT_NODE_URL: http://theme-sidecar:8788
+      # The server and sidecar must share one bearer token. Compose derives
+      # both from SIDECAR_SECRET so a mismatch cannot silently disable auth.
+      FASTCART_STOREFRONT_NODE_SECRET: ${SIDECAR_SECRET:?set SIDECAR_SECRET to a long random value}
+      FASTCART_THEMES_DIR: /app/themes
+      # Set to true behind TLS. The Admin nginx container forwards the
+      # external scheme, but cookie security is configured explicitly here.
+      FASTCART_COOKIE_SECURE: ${FASTCART_COOKIE_SECURE:-false}
+      # Draft preview and theme capabilities. Empty values disable preview and
+      # leave capability grants unsigned; set strong values in production.
       FASTCART_PREVIEW_SECRET: ${FASTCART_PREVIEW_SECRET:-}
+      FASTCART_PREVIEW_FRAME_ANCESTORS: ${FASTCART_PREVIEW_FRAME_ANCESTORS:-}
       FASTCART_CAPABILITY_SECRET: ${FASTCART_CAPABILITY_SECRET:-}
       FASTCART_INTERNAL_FETCH_SECRET: ${FASTCART_INTERNAL_FETCH_SECRET:-}
+      FASTCART_ADMIN_BASE_URL: ${FASTCART_ADMIN_BASE_URL:-http://localhost:8081}
+      # Payments and email. Empty secrets leave those features disabled.
       FASTCART_PAYMENT_WEBHOOK_SECRET: ${FASTCART_PAYMENT_WEBHOOK_SECRET:-}
       FASTCART_STRIPE_SECRET_KEY: ${FASTCART_STRIPE_SECRET_KEY:-}
       FASTCART_STRIPE_WEBHOOK_SECRET: ${FASTCART_STRIPE_WEBHOOK_SECRET:-}
-      # Email. `log` is safe by default; configure SMTP or Resend explicitly.
       FASTCART_EMAIL_PROVIDER: ${FASTCART_EMAIL_PROVIDER:-log}
       FASTCART_EMAIL_FROM: ${FASTCART_EMAIL_FROM:-orders@example.com}
       FASTCART_SMTP_HOST: ${FASTCART_SMTP_HOST:-}
@@ -51,6 +60,60 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  theme-sidecar:
+    build:
+      context: .
+      dockerfile: apps/theme-sidecar/Dockerfile
+    image: fastcart/theme-sidecar:${FASTCART_IMAGE_TAG:-local}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Container binds are never loopback, so SIDECAR_SECRET is mandatory;
+      # the image entrypoint and the sidecar bind guard both fail fast without
+      # it. The default theme bundle is baked in at /app/themes/default.
+      HOST: 0.0.0.0
+      PORT: "8788"
+      THEME_ROOT: /app/themes
+      SIDECAR_SECRET: ${SIDECAR_SECRET:?set SIDECAR_SECRET to a long random value}
+    expose:
+      - "8788"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8788/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  admin:
+    build:
+      context: .
+      dockerfile: apps/admin/Dockerfile
+    image: fastcart/admin:${FASTCART_IMAGE_TAG:-local}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      fastcart:
+        condition: service_healthy
+    # The Admin is the browser origin: nginx serves the SPA and proxies /api/
+    # to fastcart:8080. TLS is terminated by an external reverse proxy in
+    # front of this loopback port.
+    ports:
+      - "127.0.0.1:${FASTCART_ADMIN_PORT:-8081}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
 volumes:
   data:

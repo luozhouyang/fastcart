@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Extension, OriginalUri, Request, State};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 use fastcart_http::{
@@ -58,6 +59,68 @@ use fastcart_platform::{MembershipStatus, NewAudit, PlatformStore};
 use subtle::ConstantTimeEq;
 
 use crate::state::AppContext;
+
+/// Audits successful Admin mutations that have no service-level audit yet.
+///
+/// The service layer owns semantic audit entries for catalog, content, orders,
+/// promotions and the theme. Customers, payments, pricing, shipping, tax and
+/// inventory previously had no coverage, so this route-level fallback records
+/// the method, path and status for every successful mutation in those
+/// namespaces. It runs after authentication (the actor is in the request
+/// extensions) and only records 2xx responses, so failed writes are not
+/// mistaken for changes.
+pub async fn admin_audit_middleware(
+    State(context): State<Arc<AppContext>>,
+    OriginalUri(original_uri): OriginalUri,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = original_uri.path().to_owned();
+    let should_audit = matches!(
+        method,
+        Method::POST | Method::PATCH | Method::PUT | Method::DELETE
+    ) && is_audit_fallback_path(&path);
+    let actor = request.extensions().get::<ActorContext>().cloned();
+    let response = next.run(request).await;
+
+    if should_audit
+        && response.status().is_success()
+        && let Some(actor) = actor
+    {
+        let status = response.status().as_u16();
+        record_store_audit(
+            &context,
+            &actor,
+            &format!("admin.{}", method.as_str().to_ascii_lowercase()),
+            "admin_route",
+            &path,
+            serde_json::json!({ "method": method.as_str(), "path": path, "status": status }),
+        )
+        .await;
+    }
+
+    response
+}
+
+fn is_audit_fallback_path(path: &str) -> bool {
+    // `calculate` is a POST used for reads; it does not change state.
+    if path.ends_with("/calculate") {
+        return false;
+    }
+    const PREFIXES: &[&str] = &[
+        "/api/v1/admin/customers",
+        "/api/v1/admin/payments",
+        "/api/v1/admin/prices",
+        "/api/v1/admin/price-lists",
+        "/api/v1/admin/shipping",
+        "/api/v1/admin/tax",
+        "/api/v1/admin/inventory",
+    ];
+    PREFIXES
+        .iter()
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+}
 
 /// Appends an auditable store-scoped admin action.
 ///

@@ -1,4 +1,10 @@
-export type AdminCommand = "new-product" | "adjust-stock" | "new-promotion";
+export type AdminCommand =
+  | "new-product"
+  | "adjust-stock"
+  | "new-promotion"
+  | "new-region"
+  | "new-shipping-option"
+  | "new-tax-rate";
 
 const EVENT = "fastcart:command";
 let pending: AdminCommand | null = null;

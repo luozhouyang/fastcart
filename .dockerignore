@@ -1,6 +1,8 @@
-# Rust build output
+# Rust build output and local caches
 target/
 **/target/
+.cargo-home/
+**/.cargo-home/
 
 # Version control and CI metadata
 .git/
@@ -12,11 +14,11 @@ target/
 node_modules/
 **/node_modules/
 .pnpm-store/
-apps/*/dist/
+**/.pnpm-store/
+**/dist/
 apps/storefront/.output/
 apps/storefront/.nitro/
 apps/storefront/.tanstack/
-packages/*/dist/
 **/*.tsbuildinfo
 
 # Runtime data and backups never belong in an image
@@ -35,7 +37,12 @@ config/config.toml
 
 # Tests, fixtures, docs, screenshots and local tooling state
 tests/
+apps/*/test/
+**/__tests__/
+**/*.test.*
+**/*.spec.*
 docs/
+.livingdocs/
 playwright-report/
 test-results/
 coverage/

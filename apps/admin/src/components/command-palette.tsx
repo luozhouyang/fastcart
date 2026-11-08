@@ -1,18 +1,21 @@
 import { useNavigate } from "@tanstack/react-router";
 import {
   ExternalLink,
+  Globe2,
   Layers3,
   LayoutGrid,
   LayoutTemplate,
   LogOut,
   Package,
   Palette,
+  Percent,
   Plus,
   ReceiptText,
   Settings2,
   SlidersHorizontal,
   SunMoon,
   TicketPercent,
+  Truck,
   Users,
 } from "lucide-react";
 
@@ -38,6 +41,9 @@ const PAGES = [
   { to: "/promotions", label: "Promotions", icon: TicketPercent },
   { to: "/pages", label: "Pages", icon: LayoutTemplate },
   { to: "/themes", label: "Themes", icon: Palette },
+  { to: "/regions", label: "Regions", icon: Globe2 },
+  { to: "/shipping", label: "Shipping", icon: Truck },
+  { to: "/tax", label: "Tax", icon: Percent },
   { to: "/settings", label: "Settings", icon: Settings2 },
 ] as const;
 
@@ -102,6 +108,24 @@ export function CommandPalette({
           >
             <SlidersHorizontal aria-hidden="true" />
             Adjust stock
+          </CommandItem>
+          <CommandItem
+            value="new region country currency market"
+            onSelect={() => go("/regions", "new-region")}
+          >
+            <Plus aria-hidden="true" />
+            Create region
+          </CommandItem>
+          <CommandItem
+            value="new shipping option flat rate delivery"
+            onSelect={() => go("/shipping", "new-shipping-option")}
+          >
+            <Plus aria-hidden="true" />
+            Create shipping option
+          </CommandItem>
+          <CommandItem value="new tax rate percentage" onSelect={() => go("/tax", "new-tax-rate")}>
+            <Plus aria-hidden="true" />
+            Create tax rate
           </CommandItem>
           <CommandItem value="theme dark light" onSelect={toggleTheme}>
             <SunMoon aria-hidden="true" />

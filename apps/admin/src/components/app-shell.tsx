@@ -10,6 +10,7 @@ import {
   ChevronsRight,
   ChevronsUpDown,
   FileText,
+  Globe2,
   Inbox,
   Layers3,
   LayoutGrid,
@@ -18,12 +19,14 @@ import {
   Menu,
   Package,
   Palette,
+  Percent,
   ReceiptText,
   Search,
   Settings as SettingsIcon,
   Settings2,
   SunMoon,
   TicketPercent,
+  Truck,
   Users,
 } from "lucide-react";
 
@@ -61,6 +64,9 @@ interface NavItem {
     | "/pages"
     | "/themes"
     | "/notifications"
+    | "/regions"
+    | "/shipping"
+    | "/tax"
     | "/settings";
   label: string;
   icon: typeof LayoutGrid;
@@ -91,6 +97,9 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { to: "/themes", label: "Themes", icon: Palette },
       { to: "/notifications", label: "Notifications", icon: Bell },
+      { to: "/regions", label: "Regions", icon: Globe2 },
+      { to: "/shipping", label: "Shipping", icon: Truck },
+      { to: "/tax", label: "Tax", icon: Percent },
       { to: "/settings", label: "Settings", icon: SettingsIcon },
     ],
   },
@@ -108,6 +117,9 @@ const PAGE_TITLES: Record<string, string> = {
   "/pages": "Pages",
   "/themes": "Themes",
   "/notifications": "Notifications",
+  "/regions": "Regions",
+  "/shipping": "Shipping",
+  "/tax": "Tax",
   "/settings": "Settings",
 };
 

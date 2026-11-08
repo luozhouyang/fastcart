@@ -95,6 +95,11 @@ fn cookie_value(cookies: &[String], name: &str) -> Option<String> {
 }
 
 async fn bootstrap_store(fixture: &Fixture, domain: &str) -> StoreId {
+    bootstrap_store_with_admin(fixture, domain).await.0
+}
+
+/// Bootstraps a store and returns the admin cookie/CSRF pair for the owner.
+async fn bootstrap_store_with_admin(fixture: &Fixture, domain: &str) -> (StoreId, String, String) {
     let setup = fixture
         .app
         .clone()
@@ -141,7 +146,11 @@ async fn bootstrap_store(fixture: &Fixture, domain: &str) -> StoreId {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{store}");
-    StoreId::from_string(store["id"].as_str().unwrap())
+    (
+        StoreId::from_string(store["id"].as_str().unwrap()),
+        admin_auth,
+        csrf,
+    )
 }
 
 #[tokio::test]
@@ -910,5 +919,44 @@ async fn fresh_store_completes_checkout_with_provisioned_shipping() {
             .await
             .unwrap(),
         2
+    );
+}
+
+#[tokio::test]
+async fn admin_mutations_without_service_audit_are_recorded() {
+    let fixture = fixture().await;
+    let (store_id, admin_auth, csrf) =
+        bootstrap_store_with_admin(&fixture, "audit.example.com").await;
+    let store_id_header = store_id.to_string();
+
+    let (status, body) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/tax/categories",
+        Some(serde_json::json!({
+            "name": "Audit category",
+            "code": "audit_category"
+        })),
+        &[
+            ("cookie", admin_auth.as_str()),
+            ("x-csrf-token", csrf.as_str()),
+            ("x-store-id", store_id_header.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let logs = fixture
+        .context
+        .platform
+        .list_audit_logs(Some(&store_id), fastcart_kernel::Pagination::default())
+        .await
+        .unwrap();
+    assert!(
+        logs.iter().any(|log| {
+            log.action == "admin.post"
+                && log.resource_id.as_deref() == Some("/api/v1/admin/tax/categories")
+        }),
+        "missing fallback audit entry: {logs:?}"
     );
 }

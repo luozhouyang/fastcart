@@ -183,6 +183,74 @@ must not be imported into another React application's tree.
 
 Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
 
+## Deployment (Docker Compose)
+
+`docker-compose.yml` runs the production-shaped stack as three containers:
+
+| Service         | Image                    | Role                                                                          | Published port             |
+| --------------- | ------------------------ | ----------------------------------------------------------------------------- | -------------------------- |
+| `fastcart`      | `fastcart/server`        | Rust API and storefront host; SQLite data lives in the `data` volume          | `127.0.0.1:8080`           |
+| `theme-sidecar` | `fastcart/theme-sidecar` | Node 22 renderer for the bundled theme; internal-only render and asset server | none (`8788` in the stack) |
+| `admin`         | `fastcart/admin`         | nginx serving the Admin SPA and proxying `/api/` to `fastcart:8080`           | `127.0.0.1:8081`           |
+
+The server and sidecar images both build `themes/default` from source and bake
+the bundle in; rebuild those two images after changing the theme. The Admin
+image contains only `apps/admin/dist` and nginx, not `node_modules`. The server
+image sets `FASTCART_THEMES_DIR=/app/themes`, and the sidecar resolves the
+auto-registered default bundle at `/app/themes/default`.
+
+Create secrets, then build and start the stack:
+
+```bash
+export SIDECAR_SECRET="$(openssl rand -base64 48)"
+export FASTCART_PREVIEW_SECRET="$(openssl rand -base64 48)"
+export FASTCART_CAPABILITY_SECRET="$(openssl rand -base64 48)"
+export FASTCART_COOKIE_SECURE=true   # when served over HTTPS
+docker compose build
+docker compose up -d
+```
+
+Open the Admin at <http://127.0.0.1:8081>. For local HTTP-only testing set
+`FASTCART_COOKIE_SECURE=false`; otherwise the browser will not send the secure
+session cookie over plain HTTP.
+
+Required and recommended environment:
+
+- `SIDECAR_SECRET` — long random bearer token. Compose passes it to the sidecar
+  as `SIDECAR_SECRET` and to the server as `FASTCART_STOREFRONT_NODE_SECRET`, so
+  both sides always match. Compose refuses to render without it.
+- `FASTCART_STOREFRONT_NODE_SECRET` — the server-side copy of the sidecar
+  secret. Set it to the same value when running the containers without Compose;
+  Compose derives it from `SIDECAR_SECRET`.
+- `FASTCART_PREVIEW_SECRET` — at least 32 bytes; enables draft preview. Without
+  it the preview endpoints return `501 Not Implemented`.
+- `FASTCART_CAPABILITY_SECRET` — signs theme capability grants. Set a long
+  random value in production when themes use capability endpoints.
+- `FASTCART_INTERNAL_FETCH_SECRET` — shared secret that mounts the
+  secret-gated `/internal/storefront` surface; needed when a theme or sidecar
+  calls that boundary.
+- `FASTCART_COOKIE_SECURE=true` — required behind TLS so session and CSRF
+  cookies are marked `Secure`.
+- `FASTCART_PREVIEW_FRAME_ANCESTORS` — the Admin origin allowed to embed the
+  preview iframe, for example `https://admin.example.com`.
+- `FASTCART_ADMIN_BASE_URL` — absolute Admin URL used in notification deep
+  links; defaults to `http://localhost:8081` in Compose.
+
+The Admin container is the browser origin: nginx serves the SPA, and `/api/`
+requests are proxied to the server with `Host` set to the Admin host and
+`X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto`
+forwarded. This keeps session and CSRF cookies same-origin, so the Admin needs
+no CORS configuration. TLS termination is external: put a reverse proxy in
+front of the loopback Admin port (`8081`) and the loopback server port (`8080`)
+for storefront hosts, and forward `X-Forwarded-Proto` from that proxy. The Admin
+nginx config forwards the incoming scheme to the server.
+
+Health endpoints: the server exposes `/health/live` (used by its container
+healthcheck), the sidecar exposes `/health`, and the Admin nginx container
+exposes `/healthz`. `docker compose up` waits for the sidecar before starting the
+server and for the server before starting the Admin. The `data` named volume
+persists `/app/data`; removing containers does not remove it.
+
 ## HTTP API
 
 All endpoints are under `/api/v1` unless noted.
