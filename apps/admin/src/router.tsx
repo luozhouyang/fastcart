@@ -1,5 +1,11 @@
-import React from "react";
-import { Link, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import React, { Suspense } from "react";
+import {
+  Link,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  lazyRouteComponent,
+} from "@tanstack/react-router";
 
 import { AppShell } from "@/components/app-shell";
 import { ThemeProvider, useTheme } from "@/components/theme-provider";
@@ -7,25 +13,69 @@ import { Toaster } from "@/components/ui/sonner";
 import { PermissionGate } from "@/components/permission-gate";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { AuthProvider, useAuth } from "@/lib/auth";
-import { CustomersPage } from "@/pages/customers";
-import { FormEditorPage } from "@/pages/form-editor";
-import { FormsPage } from "@/pages/forms";
-import { InboxPage } from "@/pages/inbox";
-import { InventoryPage } from "@/pages/inventory";
 import { LoginPage, NoStorePage, SplashScreen } from "@/pages/login";
-import { NotificationsPage } from "@/pages/notifications";
-import { OrdersPage } from "@/pages/orders";
 import { OverviewPage } from "@/pages/overview";
-import { PageEditorPage } from "@/pages/page-editor";
-import { PagesPage } from "@/pages/pages";
-import { ProductsPage } from "@/pages/products";
-import { PromotionsPage } from "@/pages/promotions";
-import { RegionsPage } from "@/pages/regions";
-import { SettingsPage } from "@/pages/settings";
-import { ShippingPage } from "@/pages/shipping";
-import { TaxPage } from "@/pages/tax";
-import { ThemeDetailPage } from "@/pages/theme-detail";
-import { ThemesPage } from "@/pages/themes";
+
+const CustomersPage = lazyRouteComponent(() =>
+  import("@/pages/customers").then((module) => ({ default: module.CustomersPage })),
+);
+const FormEditorPage = lazyRouteComponent(() =>
+  import("@/pages/form-editor").then((module) => ({ default: module.FormEditorPage })),
+);
+const FormsPage = lazyRouteComponent(() =>
+  import("@/pages/forms").then((module) => ({ default: module.FormsPage })),
+);
+const InboxPage = lazyRouteComponent(() =>
+  import("@/pages/inbox").then((module) => ({ default: module.InboxPage })),
+);
+const InventoryPage = lazyRouteComponent(() =>
+  import("@/pages/inventory").then((module) => ({ default: module.InventoryPage })),
+);
+const NotificationsPage = lazyRouteComponent(() =>
+  import("@/pages/notifications").then((module) => ({ default: module.NotificationsPage })),
+);
+const OrdersPage = lazyRouteComponent(() =>
+  import("@/pages/orders").then((module) => ({ default: module.OrdersPage })),
+);
+const PageEditorPage = lazyRouteComponent(() =>
+  import("@/pages/page-editor").then((module) => ({ default: module.PageEditorPage })),
+);
+const PagesPage = lazyRouteComponent(() =>
+  import("@/pages/pages").then((module) => ({ default: module.PagesPage })),
+);
+const ProductsPage = lazyRouteComponent(() =>
+  import("@/pages/products").then((module) => ({ default: module.ProductsPage })),
+);
+const PromotionsPage = lazyRouteComponent(() =>
+  import("@/pages/promotions").then((module) => ({ default: module.PromotionsPage })),
+);
+const RegionsPage = lazyRouteComponent(() =>
+  import("@/pages/regions").then((module) => ({ default: module.RegionsPage })),
+);
+const SettingsPage = lazyRouteComponent(() =>
+  import("@/pages/settings").then((module) => ({ default: module.SettingsPage })),
+);
+const ShippingPage = lazyRouteComponent(() =>
+  import("@/pages/shipping").then((module) => ({ default: module.ShippingPage })),
+);
+const TaxPage = lazyRouteComponent(() =>
+  import("@/pages/tax").then((module) => ({ default: module.TaxPage })),
+);
+const ThemeDetailPage = lazyRouteComponent(() =>
+  import("@/pages/theme-detail").then((module) => ({ default: module.ThemeDetailPage })),
+);
+const ThemesPage = lazyRouteComponent(() =>
+  import("@/pages/themes").then((module) => ({ default: module.ThemesPage })),
+);
+
+function PageLoading() {
+  return (
+    <div className="flex min-h-[40vh] items-center justify-center" role="status" aria-live="polite">
+      <span className="size-6 animate-spin rounded-full border-2 border-border border-t-brand" />
+      <span className="sr-only">Loading page</span>
+    </div>
+  );
+}
 
 function AppGate() {
   const { status } = useAuth();
@@ -74,7 +124,9 @@ function NotFoundPage() {
 function guarded(component: React.ComponentType, permission: Permission) {
   return function PermissionGuardedPage() {
     return (
-      <PermissionGate permission={permission}>{React.createElement(component)}</PermissionGate>
+      <PermissionGate permission={permission}>
+        <Suspense fallback={<PageLoading />}>{React.createElement(component)}</Suspense>
+      </PermissionGate>
     );
   };
 }
