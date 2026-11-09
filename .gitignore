@@ -11,6 +11,8 @@ apps/storefront/.nitro/
 apps/storefront/.tanstack/
 packages/*/dist/
 themes/*/dist/
+templates/*/dist/
+templates/*/.wrangler/
 
 # Local design documents (kept out of version control)
 /docs/

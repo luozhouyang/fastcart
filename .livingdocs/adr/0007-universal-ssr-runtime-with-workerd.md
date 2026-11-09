@@ -177,6 +177,13 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 5 (2026-11-09) added `templates/storefront-tanstack`, a TanStack Start
+template that builds a real Worker artifact and packages it with
+`@fastcart/storefront-build`. A workerd smoke test covers SSR, server functions,
+trusted headers, streaming, duplicate cookies, redirects and errors; a manual
+`fastcart-server` run confirmed the full storefront path. Static asset serving
+and browser hydration remain Phase 7 work.
+
 Phase 4 (2026-11-09) wired the runtime into `fastcart-server`. The storefront
 fallback resolves the store, then forwards the request to a managed workerd
 group; the gateway strips client-supplied internal headers and injects trusted

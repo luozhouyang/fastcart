@@ -84,5 +84,11 @@ Background crash monitoring and persisted group state remain Phase 8/9 work.
 The storefront fallback forwards to a managed workerd group. Trusted context is
 injected, spoofed internal headers are removed, response streams and duplicate
 `Set-Cookie` headers are preserved. `[ssr]` configuration is wired into
-`apps/server`. Browser-level TanStack Start coverage and static asset serving
-remain Phase 5/7 work.
+`apps/server`.
+
+### Phase 5 status
+
+`templates/storefront-tanstack` builds a FastCart SSR artifact and its workerd
+smoke test covers SSR, server functions, trusted headers, streaming, cookies,
+redirects and errors. A manual `fastcart-server` run rendered the template.
+Static assets and browser hydration are Phase 7 work.

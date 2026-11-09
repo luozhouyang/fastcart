@@ -71,21 +71,22 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 
 ## Repository layout
 
-| Path                         | Purpose                                                           |
-| ---------------------------- | ----------------------------------------------------------------- |
-| `apps/server`                | Axum server bootstrap, configuration, graceful shutdown           |
-| `apps/admin`                 | React Admin application for the implemented store operations      |
-| `apps/storefront`            | TanStack Start reference harness (first universal-runtime target) |
-| `crates/kernel`              | IDs, money, contexts, validation, errors                          |
-| `crates/platform`            | Platform DB, stores, domains, auth, RBAC, provisioning            |
-| `crates/infrastructure`      | SQLite pools, migrations, cache, outbox, jobs, storage            |
-| `crates/http`                | Error envelope, extractors, auth/store middleware, rate limiting  |
-| `crates/modules/*`           | The independent commerce modules listed above                     |
-| `crates/workflows`           | Cart pricing, checkout and maintenance workflows                  |
-| `crates/api`                 | Versioned HTTP surface and DTOs                                   |
-| `crates/plugin`, `crates/ai` | Extension foundations                                             |
-| `migrations/platform`        | Platform schema                                                   |
-| `migrations/store`           | Per-store schema (catalog, pricing, inventory, orders, …)         |
+| Path                            | Purpose                                                           |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `apps/server`                   | Axum server bootstrap, configuration, graceful shutdown           |
+| `apps/admin`                    | React Admin application for the implemented store operations      |
+| `apps/storefront`               | TanStack Start reference harness (first universal-runtime target) |
+| `templates/storefront-tanstack` | TanStack Start starter and artifact packager                      |
+| `crates/kernel`                 | IDs, money, contexts, validation, errors                          |
+| `crates/platform`               | Platform DB, stores, domains, auth, RBAC, provisioning            |
+| `crates/infrastructure`         | SQLite pools, migrations, cache, outbox, jobs, storage            |
+| `crates/http`                   | Error envelope, extractors, auth/store middleware, rate limiting  |
+| `crates/modules/*`              | The independent commerce modules listed above                     |
+| `crates/workflows`              | Cart pricing, checkout and maintenance workflows                  |
+| `crates/api`                    | Versioned HTTP surface and DTOs                                   |
+| `crates/plugin`, `crates/ai`    | Extension foundations                                             |
+| `migrations/platform`           | Platform schema                                                   |
+| `migrations/store`              | Per-store schema (catalog, pricing, inventory, orders, …)         |
 
 ## Getting started
 

@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fastcart-storefront-tanstack",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": [],
+  "main": "@tanstack/react-start/server-entry",
+  "assets": {
+    "directory": "./dist/client",
+  },
+}

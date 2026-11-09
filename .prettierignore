@@ -11,6 +11,8 @@ docs/architecture
 # Kept verbatim from the approved architecture plan
 .livingdocs/architecture/universal-ssr-runtime.md
 apps/storefront/src/routeTree.gen.ts
+templates/*/src/routeTree.gen.ts
+templates/*/.wrangler
 
 .claude
 
