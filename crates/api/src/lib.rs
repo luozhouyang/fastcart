@@ -52,6 +52,10 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
             axum::routing::get(routes::preview::render),
         )
         .route(
+            "/preview/",
+            axum::routing::get(routes::preview::render),
+        )
+        .route(
             "/preview/{*path}",
             axum::routing::get(routes::preview::render),
         )

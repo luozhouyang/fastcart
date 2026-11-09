@@ -6,6 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
+use crate::routes::preview::{PREVIEW_ASSET_COOKIE, verify_preview_token_unbound};
 use crate::state::AppContext;
 
 /// Serves a client asset for the store resolved from `Host`.
@@ -35,9 +36,43 @@ pub async fn serve_preview(
     let Ok(store) = context.resolver.resolve_active(host).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    runtime
+    let Some(secret) = context
+        .config
+        .preview_secret
+        .as_deref()
+        .filter(|secret| !secret.is_empty())
+    else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let Some(token) = preview_asset_token(&headers) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let Ok(payload) = verify_preview_token_unbound(secret, token, fastcart_kernel::now_timestamp())
+    else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if payload.store_id != store.id.as_str() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let mut response = runtime
         .serve_preview_asset(store.id.as_str(), path, headers)
-        .await
+        .await;
+    response
+        .headers_mut()
+        .insert(header::VARY, header::HeaderValue::from_static("Cookie"));
+    response
+}
+
+fn preview_asset_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .find_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            (name == PREVIEW_ASSET_COOKIE).then_some(value)
+        })
 }
 
 /// SvelteKit adapter compatibility: its immutable assets live at `/_app/*`.

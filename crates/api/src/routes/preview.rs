@@ -40,6 +40,9 @@ use crate::state::AppContext;
 /// Lifetime of an issued preview token in seconds.
 pub const PREVIEW_TOKEN_TTL_SECONDS: i64 = 15 * 60;
 
+/// HttpOnly cookie scoped to the preview asset route.
+pub(crate) const PREVIEW_ASSET_COOKIE: &str = "fastcart_preview";
+
 /// Minimum acceptable preview signing-key length in bytes.
 pub const MIN_PREVIEW_SECRET_BYTES: usize = 32;
 
@@ -193,6 +196,33 @@ pub fn verify_preview_token_unbound(
     Ok(payload)
 }
 
+fn attach_preview_asset_cookie(
+    mut response: Response,
+    token: &str,
+    scheme: &str,
+    max_age: i64,
+) -> Response {
+    if !response.status().is_success() {
+        return response;
+    }
+    let mut cookie = format!(
+        "{PREVIEW_ASSET_COOKIE}={token}; Path=/_fastcart/preview-assets; HttpOnly; SameSite=Lax; Max-Age={}",
+        max_age.max(0)
+    );
+    if scheme == "https" {
+        cookie.push_str("; Secure");
+    }
+    match axum::http::HeaderValue::from_str(&cookie) {
+        Ok(value) => {
+            response
+                .headers_mut()
+                .append(axum::http::header::SET_COOKIE, value);
+        }
+        Err(error) => tracing::warn!(error = %error, "failed to set preview asset cookie"),
+    }
+    response
+}
+
 /// Renders a draft page through the configured runtime using a preview token.
 ///
 /// Both `/preview` and `/preview/{*path}` are handled here. The signed token
@@ -288,9 +318,15 @@ pub(crate) async fn render(
             currency,
             timezone: store.timezone.clone(),
         };
-        return universal
-            .render_preview(preview_request, store_context, request_id, scheme)
+        let response = universal
+            .render_preview(preview_request, store_context, request_id, scheme.clone())
             .await;
+        return attach_preview_asset_cookie(
+            response,
+            token,
+            &scheme,
+            payload.exp.saturating_sub(now),
+        );
     }
 
     let Some(runtime) = context.storefront_runtime.clone() else {

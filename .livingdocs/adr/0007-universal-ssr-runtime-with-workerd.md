@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 29 (2026-11-09) required a store-bound, HttpOnly signed preview cookie
+for `/_fastcart/preview-assets/*`, added `Vary: Cookie`, and registered the exact
+`/preview/` route. Asset-time JTI revocation remains open.
+
 Phase 28 (2026-11-09) added preview-specific asset bases for TanStack Start,
 Astro and SvelteKit, including preview build/smoke scripts and CI coverage.
 Separate builds are required; preview asset authorization remains open.

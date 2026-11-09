@@ -306,6 +306,13 @@ time; SvelteKit preview builds use `appDir = "_fastcart/preview-assets"` because
 `build:artifact:preview` and `test:artifact:preview` scripts. Draft page data
 injection into framework workers is not implemented yet.
 
+Preview assets are not public. A successful preview render sets an HttpOnly,
+SameSite=Lax `fastcart_preview` cookie scoped to
+`Path=/_fastcart/preview-assets`; the token is the signed preview capability.
+The asset route requires a valid cookie whose store matches the Host-resolved
+store, returns `403` otherwise, and adds `Vary: Cookie`. This keeps preview
+assets out of shared caches and prevents cross-store reuse.
+
 Retired production and preview artifacts are reference-counted. After
 `drain_timeout_ms`, a replaced group is stopped and its digest directory is
 removed when no active deployment shares it; asset roots are pruned at the same

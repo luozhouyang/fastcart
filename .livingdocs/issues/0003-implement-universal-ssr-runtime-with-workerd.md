@@ -246,5 +246,11 @@ scan failures are logged. One writer per runtime directory is assumed.
 TanStack Start and Astro accept `FASTCART_ASSET_PREFIX`; SvelteKit uses
 `appDir = "_fastcart/preview-assets"` because `paths.assets` requires an absolute
 URL. All templates have preview build/smoke scripts and CI coverage. Production
-and preview artifacts are separate builds; preview asset authorization remains
-open.
+and preview artifacts are separate builds.
+
+### Phase 29 status
+
+Preview assets require an HttpOnly signed cookie scoped to
+`/_fastcart/preview-assets`, bound to the Host-resolved store and marked
+`Vary: Cookie`. The exact `/preview/` route is registered. Asset-time JTI
+revocation remains open.
