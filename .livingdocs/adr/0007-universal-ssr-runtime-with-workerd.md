@@ -4,7 +4,7 @@ title: Universal SSR runtime with workerd
 description: Run framework-built storefront artifacts in a process-isolated workerd runtime instead of maintaining Node or V8 adapters.
 owner: luozhouyang
 status: Accepted
-implementation: not-started
+implementation: partial
 timestamp: 2026-11-09T02:46:06Z
 ---
 
@@ -159,7 +159,24 @@ line as the product rendering architecture.
 
 ## Implementation status
 
-Not started. The current repository still contains the legacy Node sidecar and
-the `runtime-v8` stub. This ADR records the target architecture; it does not
-claim that workerd integration exists. The legacy adapters must not be extended
-while the workerd migration is in progress.
+Phase 0 is validated; the production runtime is not implemented.
+
+Phase 0 (2026-11-09) used workerd `v1.20261109.1` (Linux x86_64, SHA-256
+`543f30be7dc9b6e263226fa08daa86cbb505b4b407048fbcdb82d0f1b910ad80`) and passed:
+
+- A standard ES-module Fetch handler served a request.
+- Request, Response, Headers, URL, ReadableStream/WritableStream, encoding, Web
+  Crypto, AbortController, timers and incremental streaming worked.
+- A Worker called another workerd service through a service binding.
+- A TanStack Start `1.169.5` Cloudflare build and an Astro `7.4.7` +
+  `@astrojs/cloudflare` `14.4.6` build both served SSR documents.
+
+Phase 0 also confirmed two constraints for the artifact design: framework output
+may be a module graph that needs bundling or multi-module loading, and
+Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
+declared or rejected rather than assumed. The fixtures and commands are in
+`experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
+
+The current repository still contains the legacy Node sidecar and the
+`runtime-v8` stub. These are transitional and must not be extended while the
+workerd migration is in progress.

@@ -53,3 +53,10 @@ process-isolated `workerd` process managed by `fastcart-serve`.
 Follow the phases in the architecture plan. Do not start Phase 1 until the Phase
 0 acceptance criteria pass. Keep the legacy adapters working only until the
 workerd fixtures substitute for them; do not add features to the legacy path.
+
+### Phase 0 status
+
+Validated on 2026-11-09 with workerd `v1.20261109.1`; see
+[ADR 0007](../adr/0007-universal-ssr-runtime-with-workerd.md#implementation-status)
+and `experiments/workerd`. The basic Fetch handler, Web APIs, streaming, service
+bindings, TanStack Start and Astro fixtures pass. Phase 1 has not started.
