@@ -183,7 +183,8 @@ fn editor_manifest() -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,
         "categories": {
-            "product": { "title": "Product", "components": ["ProductGrid"] }
+            "product": { "title": "Product", "components": ["ProductGrid"] },
+            "text": { "title": "Text", "components": ["Heading"] }
         },
         "components": {
             "ProductGrid": {
@@ -198,6 +199,16 @@ fn editor_manifest() -> serde_json::Value {
                     "limit": { "type": "number", "min": 1, "max": 24, "default": 4 }
                 },
                 "defaultProps": { "limit": 4 },
+                "slots": []
+            },
+            "Heading": {
+                "title": "Heading",
+                "category": "text",
+                "fields": {
+                    "text": { "type": "text", "required": true },
+                    "level": { "type": "number", "min": 1, "max": 6, "default": 1 }
+                },
+                "defaultProps": { "text": "Heading", "level": 1 },
                 "slots": []
             }
         }
@@ -300,6 +311,35 @@ async fn renders_with_the_active_theme_through_the_runtime() {
     assert_eq!(theme.settings["brand_color"], "#111111");
     assert!(request.streaming);
     assert_eq!(request.stream_timeout_ms, 30_000);
+}
+
+#[tokio::test]
+async fn cart_and_checkout_deep_links_render_seeded_pages() {
+    let (runtime, requests) = RecordingRuntime::new();
+    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    ContentService::new(fixture.database.clone())
+        .ensure_system_pages()
+        .await
+        .unwrap();
+
+    for path in ["/cart", "/checkout"] {
+        let (status, body) = send(&fixture.app, path, "shop.example.com", &[]).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(body, "<h1>rendered</h1>");
+    }
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].url, "/cart");
+    assert_eq!(requests[1].url, "/checkout");
+    assert_eq!(
+        requests[0].page.as_ref().map(|page| page.handle.as_str()),
+        Some("cart")
+    );
+    assert_eq!(
+        requests[1].page.as_ref().map(|page| page.handle.as_str()),
+        Some("checkout")
+    );
 }
 
 #[tokio::test]
