@@ -97,6 +97,26 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
     if path == "/sitemap.xml" {
         return sitemap_response(&content, &database, scheme, &host).await;
     }
+    if let Some(universal) = context.universal_storefront.clone() {
+        let request_id = request
+            .extensions()
+            .get::<RequestId>()
+            .map(|id| id.0.clone());
+        let currency = match CurrencyCode::new(store.currency_code.clone()) {
+            Ok(currency) => currency,
+            Err(error) => return ApiError::new(AppError::from(error)).into_response(),
+        };
+        let store_context = StoreContext {
+            store_id: store.id.clone(),
+            domain: host.clone(),
+            locale: store.locale.clone(),
+            currency,
+            timezone: store.timezone.clone(),
+        };
+        return universal
+            .render(request, store_context, request_id, scheme.to_owned())
+            .await;
+    }
     let Some(runtime) = context.storefront_runtime.clone() else {
         return ApiError::not_found("storefront route").into_response();
     };

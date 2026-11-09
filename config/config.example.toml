@@ -75,6 +75,24 @@ node_url = "http://127.0.0.1:8788"
 # long random value.
 # capability_secret = "replace-with-a-long-random-capability-secret"
 
+[ssr]
+# Universal workerd SSR. This requires an imported FastCart SSR artifact and a
+# pinned workerd binary. Docker and the legacy Node sidecar are not used here.
+enabled = false
+# binary = "./workerd"
+# artifact_path = "./storefront-artifact"
+# runtime_dir = "./data/ssr"
+# listen = "127.0.0.1:18888"
+# deployment_id = "default"
+# internal_token = "replace-with-a-long-random-token"
+startup_timeout_ms = 10000
+shutdown_timeout_ms = 5000
+request_timeout_ms = 30000
+restart_backoff_ms = 1000
+max_restarts = 3
+artifact_max_bytes = 104857600
+artifact_max_files = 5000
+
 [jobs]
 enabled = true
 worker_count = 2

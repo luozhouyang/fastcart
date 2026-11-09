@@ -11,9 +11,10 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 > front-end client surface. The React Admin covers orders, catalog, inventory,
 > customers, promotions, content, themes, forms, inbox, notifications, regions,
 > shipping, tax and settings. `apps/storefront` is a TanStack Start reference
-> harness. Storefront SSR is being replaced by the universal `workerd` runtime
-> ([ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md)).
-> The legacy Node sidecar remains transitional until the migration lands.
+> harness. The universal `workerd` SSR path is implemented
+> ([ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md));
+> TanStack Start/Astro templates and the default artifact build are still in
+> progress. The legacy Node sidecar remains transitional until parity.
 
 ## Why Fastcart
 
@@ -117,6 +118,9 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_THEMES_DIR` — trusted theme bundle directory (default `./themes`); transitional until artifacts replace theme bundles
 - `FASTCART_INTERNAL_FETCH_SECRET` — legacy secret-gated `/internal/storefront` surface; the target SSR gateway uses a scoped internal credential
 - `FASTCART_CAPABILITY_SECRET` — signs theme capability grants so plugin endpoints can verify them
+- `FASTCART_SSR_ENABLED` — enable the universal workerd runtime (requires an artifact)
+- `FASTCART_SSR_BINARY`, `FASTCART_SSR_ARTIFACT`, `FASTCART_SSR_RUNTIME_DIR` — pinned workerd binary, source artifact directory and runtime data directory
+- `FASTCART_SSR_LISTEN`, `FASTCART_SSR_DEPLOYMENT_ID`, `FASTCART_SSR_INTERNAL_TOKEN` — loopback listener, deployment identity and optional internal token
 
 ### Storefront SSR (target architecture)
 
@@ -174,10 +178,28 @@ backoff. The SSR gateway strips client-supplied internal context headers and
 injects a trusted store/deployment/request context before forwarding. Static
 assets are served by Rust at `/_fastcart/assets/`.
 
-The universal runtime, artifact pipeline, supervisor and gateway are **not
-implemented yet**, so this topology is not runnable today. The legacy Node
-sidecar is a migration aid only; it is not the supported deployment and must not
-be extended. See [ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md).
+The universal runtime path is implemented and can be enabled with an artifact;
+TanStack Start/Astro starter templates and the default artifact build remain
+Phase 5/11 work. The legacy Node sidecar is a migration aid only; it is not the
+supported deployment and must not be extended. See
+[ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md).
+
+To run the universal path, keep `storefront.enabled = false` and set:
+
+```toml
+[ssr]
+enabled = true
+binary = "/opt/fastcart/workerd"
+artifact_path = "./storefront-artifact"
+runtime_dir = "./data/ssr"
+listen = "127.0.0.1:18888"
+deployment_id = "default"
+# internal_token = "..."
+```
+
+The artifact must contain `fastcart-ssr.json` and expose
+`/__fastcart/health`; the binary is the pinned workerd build from
+`scripts/install-workerd.sh`. `ssr.listen` is loopback-only in this phase.
 
 Configuration is TOML plus environment overrides. Required and recommended
 settings:

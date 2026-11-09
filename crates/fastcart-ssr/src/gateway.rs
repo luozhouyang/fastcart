@@ -1,6 +1,7 @@
 //! HTTP gateway between the commerce server and workerd.
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::body::Body;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -49,11 +50,31 @@ impl std::fmt::Debug for SsrResponse {
     }
 }
 
+/// Trusted request context injected by the Rust gateway.
+#[derive(Clone, Debug, Default)]
+pub struct SsrRequestContext {
+    /// Resolved store id.
+    pub store_id: String,
+    /// Active deployment id.
+    pub deployment_id: String,
+    /// Request correlation id.
+    pub request_id: String,
+    /// Store locale.
+    pub locale: Option<String>,
+    /// Store currency.
+    pub currency: Option<String>,
+    /// Optional market id.
+    pub market_id: Option<String>,
+    /// Public request scheme, after trusted-proxy handling.
+    pub scheme: String,
+}
+
 /// Forwards storefront requests to one workerd service.
 #[derive(Clone, Debug)]
 pub struct SsrGateway {
     client: reqwest::Client,
     base_url: Url,
+    internal_token: Option<String>,
 }
 
 impl SsrGateway {
@@ -86,28 +107,107 @@ impl SsrGateway {
             .timeout(request_timeout)
             .build()
             .map_err(|error| SsrError::InvalidRequest(format!("invalid HTTP client: {error}")))?;
-        Ok(Self { client, base_url })
+        Ok(Self {
+            client,
+            base_url,
+            internal_token: None,
+        })
     }
 
-    /// Forwards a request and returns the workerd response. The response body
-    /// is exposed as a stream so the caller can preserve SSR streaming.
+    /// Injects a short-lived internal token into every forwarded request.
+    #[must_use]
+    pub fn with_internal_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        self.internal_token = (!token.is_empty()).then_some(token);
+        self
+    }
+
+    /// Forwards a buffered request. The response body stays streamed.
     pub async fn forward(
         &self,
         request: axum::http::Request<Bytes>,
     ) -> Result<SsrResponse, SsrError> {
         let (parts, body) = request.into_parts();
-        let path = parts
-            .uri
+        self.forward_parts(
+            parts.method,
+            parts.uri,
+            parts.headers,
+            reqwest::Body::from(body),
+        )
+        .await
+    }
+
+    /// Forwards a streaming request body with trusted FastCart context.
+    ///
+    /// Client-supplied `x-fastcart-*` and forwarding headers are removed before
+    /// the trusted values are inserted.
+    pub async fn forward_streaming(
+        &self,
+        request: axum::http::Request<Body>,
+        context: &SsrRequestContext,
+    ) -> Result<SsrResponse, SsrError> {
+        let (mut parts, body) = request.into_parts();
+        let original_host = parts
+            .headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        strip_gateway_headers(&mut parts.headers);
+        insert_header(&mut parts.headers, "x-fastcart-store-id", &context.store_id)?;
+        insert_header(
+            &mut parts.headers,
+            "x-fastcart-deployment-id",
+            &context.deployment_id,
+        )?;
+        insert_header(
+            &mut parts.headers,
+            "x-fastcart-request-id",
+            &context.request_id,
+        )?;
+        if let Some(locale) = &context.locale {
+            insert_header(&mut parts.headers, "x-fastcart-locale", locale)?;
+        }
+        if let Some(currency) = &context.currency {
+            insert_header(&mut parts.headers, "x-fastcart-currency", currency)?;
+        }
+        if let Some(market_id) = &context.market_id {
+            insert_header(&mut parts.headers, "x-fastcart-market-id", market_id)?;
+        }
+        if let Some(host) = original_host {
+            insert_header(&mut parts.headers, "x-forwarded-host", &host)?;
+        }
+        let scheme = if context.scheme.is_empty() {
+            "http"
+        } else {
+            context.scheme.as_str()
+        };
+        insert_header(&mut parts.headers, "x-forwarded-proto", scheme)?;
+        if let Some(token) = &self.internal_token {
+            insert_header(&mut parts.headers, "x-fastcart-internal-token", token)?;
+        }
+        let body = reqwest::Body::wrap_stream(body.into_data_stream());
+        self.forward_parts(parts.method, parts.uri, parts.headers, body)
+            .await
+    }
+
+    async fn forward_parts(
+        &self,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: reqwest::Body,
+    ) -> Result<SsrResponse, SsrError> {
+        let path = uri
             .path_and_query()
             .map_or("/", axum::http::uri::PathAndQuery::as_str);
         let url = self
             .base_url
             .join(path)
             .map_err(|error| SsrError::InvalidRequest(format!("invalid SSR path: {error}")))?;
-        let headers = filtered_headers(&parts.headers);
+        let headers = filtered_headers(&headers);
         let response = self
             .client
-            .request(parts.method, url)
+            .request(method, url)
             .headers(headers)
             .body(body)
             .send()
@@ -136,6 +236,31 @@ fn filtered_headers(source: &HeaderMap) -> reqwest::header::HeaderMap {
         headers.append(name, value.clone());
     }
     headers
+}
+
+fn strip_gateway_headers(headers: &mut HeaderMap) {
+    let remove: Vec<HeaderName> = headers
+        .keys()
+        .filter(|name| {
+            let name = name.as_str();
+            name.starts_with("x-fastcart-")
+                || matches!(
+                    name,
+                    "forwarded" | "x-forwarded-host" | "x-forwarded-proto" | "x-real-ip"
+                )
+        })
+        .cloned()
+        .collect();
+    for name in remove {
+        headers.remove(name);
+    }
+}
+
+fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<(), SsrError> {
+    let value = HeaderValue::from_str(value)
+        .map_err(|_| SsrError::InvalidRequest(format!("invalid value for {name}")))?;
+    headers.insert(HeaderName::from_static(name), value);
+    Ok(())
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
@@ -169,6 +294,18 @@ mod tests {
         assert!(!filtered.contains_key(header::CONNECTION));
         assert!(!filtered.contains_key(header::HOST));
         assert_eq!(filtered.get(header::ACCEPT).unwrap(), "text/html");
+    }
+
+    #[test]
+    fn gateway_headers_are_stripped_before_injection() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-fastcart-store-id", HeaderValue::from_static("attacker"));
+        headers.insert("x-forwarded-host", HeaderValue::from_static("attacker"));
+        headers.insert(header::COOKIE, HeaderValue::from_static("session=ok"));
+        strip_gateway_headers(&mut headers);
+        assert!(!headers.contains_key("x-fastcart-store-id"));
+        assert!(!headers.contains_key("x-forwarded-host"));
+        assert_eq!(headers.get(header::COOKIE).unwrap(), "session=ok");
     }
 
     #[test]

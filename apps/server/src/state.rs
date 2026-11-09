@@ -28,6 +28,8 @@ pub struct AppState {
     pub databases: Arc<StoreDatabaseManager>,
     /// Optional SSR runtime, shut down during graceful shutdown.
     pub storefront_runtime: Option<Arc<dyn StorefrontRuntime>>,
+    /// Optional universal workerd runtime, shut down during graceful shutdown.
+    pub universal_ssr: Option<Arc<crate::universal::UniversalSsr>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -114,6 +116,10 @@ impl AppState {
             inquiry_retention_days: config.inquiries.retention_days,
             notification_retention_days: config.notifications.retention_days,
         };
+        let universal_ssr = crate::universal::UniversalSsr::initialize(&config.ssr).await?;
+        let universal_storefront = universal_ssr.as_ref().map(|runtime| {
+            Arc::clone(runtime) as Arc<dyn fastcart_api::state::UniversalStorefront>
+        });
         let storefront_runtime = build_storefront_runtime(&config.storefront)?;
         if let Some(runtime) = storefront_runtime.as_ref()
             && let Err(error) = runtime.health_check().await
@@ -124,6 +130,7 @@ impl AppState {
         let context = Arc::new(
             AppContext::new(api_config, platform, databases.clone(), cache)
                 .with_storefront_runtime(storefront_runtime.clone())
+                .with_universal_storefront(universal_storefront)
                 .with_email(email),
         );
         Ok(Self {
@@ -131,6 +138,7 @@ impl AppState {
             context,
             databases,
             storefront_runtime,
+            universal_ssr,
         })
     }
 }

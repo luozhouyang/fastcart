@@ -5,9 +5,11 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::response::{IntoResponse, Response};
+use fastcart_api::state::UniversalStorefront;
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
-use fastcart_kernel::Metadata;
+use fastcart_kernel::{Metadata, StoreContext};
 use fastcart_module_cart::{CartService, CreateCartInput};
 use fastcart_module_catalog::{CatalogService, CreateCollectionInput, CreateProductInput};
 use fastcart_module_content::{ContentService, CreatePageInput, UpdatePageInput};
@@ -55,6 +57,35 @@ impl StorefrontRuntime for RecordingRuntime {
 
     async fn shutdown(&self) -> Result<(), RuntimeError> {
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingUniversal {
+    seen: Arc<Mutex<Vec<RecordedContext>>>,
+}
+
+struct RecordedContext {
+    store: StoreContext,
+    request_id: Option<String>,
+    scheme: String,
+}
+
+#[async_trait::async_trait]
+impl UniversalStorefront for RecordingUniversal {
+    async fn render(
+        &self,
+        _request: Request<Body>,
+        store: StoreContext,
+        request_id: Option<String>,
+        scheme: String,
+    ) -> Response {
+        self.seen.lock().unwrap().push(RecordedContext {
+            store,
+            request_id,
+            scheme,
+        });
+        (StatusCode::OK, "<h1>universal</h1>").into_response()
     }
 }
 
@@ -111,6 +142,7 @@ struct Fixture {
 async fn fixture(
     runtime: Option<Arc<dyn StorefrontRuntime>>,
     internal_secret: Option<String>,
+    universal: Option<Arc<dyn UniversalStorefront>>,
 ) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let platform = PlatformStore::in_memory().await.unwrap();
@@ -169,7 +201,8 @@ async fn fixture(
             databases,
             StoreCache::default_capacity(),
         )
-        .with_storefront_runtime(runtime),
+        .with_storefront_runtime(runtime)
+        .with_universal_storefront(universal),
     );
     Fixture {
         app: build_router(context),
@@ -291,7 +324,7 @@ async fn send(
 #[tokio::test]
 async fn renders_with_the_active_theme_through_the_runtime() {
     let (runtime, requests) = RecordingRuntime::new();
-    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let fixture = fixture(Some(Arc::new(runtime)), None, None).await;
 
     let (status, body) = send(
         &fixture.app,
@@ -320,7 +353,7 @@ async fn renders_with_the_active_theme_through_the_runtime() {
 #[tokio::test]
 async fn cart_and_checkout_deep_links_render_seeded_pages() {
     let (runtime, requests) = RecordingRuntime::new();
-    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let fixture = fixture(Some(Arc::new(runtime)), None, None).await;
     ContentService::new(fixture.database.clone())
         .ensure_system_pages()
         .await
@@ -348,7 +381,7 @@ async fn cart_and_checkout_deep_links_render_seeded_pages() {
 
 #[tokio::test]
 async fn streams_runtime_bodies_to_the_client() {
-    let fixture = fixture(Some(Arc::new(StreamingRuntime)), None).await;
+    let fixture = fixture(Some(Arc::new(StreamingRuntime)), None, None).await;
 
     let response = fixture
         .app
@@ -377,7 +410,7 @@ async fn streams_runtime_bodies_to_the_client() {
 #[tokio::test]
 async fn injects_the_published_page_and_resolved_data() {
     let (runtime, requests) = RecordingRuntime::new();
-    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let fixture = fixture(Some(Arc::new(runtime)), None, None).await;
     let page = ContentService::new(fixture.database.clone())
         .create_page(CreatePageInput {
             title: "Home".to_owned(),
@@ -443,7 +476,7 @@ async fn injects_the_published_page_and_resolved_data() {
 #[tokio::test]
 async fn serves_robots_and_a_published_page_sitemap() {
     let (runtime, requests) = RecordingRuntime::new();
-    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let fixture = fixture(Some(Arc::new(runtime)), None, None).await;
     let content = ContentService::new(fixture.database.clone());
     for (title, handle, page_type) in [
         ("Home", "home", "home"),
@@ -520,7 +553,7 @@ async fn serves_robots_and_a_published_page_sitemap() {
 
 #[tokio::test]
 async fn discovery_files_work_without_a_storefront_runtime() {
-    let fixture = fixture(None, None).await;
+    let fixture = fixture(None, None, None).await;
     let (status, robots) = send(&fixture.app, "/robots.txt", "shop.example.com", &[]).await;
     assert_eq!(status, StatusCode::OK, "{robots}");
     let (status, sitemap) = send(&fixture.app, "/sitemap.xml", "shop.example.com", &[]).await;
@@ -856,7 +889,7 @@ async fn renders_theme_dynamic_routes_from_published_templates() {
 #[tokio::test]
 async fn injects_customer_and_cart_context_from_cookies() {
     let (runtime, requests) = RecordingRuntime::new();
-    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let fixture = fixture(Some(Arc::new(runtime)), None, None).await;
     let customers = CustomerService::new(fixture.database.clone());
     let customer = customers
         .register(RegisterCustomerInput::new(
@@ -1031,7 +1064,7 @@ async fn compiled_pages_and_themes_do_not_leak_between_stores() {
 #[tokio::test]
 async fn does_not_render_api_health_or_unknown_host_paths() {
     let (runtime, requests) = RecordingRuntime::new();
-    let fixture = fixture(Some(Arc::new(runtime)), None).await;
+    let fixture = fixture(Some(Arc::new(runtime)), None, None).await;
 
     let (status, _) = send(&fixture.app, "/api/v1/unknown", "shop.example.com", &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1044,7 +1077,7 @@ async fn does_not_render_api_health_or_unknown_host_paths() {
 
 #[tokio::test]
 async fn runtime_timeouts_render_a_gateway_timeout() {
-    let fixture = fixture(Some(Arc::new(TimeoutRuntime)), None).await;
+    let fixture = fixture(Some(Arc::new(TimeoutRuntime)), None, None).await;
     let (status, body) = send(&fixture.app, "/", "shop.example.com", &[]).await;
     assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1054,7 +1087,7 @@ async fn runtime_timeouts_render_a_gateway_timeout() {
 
 #[tokio::test]
 async fn internal_http_surface_requires_a_secret() {
-    let fixture = fixture(None, Some("internal-secret".to_owned())).await;
+    let fixture = fixture(None, Some("internal-secret".to_owned()), None).await;
 
     let (status, _) = send(
         &fixture.app,
@@ -1082,7 +1115,7 @@ async fn internal_http_surface_requires_a_secret() {
 
 #[tokio::test]
 async fn internal_surface_is_not_mounted_without_a_secret() {
-    let fixture = fixture(None, None).await;
+    let fixture = fixture(None, None, None).await;
     let (status, _) = send(
         &fixture.app,
         "/internal/storefront/products",
@@ -1091,4 +1124,25 @@ async fn internal_surface_is_not_mounted_without_a_secret() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn universal_runtime_receives_trusted_context() {
+    let universal = Arc::new(RecordingUniversal::default());
+    let fixture = fixture(None, None, Some(universal.clone())).await;
+    let request = Request::builder()
+        .uri("/products/example")
+        .header("host", "shop.example.com")
+        .header("x-fastcart-store-id", "attacker")
+        .body(Body::empty())
+        .unwrap();
+    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"<h1>universal</h1>");
+    let seen = universal.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].store.store_id.as_str().starts_with("store_"));
+    assert!(seen[0].request_id.is_some());
+    assert_eq!(seen[0].scheme, "https");
 }

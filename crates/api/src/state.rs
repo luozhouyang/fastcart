@@ -10,10 +10,23 @@ use tokio::sync::Mutex;
 use fastcart_email::EmailService;
 use fastcart_http::{Metrics, RateLimiter};
 use fastcart_infrastructure::{EventBus, LocalStorage, Storage, StoreCache, StoreDatabaseManager};
-use fastcart_kernel::StoreId;
+use fastcart_kernel::{StoreContext, StoreId};
 use fastcart_module_payment::{ManualProvider, ProviderRegistry, StripeProvider};
 use fastcart_platform::{AuthService, PlatformStore, StoreProvisioningService, StoreResolver};
 use fastcart_runtime_api::StorefrontRuntime;
+
+/// Process-wide universal SSR runtime.
+#[async_trait::async_trait]
+pub trait UniversalStorefront: Send + Sync {
+    /// Forwards a storefront request to the configured artifact runtime.
+    async fn render(
+        &self,
+        request: axum::http::Request<axum::body::Body>,
+        store: StoreContext,
+        request_id: Option<String>,
+        scheme: String,
+    ) -> axum::response::Response;
+}
 
 /// HTTP-facing configuration.
 #[derive(Clone, Debug)]
@@ -228,6 +241,8 @@ pub struct AppContext {
     pub metrics: Arc<Metrics>,
     /// Optional storefront SSR runtime shared by all stores.
     pub storefront_runtime: Option<Arc<dyn StorefrontRuntime>>,
+    /// Optional universal workerd storefront runtime.
+    pub universal_storefront: Option<Arc<dyn UniversalStorefront>>,
     /// Server-side resolver for theme data bindings.
     pub storefront_data: fastcart_storefront_data::StorefrontDataResolver,
     /// Parsed active theme editor manifests keyed by store, theme and revision.
@@ -400,6 +415,7 @@ impl AppContext {
                 fastcart_module_shipping::FulfillmentProviderRegistry::with_defaults(),
             metrics: Arc::new(Metrics::new()),
             storefront_runtime: None,
+            universal_storefront: None,
             storefront_data: fastcart_storefront_data::StorefrontDataResolver::new(),
             storefront_editor_cache: moka::future::Cache::builder()
                 .max_capacity(STOREFRONT_EDITOR_CACHE_CAPACITY)
@@ -429,6 +445,16 @@ impl AppContext {
     #[must_use]
     pub fn with_storefront_runtime(mut self, runtime: Option<Arc<dyn StorefrontRuntime>>) -> Self {
         self.storefront_runtime = runtime;
+        self
+    }
+
+    /// Installs the universal workerd storefront runtime.
+    #[must_use]
+    pub fn with_universal_storefront(
+        mut self,
+        runtime: Option<Arc<dyn UniversalStorefront>>,
+    ) -> Self {
+        self.universal_storefront = runtime;
         self
     }
 

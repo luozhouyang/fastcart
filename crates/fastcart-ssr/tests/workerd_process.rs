@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use bytes::Bytes;
-use fastcart_ssr::{SsrBody, WorkerdConfig, WorkerdProcess};
+use fastcart_ssr::{SsrBody, SsrRequestContext, WorkerdConfig, WorkerdProcess};
 use futures::StreamExt;
 
 fn workerd_binary() -> Option<PathBuf> {
@@ -56,12 +57,24 @@ export default {
         headers: { "x-ssr-test": "yes" },
       });
     }
+    if (url.pathname === "/cookies") {
+      const headers = new Headers();
+      headers.append("set-cookie", "a=1; Path=/");
+      headers.append("set-cookie", "b=2; Path=/");
+      return new Response("cookies", { headers });
+    }
     return Response.json({
       method: request.method,
       path: url.pathname,
       query: url.search,
       header: request.headers.get("x-test"),
       connection: request.headers.get("connection"),
+      store: request.headers.get("x-fastcart-store-id"),
+      deployment: request.headers.get("x-fastcart-deployment-id"),
+      requestId: request.headers.get("x-fastcart-request-id"),
+      forwardedHost: request.headers.get("x-forwarded-host"),
+      forwardedProto: request.headers.get("x-forwarded-proto"),
+      internalToken: request.headers.get("x-fastcart-internal-token"),
       body: await request.text(),
     });
   },
@@ -132,9 +145,55 @@ const mainWorker :Workerd.Worker = (
     assert_eq!(created.status, StatusCode::CREATED);
     assert_eq!(created.headers.get("x-ssr-test").unwrap(), "yes");
 
+    let cookies = gateway
+        .forward(
+            Request::builder()
+                .uri("/cookies")
+                .body(Bytes::new())
+                .expect("request"),
+        )
+        .await
+        .expect("cookies request");
+    assert_eq!(
+        cookies.headers.get_all(header::SET_COOKIE).iter().count(),
+        2
+    );
+
     let health = process.health().await.expect("health");
     assert!(health.status == fastcart_ssr::RuntimeStatus::Healthy);
     assert!(health.process_id.is_some());
+
+    let context = SsrRequestContext {
+        store_id: "store_trusted".to_owned(),
+        deployment_id: "deploy_1".to_owned(),
+        request_id: "req_1".to_owned(),
+        locale: Some("en-US".to_owned()),
+        currency: Some("USD".to_owned()),
+        market_id: None,
+        scheme: "https".to_owned(),
+    };
+    let streaming_gateway = gateway.clone().with_internal_token("internal-secret");
+    let streaming_request = Request::builder()
+        .method(Method::POST)
+        .uri("/context")
+        .header(header::HOST, "shop.example")
+        .header("x-fastcart-store-id", "attacker")
+        .header("x-forwarded-proto", "http")
+        .body(Body::from("streamed-body"))
+        .expect("streaming request");
+    let streaming_response = streaming_gateway
+        .forward_streaming(streaming_request, &context)
+        .await
+        .expect("streaming proxy");
+    let body = collect_body(streaming_response.body).await;
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("context json");
+    assert_eq!(value["store"], "store_trusted");
+    assert_eq!(value["deployment"], "deploy_1");
+    assert_eq!(value["requestId"], "req_1");
+    assert_eq!(value["forwardedHost"], "shop.example");
+    assert_eq!(value["forwardedProto"], "https");
+    assert_eq!(value["internalToken"], "internal-secret");
+    assert_eq!(value["body"], "streamed-body");
 
     process.stop().await.expect("stop workerd");
     assert!(!process.is_running(), "workerd should be stopped");

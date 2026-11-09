@@ -2,6 +2,7 @@
 
 use std::env;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -21,6 +22,8 @@ pub struct Config {
     pub cache: CacheConfig,
     /// Storefront runtime settings.
     pub storefront: StorefrontConfig,
+    /// Universal workerd SSR settings.
+    pub ssr: SsrConfig,
     /// Background job settings.
     pub jobs: JobsConfig,
     /// Payment provider settings.
@@ -236,6 +239,61 @@ impl Default for StorefrontConfig {
     }
 }
 
+/// Universal workerd SSR settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SsrConfig {
+    /// Whether the universal runtime is enabled.
+    pub enabled: bool,
+    /// Pinned workerd binary.
+    pub binary: PathBuf,
+    /// Source artifact directory (`fastcart-ssr.json` at its root).
+    pub artifact_path: PathBuf,
+    /// Directory for generated configs and imported artifacts.
+    pub runtime_dir: PathBuf,
+    /// Loopback address assigned to the runtime group.
+    pub listen: SocketAddr,
+    /// Deployment identity injected into SSR requests.
+    pub deployment_id: String,
+    /// Optional internal token injected into SSR requests.
+    pub internal_token: Option<String>,
+    /// Readiness timeout in milliseconds.
+    pub startup_timeout_ms: u64,
+    /// Graceful shutdown timeout in milliseconds.
+    pub shutdown_timeout_ms: u64,
+    /// Gateway request timeout in milliseconds.
+    pub request_timeout_ms: u64,
+    /// Minimum restart delay in milliseconds.
+    pub restart_backoff_ms: u64,
+    /// Maximum restarts before the group fails.
+    pub max_restarts: u32,
+    /// Maximum artifact size in bytes.
+    pub artifact_max_bytes: u64,
+    /// Maximum artifact file count.
+    pub artifact_max_files: u64,
+}
+
+impl Default for SsrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            binary: PathBuf::from("./workerd"),
+            artifact_path: PathBuf::from("./storefront-artifact"),
+            runtime_dir: PathBuf::from("./data/ssr"),
+            listen: SocketAddr::from(([127, 0, 0, 1], 18_888)),
+            deployment_id: "default".to_owned(),
+            internal_token: None,
+            startup_timeout_ms: 10_000,
+            shutdown_timeout_ms: 5_000,
+            request_timeout_ms: 30_000,
+            restart_backoff_ms: 1_000,
+            max_restarts: 3,
+            artifact_max_bytes: 100 * 1024 * 1024,
+            artifact_max_files: 5_000,
+        }
+    }
+}
+
 /// Payment provider settings.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -421,6 +479,66 @@ impl Config {
         {
             self.storefront.themes_dir = PathBuf::from(value);
         }
+        if let Ok(value) = env::var("FASTCART_SSR_ENABLED") {
+            self.ssr.enabled = value
+                .parse()
+                .context("FASTCART_SSR_ENABLED must be true or false")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_BINARY") {
+            self.ssr.binary = PathBuf::from(value);
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_ARTIFACT") {
+            self.ssr.artifact_path = PathBuf::from(value);
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_RUNTIME_DIR") {
+            self.ssr.runtime_dir = PathBuf::from(value);
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_LISTEN") {
+            self.ssr.listen = value
+                .parse()
+                .context("FASTCART_SSR_LISTEN must be a socket address")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_DEPLOYMENT_ID") {
+            self.ssr.deployment_id = value;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_INTERNAL_TOKEN") {
+            self.ssr.internal_token = (!value.trim().is_empty()).then_some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_STARTUP_TIMEOUT_MS") {
+            self.ssr.startup_timeout_ms = value
+                .parse()
+                .context("FASTCART_SSR_STARTUP_TIMEOUT_MS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_SHUTDOWN_TIMEOUT_MS") {
+            self.ssr.shutdown_timeout_ms = value
+                .parse()
+                .context("FASTCART_SSR_SHUTDOWN_TIMEOUT_MS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_REQUEST_TIMEOUT_MS") {
+            self.ssr.request_timeout_ms = value
+                .parse()
+                .context("FASTCART_SSR_REQUEST_TIMEOUT_MS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_RESTART_BACKOFF_MS") {
+            self.ssr.restart_backoff_ms = value
+                .parse()
+                .context("FASTCART_SSR_RESTART_BACKOFF_MS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_MAX_RESTARTS") {
+            self.ssr.max_restarts = value
+                .parse()
+                .context("FASTCART_SSR_MAX_RESTARTS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_ARTIFACT_MAX_BYTES") {
+            self.ssr.artifact_max_bytes = value
+                .parse()
+                .context("FASTCART_SSR_ARTIFACT_MAX_BYTES must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_ARTIFACT_MAX_FILES") {
+            self.ssr.artifact_max_files = value
+                .parse()
+                .context("FASTCART_SSR_ARTIFACT_MAX_FILES must be a number")?;
+        }
         if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
             // An empty pass-through value from an orchestrator
             // disables preview rather than configuring a zero-byte secret.
@@ -526,6 +644,9 @@ impl Config {
 
     /// Validates configuration invariants.
     pub fn validate(&self) -> Result<()> {
+        if self.ssr.enabled && self.storefront.enabled {
+            bail!("storefront.enabled and ssr.enabled are mutually exclusive");
+        }
         if self.storefront.worker_count == 0 {
             bail!("storefront.worker_count must be greater than zero");
         }
@@ -562,6 +683,42 @@ impl Config {
                     "storefront.node_secret is required when storefront.node_url ({node_url:?}) is \
                      not loopback; set the same value as SIDECAR_SECRET on the sidecar"
                 );
+            }
+        }
+        if self.ssr.enabled {
+            if self.ssr.binary.as_os_str().is_empty() {
+                bail!("ssr.binary must not be empty");
+            }
+            if self.ssr.artifact_path.as_os_str().is_empty() {
+                bail!("ssr.artifact_path must not be empty");
+            }
+            if self.ssr.runtime_dir.as_os_str().is_empty() {
+                bail!("ssr.runtime_dir must not be empty");
+            }
+            if self.ssr.listen.port() == 0 {
+                bail!("ssr.listen must include a non-zero port");
+            }
+            if !self.ssr.listen.ip().is_loopback() {
+                bail!("ssr.listen must bind to loopback in this phase");
+            }
+            if self.ssr.deployment_id.is_empty()
+                || self.ssr.deployment_id.len() > 128
+                || !self
+                    .ssr
+                    .deployment_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                bail!("ssr.deployment_id must be 1-128 safe characters");
+            }
+            if self.ssr.startup_timeout_ms == 0
+                || self.ssr.shutdown_timeout_ms == 0
+                || self.ssr.request_timeout_ms == 0
+            {
+                bail!("ssr timeouts must be greater than zero");
+            }
+            if self.ssr.artifact_max_bytes == 0 || self.ssr.artifact_max_files == 0 {
+                bail!("ssr artifact limits must be greater than zero");
             }
         }
         if self.jobs.enabled && self.jobs.worker_count == 0 {
@@ -828,6 +985,38 @@ mod tests {
             .expect("an empty value clears the list");
         assert!(config.server.cors_origins.is_empty());
         assert!(config.apply_server_env(None, Some(",")).is_err());
+    }
+
+    #[test]
+    fn ssr_defaults_are_disabled_and_legacy_runtime_is_exclusive() {
+        let mut config = Config::default();
+        assert!(!config.ssr.enabled);
+        config.validate().unwrap();
+
+        config.ssr.enabled = true;
+        config.storefront.enabled = true;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
+        );
+
+        config.storefront.enabled = false;
+        config.ssr.deployment_id = "bad id".to_owned();
+        assert!(config.validate().is_err());
+
+        config.ssr.deployment_id = "default".to_owned();
+        config.ssr.listen = "127.0.0.1:0".parse().unwrap();
+        assert!(config.validate().is_err());
+
+        config.ssr.listen = "0.0.0.0:18888".parse().unwrap();
+        assert!(config.validate().is_err());
+
+        config.ssr.listen = "127.0.0.1:18888".parse().unwrap();
+        config.ssr.startup_timeout_ms = 0;
+        assert!(config.validate().is_err());
     }
 
     #[test]

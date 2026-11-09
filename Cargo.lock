@@ -1407,6 +1407,7 @@ name = "fastcart-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "fastcart-api",
  "fastcart-email",
@@ -1417,8 +1418,11 @@ dependencies = [
  "fastcart-runtime-api",
  "fastcart-runtime-node",
  "fastcart-runtime-pool",
+ "fastcart-ssr",
  "fastcart-workflows",
  "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

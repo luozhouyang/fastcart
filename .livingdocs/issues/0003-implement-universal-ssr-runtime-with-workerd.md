@@ -78,3 +78,11 @@ missing entries and size limits are enforced.
 `RuntimeManager` now generates workerd configuration for a stored artifact and
 manages group start, health, stop and restart with backoff and a restart limit.
 Background crash monitoring and persisted group state remain Phase 8/9 work.
+
+### Phase 4 status
+
+The storefront fallback forwards to a managed workerd group. Trusted context is
+injected, spoofed internal headers are removed, response streams and duplicate
+`Set-Cookie` headers are preserved. `[ssr]` configuration is wired into
+`apps/server`. Browser-level TanStack Start coverage and static asset serving
+remain Phase 5/7 work.

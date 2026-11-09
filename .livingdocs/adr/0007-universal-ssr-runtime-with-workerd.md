@@ -177,6 +177,14 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 4 (2026-11-09) wired the runtime into `fastcart-server`. The storefront
+fallback resolves the store, then forwards the request to a managed workerd
+group; the gateway strips client-supplied internal headers and injects trusted
+store/deployment/request context, preserves multiple `Set-Cookie` headers and
+streams the response body. `[ssr]`/`FASTCART_SSR_*` configuration imports and
+starts the artifact. Browser-level framework coverage arrives in Phase 5; static
+assets, multi-store selection and crash-triggered restarts remain later phases.
+
 Phase 3 (2026-11-09) added `RuntimeManager` and a deterministic Cap'n Proto
 generator. A manager starts, health-checks, stops and restarts a runtime group,
 applies a restart backoff and stops after the configured restart limit. Configs
