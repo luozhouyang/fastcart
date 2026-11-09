@@ -49,10 +49,16 @@ line as the product rendering architecture.
    FastCart SSR Artifact with a versioned `fastcart-ssr.json` manifest, a Worker
    entry, client assets and static files. TanStack Start is the first supported
    framework; Astro is the second.
-5. A new `fastcart-ssr` Rust crate owns artifact validation and storage, the
-   deployment registry and lifecycle, workerd configuration generation, process
-   supervision, health checks, the SSR gateway, trusted context injection,
-   streaming, timeouts and metrics.
+5. Two crates split the SSR runtime along its stable seam:
+   - `fastcart-ssr` owns the deployment registry and lifecycle, activation and
+     rollback, preview deployments, the response cache, static asset serving,
+     trusted context injection, streaming, timeouts and metrics.
+   - `fastcart-ssr-workerd` owns artifact validation and storage, workerd
+     configuration generation, process supervision, health checks and the
+     loopback SSR gateway.
+     `fastcart-ssr` depends on `fastcart-ssr-workerd`, never the reverse. The
+     execution layer can be tested without stores or deployment records, and
+     workerd upgrades do not change the service API.
 6. Store context is resolved by `fastcart-serve` from the trusted hostname and
    is injected into the SSR request. Client-supplied internal context headers
    are stripped. The Worker cannot choose another store by changing a header or
@@ -71,6 +77,17 @@ line as the product rendering architecture.
 10. workerd is not treated as a hardened sandbox. Trusted artifacts may share a
     runtime group; untrusted third-party code requires a stronger OS or VM
     boundary.
+
+**Amendment (2026-11-09):** decision 5 originally created a single
+`fastcart-ssr` crate. In practice that crate only ever contained the workerd
+execution layer, while the deployment lifecycle stayed in `apps/server`, so the
+name described something the crate did not do. The crate is now split along
+that existing seam: `crates/ssr-workerd` (package `fastcart-ssr-workerd`) holds
+artifact validation, config generation, process supervision and the gateway;
+`crates/ssr` (package `fastcart-ssr`) holds the deployment registry, activation,
+previews, caching and asset serving. Earlier phase notes in
+[`../architecture`](../architecture/index.md) still use the former
+`crates/fastcart-ssr` path; they are historical records.
 
 **Rejected alternatives:**
 
@@ -133,7 +150,8 @@ line as the product rendering architecture.
 
 ## Verification
 
-**Implementation impact:** `crates/fastcart-ssr`, `apps/server`, `crates/api`,
+**Implementation impact:** `crates/ssr`, `crates/ssr-workerd`, `apps/server`,
+`crates/api`,
 `packages/storefront-sdk`, `packages/storefront-build`,
 `packages/storefront-adapter-tanstack`, `packages/storefront-adapter-astro`,
 `templates/storefront-tanstack`, `templates/storefront-astro`,

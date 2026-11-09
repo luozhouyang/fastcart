@@ -108,3 +108,27 @@ and the [Universal SSR Runtime](architecture/universal-ssr-runtime.md) plan.
 - A deployment is two processes, not a single binary: `fastcart-serve` plus the
   supervised `workerd` runtime when SSR is enabled. Docker is not a supported
   deployment path.
+
+## Amendment 3 — 2026-11-09: themes are deployment artifacts
+
+The theme architecture is amended by
+[ADR 0008](adr/0008-themes-as-deployment-artifacts.md). ADR 0003 (trusted theme
+bundles) is superseded; ADR 0004 (page editor) remains Accepted.
+
+- A theme is a storefront artifact deployed through the universal deployment
+  API and served by `workerd`. FastCart does not load theme bundles, interpret
+  theme routes or resolve page bindings for theme traffic.
+- The theme registry keeps identity, version, settings schema, published
+  settings, revisions and activation. Bundle path, entry, routes, asset and
+  editor manifests, and the `v8`/`node` runtime field are removed.
+- `fastcart-runtime-api`, `fastcart-runtime-node`, `fastcart-runtime-pool`,
+  `fastcart-runtime-v8`, `fastcart-runtime-bridge`, `apps/theme-sidecar`, the
+  `storefront.runtime` switch, the secret-gated `/internal/storefront` surface
+  and the theme asset route are removed. Amendment 2's transitional adapter
+  line no longer exists in the target architecture.
+- Page content remains CMS data that an artifact may fetch. The admin page
+  editor is reworked independently and no longer consumes a theme-provided
+  editor bundle or binds blocks to theme components.
+- The trust statement from ADR 0003 still applies to artifacts: storefront code
+  is trusted server-side code isolated by supervised `workerd` groups with
+  resource limits, not an operating-system sandbox.

@@ -10,6 +10,11 @@ timestamp: 2026-11-06T16:17:43Z
 
 # 0004. Puck as the admin page editor
 
+> **Note (2026-11-09):** [ADR 0008](0008-themes-as-deployment-artifacts.md)
+> removes the theme-provided editor bundle and the component palette that this
+> ADR assumes. The page editor itself remains valid: it edits page content that
+> an artifact may fetch, not theme components.
+
 ## Context
 
 The admin page editor is a bespoke block tree with a component palette, field inspector, zone targets, nested slots, a data-source picker, JSON mode, draft revisions, iframe preview and publish. The theme/editor design notes target Puck as the editor while keeping the page body as the authoritative data model. The current editor works but owns layout, drag-and-drop behaviour and field rendering, which is a large surface to maintain and a barrier to the drag-and-drop UX merchants expect.

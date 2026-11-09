@@ -2059,7 +2059,9 @@ fastcart/
 
 ## 17.1 Rust crate boundaries
 
-`fastcart-ssr` should be a separate crate.
+SSR should be separate crates: `fastcart-ssr` for the deployment lifecycle and
+`fastcart-ssr-workerd` for workerd execution. See
+[ADR 0007](../adr/0007-universal-ssr-runtime-with-workerd.md#amendment-2026-11-09).
 
 It should depend on:
 
@@ -2332,13 +2334,16 @@ Build the simplest working Rust-to-workerd execution path.
 
 ## Tasks
 
-### 22.1 Create `fastcart-ssr`
+### 22.1 Create `fastcart-ssr-workerd`
 
 Create a new Rust crate:
 
 ```text
-crates/fastcart-ssr/
+crates/ssr-workerd/
 ```
+
+The deployment registry and lifecycle are not part of this crate; they live in
+`crates/ssr` (`fastcart-ssr`), which depends on `fastcart-ssr-workerd`.
 
 Implement:
 
@@ -2409,7 +2414,7 @@ Do not expose this endpoint publicly.
 
 ### Deliverables
 
-- `fastcart-ssr` crate.
+- `fastcart-ssr-workerd` crate.
 - Workerd process launcher.
 - Basic HTTP proxy.
 - Health check.

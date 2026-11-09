@@ -3,12 +3,19 @@ type: ADR
 title: Trusted theme bundles with worker limits
 description: Treat storefront artifacts as trusted server-side code isolated by workerd process groups and resource limits, not an OS sandbox.
 owner: luozhouyang
-status: Accepted
+status: Superseded
 implementation: partial
+superseded_by: 0008
 timestamp: 2026-11-06T16:17:43Z
 ---
 
 # 0003. Trusted theme bundles with worker limits
+
+> **Superseded by [ADR 0008](0008-themes-as-deployment-artifacts.md).**
+> A theme is now a deployment artifact rather than a separately registered
+> bundle, so the theme-bundle validation pipeline this ADR describes is removed.
+> The trust model — artifacts are trusted server-side code isolated by saved
+> runtime groups, not an OS sandbox — still applies to artifacts.
 
 ## Context
 

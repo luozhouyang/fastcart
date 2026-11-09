@@ -13,8 +13,9 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 > shipping, tax and settings. `apps/storefront` is a TanStack Start reference
 > harness. The universal `workerd` SSR path is implemented
 > ([ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md));
-> TanStack Start and Astro templates exist; the default artifact build remains
-> in progress. The legacy Node sidecar remains transitional until parity.
+> TanStack Start, Astro, SvelteKit and generic Fetch-handler templates exist.
+> Themes are deployment artifacts ([ADR 0008](.livingdocs/adr/0008-themes-as-deployment-artifacts.md));
+> the legacy Node/V8 sidecar has been removed.
 
 ## Why Fastcart
 
@@ -36,23 +37,23 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 
 ### Commerce modules
 
-| Module    | Capabilities                                                                                     |
-| --------- | ------------------------------------------------------------------------------------------------ |
-| store     | Store settings and sales channels                                                                |
-| catalog   | Products, variants, options, media, categories, collections, tags, FTS5 search, publication      |
-| pricing   | Price lists, scoped prices and deterministic price selection                                     |
-| promotion | Percentage/fixed/free-shipping promotions, coupons, rules, usage limits, proportional allocation |
-| inventory | Locations, levels, atomic reservations, release/commit, expiry and movement history              |
-| shipping  | Profiles, options and region/weight-aware flat rate selection                                    |
-| tax       | Categories, regions, rates and inclusive/exclusive tax calculation                               |
-| customer  | Profiles, addresses, groups, Argon2id credentials and store-scoped sessions                      |
-| cart      | Snapshot line items and server-derived totals                                                    |
-| checkout  | Persisted state machine with transition history                                                  |
-| order     | Immutable commercial snapshots, idempotent placement, fulfillment and refunds                    |
-| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events      |
-| content   | Pages, versions, navigation trees and redirects                                                  |
-| webhook   | Endpoint subscriptions, HMAC-signed deliveries, retries, replay and delivery history             |
-| theme     | Theme registry, JSON Schema settings, activation, rollback and public active-theme lookup        |
+| Module    | Capabilities                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------------- |
+| store     | Store settings and sales channels                                                                        |
+| catalog   | Products, variants, options, media, categories, collections, tags, FTS5 search, publication              |
+| pricing   | Price lists, scoped prices and deterministic price selection                                             |
+| promotion | Percentage/fixed/free-shipping promotions, coupons, rules, usage limits, proportional allocation         |
+| inventory | Locations, levels, atomic reservations, release/commit, expiry and movement history                      |
+| shipping  | Profiles, options and region/weight-aware flat rate selection                                            |
+| tax       | Categories, regions, rates and inclusive/exclusive tax calculation                                       |
+| customer  | Profiles, addresses, groups, Argon2id credentials and store-scoped sessions                              |
+| cart      | Snapshot line items and server-derived totals                                                            |
+| checkout  | Persisted state machine with transition history                                                          |
+| order     | Immutable commercial snapshots, idempotent placement, fulfillment and refunds                            |
+| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events              |
+| content   | Pages, versions, navigation trees and redirects                                                          |
+| webhook   | Endpoint subscriptions, HMAC-signed deliveries, retries, replay and delivery history                     |
+| theme     | Theme settings registry (themes are deployment artifacts), JSON Schema settings, activation and rollback |
 
 ### Cross-cutting
 
@@ -60,7 +61,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - SQLite-backed persistent job queue with atomic claiming and lease expiry.
 - Signed webhook delivery from outbox events with idempotent fan-out, retry/backoff, crash recovery and replay.
 - Provider-independent transactional email with queued `send_email` jobs, SMTP (`lettre`) and Resend (`resend-rs`) providers, plus log and in-memory test providers.
-- Storefront SSR: the accepted target is a framework-agnostic universal runtime. `fastcart-serve` resolves the store, strips client-supplied internal headers, injects trusted context and forwards the request to a process-isolated `workerd` runtime, which executes a standard Fetch-handler artifact and calls the internal Commerce API. The legacy Node sidecar (worker thread, heap and wall-clock limits, no CPU isolation) remains transitional and must not be extended; see [ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md).
+- Storefront SSR: the accepted target is a framework-agnostic universal runtime. `fastcart-serve` resolves the store, strips client-supplied internal headers, injects trusted context and forwards the request to a process-isolated `workerd` runtime, which executes a standard Fetch-handler artifact and calls the internal Commerce API. A theme is a deployment artifact built with any supported framework: the theme registry stores settings and activation, while rendering and data access belong to the artifact ([ADR 0008](.livingdocs/adr/0008-themes-as-deployment-artifacts.md)).
 - Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; email jobs; simple job handlers.
 - Store-scoped Moka cache with generation-based invalidation.
 - Prometheus-compatible `/metrics` with latency histograms, plus baseline security response headers.
@@ -87,6 +88,9 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 | `crates/modules/*`               | The independent commerce modules listed above                     |
 | `crates/workflows`               | Cart pricing, checkout and maintenance workflows                  |
 | `crates/api`                     | Versioned HTTP surface and DTOs                                   |
+| `crates/ssr`                     | SSR deployments: activation, rollback, previews, cache, assets    |
+| `crates/ssr-workerd`             | workerd supervisor, gateway and `fastcart-ssr.json` artifact      |
+| `crates/ssr-credentials`         | Store-scoped internal SSR credentials                             |
 | `crates/plugin`, `crates/ai`     | Extension foundations                                             |
 | `migrations/platform`            | Platform schema                                                   |
 | `migrations/store`               | Per-store schema (catalog, pricing, inventory, orders, …)         |
@@ -117,11 +121,6 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_SMTP_HOST`, `FASTCART_SMTP_PORT`, `FASTCART_SMTP_USERNAME`,
   `FASTCART_SMTP_PASSWORD`, `FASTCART_SMTP_SECURITY` — SMTP delivery
 - `FASTCART_RESEND_API_KEY` — Resend delivery
-- `FASTCART_STOREFRONT_ENABLED` — enable SSR (default off)
-- `FASTCART_STOREFRONT_STREAMING`, `FASTCART_STOREFRONT_STREAM_TIMEOUT_MS` — allow streamed HTML (default on) and its total time budget (default 30s)
-- `FASTCART_THEMES_DIR` — trusted theme bundle directory (default `./themes`); transitional until artifacts replace theme bundles
-- `FASTCART_INTERNAL_FETCH_SECRET` — legacy secret-gated `/internal/storefront` surface; the target SSR gateway uses a scoped internal credential
-- `FASTCART_CAPABILITY_SECRET` — signs theme capability grants so plugin endpoints can verify them
 - `FASTCART_SSR_ENABLED` — enable the universal workerd runtime (requires an artifact)
 - `FASTCART_SSR_BINARY`, `FASTCART_SSR_ARTIFACT`, `FASTCART_SSR_RUNTIME_DIR` — pinned workerd binary, source artifact directory and runtime data directory
 - `FASTCART_SSR_LISTEN`, `FASTCART_SSR_DEPLOYMENT_ID`, `FASTCART_SSR_INTERNAL_TOKEN` — loopback listener, deployment identity and optional internal token
@@ -141,20 +140,22 @@ Commerce API. TanStack Start is the first supported framework; Astro is second.
 The artifact contract, runtime manager, gateway, trusted request context and
 deployment lifecycle are specified in [ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md)
 and the [universal SSR runtime plan](.livingdocs/architecture/universal-ssr-runtime.md).
-Implementation has not started.
+The runtime, artifact pipeline, gateway and deployment lifecycle are implemented;
+theme artifacts are the remaining product work
+([ADR 0008](.livingdocs/adr/0008-themes-as-deployment-artifacts.md)).
 
-The legacy Node renderer (`runtime-node`, `apps/theme-sidecar`,
-`FASTCART_STOREFRONT_RUNTIME=node|v8`) remains in the tree only as transitional
-code. It is not the target deployment, must not be extended, and will be removed
-once the workerd path passes parity. Node and Docker are not required by the
-target architecture. For local migration testing only, the legacy sidecar still
-starts with:
+### Themes
 
-```bash
-pnpm --filter @fastcart/theme-default build
-SIDECAR_SECRET=change-me pnpm --filter @fastcart/theme-sidecar start
-# and set FASTCART_STOREFRONT_NODE_SECRET=change-me on the server
-```
+A theme is a storefront artifact plus settings, not a bundle the server loads.
+The admin registers theme metadata (`id`, `name`, `version`) with a JSON Schema
+for settings and initial settings; the theme's rendering code ships as a
+`fastcart-ssr.json` artifact deployed through the universal deployment API. At
+render time the artifact reads its settings with `GET /api/v1/store/theme` (or
+the scoped internal SSR namespace) through `@fastcart/storefront-sdk`. Theme
+previews use preview deployments, and assets are served from the artifact under
+`/_fastcart/assets/`. The legacy theme bundle, theme editor bundle and
+capability bindings have been removed
+([ADR 0008](.livingdocs/adr/0008-themes-as-deployment-artifacts.md)).
 
 ### Storefront trust model
 
@@ -165,14 +166,14 @@ reliability boundary, not an operating-system sandbox. Untrusted third-party cod
 requires a dedicated process group plus an OS or VM boundary, and storefront
 code never receives database access, payment secrets, admin credentials or other
 backend secrets. Static assets are served by Rust, not by the Worker. See
-[ADR 0003](.livingdocs/adr/0003-trusted-theme-bundles-with-worker-limits.md).
+[ADR 0008](.livingdocs/adr/0008-themes-as-deployment-artifacts.md).
 
 Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
 
 ## Deployment
 
 Docker is **not** a supported deployment path. The Dockerfiles, Compose stack,
-Admin nginx image and theme-sidecar image have been removed from the repository;
+Admin nginx image and the legacy theme sidecar have been removed from the repository;
 do not reintroduce them for the workerd migration.
 
 The target topology is two local processes on one host:
@@ -198,11 +199,10 @@ supported. Scale up requires the PostgreSQL/coordination work described in
 
 The universal runtime path is implemented and can be enabled with an artifact.
 TanStack Start, Astro, SvelteKit and generic Fetch-handler templates are
-provided. The legacy Node sidecar is a migration aid only; it is not the
-supported deployment and must not be extended. See
+provided. See
 [ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md).
 
-To run the universal path, keep `storefront.enabled = false` and set:
+To run the universal path, set:
 
 ```toml
 [ssr]
@@ -359,11 +359,6 @@ settings:
 
 - `FASTCART_PREVIEW_SECRET` — at least 32 bytes; enables draft preview. Without
   it the preview endpoints return `501 Not Implemented`.
-- `FASTCART_CAPABILITY_SECRET` — signs capability grants. Set a long random
-  value in production when plugins use capability endpoints.
-- `FASTCART_INTERNAL_FETCH_SECRET` — legacy shared secret for the
-  `/internal/storefront` surface. The target gateway replaces it with a scoped
-  internal runtime credential.
 - `FASTCART_COOKIE_SECURE=true` — required behind TLS so session and CSRF
   cookies are marked `Secure`.
 - `FASTCART_STORE_<STORE>_STRIPE_SECRET_KEY`,
@@ -402,17 +397,17 @@ never public.
 
 All endpoints are under `/api/v1` unless noted.
 
-| Namespace                  | Purpose                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------- |
-| `/platform/*`              | Installation, auth, stores, domains, memberships                             |
-| `/admin/*`                 | Store-scoped administration                                                  |
-| `/store/*`                 | Public storefront and customer operations                                    |
-| `/webhooks/payments/*`     | Provider callbacks                                                           |
-| `/internal/*`              | SSR-to-commerce boundary (`/internal/ssr/v1`; legacy `/internal/storefront`) |
-| `/health`, `/health/ready` | Liveness and readiness                                                       |
-| `/metrics`                 | Prometheus-compatible process metrics                                        |
-| `/api/v1/openapi.json`     | OpenAPI 3.1 document                                                         |
-| `/*`                       | Storefront SSR fallback (legacy theme runtime; target gateway)               |
+| Namespace                  | Purpose                                              |
+| -------------------------- | ---------------------------------------------------- |
+| `/platform/*`              | Installation, auth, stores, domains, memberships     |
+| `/admin/*`                 | Store-scoped administration                          |
+| `/store/*`                 | Public storefront and customer operations            |
+| `/webhooks/payments/*`     | Provider callbacks                                   |
+| `/internal/ssr/*`          | Scoped SSR-to-commerce boundary (`/internal/ssr/v1`) |
+| `/health`, `/health/ready` | Liveness and readiness                               |
+| `/metrics`                 | Prometheus-compatible process metrics                |
+| `/api/v1/openapi.json`     | OpenAPI 3.1 document                                 |
+| `/*`                       | Storefront SSR fallback (universal workerd gateway)  |
 
 Key flows:
 

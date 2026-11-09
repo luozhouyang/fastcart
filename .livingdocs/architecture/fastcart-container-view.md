@@ -54,17 +54,24 @@ flowchart TB
 - `workerd` executes framework-built Worker artifacts and calls the internal
   Commerce API. It never receives database access, admin credentials or payment
   secrets.
-- `fastcart-ssr` owns the runtime manager, process supervisor, artifact
-  validation and deployment lifecycle. A workerd process crash must not take
+- `fastcart-ssr` owns the deployment registry, activation and rollback,
+  previews, the response cache and static asset serving.
+- `fastcart-ssr-workerd` owns the runtime manager, process supervisor, artifact
+  validation and the loopback gateway. A workerd process crash must not take
   down the commerce API.
 - Static assets under `/_fastcart/assets/` are served by Rust, not by workerd.
 
 ## Implementation status
 
-The workerd runtime, artifact pipeline, gateway and runtime manager are not
-implemented yet. The current repository still runs the legacy Node sidecar
-(`apps/theme-sidecar`) and keeps `runtime-v8` as a stub. This view describes the
-target container boundary, not the current deployment.
+The workerd execution layer, artifact pipeline, gateway, runtime manager and
+deployment lifecycle are implemented in `crates/ssr-workerd` and `crates/ssr`.
+
+[ADR 0008](../adr/0008-themes-as-deployment-artifacts.md) makes the storefront
+artifact the only theme contract. `crates/storefront-runtime/runtime-v8` and
+`runtime-bridge` are already removed; the Node sidecar, the remaining
+`runtime-*` crates, the `storefront.runtime` switch and the secret-gated
+`/internal/storefront` surface are being removed next. Until that lands, the
+legacy path still exists in the workspace but is not part of this target view.
 
 ## Drift instrument
 
@@ -74,5 +81,6 @@ validation (manifest, digest, path traversal, missing entry), SSR gateway tests
 and workerd framework fixtures (TanStack Start, Astro, generic Fetch handler).
 A dependency from `crates/kernel` or `crates/storefront` onto workerd-specific
 types is a boundary drift signal; keep workerd process management inside
-`fastcart-ssr`. The legacy sidecar protocol tests are transitional and must be
-removed with the legacy adapters.
+`fastcart-ssr-workerd` and deployment lifecycle inside `fastcart-ssr`. The
+legacy sidecar protocol tests are transitional and must be removed with the
+legacy adapters.

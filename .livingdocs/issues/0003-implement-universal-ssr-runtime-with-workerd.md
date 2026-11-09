@@ -19,9 +19,11 @@ process-isolated `workerd` process managed by `fastcart-serve`.
 
 - Phase 0: pin a workerd binary and validate Fetch handlers, Web APIs, streaming,
   service bindings, TanStack Start output and Astro output.
-- `crates/fastcart-ssr`: artifact manifest parsing and validation, immutable
-  artifact storage, deployment registry and lifecycle, workerd configuration
-  generation, process supervisor, health checks, gateway and trusted context.
+- `crates/ssr-workerd`: artifact manifest parsing and validation, immutable
+  artifact storage, workerd configuration generation, process supervisor,
+  health checks and gateway.
+- `crates/ssr`: deployment registry and lifecycle, activation and rollback,
+  previews, response cache, static assets and trusted context.
 - A versioned FastCart SSR Artifact (`fastcart-ssr.json`) and a TypeScript
   packager under `packages/storefront-build`.
 - TanStack Start as the first supported framework, then Astro, using official

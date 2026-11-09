@@ -46,4 +46,4 @@ Validated on 2026-11-09 with workerd `v1.20261109.1`:
 
 Phase 0 does not implement the artifact packager, runtime supervisor, gateway,
 static asset serving or deployment registry. Those start in Phase 1 with
-`crates/fastcart-ssr`.
+`crates/ssr-workerd` and `crates/ssr`.
