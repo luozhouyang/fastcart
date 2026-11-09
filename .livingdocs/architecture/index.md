@@ -28,3 +28,4 @@
 * [Universal SSR Runtime Phase 23 Review](ssr-phase23-review.md) - phase 23 review
 * [Universal SSR Runtime Phase 24 Review](ssr-phase24-review.md) - phase 24 review
 * [Universal SSR Runtime Phase 25 Review](ssr-phase25-review.md) - phase 25 review
+* [Universal SSR Runtime Phase 26 Review](ssr-phase26-review.md) - phase 26 review

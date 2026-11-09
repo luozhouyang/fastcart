@@ -303,6 +303,11 @@ templates that emit asset URLs must honor the prefix header (the generic
 template does). Draft page data injection into framework workers is not
 implemented yet.
 
+Retired production and preview artifacts are reference-counted. After
+`drain_timeout_ms`, a replaced group is stopped and its digest directory is
+removed when no active deployment shares it; asset roots are pruned at the same
+time. Startup-orphaned artifact directories are not swept yet.
+
 `/metrics` now includes `fastcart_ssr_requests_total`,
 `fastcart_ssr_errors_total`, `fastcart_ssr_cache_hits_total`,
 `fastcart_ssr_cache_misses_total` and `fastcart_ssr_deployments`.

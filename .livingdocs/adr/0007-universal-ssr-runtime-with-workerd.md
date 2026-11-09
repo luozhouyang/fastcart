@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 26 (2026-11-09) added reference-counted artifact garbage collection after
+drain, retaining shared digest directories and pruning asset roots. Startup
+orphan sweeping and GC metrics remain open.
+
 Phase 25 (2026-11-09) added credential backend metrics and opt-in
 XChaCha20-Poly1305 file encryption with an environment-provided key. Key
 rotation, KMS integration and automatic plaintext migration remain open.

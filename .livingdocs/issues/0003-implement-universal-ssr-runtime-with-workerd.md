@@ -228,3 +228,9 @@ Credential backend load/save/refresh metrics and opt-in XChaCha20-Poly1305 file
 encryption are implemented. Keys come from an environment variable and are not
 logged; legacy plaintext remains readable. Key rotation, KMS integration and
 automatic plaintext migration remain open.
+
+### Phase 26 status
+
+Retired production/preview artifacts are reference-counted and removed after the
+drain window when no active deployment shares the digest; asset roots are pruned
+at the same time. Startup orphan sweeping and dedicated GC metrics remain open.

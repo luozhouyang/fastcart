@@ -33,6 +33,7 @@ struct Deployment {
     gateway: SsrGateway,
     deployment_id: String,
     asset_root: PathBuf,
+    artifact_dir: PathBuf,
     artifact_path: PathBuf,
 }
 
@@ -72,8 +73,9 @@ pub struct UniversalSsr {
     deployments: RwLock<HashMap<String, Arc<Deployment>>>,
     previews: RwLock<HashMap<String, Arc<Deployment>>>,
     history: RwLock<HashMap<String, Vec<DeploymentMeta>>>,
-    asset_roots: RwLock<Vec<PathBuf>>,
-    preview_asset_roots: RwLock<Vec<PathBuf>>,
+    asset_roots: Arc<RwLock<Vec<PathBuf>>>,
+    preview_asset_roots: Arc<RwLock<Vec<PathBuf>>>,
+    artifact_refs: Arc<RwLock<HashMap<PathBuf, usize>>>,
     response_cache: RwLock<HashMap<String, CachedResponse>>,
     default: Option<Arc<Deployment>>,
     metrics: Arc<Metrics>,
@@ -193,14 +195,25 @@ impl UniversalSsr {
             .values()
             .map(|deployment| deployment.asset_root.clone())
             .collect();
+        let mut artifact_refs: HashMap<PathBuf, usize> = HashMap::new();
+        for deployment in deployments
+            .values()
+            .chain(previews.values())
+            .chain(default.iter())
+        {
+            *artifact_refs
+                .entry(deployment.artifact_dir.clone())
+                .or_default() += 1;
+        }
         metrics.set_ssr_deployments(deployments.len() + previews.len());
         Ok(Some(Arc::new(Self {
             manager: Arc::new(Mutex::new(manager)),
             deployments: RwLock::new(deployments),
             previews: RwLock::new(previews),
             history: RwLock::new(HashMap::new()),
-            asset_roots: RwLock::new(asset_roots),
-            preview_asset_roots: RwLock::new(preview_asset_roots),
+            asset_roots: Arc::new(RwLock::new(asset_roots)),
+            preview_asset_roots: Arc::new(RwLock::new(preview_asset_roots)),
+            artifact_refs: Arc::new(RwLock::new(artifact_refs)),
             response_cache: RwLock::new(HashMap::new()),
             default,
             metrics,
@@ -281,6 +294,7 @@ impl UniversalSsr {
         drop(manager);
 
         let deployment = Arc::new(deployment);
+        self.retain_artifact(&deployment).await;
         let old = self
             .deployments
             .write()
@@ -313,7 +327,7 @@ impl UniversalSsr {
                 .as_ref()
                 .is_none_or(|default| default.group.as_str() != previous.group.as_str())
             {
-                self.schedule_drain(previous.group.clone());
+                self.schedule_drain(previous.clone());
             }
         }
         Ok(())
@@ -420,13 +434,36 @@ impl UniversalSsr {
         Ok(candidate)
     }
 
-    fn schedule_drain(&self, group: RuntimeGroupId) {
+    async fn retain_artifact(&self, deployment: &Deployment) {
+        *self
+            .artifact_refs
+            .write()
+            .await
+            .entry(deployment.artifact_dir.clone())
+            .or_default() += 1;
+    }
+
+    fn schedule_drain(&self, deployment: Arc<Deployment>) {
         let manager = Arc::clone(&self.manager);
+        let refs = Arc::clone(&self.artifact_refs);
+        let roots = Arc::clone(&self.asset_roots);
+        let preview_roots = Arc::clone(&self.preview_asset_roots);
+        let artifact_dir = deployment.artifact_dir.clone();
+        let group = deployment.group.clone();
         let delay = Duration::from_millis(self.config.drain_timeout_ms.max(1));
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            if let Err(error) = manager.lock().await.stop_group(&group).await {
-                tracing::warn!(error = %error, group = %group, "failed to drain SSR group");
+            match manager.lock().await.stop_group(&group).await {
+                Ok(()) => {
+                    release_artifact(artifact_dir, refs, roots, preview_roots).await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        group = %group,
+                        "failed to drain SSR group; retaining its artifact"
+                    );
+                }
             }
         });
     }
@@ -470,6 +507,7 @@ impl UniversalSsr {
         .await?;
         drop(manager);
         let deployment = Arc::new(deployment);
+        self.retain_artifact(&deployment).await;
         let old = self
             .previews
             .write()
@@ -486,7 +524,7 @@ impl UniversalSsr {
                 preview_roots.push(old.asset_root.clone());
             }
             drop(preview_roots);
-            self.schedule_drain(old.group.clone());
+            self.schedule_drain(old.clone());
         }
         self.refresh_deployment_metric().await;
         self.persist_state().await;
@@ -508,7 +546,7 @@ impl UniversalSsr {
             preview_roots.push(old.asset_root.clone());
         }
         drop(preview_roots);
-        self.schedule_drain(old.group.clone());
+        self.schedule_drain(old.clone());
         self.refresh_deployment_metric().await;
         self.persist_state().await;
         Ok(())
@@ -625,6 +663,7 @@ async fn start_deployment(
             spec.store_id.unwrap_or("default")
         )
     })?;
+    let artifact_dir = artifact.root().to_path_buf();
     let asset_root = artifact.root().join(&artifact.manifest().assets.directory);
     let health = manager
         .start_group(group.clone(), artifact, spec.listen)
@@ -648,8 +687,47 @@ async fn start_deployment(
         gateway,
         deployment_id: spec.deployment_id.to_owned(),
         asset_root,
+        artifact_dir,
         artifact_path: spec.artifact_path.to_owned(),
     })
+}
+
+async fn release_artifact(
+    artifact_dir: PathBuf,
+    refs: Arc<RwLock<HashMap<PathBuf, usize>>>,
+    roots: Arc<RwLock<Vec<PathBuf>>>,
+    preview_roots: Arc<RwLock<Vec<PathBuf>>>,
+) {
+    let remaining = {
+        let mut refs = refs.write().await;
+        let Some(count) = refs.get_mut(&artifact_dir) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        let remaining = *count;
+        if remaining == 0 {
+            refs.remove(&artifact_dir);
+        }
+        remaining
+    };
+    if remaining > 0 {
+        return;
+    }
+    roots
+        .write()
+        .await
+        .retain(|root| !root.starts_with(&artifact_dir));
+    preview_roots
+        .write()
+        .await
+        .retain(|root| !root.starts_with(&artifact_dir));
+    match tokio::fs::remove_dir_all(&artifact_dir).await {
+        Ok(()) => tracing::info!(path = %artifact_dir.display(), "removed retired SSR artifact"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(error = %error, path = %artifact_dir.display(), "failed to remove retired SSR artifact");
+        }
+    }
 }
 
 fn free_loopback_port() -> Result<SocketAddr> {
@@ -1600,9 +1678,11 @@ export default {
         let root = tempfile::tempdir().expect("root");
         let source_a = artifact(&root.path().join("a"));
         let source_b = artifact(&root.path().join("b"));
+        let source_d = artifact(&root.path().join("d"));
         std::fs::write(source_a.join("client/app.js"), "asset-a").expect("asset a");
         std::fs::write(source_a.join("client/old.js"), "old-a").expect("old asset a");
         std::fs::write(source_b.join("client/app.js"), "asset-b").expect("asset b");
+        std::fs::write(source_d.join("client/app.js"), "asset-preview").expect("preview asset");
         let config = SsrConfig {
             enabled: true,
             binary,
@@ -1759,7 +1839,7 @@ export default {
         assert_eq!(rolled_back["deployment"], "deploy_a");
 
         runtime
-            .activate_preview("store_a", "deploy_preview", &source_b)
+            .activate_preview("store_a", "deploy_preview", &source_d)
             .await
             .expect("activate preview");
         assert!(runtime.has_preview("store_a").await);
@@ -1775,7 +1855,7 @@ export default {
         let preview_asset_body = axum::body::to_bytes(preview_asset.into_body(), 1024)
             .await
             .expect("preview asset");
-        assert_eq!(&preview_asset_body[..], b"asset-b");
+        assert_eq!(&preview_asset_body[..], b"asset-preview");
         let production_asset = runtime
             .serve_asset("store_a", "app.js".to_owned(), axum::http::HeaderMap::new())
             .await;
@@ -1783,6 +1863,14 @@ export default {
             .await
             .expect("production asset");
         assert_eq!(&production_asset_body[..], b"asset-a");
+        let preview_artifact_dir = runtime
+            .previews
+            .read()
+            .await
+            .get("store_a")
+            .expect("preview deployment")
+            .artifact_dir
+            .clone();
         runtime
             .deactivate_preview("store_a")
             .await
@@ -1792,6 +1880,8 @@ export default {
             .serve_preview_asset("store_a", "app.js".to_owned(), axum::http::HeaderMap::new())
             .await;
         assert_eq!(missing_preview_asset.status(), StatusCode::NOT_FOUND);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!preview_artifact_dir.exists());
         let missing_preview = runtime
             .render_preview(
                 Request::builder()
