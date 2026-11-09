@@ -92,3 +92,10 @@ injected, spoofed internal headers are removed, response streams and duplicate
 smoke test covers SSR, server functions, trusted headers, streaming, cookies,
 redirects and errors. A manual `fastcart-server` run rendered the template.
 Static assets and browser hydration are Phase 7 work.
+
+### Phase 6 status
+
+The server-only `/internal/ssr/v1/stores/{store_id}` namespace requires a bearer
+token and resolves the active store from the path. `@fastcart/storefront-sdk/server`
+rewrites public SDK paths to this namespace. Token scoping and Worker-side SDK
+use remain Phase 8 work.

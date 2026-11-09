@@ -269,6 +269,30 @@ pub async fn internal_fetch_auth_middleware(
     Ok(next.run(request).await)
 }
 
+/// Authenticates the server-only SSR commerce API.
+pub async fn internal_ssr_auth_middleware(
+    State(expected): State<String>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let provided = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-fastcart-internal-token")
+                .and_then(|value| value.to_str().ok())
+        })
+        .unwrap_or_default();
+    if expected.is_empty() || !bool::from(provided.as_bytes().ct_eq(expected.as_bytes())) {
+        return Err(ApiError::new(AppError::Forbidden));
+    }
+    Ok(next.run(request).await)
+}
+
 /// State for the store database middleware.
 #[derive(Clone)]
 pub struct StoreDbState {

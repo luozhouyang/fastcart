@@ -72,6 +72,10 @@ pub struct ApiConfig {
     /// When absent, internal routes are not mounted over HTTP; the in-process
     /// bridge remains the only way to reach them.
     pub internal_fetch_secret: Option<String>,
+    /// Optional bearer token for the server-to-server SSR commerce API.
+    ///
+    /// When absent, `/internal/ssr/v1` is not mounted.
+    pub internal_ssr_token: Option<String>,
     /// Optional secret used to sign theme capability grants.
     ///
     /// When set, grants carry a signed payload a capability endpoint sharing
@@ -131,6 +135,7 @@ impl Default for ApiConfig {
             storefront_streaming_enabled: true,
             storefront_stream_timeout_ms: 30_000,
             internal_fetch_secret: None,
+            internal_ssr_token: None,
             capability_secret: None,
             preview_secret: None,
             preview_frame_ancestors: Vec::new(),

@@ -250,17 +250,17 @@ never public.
 
 All endpoints are under `/api/v1` unless noted.
 
-| Namespace                  | Purpose                                                                             |
-| -------------------------- | ----------------------------------------------------------------------------------- |
-| `/platform/*`              | Installation, auth, stores, domains, memberships                                    |
-| `/admin/*`                 | Store-scoped administration                                                         |
-| `/store/*`                 | Public storefront and customer operations                                           |
-| `/webhooks/payments/*`     | Provider callbacks                                                                  |
-| `/internal/*`              | SSR-to-commerce boundary (legacy `/internal/storefront`; target `/internal/ssr/v1`) |
-| `/health`, `/health/ready` | Liveness and readiness                                                              |
-| `/metrics`                 | Prometheus-compatible process metrics                                               |
-| `/api/v1/openapi.json`     | OpenAPI 3.1 document                                                                |
-| `/*`                       | Storefront SSR fallback (legacy theme runtime; target gateway)                      |
+| Namespace                  | Purpose                                                                      |
+| -------------------------- | ---------------------------------------------------------------------------- |
+| `/platform/*`              | Installation, auth, stores, domains, memberships                             |
+| `/admin/*`                 | Store-scoped administration                                                  |
+| `/store/*`                 | Public storefront and customer operations                                    |
+| `/webhooks/payments/*`     | Provider callbacks                                                           |
+| `/internal/*`              | SSR-to-commerce boundary (`/internal/ssr/v1`; legacy `/internal/storefront`) |
+| `/health`, `/health/ready` | Liveness and readiness                                                       |
+| `/metrics`                 | Prometheus-compatible process metrics                                        |
+| `/api/v1/openapi.json`     | OpenAPI 3.1 document                                                         |
+| `/*`                       | Storefront SSR fallback (legacy theme runtime; target gateway)               |
 
 Key flows:
 

@@ -7,7 +7,8 @@
 //! - `/api/v1/admin` — store-scoped administration
 //! - `/api/v1/store` — public storefront operations
 //! - `/api/v1/webhooks` — provider callbacks
-//! - `/internal/storefront` — trusted SSR-to-commerce boundary (secret-gated)
+//! - `/internal/storefront` — legacy trusted SSR-to-commerce boundary
+//! - `/internal/ssr/v1/stores/{store_id}` — server-only SSR commerce API
 //!
 //! Unmatched paths on a storefront host are rendered by the active theme via
 //! the configured runtime. API, health, metrics and internal namespaces are
@@ -62,6 +63,12 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
             axum::middleware::from_fn_with_state(secret, routes::internal_fetch_auth_middleware),
         );
         router = router.nest("/internal/storefront", internal);
+    }
+    if let Some(token) = context.config.internal_ssr_token.clone() {
+        let internal = routes::store::internal_ssr_router(&context).layer(
+            axum::middleware::from_fn_with_state(token, routes::internal_ssr_auth_middleware),
+        );
+        router = router.nest("/internal/ssr/v1/stores/{store_id}", internal);
     }
 
     let router = router

@@ -136,6 +136,7 @@ impl StorefrontRuntime for TimeoutRuntime {
 struct Fixture {
     app: Router,
     database: fastcart_infrastructure::StoreDatabase,
+    store_id: String,
     _dir: tempfile::TempDir,
 }
 
@@ -195,6 +196,7 @@ async fn fixture(
                 cookie_secure: false,
                 backup_dir: dir.path().join("backups"),
                 internal_fetch_secret: internal_secret,
+                internal_ssr_token: Some("ssr-internal-secret".to_owned()),
                 ..ApiConfig::default()
             },
             platform,
@@ -207,6 +209,7 @@ async fn fixture(
     Fixture {
         app: build_router(context),
         database: database.clone(),
+        store_id: store.id.to_string(),
         _dir: dir,
     }
 }
@@ -1145,4 +1148,55 @@ async fn universal_runtime_receives_trusted_context() {
     assert!(seen[0].store.store_id.as_str().starts_with("store_"));
     assert!(seen[0].request_id.is_some());
     assert_eq!(seen[0].scheme, "https");
+}
+
+#[tokio::test]
+async fn internal_ssr_namespace_requires_token_and_uses_path_store() {
+    let fixture = fixture(None, None, None).await;
+    let context_path = format!("/internal/ssr/v1/stores/{}/context", fixture.store_id);
+
+    let authorized = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&context_path)
+                .header("authorization", "Bearer ssr-internal-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+    let body = authorized.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["store_id"], fixture.store_id);
+
+    let rejected = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&context_path)
+                .header("authorization", "Bearer wrong")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+
+    let unknown = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/internal/ssr/v1/stores/store_missing/context")
+                .header("authorization", "Bearer ssr-internal-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 }

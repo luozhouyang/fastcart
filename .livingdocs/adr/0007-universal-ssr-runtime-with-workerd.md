@@ -177,6 +177,13 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 6 (2026-11-09) added the server-only commerce namespace
+`/internal/ssr/v1/stores/{store_id}` and
+`@fastcart/storefront-sdk/server`. The namespace requires a bearer token,
+resolves the active store from the path and reuses the public store handlers.
+Per-deployment token scoping and SDK execution inside the Worker remain Phase 8
+work.
+
 Phase 5 (2026-11-09) added `templates/storefront-tanstack`, a TanStack Start
 template that builds a real Worker artifact and packages it with
 `@fastcart/storefront-build`. A workerd smoke test covers SSR, server functions,

@@ -91,6 +91,11 @@ impl AppState {
                 .internal_fetch_secret
                 .clone()
                 .filter(|secret| !secret.is_empty()),
+            internal_ssr_token: config
+                .ssr
+                .internal_token
+                .clone()
+                .filter(|secret| !secret.is_empty()),
             capability_secret: config
                 .storefront
                 .capability_secret
