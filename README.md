@@ -306,7 +306,10 @@ implemented yet.
 Retired production and preview artifacts are reference-counted. After
 `drain_timeout_ms`, a replaced group is stopped and its digest directory is
 removed when no active deployment shares it; asset roots are pruned at the same
-time. Startup-orphaned artifact directories are not swept yet.
+time. At startup, the runtime scans the artifact directory and removes digest
+directories that are not referenced by the deployments it just started. The scan
+does not run when the runtime is disabled; failures are logged and leave the
+directory in place.
 
 `/metrics` now includes `fastcart_ssr_requests_total`,
 `fastcart_ssr_errors_total`, `fastcart_ssr_cache_hits_total`,

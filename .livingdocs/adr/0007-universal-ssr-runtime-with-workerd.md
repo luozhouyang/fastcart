@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 27 (2026-11-09) added a startup scan that removes artifact digest
+directories not referenced by the deployments started in that process.
+Concurrent runtime writers and sweep metrics remain open.
+
 Phase 26 (2026-11-09) added reference-counted artifact garbage collection after
 drain, retaining shared digest directories and pruning asset roots. Startup
 orphan sweeping and GC metrics remain open.

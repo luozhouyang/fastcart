@@ -234,3 +234,9 @@ automatic plaintext migration remain open.
 Retired production/preview artifacts are reference-counted and removed after the
 drain window when no active deployment shares the digest; asset roots are pruned
 at the same time. Startup orphan sweeping and dedicated GC metrics remain open.
+
+### Phase 27 status
+
+Initialization sweeps artifact digest directories that are not referenced by
+the deployments it just started; active/shared directories are preserved and
+scan failures are logged. One writer per runtime directory is assumed.

@@ -1,6 +1,6 @@
 //! Universal workerd storefront runtime wiring.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -205,6 +205,8 @@ impl UniversalSsr {
                 .entry(deployment.artifact_dir.clone())
                 .or_default() += 1;
         }
+        let active_artifacts: HashSet<PathBuf> = artifact_refs.keys().cloned().collect();
+        sweep_orphan_artifacts(artifacts.root(), &active_artifacts).await;
         metrics.set_ssr_deployments(deployments.len() + previews.len());
         Ok(Some(Arc::new(Self {
             manager: Arc::new(Mutex::new(manager)),
@@ -690,6 +692,50 @@ async fn start_deployment(
         artifact_dir,
         artifact_path: spec.artifact_path.to_owned(),
     })
+}
+
+async fn sweep_orphan_artifacts(root: &Path, active: &HashSet<PathBuf>) {
+    let entries = match tokio::fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(error = %error, path = %root.display(), "failed to scan SSR artifacts");
+            return;
+        }
+    };
+    let mut entries = entries;
+    let mut removed = 0_usize;
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(error = %error, path = %root.display(), "failed to read SSR artifact entry");
+                break;
+            }
+        };
+        let path = entry.path();
+        if active.contains(&path) {
+            continue;
+        }
+        let is_dir = entry
+            .file_type()
+            .await
+            .is_ok_and(|file_type| file_type.is_dir());
+        if !is_dir {
+            continue;
+        }
+        match tokio::fs::remove_dir_all(&path).await {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(error = %error, path = %path.display(), "failed to remove orphaned SSR artifact");
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, path = %root.display(), "swept orphaned SSR artifacts");
+    }
 }
 
 async fn release_artifact(
@@ -1381,6 +1427,9 @@ export default {
             credentials: crate::config::SsrCredentialsConfig::default(),
             deployments: Vec::new(),
         };
+        let orphan = config.runtime_dir.join("artifacts").join("orphan-digest");
+        std::fs::create_dir_all(orphan.join("client")).expect("orphan artifact");
+        std::fs::write(orphan.join("client/app.js"), "orphan").expect("orphan asset");
         let runtime = UniversalSsr::initialize(
             &config,
             Arc::new(Metrics::new()),
@@ -1389,6 +1438,16 @@ export default {
         .await
         .expect("initialize")
         .expect("enabled");
+        assert!(!orphan.exists(), "orphan artifact should be swept");
+        assert!(
+            runtime
+                .default
+                .as_ref()
+                .expect("default deployment")
+                .artifact_dir
+                .exists(),
+            "active artifact must survive the sweep"
+        );
         let request = Request::builder()
             .uri("/context")
             .body(Body::empty())
