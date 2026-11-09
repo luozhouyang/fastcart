@@ -264,5 +264,13 @@ database failures fail closed. Cross-origin preview hosting remains open.
 ### Phase 31 status
 
 Positive preview asset authorization checks are cached for 30 seconds in a
-bounded Moka cache and invalidated by the admin revoke endpoint. Other instances
-may lag by the TTL; cache metrics remain open.
+bounded Moka cache and invalidated by the admin revoke endpoint. Cross-process
+invalidation is not needed because only one FastCart process may use a data
+directory.
+
+### Phase 32 status
+
+Startup acquires advisory locks next to the platform SQLite database and, when
+SSR is enabled, in the SSR runtime directory. A second `fastcart-serve` fails
+before opening databases. Multi-process operation is explicitly unsupported;
+HA/shared-database coordination is a separate architecture change.

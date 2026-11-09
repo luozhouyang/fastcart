@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 32 (2026-11-09) added startup advisory locks for the platform data
+directory and SSR runtime directory. Only one `fastcart-serve` may use a data
+directory; multi-process operation is explicitly unsupported.
+
 Phase 31 (2026-11-09) added a bounded positive cache for preview asset
 revocation checks with same-process admin invalidation. Cross-instance
 invalidation and cache metrics remain open.
@@ -216,8 +220,8 @@ preview and credential lifecycle actions, excluding token values. Service
 identity, IP attribution and tamper-evident storage remain open.
 
 Phase 22 (2026-11-09) added explicit scoped-token revocation through the
-internal lifecycle API. Audit events, token fingerprints and multi-instance
-coordination remain open.
+internal lifecycle API. Audit events and token fingerprints remain open.
+Multi-instance operation is unsupported by the single-node architecture.
 
 Phase 21 (2026-11-09) isolated preview assets under
 `/_fastcart/preview-assets/*`, propagated a trusted asset-prefix header, and
@@ -231,7 +235,8 @@ policies and preview asset roots remain open.
 
 Phase 19 (2026-11-09) added a persistent, atomically written credential store
 with Unix `0600` mode, rotation reload and expired-token filtering. Secret
-manager integration, revocation and multi-instance coordination remain open.
+manager integration and revocation remain open. Multi-instance operation is
+unsupported by the single-node architecture.
 
 Phase 18 (2026-11-09) added online token rotation with a grace window, mutable
 shared credentials, per-request gateway token selection and expiry purging.

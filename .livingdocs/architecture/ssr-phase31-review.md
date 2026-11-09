@@ -40,8 +40,9 @@ Phase 31 reduces the per-asset revocation lookup:
    verifies the HMAC, expiry and store binding, so a forged or cross-store token
    cannot use a cache entry.
 2. **Revocation is immediate in the same process.** The admin endpoint
-   invalidates after the transaction commits. A direct database write or another
-   instance can leave a stale positive entry until TTL expiry.
+   invalidates after the transaction commits. A direct database write can leave a
+   stale positive entry until TTL expiry; another FastCart process on the same
+   data directory is rejected by the Phase 32 startup lock.
 3. **The key is not secret.** `store_id:jti` appears in memory only; the token
    value is not used as a cache key.
 4. **No cache metrics.** Hit/miss and size counters would make the effect visible
@@ -66,4 +67,5 @@ CARGO_HOME="$PWD/.cargo-home" cargo test -p fastcart-api --test storefront_ssr u
 ## Gate decision
 
 The preview asset revocation check is cached with explicit same-process
-invalidation. Cross-instance invalidation and cache metrics remain open.
+invalidation. Multi-process operation is unsupported and enforced by the Phase 32
+startup lock; cache metrics remain open.

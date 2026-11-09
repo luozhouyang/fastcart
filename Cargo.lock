@@ -1468,6 +1468,7 @@ dependencies = [
  "fastcart-runtime-pool",
  "fastcart-ssr",
  "fastcart-workflows",
+ "fs2",
  "futures",
  "serde",
  "serde_json",

@@ -188,9 +188,17 @@ backoff. The SSR gateway strips client-supplied internal context headers and
 injects a trusted store/deployment/request context before forwarding. Static
 assets are served by Rust at `/_fastcart/assets/`.
 
-The universal runtime path is implemented and can be enabled with an artifact;
-TanStack Start/Astro starter templates and the default artifact build remain
-Phase 5/11 work. The legacy Node sidecar is a migration aid only; it is not the
+Only **one `fastcart-serve` process may use a data directory**. Startup takes an
+advisory lock next to the platform SQLite database and, when SSR is enabled, in
+the SSR runtime directory; a second process fails before opening the databases.
+This is a single-node deployment: SQLite is not an HA/shared-writer store, and
+cross-process cache invalidation, job coordination and artifact sweeping are not
+supported. Scale up requires the PostgreSQL/coordination work described in
+[ADR 0001](.livingdocs/adr/0001-single-node-modular-monolith-with-sqlite.md).
+
+The universal runtime path is implemented and can be enabled with an artifact.
+TanStack Start, Astro, SvelteKit and generic Fetch-handler templates are
+provided. The legacy Node sidecar is a migration aid only; it is not the
 supported deployment and must not be extended. See
 [ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md).
 

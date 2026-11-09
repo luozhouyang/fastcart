@@ -59,13 +59,14 @@ We will ship Fastcart as one Rust modular monolith deployed as a single `fastcar
 
 ## Implementation status
 
-Partial. The single-process Rust server, platform database, per-store SQLite
-databases and in-process outbox/job queue exist (`Cargo.toml`,
-`apps/server/src/main.rs`, `crates/infrastructure/src/store_db_manager.rs`,
+Implemented for the single-node scope. The Rust server, platform database,
+per-store SQLite databases, in-process outbox/job queue and universal `workerd`
+runtime exist (`Cargo.toml`, `apps/server/src/main.rs`,
+`crates/infrastructure/src/store_db_manager.rs`,
 `crates/infrastructure/src/event_bus.rs`, `crates/infrastructure/src/jobs.rs`,
-`migrations/platform`, `migrations/store`). The PostgreSQL adapter and a written
-single-node deployment-limits/scale-up guide do not exist yet. The universal
-`workerd` runtime is not implemented; the legacy Node sidecar remains
-transitional under ADR 0007.
+`migrations/platform`, `migrations/store`, `crates/fastcart-ssr`). Startup takes
+advisory locks next to the platform database and SSR runtime directory so a
+second `fastcart-serve` fails instead of sharing SQLite (Phase 32 of ADR 0007).
+The PostgreSQL adapter and a full scale-up guide remain future work.
 
 This ADR is a decision, not a claim of completion.

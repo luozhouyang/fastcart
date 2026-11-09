@@ -1,5 +1,7 @@
 //! Process-level state shared by bootstrap and the HTTP layer.
 
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,8 +17,50 @@ use fastcart_platform::PlatformStore;
 use fastcart_runtime_api::StorefrontRuntime;
 use fastcart_runtime_node::NodeRuntime;
 use fastcart_runtime_pool::RuntimePool;
+use fs2::FileExt as _;
 
 use crate::config::Config;
+
+/// An advisory process lock held for the lifetime of the server.
+struct ProcessLock {
+    _file: std::fs::File,
+}
+
+impl ProcessLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("failed to open process lock {}", path.display()))?;
+        file.try_lock_exclusive().with_context(|| {
+            format!(
+                "another fastcart-serve process holds the lock {}; only one process may use a data directory",
+                path.display()
+            )
+        })?;
+        Ok(Self { _file: file })
+    }
+
+    fn for_platform(path: &Path) -> Result<Option<Self>> {
+        if path.as_os_str() == ":memory:" {
+            return Ok(None);
+        }
+        let name = path
+            .file_name()
+            .map_or_else(|| "platform".into(), |name| name.to_string_lossy());
+        let lock_path = path.with_file_name(format!("{name}.lock"));
+        Self::acquire(&lock_path).map(Some)
+    }
+}
 
 /// State owned by the server process.
 pub struct AppState {
@@ -30,6 +74,10 @@ pub struct AppState {
     pub storefront_runtime: Option<Arc<dyn StorefrontRuntime>>,
     /// Optional universal workerd runtime, shut down during graceful shutdown.
     pub universal_ssr: Option<Arc<crate::universal::UniversalSsr>>,
+    /// Process lock next to the platform database.
+    _platform_lock: Option<ProcessLock>,
+    /// Process lock for a shared SSR runtime directory.
+    _runtime_lock: Option<ProcessLock>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -44,6 +92,13 @@ impl std::fmt::Debug for AppState {
 impl AppState {
     /// Opens databases and builds all process services.
     pub async fn initialize(config: Config) -> Result<Self> {
+        let platform_lock = ProcessLock::for_platform(&config.database.platform_path)?;
+        let runtime_lock = if config.ssr.enabled {
+            let path = config.ssr.runtime_dir.join("fastcart-runtime.lock");
+            Some(ProcessLock::acquire(&path)?)
+        } else {
+            None
+        };
         let database_options = DatabaseOptions {
             max_connections: config.database.max_connections,
             busy_timeout_ms: config.database.busy_timeout_ms,
@@ -153,6 +208,8 @@ impl AppState {
             databases,
             storefront_runtime,
             universal_ssr,
+            _platform_lock: platform_lock,
+            _runtime_lock: runtime_lock,
         })
     }
 }
@@ -447,5 +504,29 @@ fn build_storefront_runtime(
             tracing::warn!(runtime = other, "unknown storefront runtime");
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod process_lock_tests {
+    use super::ProcessLock;
+
+    #[test]
+    fn only_one_process_lock_can_be_held() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("platform.sqlite.lock");
+        let first = ProcessLock::acquire(&path).expect("first lock");
+        assert!(ProcessLock::acquire(&path).is_err());
+        drop(first);
+        ProcessLock::acquire(&path).expect("lock after release");
+    }
+
+    #[test]
+    fn in_memory_platform_has_no_lock() {
+        assert!(
+            ProcessLock::for_platform(std::path::Path::new(":memory:"))
+                .expect("no lock")
+                .is_none()
+        );
     }
 }

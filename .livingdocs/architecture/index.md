@@ -34,3 +34,4 @@
 * [Universal SSR Runtime Phase 29 Review](ssr-phase29-review.md) - phase 29 review
 * [Universal SSR Runtime Phase 30 Review](ssr-phase30-review.md) - phase 30 review
 * [Universal SSR Runtime Phase 31 Review](ssr-phase31-review.md) - phase 31 review
+* [Universal SSR Runtime Phase 32 Review](ssr-phase32-review.md) - phase 32 review
