@@ -481,10 +481,6 @@ fn doctor(config: Option<PathBuf>) -> Result<()> {
 
     println!("fastcart {}", env!("CARGO_PKG_VERSION"));
     println!("listen: {}", config.listen_address());
-    println!(
-        "storefront: {} ({} workers, {} queued)",
-        config.storefront.runtime, config.storefront.worker_count, config.storefront.queue_capacity
-    );
     println!("configuration ok");
     Ok(())
 }

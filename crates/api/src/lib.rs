@@ -7,7 +7,6 @@
 //! - `/api/v1/admin` — store-scoped administration
 //! - `/api/v1/store` — public storefront operations
 //! - `/api/v1/webhooks` — provider callbacks
-//! - `/internal/storefront` — legacy trusted SSR-to-commerce boundary
 //! - `/internal/ssr/v1/stores/{store_id}` — server-only SSR commerce API
 //!
 //! Unmatched paths on a storefront host are rendered by the active theme via
@@ -72,14 +71,6 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
             axum::routing::get(routes::universal_assets::serve_app),
         );
 
-    // The internal surface is only reachable over HTTP when a secret is
-    // configured; otherwise it remains an in-process bridge target.
-    if let Some(secret) = context.config.internal_fetch_secret.clone() {
-        let internal = routes::store::internal_router(&context).layer(
-            axum::middleware::from_fn_with_state(secret, routes::internal_fetch_auth_middleware),
-        );
-        router = router.nest("/internal/storefront", internal);
-    }
     let internal_ssr_credentials = context.config.internal_ssr_credentials.clone();
     if !internal_ssr_credentials.is_empty() {
         let internal = routes::store::internal_ssr_router(&context).layer(

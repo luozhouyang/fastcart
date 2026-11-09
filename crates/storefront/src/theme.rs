@@ -1,17 +1,15 @@
 //! Typed theme manifest validation.
+//!
+//! Themes are deployment artifacts (ADR 0008); the registry only stores this
+//! metadata, a settings schema and settings. Rendering and assets belong to the
+//! deployed SSR artifact.
 
-use crate::{StorefrontError, validate_bundle_path};
-
-/// Rendering runtimes supported by the storefront.
-pub const SUPPORTED_RUNTIMES: [&str; 2] = ["v8", "node"];
-
-/// Storefront data API contract version implemented by this build.
-pub const SUPPORTED_DATA_API_VERSION: u32 = 1;
+use crate::StorefrontError;
 
 /// Editor manifest schema version implemented by this build.
 pub const SUPPORTED_EDITOR_SCHEMA_VERSION: u32 = 1;
 
-/// Describes a trusted storefront theme bundle.
+/// Metadata describing a registered storefront theme.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThemeManifest {
     /// Stable theme identifier.
@@ -20,76 +18,10 @@ pub struct ThemeManifest {
     pub name: String,
     /// Theme version.
     pub version: String,
-    /// Rendering runtime expected by the theme.
-    pub runtime: String,
-    /// Entry file inside the theme bundle.
-    pub entry: String,
-    /// Optional JSON Schema for theme settings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settings_schema: Option<String>,
-    /// Optional asset manifest file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assets_manifest: Option<String>,
-    /// Optional editor bundle and manifest references.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub editor: Option<ThemeEditorRef>,
-    /// Optional platform contracts and capabilities the theme depends on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires: Option<ThemeRequirements>,
-    /// Optional dynamic routes keyed by template page type.
-    ///
-    /// A pattern such as `/products/{handle}` matches one storefront path and
-    /// renders the published page whose `page_type` equals the map key. The
-    /// captured handle resolves a product or collection for the request.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub routes: std::collections::BTreeMap<String, String>,
-}
-
-/// Bundle-relative references to the theme editor surface.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ThemeEditorRef {
-    /// ESM entry that exports render and field components.
-    pub entry: String,
-    /// JSON file describing categories, components and fields.
-    pub manifest: String,
-    /// Editor manifest schema version.
-    #[serde(default = "default_editor_schema_version")]
-    pub schema_version: u32,
-}
-
-/// Platform contracts and capabilities a theme depends on.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ThemeRequirements {
-    /// Required storefront data API version.
-    #[serde(default = "default_data_api_version")]
-    pub data_api: u32,
-    /// Optional or required plugin capabilities.
-    #[serde(default)]
-    pub capabilities: Vec<CapabilityRequirement>,
-}
-
-/// One capability required by a theme.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CapabilityRequirement {
-    /// Capability identifier.
-    pub id: String,
-    /// Required capability version.
-    pub version: u32,
-    /// Whether activation may proceed when the capability is missing.
-    #[serde(default)]
-    pub optional: bool,
-}
-
-const fn default_data_api_version() -> u32 {
-    SUPPORTED_DATA_API_VERSION
-}
-
-const fn default_editor_schema_version() -> u32 {
-    SUPPORTED_EDITOR_SCHEMA_VERSION
 }
 
 impl ThemeManifest {
-    /// Validates identifiers, runtime, bundle paths and platform contracts.
+    /// Validates the theme identifier, name and version.
     pub fn validate(&self) -> Result<(), StorefrontError> {
         if !valid_identifier(&self.id) {
             return Err(StorefrontError::Invalid(format!(
@@ -108,87 +40,8 @@ impl ThemeManifest {
                 self.version
             )));
         }
-        if !SUPPORTED_RUNTIMES.contains(&self.runtime.as_str()) {
-            return Err(StorefrontError::Invalid(format!(
-                "unsupported theme runtime: {}",
-                self.runtime
-            )));
-        }
-        validate_bundle_path(&self.entry)?;
-        for path in [&self.settings_schema, &self.assets_manifest]
-            .into_iter()
-            .flatten()
-        {
-            validate_bundle_path(path)?;
-        }
-        if let Some(editor) = self.editor.as_ref() {
-            validate_bundle_path(&editor.entry)?;
-            validate_bundle_path(&editor.manifest)?;
-            if editor.schema_version != SUPPORTED_EDITOR_SCHEMA_VERSION {
-                return Err(StorefrontError::Invalid(format!(
-                    "unsupported editor manifest schema version: {}",
-                    editor.schema_version
-                )));
-            }
-        }
-        if let Some(requires) = self.requires.as_ref() {
-            if requires.data_api == 0 || requires.data_api > SUPPORTED_DATA_API_VERSION {
-                return Err(StorefrontError::Invalid(format!(
-                    "unsupported storefront data API version: {}",
-                    requires.data_api
-                )));
-            }
-            let mut seen = std::collections::HashSet::new();
-            for capability in &requires.capabilities {
-                if !valid_identifier(&capability.id) {
-                    return Err(StorefrontError::Invalid(format!(
-                        "invalid capability id: {}",
-                        capability.id
-                    )));
-                }
-                if capability.version == 0 {
-                    return Err(StorefrontError::Invalid(
-                        "capability version must be greater than zero".to_owned(),
-                    ));
-                }
-                if !seen.insert(capability.id.as_str()) {
-                    return Err(StorefrontError::Invalid(format!(
-                        "duplicate capability requirement: {}",
-                        capability.id
-                    )));
-                }
-            }
-        }
-        for (kind, pattern) in &self.routes {
-            if !matches!(kind.as_str(), "product" | "collection") {
-                return Err(StorefrontError::Invalid(format!(
-                    "unsupported theme route kind: {kind}"
-                )));
-            }
-            validate_route_pattern(pattern)?;
-        }
         Ok(())
     }
-}
-
-/// Validates one dynamic route pattern such as `/products/{handle}`.
-fn validate_route_pattern(pattern: &str) -> Result<(), StorefrontError> {
-    if !pattern.starts_with('/')
-        || pattern.len() > 200
-        || pattern.chars().any(char::is_whitespace)
-        || pattern.matches("{handle}").count() != 1
-    {
-        return Err(StorefrontError::Invalid(format!(
-            "invalid theme route pattern: {pattern}"
-        )));
-    }
-    let stripped = pattern.replace("{handle}", "handle");
-    if stripped.contains('{') || stripped.contains('}') {
-        return Err(StorefrontError::Invalid(format!(
-            "invalid theme route pattern: {pattern}"
-        )));
-    }
-    Ok(())
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -218,13 +71,6 @@ mod tests {
             id: "default".to_owned(),
             name: "Default".to_owned(),
             version: "1.0.0".to_owned(),
-            runtime: "v8".to_owned(),
-            entry: "dist/server.js".to_owned(),
-            settings_schema: Some("settings.schema.json".to_owned()),
-            assets_manifest: Some("assets.json".to_owned()),
-            editor: None,
-            requires: None,
-            routes: Default::default(),
         }
     }
 
@@ -234,105 +80,25 @@ mod tests {
     }
 
     #[test]
-    fn invalid_identifiers_and_runtimes_are_rejected() {
+    fn invalid_identifiers_names_and_versions_are_rejected() {
         let mut manifest = theme();
         manifest.id = "Bad Theme".to_owned();
         assert!(manifest.validate().is_err());
 
         let mut manifest = theme();
-        manifest.runtime = "browser".to_owned();
+        manifest.name = "   ".to_owned();
+        assert!(manifest.validate().is_err());
+
+        let mut manifest = theme();
+        manifest.name = "x".repeat(121);
         assert!(manifest.validate().is_err());
 
         let mut manifest = theme();
         manifest.version = "one".to_owned();
         assert!(manifest.validate().is_err());
-    }
-
-    #[test]
-    fn entries_cannot_escape_the_bundle() {
-        let mut manifest = theme();
-        manifest.entry = "../outside.js".to_owned();
-        assert!(manifest.validate().is_err());
 
         let mut manifest = theme();
-        manifest.assets_manifest = Some("/absolute.json".to_owned());
-        assert!(manifest.validate().is_err());
-    }
-
-    #[test]
-    fn dynamic_routes_are_validated() {
-        let mut manifest = theme();
-        manifest
-            .routes
-            .insert("product".to_owned(), "/products/{handle}".to_owned());
-        manifest.validate().unwrap();
-
-        for (kind, pattern) in [
-            ("product", "/products/hoodie"),
-            ("product", "products/{handle}"),
-            ("product", "/products/{slug}"),
-            ("product", "/products/{handle}/{handle}"),
-            ("unknown", "/things/{handle}"),
-            ("product", "/products/{handle} extra"),
-        ] {
-            let mut manifest = theme();
-            manifest.routes.insert(kind.to_owned(), pattern.to_owned());
-            assert!(manifest.validate().is_err(), "{kind} {pattern}");
-        }
-    }
-
-    #[test]
-    fn editor_references_and_contracts_are_validated() {
-        use super::{CapabilityRequirement, ThemeEditorRef, ThemeRequirements};
-
-        let mut manifest = theme();
-        manifest.editor = Some(ThemeEditorRef {
-            entry: "editor.js".to_owned(),
-            manifest: "editor.manifest.json".to_owned(),
-            schema_version: 1,
-        });
-        manifest.requires = Some(ThemeRequirements {
-            data_api: 1,
-            capabilities: vec![CapabilityRequirement {
-                id: "chat".to_owned(),
-                version: 1,
-                optional: true,
-            }],
-        });
-        manifest.validate().unwrap();
-
-        let mut manifest = theme();
-        manifest.editor = Some(ThemeEditorRef {
-            entry: "../escape.js".to_owned(),
-            manifest: "editor.manifest.json".to_owned(),
-            schema_version: 1,
-        });
-        assert!(manifest.validate().is_err());
-
-        let mut manifest = theme();
-        manifest.editor = Some(ThemeEditorRef {
-            entry: "editor.js".to_owned(),
-            manifest: "editor.manifest.json".to_owned(),
-            schema_version: 2,
-        });
-        assert!(manifest.validate().is_err());
-
-        let mut manifest = theme();
-        manifest.requires = Some(ThemeRequirements {
-            data_api: 2,
-            capabilities: Vec::new(),
-        });
-        assert!(manifest.validate().is_err());
-
-        let mut manifest = theme();
-        manifest.requires = Some(ThemeRequirements {
-            data_api: 1,
-            capabilities: vec![CapabilityRequirement {
-                id: "Bad Capability".to_owned(),
-                version: 1,
-                optional: false,
-            }],
-        });
+        manifest.version = "1.0.0.0".to_owned();
         assert!(manifest.validate().is_err());
     }
 }

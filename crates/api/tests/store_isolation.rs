@@ -27,7 +27,6 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 const PASSWORD: &str = "hunter2hunter2";
-const INTERNAL_SECRET: &str = "test-internal-secret";
 
 struct Fixture {
     app: Router,
@@ -49,7 +48,6 @@ async fn fixture() -> Fixture {
     let config = ApiConfig {
         cookie_secure: false,
         backup_dir: dir.path().join("backups"),
-        internal_fetch_secret: Some(INTERNAL_SECRET.to_owned()),
         ..ApiConfig::default()
     };
     let context = Arc::new(AppContext::new(
@@ -945,80 +943,4 @@ async fn admin_membership_is_checked_against_the_selected_store() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn internal_storefront_surface_requires_the_secret_and_resolves_per_host() {
-    let fixture = fixture().await;
-    let product_a = seed_product(
-        &fixture.context,
-        &fixture.store_a,
-        "Alpha Internal",
-        "ALPHA-I",
-        true,
-    )
-    .await;
-    let product_b = seed_product(
-        &fixture.context,
-        &fixture.store_b,
-        "Beta Internal",
-        "BETA-I",
-        true,
-    )
-    .await;
-
-    // Missing and incorrect secrets are rejected.
-    let (status, _, _) = request(
-        &fixture.app,
-        "GET",
-        "/internal/storefront/products",
-        None,
-        &[("host", "alpha.example.com")],
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-
-    let (status, _, _) = request(
-        &fixture.app,
-        "GET",
-        "/internal/storefront/products",
-        None,
-        &[
-            ("host", "alpha.example.com"),
-            ("x-fastcart-internal-secret", "wrong-secret"),
-        ],
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-
-    // The correct secret still resolves the trusted host, not a client store.
-    let (status, products, _) = request(
-        &fixture.app,
-        "GET",
-        "/internal/storefront/products",
-        None,
-        &[
-            ("host", "alpha.example.com"),
-            ("x-fastcart-internal-secret", INTERNAL_SECRET),
-        ],
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{products}");
-    assert_eq!(products["count"], 1);
-    assert_eq!(products["products"][0]["id"], product_a.id);
-
-    let (status, products, _) = request(
-        &fixture.app,
-        "GET",
-        "/internal/storefront/products",
-        None,
-        &[
-            ("host", "beta.example.com"),
-            ("x-fastcart-internal-secret", INTERNAL_SECRET),
-        ],
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{products}");
-    assert_eq!(products["count"], 1);
-    assert_eq!(products["products"][0]["id"], product_b.id);
 }

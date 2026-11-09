@@ -900,10 +900,9 @@ dependencies = [
  "fastcart-module-webhook",
  "fastcart-notifications",
  "fastcart-platform",
- "fastcart-runtime-api",
+ "fastcart-ssr",
  "fastcart-ssr-credentials",
  "fastcart-storefront",
- "fastcart-storefront-data",
  "fastcart-workflows",
  "form_urlencoded",
  "futures",
@@ -1387,69 +1386,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastcart-runtime-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "fastcart-kernel",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "fastcart-runtime-bridge"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "bytes",
- "fastcart-kernel",
- "http-body-util",
- "thiserror 2.0.21",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "fastcart-runtime-node"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.22.1",
- "fastcart-kernel",
- "fastcart-runtime-api",
- "futures",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "fastcart-runtime-pool"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "fastcart-kernel",
- "fastcart-runtime-api",
- "futures",
- "tokio",
-]
-
-[[package]]
-name = "fastcart-runtime-v8"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fastcart-runtime-api",
-]
-
-[[package]]
 name = "fastcart-server"
 version = "0.1.0"
 dependencies = [
@@ -1463,9 +1399,6 @@ dependencies = [
  "fastcart-infrastructure",
  "fastcart-kernel",
  "fastcart-platform",
- "fastcart-runtime-api",
- "fastcart-runtime-node",
- "fastcart-runtime-pool",
  "fastcart-ssr",
  "fastcart-workflows",
  "fs2",
@@ -1483,18 +1416,18 @@ dependencies = [
 name = "fastcart-ssr"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "axum",
  "bytes",
+ "fastcart-http",
+ "fastcart-kernel",
+ "fastcart-ssr-credentials",
+ "fastcart-ssr-workerd",
  "futures",
- "hex",
- "nix",
- "pathdiff",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
@@ -1520,35 +1453,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastcart-ssr-workerd"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures",
+ "hex",
+ "nix",
+ "pathdiff",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fastcart-storefront"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "fastcart-storefront-data"
-version = "0.1.0"
-dependencies = [
- "fastcart-infrastructure",
- "fastcart-kernel",
- "fastcart-module-asset",
- "fastcart-module-catalog",
- "fastcart-module-content",
- "fastcart-module-inquiry",
- "fastcart-module-inventory",
- "fastcart-module-pricing",
- "fastcart-storefront",
- "futures",
- "moka",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
 ]
 
 [[package]]

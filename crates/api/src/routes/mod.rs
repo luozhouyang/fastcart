@@ -216,19 +216,17 @@ pub async fn record_store_audit(
     }
 }
 
-/// Invalidates short-lived storefront context caches after successful mutations.
+/// Invalidates the universal storefront render cache after successful mutations.
 ///
-/// The customer and cart context caches are also bounded by a two-second TTL.
-/// This middleware closes the window for the ordinary storefront flows (cart
-/// edits, checkout, login, logout, profile updates) so a response that changes
-/// the viewer's context is not followed by a stale render.
+/// This closes the window for the ordinary storefront flows (cart edits,
+/// checkout, login, logout, profile updates) so a response that changes the
+/// viewer's context is not followed by a stale render.
 pub async fn storefront_context_invalidation_middleware(
     State(context): State<Arc<AppContext>>,
     request: Request,
     next: Next,
 ) -> Response {
     let method = request.method().clone();
-    let path = request.uri().path().to_owned();
     let store_id = request
         .extensions()
         .get::<StoreContext>()
@@ -241,48 +239,13 @@ pub async fn storefront_context_invalidation_middleware(
             | axum::http::Method::OPTIONS
             | axum::http::Method::TRACE
     ) && response.status().is_success();
-    if cacheable {
-        // The store router is nested at `/api/v1/store`, so middleware inside
-        // it sees paths relative to that prefix, while the upload router is
-        // merged at the root with its full path. Accept both shapes.
-        let under = |suffix: &str| {
-            path.starts_with(suffix) || path.starts_with(&format!("/api/v1/store{suffix}"))
-        };
-        if under("/carts") || under("/checkouts") {
-            context.invalidate_storefront_carts();
-        }
-        if under("/customers") {
-            context.invalidate_storefront_customers();
-            // Login, logout and profile changes can alter cart ownership.
-            context.invalidate_storefront_carts();
-        }
-        if let Some(store_id) = &store_id
-            && let Some(runtime) = &context.universal_storefront
-        {
-            runtime.invalidate_cache(store_id.as_str()).await;
-        }
+    if cacheable
+        && let Some(store_id) = &store_id
+        && let Some(runtime) = &context.universal_storefront
+    {
+        runtime.invalidate_cache(store_id.as_str()).await;
     }
     response
-}
-
-/// Requires the configured secret on the internal storefront HTTP surface.
-///
-/// The in-process bridge does not need this middleware; it exists only for a
-/// trusted sidecar that must call commerce services over loopback HTTP.
-pub async fn internal_fetch_auth_middleware(
-    State(expected): State<String>,
-    request: Request,
-    next: Next,
-) -> Result<Response, ApiError> {
-    let provided = request
-        .headers()
-        .get("x-fastcart-internal-secret")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if !bool::from(provided.as_bytes().ct_eq(expected.as_bytes())) {
-        return Err(ApiError::new(AppError::Forbidden));
-    }
-    Ok(next.run(request).await)
 }
 
 /// Store scope attached by the internal SSR credential middleware.

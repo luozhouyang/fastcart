@@ -1,4 +1,9 @@
-//! Universal workerd storefront runtime wiring.
+//! The SSR service: deployment registry, lifecycle and request path.
+//!
+//! [`SsrService`] decides which artifact serves a store, performs activation
+//! and rollback, keeps previews apart from live deployments, and serves
+//! rendered responses and static assets. It drives `fastcart-ssr-workerd` for
+//! the process and gateway details.
 
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
@@ -11,11 +16,11 @@ use anyhow::{Context, Result, bail};
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use fastcart_api::state::{InternalSsrCredentials, UniversalStorefront};
 use fastcart_http::Metrics;
 use fastcart_kernel::StoreContext;
-use fastcart_ssr::artifact::{ArtifactLimits, ArtifactStore};
-use fastcart_ssr::{
+use fastcart_ssr_credentials::CredentialManager;
+use fastcart_ssr_workerd::artifact::{ArtifactLimits, ArtifactStore};
+use fastcart_ssr_workerd::{
     RuntimeGroupId, RuntimeManager, RuntimeManagerConfig, SsrBody, SsrError, SsrGateway,
     SsrRequestContext, SsrResponse,
 };
@@ -24,7 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::config::SsrConfig;
+use super::config::SsrConfig;
+use crate::contract::UniversalStorefront;
 
 /// One active storefront deployment.
 #[derive(Clone)]
@@ -67,8 +73,8 @@ struct PersistedDeployment {
     preview: bool,
 }
 
-/// Universal storefront runtime registry.
-pub struct UniversalSsr {
+/// Storefront SSR service shared by every store.
+pub struct SsrService {
     manager: Arc<Mutex<RuntimeManager>>,
     deployments: RwLock<HashMap<String, Arc<Deployment>>>,
     previews: RwLock<HashMap<String, Arc<Deployment>>>,
@@ -79,7 +85,7 @@ pub struct UniversalSsr {
     response_cache: RwLock<HashMap<String, CachedResponse>>,
     default: Option<Arc<Deployment>>,
     metrics: Arc<Metrics>,
-    credentials: InternalSsrCredentials,
+    credentials: CredentialManager,
     artifacts: ArtifactStore,
     artifact_root: Option<PathBuf>,
     state_path: PathBuf,
@@ -96,12 +102,12 @@ struct DeploymentSpec<'a> {
     internal_token: Option<String>,
 }
 
-impl UniversalSsr {
+impl SsrService {
     /// Imports configured artifacts and starts one workerd group per deployment.
     pub async fn initialize(
         config: &SsrConfig,
         metrics: Arc<Metrics>,
-        credentials: InternalSsrCredentials,
+        credentials: CredentialManager,
     ) -> Result<Option<Arc<Self>>> {
         if !config.enabled {
             return Ok(None);
@@ -676,7 +682,7 @@ async fn start_deployment(
                 spec.store_id.unwrap_or("default")
             )
         })?;
-    if health.status != fastcart_ssr::RuntimeStatus::Healthy {
+    if health.status != fastcart_ssr_workerd::RuntimeStatus::Healthy {
         let _ = manager.stop_group(&group).await;
         bail!("SSR runtime started but did not become healthy");
     }
@@ -798,7 +804,7 @@ fn validate_identifier(label: &str, value: &str) -> Result<()> {
 }
 
 #[async_trait::async_trait]
-impl UniversalStorefront for UniversalSsr {
+impl UniversalStorefront for SsrService {
     async fn invalidate_cache(&self, store_id: &str) {
         self.invalidate_store_cache(store_id).await;
     }
@@ -1297,7 +1303,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use fastcart_kernel::{CurrencyCode, StoreContext, StoreId};
-    use fastcart_ssr::artifact::{
+    use fastcart_ssr_workerd::artifact::{
         ArtifactManifest, AssetMetadata, BuildMetadata, EntryMetadata, FrameworkMetadata,
         RenderingMetadata, RuntimeMetadata,
     };
@@ -1305,6 +1311,7 @@ mod tests {
 
     use super::*;
     use crate::config::SsrDeploymentConfig;
+    use fastcart_ssr_credentials::CredentialToken;
 
     fn workerd_binary() -> Option<PathBuf> {
         if let Some(path) = std::env::var_os("FASTCART_WORKERD_BIN").map(PathBuf::from) {
@@ -1430,10 +1437,10 @@ export default {
         let orphan = config.runtime_dir.join("artifacts").join("orphan-digest");
         std::fs::create_dir_all(orphan.join("client")).expect("orphan artifact");
         std::fs::write(orphan.join("client/app.js"), "orphan").expect("orphan asset");
-        let runtime = UniversalSsr::initialize(
+        let runtime = SsrService::initialize(
             &config,
             Arc::new(Metrics::new()),
-            InternalSsrCredentials::default(),
+            CredentialManager::default(),
         )
         .await
         .expect("initialize")
@@ -1678,7 +1685,7 @@ export default {
         runtime.shutdown().await;
     }
 
-    async fn render_store(runtime: &UniversalSsr, store_id: &str) -> serde_json::Value {
+    async fn render_store(runtime: &SsrService, store_id: &str) -> serde_json::Value {
         let response = runtime
             .render(
                 Request::builder()
@@ -1703,7 +1710,7 @@ export default {
         serde_json::from_slice(&body).expect("json")
     }
 
-    async fn render_preview_store(runtime: &UniversalSsr, store_id: &str) -> serde_json::Value {
+    async fn render_preview_store(runtime: &SsrService, store_id: &str) -> serde_json::Value {
         let response = runtime
             .render_preview(
                 Request::builder()
@@ -1790,21 +1797,21 @@ export default {
                 },
             ],
         };
-        let credentials = InternalSsrCredentials::new(vec![
-            fastcart_api::state::InternalSsrToken {
+        let credentials = CredentialManager::new(vec![
+            CredentialToken {
                 token: "production-token".to_owned(),
                 store_id: Some("store_a".to_owned()),
                 expires_at: None,
                 preview: false,
             },
-            fastcart_api::state::InternalSsrToken {
+            CredentialToken {
                 token: "preview-token".to_owned(),
                 store_id: Some("store_a".to_owned()),
                 expires_at: None,
                 preview: true,
             },
         ]);
-        let runtime = UniversalSsr::initialize(&config, Arc::new(Metrics::new()), credentials)
+        let runtime = SsrService::initialize(&config, Arc::new(Metrics::new()), credentials)
             .await
             .expect("initialize")
             .expect("enabled");
@@ -1995,10 +2002,10 @@ export default {
             credentials: crate::config::SsrCredentialsConfig::default(),
             deployments: Vec::new(),
         };
-        let runtime = UniversalSsr::initialize(
+        let runtime = SsrService::initialize(
             &base,
             Arc::new(Metrics::new()),
-            InternalSsrCredentials::default(),
+            CredentialManager::default(),
         )
         .await
         .expect("initialize")
@@ -2009,10 +2016,10 @@ export default {
             .expect("activate");
         runtime.shutdown().await;
 
-        let restarted = UniversalSsr::initialize(
+        let restarted = SsrService::initialize(
             &base,
             Arc::new(Metrics::new()),
-            InternalSsrCredentials::default(),
+            CredentialManager::default(),
         )
         .await
         .expect("restart")

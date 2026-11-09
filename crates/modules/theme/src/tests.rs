@@ -2,12 +2,11 @@
 
 use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
 use fastcart_kernel::{AppError, Pagination, StoreId, ThemeId};
-use fastcart_storefront::{ThemeEditorRef, ThemeManifest};
+use fastcart_storefront::ThemeManifest;
 use serde_json::{Value, json};
 
 use crate::{
-    RegisterThemeInput, ThemeCapabilityBindingInput, ThemeService, ThemeSettingsRevisionStatus,
-    UpdateThemeSettingsInput,
+    RegisterThemeInput, ThemeService, ThemeSettingsRevisionStatus, UpdateThemeSettingsInput,
 };
 
 async fn service() -> ThemeService {
@@ -35,66 +34,14 @@ fn manifest(id: &str) -> ThemeManifest {
         id: id.to_owned(),
         name: format!("Theme {id}"),
         version: "1.0.0".to_owned(),
-        runtime: "v8".to_owned(),
-        entry: "dist/server.js".to_owned(),
-        settings_schema: Some("settings.schema.json".to_owned()),
-        assets_manifest: Some("assets.json".to_owned()),
-        editor: None,
-        requires: None,
-        routes: Default::default(),
-    }
-}
-
-fn editor_ref() -> ThemeEditorRef {
-    ThemeEditorRef {
-        entry: "dist/editor.js".to_owned(),
-        manifest: "editor.manifest.json".to_owned(),
-        schema_version: 1,
-    }
-}
-
-fn editor_manifest_value() -> Value {
-    json!({
-        "schema_version": 1,
-        "categories": {
-            "hero": { "title": "Hero", "components": ["Hero"] }
-        },
-        "components": {
-            "Hero": {
-                "title": "Hero",
-                "category": "hero",
-                "fields": {
-                    "title": { "type": "text", "required": true }
-                },
-                "defaultProps": { "title": "Welcome" },
-                "slots": []
-            }
-        },
-        "root": { "fields": { "title": { "type": "text" } } }
-    })
-}
-
-fn editor_input(id: &str, editor_manifest: Option<Value>) -> RegisterThemeInput {
-    let mut declared = manifest(id);
-    declared.editor = Some(editor_ref());
-    RegisterThemeInput {
-        manifest: declared,
-        bundle_path: format!("themes/{id}"),
-        settings_schema: None,
-        assets_manifest: None,
-        settings: None,
-        editor_manifest,
     }
 }
 
 fn input(id: &str) -> RegisterThemeInput {
     RegisterThemeInput {
         manifest: manifest(id),
-        bundle_path: format!("themes/{id}"),
         settings_schema: Some(schema()),
-        assets_manifest: None,
         settings: Some(json!({ "logo": "/logo.svg" })),
-        editor_manifest: None,
     }
 }
 
@@ -111,9 +58,11 @@ async fn registers_lists_and_reads_themes() {
     let theme = service.register(input("default")).await.unwrap();
     assert_eq!(theme.manifest.id, "default");
     assert_eq!(theme.manifest.name, "Theme default");
-    assert_eq!(theme.bundle_path, "themes/default");
+    assert_eq!(theme.manifest.version, "1.0.0");
     assert_eq!(theme.settings_schema, Some(schema()));
     assert_eq!(theme.settings, json!({ "logo": "/logo.svg" }));
+    assert_eq!(theme.settings_revision, 1);
+    assert_eq!(theme.draft_settings, None);
     assert!(!theme.is_active);
     assert_eq!(theme.created_at, theme.updated_at);
 
@@ -207,16 +156,10 @@ async fn rejects_duplicate_manifest_versions_but_allows_new_versions() {
 }
 
 #[tokio::test]
-async fn stores_assets_manifests_and_settings_revisions() {
+async fn stores_initial_settings_as_the_first_published_revision() {
     let service = service().await;
-    let mut input = input("default");
-    input.assets_manifest = Some(json!({ "main.js": "dist/main.js" }));
 
-    let theme = service.register(input).await.unwrap();
-    assert_eq!(
-        theme.assets_manifest,
-        Some(json!({ "main.js": "dist/main.js" }))
-    );
+    let theme = service.register(input("default")).await.unwrap();
     assert_eq!(theme.settings_revision, 1);
     assert_eq!(theme.draft_settings, None);
 
@@ -228,7 +171,7 @@ async fn stores_assets_manifests_and_settings_revisions() {
 }
 
 #[tokio::test]
-async fn validates_manifest_bundle_path_schema_and_settings() {
+async fn validates_manifest_schema_and_settings() {
     let service = service().await;
 
     let error = service
@@ -238,15 +181,6 @@ async fn validates_manifest_bundle_path_schema_and_settings() {
                 ..manifest("bad")
             },
             ..input("bad")
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(error, AppError::Validation(_)));
-
-    let error = service
-        .register(RegisterThemeInput {
-            bundle_path: "../outside".to_owned(),
-            ..input("escape")
         })
         .await
         .unwrap_err();
@@ -431,108 +365,6 @@ async fn settings_drafts_publish_and_restore_revisions() {
 }
 
 #[tokio::test]
-async fn capability_bindings_support_create_update_and_delete() {
-    let service = service().await;
-    let theme = service.register(input("default")).await.unwrap();
-
-    assert!(
-        service
-            .list_capability_bindings(&theme.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    let binding = service
-        .upsert_capability_binding(
-            &theme.id,
-            ThemeCapabilityBindingInput {
-                capability_id: "chat".to_owned(),
-                endpoint: "https://plugins.example.com/chat".to_owned(),
-                config: json!({ "region": "eu" }),
-                is_active: true,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(binding.capability_id, "chat");
-    assert_eq!(binding.config, json!({ "region": "eu" }));
-    assert!(binding.is_active);
-
-    let updated = service
-        .upsert_capability_binding(
-            &theme.id,
-            ThemeCapabilityBindingInput {
-                capability_id: "chat".to_owned(),
-                endpoint: "https://plugins.example.com/chat/v2".to_owned(),
-                config: json!({}),
-                is_active: false,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(updated.id, binding.id);
-    assert_eq!(updated.endpoint, "https://plugins.example.com/chat/v2");
-    assert!(!updated.is_active);
-    assert_eq!(updated.created_at, binding.created_at);
-
-    assert_eq!(
-        service
-            .list_capability_bindings(&theme.id)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-
-    let error = service
-        .upsert_capability_binding(
-            &theme.id,
-            ThemeCapabilityBindingInput {
-                capability_id: "search".to_owned(),
-                endpoint: "plugins/search".to_owned(),
-                config: json!({}),
-                is_active: true,
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(error, AppError::Validation(_)));
-
-    let error = service
-        .upsert_capability_binding(
-            &theme.id,
-            ThemeCapabilityBindingInput {
-                capability_id: "search".to_owned(),
-                endpoint: "https://plugins.example.com/search".to_owned(),
-                config: json!(["not", "an", "object"]),
-                is_active: true,
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(error, AppError::Validation(_)));
-
-    service
-        .delete_capability_binding(&theme.id, "chat")
-        .await
-        .unwrap();
-    assert!(
-        service
-            .list_capability_bindings(&theme.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    let error = service
-        .delete_capability_binding(&theme.id, "chat")
-        .await
-        .unwrap_err();
-    assert!(error.is_not_found());
-}
-
-#[tokio::test]
 async fn activation_is_idempotent_and_keeps_one_active_theme() {
     let service = service().await;
     let first = service.register(input("first")).await.unwrap();
@@ -628,91 +460,6 @@ async fn deletes_inactive_themes_and_refuses_the_active_one() {
 }
 
 #[tokio::test]
-async fn registers_and_returns_editor_manifests() {
-    let service = service().await;
-    let editor = editor_manifest_value();
-
-    let theme = service
-        .register(editor_input("editor", Some(editor.clone())))
-        .await
-        .unwrap();
-    assert_eq!(theme.editor_manifest, Some(editor));
-    assert_eq!(theme.schema_version, 1);
-
-    let fetched = service.get(&theme.id).await.unwrap();
-    assert_eq!(fetched.editor_manifest, theme.editor_manifest);
-    assert_eq!(fetched.schema_version, 1);
-
-    let listed = service.list(pagination(10, 0)).await.unwrap();
-    assert_eq!(listed.data[0].editor_manifest, theme.editor_manifest);
-
-    let parsed = service.editor_manifest(&theme.id).await.unwrap();
-    assert_eq!(parsed.schema_version, 1);
-    assert!(parsed.components.contains_key("Hero"));
-}
-
-#[tokio::test]
-async fn themes_without_an_editor_default_to_schema_version_one() {
-    let service = service().await;
-    let theme = service.register(input("plain")).await.unwrap();
-
-    assert!(theme.editor_manifest.is_none());
-    assert_eq!(theme.schema_version, 1);
-
-    let error = service.editor_manifest(&theme.id).await.unwrap_err();
-    assert!(matches!(error, AppError::Conflict(_)));
-}
-
-#[tokio::test]
-async fn rejects_editor_manifests_that_do_not_match_the_theme() {
-    let service = service().await;
-
-    let error = service
-        .register(editor_input("missing", None))
-        .await
-        .unwrap_err();
-    assert!(matches!(error, AppError::Validation(_)));
-
-    let error = service
-        .register(editor_input(
-            "invalid",
-            Some(json!({ "schema_version": 1, "components": {} })),
-        ))
-        .await
-        .unwrap_err();
-    assert!(matches!(error, AppError::Validation(_)));
-
-    let error = service
-        .register(RegisterThemeInput {
-            editor_manifest: Some(editor_manifest_value()),
-            ..input("orphan")
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(error, AppError::Validation(_)));
-}
-
-#[tokio::test]
-async fn exposes_the_active_editor_manifest() {
-    let service = service().await;
-    assert!(service.active_editor_manifest().await.unwrap().is_none());
-
-    let plain = service.register(input("plain")).await.unwrap();
-    service.activate(&plain.id).await.unwrap();
-    assert!(service.active_editor_manifest().await.unwrap().is_none());
-
-    let themed = service
-        .register(editor_input("editor", Some(editor_manifest_value())))
-        .await
-        .unwrap();
-    service.activate(&themed.id).await.unwrap();
-
-    let active = service.active_editor_manifest().await.unwrap().unwrap();
-    assert_eq!(active.schema_version, 1);
-    assert!(active.components.contains_key("Hero"));
-}
-
-#[tokio::test]
 async fn missing_themes_return_not_found_errors() {
     let service = service().await;
     let missing = ThemeId::new();
@@ -720,13 +467,6 @@ async fn missing_themes_return_not_found_errors() {
     assert!(service.get(&missing).await.unwrap_err().is_not_found());
     assert!(service.activate(&missing).await.unwrap_err().is_not_found());
     assert!(service.delete(&missing).await.unwrap_err().is_not_found());
-    assert!(
-        service
-            .editor_manifest(&missing)
-            .await
-            .unwrap_err()
-            .is_not_found()
-    );
     assert!(
         service
             .update_settings(

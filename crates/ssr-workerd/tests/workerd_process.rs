@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use bytes::Bytes;
-use fastcart_ssr::{SsrBody, SsrRequestContext, WorkerdConfig, WorkerdProcess};
+use fastcart_ssr_workerd::{SsrBody, SsrRequestContext, WorkerdConfig, WorkerdProcess};
 use futures::StreamExt;
 
 fn workerd_binary() -> Option<PathBuf> {
@@ -160,7 +160,7 @@ const mainWorker :Workerd.Worker = (
     );
 
     let health = process.health().await.expect("health");
-    assert!(health.status == fastcart_ssr::RuntimeStatus::Healthy);
+    assert!(health.status == fastcart_ssr_workerd::RuntimeStatus::Healthy);
     assert!(health.process_id.is_some());
 
     let context = SsrRequestContext {
@@ -218,7 +218,7 @@ async fn reports_an_early_process_exit() {
         "127.0.0.1:1".parse().expect("listen addr"),
     );
     match WorkerdProcess::start(config).await {
-        Err(fastcart_ssr::SsrError::EarlyExit(_)) => {}
+        Err(fastcart_ssr_workerd::SsrError::EarlyExit(_)) => {}
         Err(error) => panic!("expected early exit, got {error:?}"),
         Ok(_) => panic!("expected early exit, got a running process"),
     }

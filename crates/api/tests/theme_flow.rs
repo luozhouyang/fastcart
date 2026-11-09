@@ -87,46 +87,13 @@ fn theme_body(id: &str) -> Value {
             "id": id,
             "name": format!("Theme {id}"),
             "version": "1.0.0",
-            "runtime": "node",
-            "entry": "dist/server.js",
-            "settings_schema": "settings.schema.json",
-            "assets_manifest": "assets.json",
-            "editor": {
-                "entry": "editor.js",
-                "manifest": "editor.manifest.json",
-                "schema_version": 1
-            },
-            "requires": { "data_api": 1, "capabilities": [] }
         },
-        "bundle_path": format!("themes/{id}"),
         "settings_schema": {
             "type": "object",
             "properties": { "logo": { "type": "string" } },
             "required": ["logo"]
         },
-        "settings": { "logo": "/logo.svg" },
-        "editor_manifest": {
-            "schema_version": 1,
-            "categories": {
-                "product": { "title": "Product", "components": ["ProductGrid"] }
-            },
-            "components": {
-                "ProductGrid": {
-                    "title": "Product Grid",
-                    "category": "product",
-                    "fields": {
-                        "collection": {
-                            "type": "data_source",
-                            "source": "collection",
-                            "required": true
-                        },
-                        "limit": { "type": "number", "min": 1, "max": 24, "default": 4 }
-                    },
-                    "defaultProps": { "limit": 4 },
-                    "slots": []
-                }
-            }
-        }
+        "settings": { "logo": "/logo.svg" }
     })
 }
 
@@ -201,22 +168,12 @@ async fn theme_registry_admin_and_storefront_flow() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
     assert_eq!(first["manifest"]["id"], "default");
-    assert_eq!(first["bundle_path"], "themes/default");
+    assert_eq!(first["manifest"]["name"], "Theme default");
+    assert_eq!(first["manifest"]["version"], "1.0.0");
     assert_eq!(first["settings"]["logo"], "/logo.svg");
     assert_eq!(first["is_active"], false);
-    assert_eq!(first["schema_version"], 1);
+    assert_eq!(first["settings_revision"], 1);
     let first_id = first["id"].as_str().unwrap().to_owned();
-
-    let (status, editor_manifest) = request(
-        &app,
-        "GET",
-        &format!("/api/v1/admin/themes/{first_id}/editor-manifest"),
-        None,
-        &store_headers,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{editor_manifest}");
-    assert!(editor_manifest["components"]["ProductGrid"].is_object());
 
     // Duplicate manifest identifiers conflict.
     let (status, duplicate) = request(
@@ -312,8 +269,7 @@ async fn theme_registry_admin_and_storefront_flow() {
     assert_eq!(status, StatusCode::OK, "{admin_active}");
     assert_eq!(admin_active["id"], first_id);
 
-    // Page writes validate against the active editor manifest and require an
-    // optimistic revision token.
+    // Page writes require an optimistic revision token.
     let page_body = json!({
         "schema_version": 1,
         "content": [{
@@ -371,26 +327,6 @@ async fn theme_registry_admin_and_storefront_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
-
-    // A body that references a component missing from the active theme is
-    // rejected before it can be persisted.
-    let (status, rejected) = request(
-        &app,
-        "PATCH",
-        &format!("/api/v1/admin/content/pages/{page_id}"),
-        Some(json!({
-            "base_revision": 2,
-            "body": {
-                "schema_version": 1,
-                "content": [{ "type": "MissingComponent", "props": { "id": "x" } }],
-                "root": { "props": {} },
-                "zones": {}
-            }
-        })),
-        &store_headers,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
 
     let (status, unchanged) = request(
         &app,

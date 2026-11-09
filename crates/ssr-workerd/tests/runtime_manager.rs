@@ -3,11 +3,11 @@ use std::time::{Duration, Instant};
 
 use axum::http::Request;
 use bytes::Bytes;
-use fastcart_ssr::artifact::{
+use fastcart_ssr_workerd::artifact::{
     Artifact, ArtifactLimits, ArtifactManifest, ArtifactStore, AssetMetadata, BuildMetadata,
     EntryMetadata, FrameworkMetadata, RenderingMetadata, RuntimeMetadata,
 };
-use fastcart_ssr::{RuntimeGroupId, RuntimeManager, RuntimeManagerConfig, RuntimeStatus};
+use fastcart_ssr_workerd::{RuntimeGroupId, RuntimeManager, RuntimeManagerConfig, RuntimeStatus};
 
 fn workerd_binary() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FASTCART_WORKERD_BIN").map(PathBuf::from) {
@@ -137,7 +137,7 @@ async fn manages_start_restart_health_and_stop() {
 
     assert!(matches!(
         manager.restart_group(&group).await,
-        Err(fastcart_ssr::SsrError::RestartLimit(_))
+        Err(fastcart_ssr_workerd::SsrError::RestartLimit(_))
     ));
     assert_eq!(manager.status(&group), Some(RuntimeStatus::Failed));
 

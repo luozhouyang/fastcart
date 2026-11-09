@@ -17,9 +17,7 @@ use fastcart_module_shipping::ResolvedShippingOption;
 use fastcart_module_store::Region;
 use fastcart_module_theme::Theme;
 use fastcart_platform::{Membership, Store, StoreDomain, User};
-use fastcart_storefront::{
-    CapabilityRequirement, ThemeEditorRef, ThemeManifest, ThemeRequirements,
-};
+use fastcart_storefront::ThemeManifest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -699,118 +697,6 @@ impl From<CustomerGroup> for CustomerGroupDto {
     }
 }
 
-/// Bundle-relative references to a theme editor surface.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = ThemeEditorRef)]
-pub struct ThemeEditorRefDto {
-    /// ESM entry that exports render and field components.
-    pub entry: String,
-    /// JSON file describing categories, components and fields.
-    pub manifest: String,
-    /// Editor manifest schema version.
-    #[serde(default = "default_editor_schema_version")]
-    pub schema_version: u32,
-}
-
-impl From<ThemeEditorRef> for ThemeEditorRefDto {
-    fn from(editor: ThemeEditorRef) -> Self {
-        Self {
-            entry: editor.entry,
-            manifest: editor.manifest,
-            schema_version: editor.schema_version,
-        }
-    }
-}
-
-impl From<ThemeEditorRefDto> for ThemeEditorRef {
-    fn from(editor: ThemeEditorRefDto) -> Self {
-        Self {
-            entry: editor.entry,
-            manifest: editor.manifest,
-            schema_version: editor.schema_version,
-        }
-    }
-}
-
-/// One capability required by a theme.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = CapabilityRequirement)]
-pub struct CapabilityRequirementDto {
-    /// Capability identifier.
-    pub id: String,
-    /// Required capability version.
-    pub version: u32,
-    /// Whether activation may proceed when the capability is missing.
-    #[serde(default)]
-    pub optional: bool,
-}
-
-impl From<CapabilityRequirement> for CapabilityRequirementDto {
-    fn from(capability: CapabilityRequirement) -> Self {
-        Self {
-            id: capability.id,
-            version: capability.version,
-            optional: capability.optional,
-        }
-    }
-}
-
-impl From<CapabilityRequirementDto> for CapabilityRequirement {
-    fn from(capability: CapabilityRequirementDto) -> Self {
-        Self {
-            id: capability.id,
-            version: capability.version,
-            optional: capability.optional,
-        }
-    }
-}
-
-/// Platform contracts and capabilities a theme depends on.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = ThemeRequirements)]
-pub struct ThemeRequirementsDto {
-    /// Required storefront data API version.
-    #[serde(default = "default_data_api_version")]
-    pub data_api: u32,
-    /// Optional or required plugin capabilities.
-    #[serde(default)]
-    pub capabilities: Vec<CapabilityRequirementDto>,
-}
-
-impl From<ThemeRequirements> for ThemeRequirementsDto {
-    fn from(requires: ThemeRequirements) -> Self {
-        Self {
-            data_api: requires.data_api,
-            capabilities: requires
-                .capabilities
-                .into_iter()
-                .map(CapabilityRequirementDto::from)
-                .collect(),
-        }
-    }
-}
-
-impl From<ThemeRequirementsDto> for ThemeRequirements {
-    fn from(requires: ThemeRequirementsDto) -> Self {
-        Self {
-            data_api: requires.data_api,
-            capabilities: requires
-                .capabilities
-                .into_iter()
-                .map(CapabilityRequirement::from)
-                .collect(),
-        }
-    }
-}
-
-const fn default_editor_schema_version() -> u32 {
-    fastcart_storefront::theme::SUPPORTED_EDITOR_SCHEMA_VERSION
-}
-
-const fn default_data_api_version() -> u32 {
-    fastcart_storefront::theme::SUPPORTED_DATA_API_VERSION
-}
-
 /// A validated theme manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = ThemeManifest)]
@@ -821,23 +707,6 @@ pub struct ThemeManifestDto {
     pub name: String,
     /// Theme version.
     pub version: String,
-    /// Rendering runtime expected by the theme.
-    pub runtime: String,
-    /// Entry file inside the theme bundle.
-    pub entry: String,
-    /// Optional JSON Schema for theme settings.
-    pub settings_schema: Option<String>,
-    /// Optional asset manifest file.
-    pub assets_manifest: Option<String>,
-    /// Optional editor bundle and manifest references.
-    #[serde(default)]
-    pub editor: Option<ThemeEditorRefDto>,
-    /// Optional platform contracts and capabilities the theme depends on.
-    #[serde(default)]
-    pub requires: Option<ThemeRequirementsDto>,
-    /// Optional dynamic routes keyed by template page type.
-    #[serde(default)]
-    pub routes: std::collections::BTreeMap<String, String>,
 }
 
 impl From<ThemeManifest> for ThemeManifestDto {
@@ -846,13 +715,6 @@ impl From<ThemeManifest> for ThemeManifestDto {
             id: manifest.id,
             name: manifest.name,
             version: manifest.version,
-            runtime: manifest.runtime,
-            entry: manifest.entry,
-            settings_schema: manifest.settings_schema,
-            assets_manifest: manifest.assets_manifest,
-            editor: manifest.editor.map(ThemeEditorRefDto::from),
-            requires: manifest.requires.map(ThemeRequirementsDto::from),
-            routes: manifest.routes,
         }
     }
 }
@@ -863,13 +725,6 @@ impl From<ThemeManifestDto> for ThemeManifest {
             id: manifest.id,
             name: manifest.name,
             version: manifest.version,
-            runtime: manifest.runtime,
-            entry: manifest.entry,
-            settings_schema: manifest.settings_schema,
-            assets_manifest: manifest.assets_manifest,
-            editor: manifest.editor.map(ThemeEditorRef::from),
-            requires: manifest.requires.map(ThemeRequirements::from),
-            routes: manifest.routes,
         }
     }
 }
@@ -924,24 +779,16 @@ pub struct PaymentWebhook {
 pub struct ThemeDto {
     /// Theme identifier.
     pub id: String,
-    /// Parsed theme manifest.
+    /// Parsed theme manifest metadata.
     pub manifest: ThemeManifestDto,
-    /// Bundle-relative asset root.
-    pub bundle_path: String,
     /// JSON Schema used to validate settings.
     pub settings_schema: Option<Value>,
     /// Current theme settings.
     pub settings: Value,
-    /// Raw editor manifest, when the theme exposes an editor.
-    pub editor_manifest: Option<Value>,
-    /// Parsed `assets.json` from the theme bundle.
-    pub assets_manifest: Option<Value>,
     /// Draft settings, when they differ from the live settings.
     pub draft_settings: Option<Value>,
     /// Monotonic settings revision.
     pub settings_revision: i64,
-    /// Editor manifest schema version.
-    pub schema_version: u32,
     /// Whether this is the active theme.
     pub is_active: bool,
     /// Creation timestamp.
@@ -957,14 +804,10 @@ impl From<Theme> for ThemeDto {
         Self {
             id: theme.id.to_string(),
             manifest: theme.manifest.into(),
-            bundle_path: theme.bundle_path,
             settings_schema: theme.settings_schema,
             settings: theme.settings,
-            editor_manifest: theme.editor_manifest,
-            assets_manifest: theme.assets_manifest,
             draft_settings: theme.draft_settings,
             settings_revision: theme.settings_revision,
-            schema_version: theme.schema_version,
             is_active: theme.is_active,
             created_at: theme.created_at,
             updated_at: theme.updated_at,

@@ -20,7 +20,7 @@ use fastcart_module_content::{
     PageVersion, Redirect, UpdateNavigationInput, UpdatePageInput,
 };
 use fastcart_module_theme::ThemeService;
-use fastcart_storefront::{PageThemeRef, SUPPORTED_EDITOR_SCHEMA_VERSION, ThemeEditorManifest};
+use fastcart_storefront::{PageThemeRef, SUPPORTED_EDITOR_SCHEMA_VERSION};
 use serde::Deserialize;
 use serde_json::Value;
 use utoipa_axum::router::OpenApiRouter;
@@ -301,29 +301,21 @@ fn parse_page_revision_origin(value: &str) -> ApiResult<PageRevisionOrigin> {
 
 /// Builds a content service bound to the active theme.
 ///
-/// Page bodies are validated against the active theme editor manifest and
-/// stamped with a [`PageThemeRef`] built from the active manifest identity. The
+/// Page bodies are stamped with a [`PageThemeRef`] built from the active theme
+/// metadata. Themes are deployment artifacts (ADR 0008), so the registry holds
+/// no editor contract to validate against; a generic editor arrives later. The
 /// actor is recorded by the service inside each mutation transaction, so
 /// content audits are atomic with the change and never need a second write.
 async fn content_service(db: StoreDatabase, actor_id: Option<String>) -> ApiResult<ContentService> {
-    let (editor_manifest, theme_ref) = match ThemeService::new(db.clone()).active().await? {
-        Some(theme) => {
-            let editor_manifest = match theme.editor_manifest {
-                Some(raw) => Some(ThemeEditorManifest::parse(&raw).map_err(|error| {
-                    AppError::conflict(format!("stored theme editor manifest is invalid: {error}"))
-                })?),
-                None => None,
-            };
-            let theme_ref = PageThemeRef {
-                id: theme.manifest.id,
-                version: theme.manifest.version,
-                schema_version: SUPPORTED_EDITOR_SCHEMA_VERSION,
-            };
-            (editor_manifest, Some(theme_ref))
-        }
-        None => (None, None),
+    let theme_ref = match ThemeService::new(db.clone()).active().await? {
+        Some(theme) => Some(PageThemeRef {
+            id: theme.manifest.id,
+            version: theme.manifest.version,
+            schema_version: SUPPORTED_EDITOR_SCHEMA_VERSION,
+        }),
+        None => None,
     };
-    Ok(ContentService::with_editor_manifest(db, editor_manifest)
+    Ok(ContentService::new(db)
         .with_theme_ref(theme_ref)
         .with_audit_actor(actor_id))
 }

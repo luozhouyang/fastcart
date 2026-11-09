@@ -6,11 +6,9 @@
 //! admin cookies. Tokens are never logged and are removed from the URL handed
 //! to the storefront runtime.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::extract::{Extension, Query, Request, State};
-use axum::http::StatusCode;
 use axum::http::Uri;
 use axum::http::header::HOST;
 use axum::response::{IntoResponse, Response};
@@ -18,23 +16,11 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fastcart_http::{ApiError, ClientIp, RequestId};
 use fastcart_infrastructure::{StoreDatabase, database_error};
-use fastcart_kernel::{
-    AppError, CurrencyCode, PageId, Pagination, StoreContext, now_timestamp, validate_handle,
-};
-use fastcart_module_catalog::CatalogService;
-use fastcart_module_content::{ContentService, PageStatus};
-use fastcart_module_theme::ThemeService;
-use fastcart_runtime_api::{RuntimeError, RuntimeMode, RuntimeRequest, RuntimeTheme};
-use fastcart_storefront::page::RESERVED_CONTEXT_KEY;
-use fastcart_storefront_data::{DataMode, DataResolutionContext};
+use fastcart_kernel::{AppError, CurrencyCode, StoreContext, now_timestamp};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 
-use super::storefront::{
-    THEME_ASSETS_BASE_URL, build_context_data, capability_grants, compile_page, is_hop_by_hop,
-    match_theme_route, resolve_active_editor, runtime_error, runtime_response,
-};
 use crate::state::AppContext;
 
 /// Lifetime of an issued preview token in seconds.
@@ -86,12 +72,6 @@ pub enum PreviewTokenError {
 pub(crate) struct PreviewQuery {
     /// Signed preview token.
     token: Option<String>,
-    /// Optional resource handle for a dynamic route template.
-    ///
-    /// Used only when the request path does not already match the template's
-    /// route. The value is internal to the preview surface and is removed
-    /// before the URL reaches the theme.
-    preview_handle: Option<String>,
 }
 
 /// Issues a signed preview token for one page.
@@ -272,7 +252,6 @@ pub(crate) async fn render(
         Err(error) => return ApiError::new(AppError::from(error)).into_response(),
     };
 
-    let domain = store.primary_domain.clone().unwrap_or_default();
     let database = match context.databases.database(&store.id).await {
         Ok(database) => database,
         Err(error) => return ApiError::new(AppError::from(error)).into_response(),
@@ -336,269 +315,7 @@ pub(crate) async fn render(
         );
     }
 
-    let Some(runtime) = context.storefront_runtime.clone() else {
-        return ApiError::not_found("storefront route").into_response();
-    };
-    let currency = match CurrencyCode::new(store.currency_code.clone()) {
-        Ok(currency) => currency,
-        Err(error) => return ApiError::new(AppError::from(error)).into_response(),
-    };
-    let theme = match ThemeService::new(database.clone()).active().await {
-        Ok(Some(theme)) => theme,
-        Ok(None) => return ApiError::not_found("active theme").into_response(),
-        Err(error) => return ApiError::new(error).into_response(),
-    };
-    let page = match ContentService::new(database.clone())
-        .get_page(&PageId::from_string(payload.page_id))
-        .await
-    {
-        Ok(page) => page,
-        Err(error) if error.is_not_found() => {
-            return ApiError::not_found("page").into_response();
-        }
-        Err(error) => return ApiError::new(error).into_response(),
-    };
-    // An archived page is withdrawn from every surface, including the editor
-    // preview. The token stays valid but no longer renders anything.
-    if page.status == PageStatus::Archived {
-        return ApiError::not_found("page").into_response();
-    }
-
-    // A dynamic route template is previewed with a concrete resource so that
-    // `data.context.route` matches production. The path wins; otherwise an
-    // explicit handle is used, and finally the first published record of the
-    // template's kind. A missing resource leaves the route unset rather than
-    // failing the preview.
-    let page_type = page.page_type.trim();
-    let mut route_context: Option<serde_json::Value> = None;
-    if theme.manifest.routes.contains_key(page_type) {
-        let matched = match_theme_route(&theme.manifest.routes, preview_path(request.uri()))
-            .filter(|route| route.kind == page_type);
-        let handle = if let Some(route) = matched {
-            Some(route.handle)
-        } else if let Some(handle) = query
-            .preview_handle
-            .as_deref()
-            .map(str::trim)
-            .filter(|handle| !handle.is_empty())
-        {
-            if validate_handle(handle, "handle").is_ok() {
-                Some(handle.to_owned())
-            } else {
-                tracing::debug!(handle, "ignored invalid preview handle");
-                None
-            }
-        } else {
-            first_published_handle(&database, page_type).await
-        };
-        if let Some(handle) = handle {
-            let resolution = DataResolutionContext {
-                currency: currency.clone(),
-                sales_channel_id: None,
-                customer_group_id: None,
-                mode: DataMode::Preview,
-                now,
-            };
-            match context
-                .storefront_data
-                .resolve_route(&database, page_type, &handle, &resolution)
-                .await
-            {
-                Ok(Some(resource)) => {
-                    route_context = Some(serde_json::json!({
-                        "kind": page_type,
-                        "handle": handle,
-                        "resource": resource,
-                    }));
-                }
-                Ok(None) => {
-                    tracing::debug!(
-                        kind = page_type,
-                        handle = %handle,
-                        "preview route resource not found"
-                    );
-                }
-                Err(error) => {
-                    context.metrics.record_storefront_data_failure();
-                    tracing::warn!(
-                        kind = page_type,
-                        handle = %handle,
-                        error = %error,
-                        "preview route resolution failed"
-                    );
-                }
-            }
-        }
-    }
-
-    let editor = resolve_active_editor(&context, &store.id, &theme).await;
-    let compiled = match compile_page(&page, editor.manifest.as_deref()) {
-        Ok(compiled) => compiled,
-        Err(error) => {
-            return ApiError::new(AppError::validation(format!(
-                "page body is invalid for preview: {error}"
-            )))
-            .into_response();
-        }
-    };
-
-    let mut context_entry = build_context_data(
-        &context,
-        &database,
-        request.headers(),
-        &store,
-        &domain,
-        &currency,
-        &theme,
-        DataMode::Preview,
-    )
-    .await;
-    if let Some(route) = route_context {
-        context_entry["route"] = route;
-    }
-    let mut data: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    data.insert(RESERVED_CONTEXT_KEY.to_owned(), context_entry);
-    if !compiled.bindings.is_empty() {
-        let resolution = DataResolutionContext {
-            currency: currency.clone(),
-            sales_channel_id: None,
-            customer_group_id: None,
-            mode: DataMode::Preview,
-            now,
-        };
-        match context
-            .storefront_data
-            .resolve(&database, &compiled.bindings, &resolution)
-            .await
-        {
-            Ok(bag) => data.extend(bag),
-            Err(error) => {
-                context.metrics.record_storefront_data_failure();
-                tracing::warn!(error = %error, "preview data resolution failed");
-            }
-        }
-    }
-    let data = Some(serde_json::to_value(data).unwrap_or(serde_json::Value::Null));
-
-    let request_id = request
-        .extensions()
-        .get::<RequestId>()
-        .map(|id| id.0.clone())
-        .unwrap_or_default();
-    let url = preview_runtime_url(request.uri());
-    let headers = request
-        .headers()
-        .iter()
-        .filter(|(name, _)| !is_hop_by_hop(name.as_str()) && name.as_str() != HOST)
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|value| (name.as_str().to_owned(), value.to_owned()))
-        })
-        .collect();
-    let capabilities = capability_grants(&context, &store.id, &database, &theme).await;
-    let runtime_request = RuntimeRequest {
-        request_id: request_id.clone(),
-        store: StoreContext {
-            store_id: store.id.clone(),
-            domain,
-            locale: store.locale.clone(),
-            currency,
-            timezone: store.timezone.clone(),
-        },
-        method: "GET".to_owned(),
-        url,
-        headers,
-        body: None,
-        theme: Some(RuntimeTheme {
-            id: theme.manifest.id.clone(),
-            version: theme.manifest.version.clone(),
-            runtime: theme.manifest.runtime.clone(),
-            bundle_path: theme.bundle_path.clone(),
-            entry: theme.manifest.entry.clone(),
-            settings: theme
-                .draft_settings
-                .clone()
-                .unwrap_or_else(|| theme.settings.clone()),
-            assets_manifest: theme.assets_manifest.clone(),
-            assets_base_url: Some(THEME_ASSETS_BASE_URL.to_owned()),
-        }),
-        page: Some(compiled.page),
-        data,
-        capabilities,
-        mode: RuntimeMode::Preview,
-        timeout_ms: context.config.storefront_timeout_ms.max(1),
-        streaming: context.config.storefront_streaming_enabled,
-        stream_timeout_ms: context.config.storefront_stream_timeout_ms.max(1),
-    };
-
-    match runtime.render(runtime_request).await {
-        Ok(response) => {
-            let mut response =
-                runtime_response(response, context.config.storefront_stream_timeout_ms.max(1));
-            // Draft previews must never be cached by browsers or shared
-            // proxies, even if the theme emits permissive headers.
-            response.headers_mut().insert(
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("no-store"),
-            );
-            response.headers_mut().insert(
-                axum::http::header::HeaderName::from_static("x-robots-tag"),
-                axum::http::HeaderValue::from_static("noindex, nofollow"),
-            );
-            // Keep the token-bearing preview URL out of Referer headers and
-            // restrict which origins may frame a draft.
-            response.headers_mut().insert(
-                axum::http::header::HeaderName::from_static("referrer-policy"),
-                axum::http::HeaderValue::from_static("no-referrer"),
-            );
-            let ancestors = &context.config.preview_frame_ancestors;
-            if !ancestors.is_empty() {
-                let mut frame_ancestors = String::from("frame-ancestors 'self'");
-                for ancestor in ancestors {
-                    frame_ancestors.push(' ');
-                    frame_ancestors.push_str(ancestor);
-                }
-                if let Ok(value) = axum::http::HeaderValue::from_str(&frame_ancestors) {
-                    response.headers_mut().insert(
-                        axum::http::header::HeaderName::from_static("content-security-policy"),
-                        value,
-                    );
-                }
-            }
-            response
-        }
-        Err(RuntimeError::Timeout(timeout_ms)) => runtime_error(
-            StatusCode::GATEWAY_TIMEOUT,
-            "RUNTIME_TIMEOUT",
-            &format!("preview rendering timed out after {timeout_ms} ms"),
-            &request_id,
-        ),
-        Err(RuntimeError::WorkerUnavailable(message)) => {
-            tracing::warn!(error = %message, "preview runtime unavailable");
-            let mut response = runtime_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "RUNTIME_UNAVAILABLE",
-                "storefront preview is temporarily unavailable",
-                &request_id,
-            );
-            response.headers_mut().insert(
-                axum::http::header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static("5"),
-            );
-            response
-        }
-        Err(error) => {
-            tracing::warn!(error = %error, "preview runtime failed");
-            runtime_error(
-                StatusCode::BAD_GATEWAY,
-                "RUNTIME_ERROR",
-                "preview rendering failed",
-                &request_id,
-            )
-        }
-    }
+    ApiError::not_found("storefront route").into_response()
 }
 
 /// Returns true when the token identifier has been explicitly revoked.
@@ -672,32 +389,6 @@ fn remaining_query(query: Option<&str>) -> Option<String> {
         kept = true;
     }
     kept.then(|| serializer.finish())
-}
-
-/// Picks the first published resource of a route kind for auto-previewed
-/// templates.
-async fn first_published_handle(database: &StoreDatabase, kind: &str) -> Option<String> {
-    let pagination = Pagination {
-        limit: 1,
-        offset: 0,
-    };
-    let catalog = CatalogService::new(database.clone());
-    let result = match kind {
-        "product" => catalog.list_published_product_handles(pagination).await,
-        "collection" => catalog.list_published_collection_handles(pagination).await,
-        _ => return None,
-    };
-    match result {
-        Ok(page) => page.data.into_iter().next(),
-        Err(error) => {
-            tracing::warn!(
-                kind,
-                error = %error,
-                "could not auto-select a preview route handle"
-            );
-            None
-        }
-    }
 }
 
 #[cfg(test)]

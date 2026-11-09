@@ -50,31 +50,6 @@ retention_days = 90
 max_capacity = 10000
 ttl_seconds = 60
 
-[storefront]
-enabled = true
-# "node" uses the Node.js sidecar. The embedded "v8" adapter is not built yet.
-runtime = "node"
-worker_count = 2
-queue_capacity = 128
-request_timeout_ms = 10000
-# Let themes that return a stream send the HTML shell before the whole page
-# is rendered. Disable when a proxy buffers chunked responses.
-streaming_enabled = true
-# Total budget for one streamed response. The shell still has to arrive within
-# request_timeout_ms.
-stream_timeout_ms = 30000
-node_url = "http://127.0.0.1:8788"
-# Bearer token sent to the sidecar. Required when node_url is not loopback;
-# set SIDECAR_SECRET on the sidecar to the same value. Optional for a loopback
-# sidecar that runs without authentication.
-# node_secret = "replace-with-a-long-random-sidecar-secret"
-# Enables the secret-authenticated /internal/storefront HTTP surface for the sidecar.
-# internal_fetch_secret = "long-random-internal-secret"
-# Signs theme capability grants; capability endpoints sharing this secret can
-# verify tokens without a database lookup. Recommended in production; use a
-# long random value.
-# capability_secret = "replace-with-a-long-random-capability-secret"
-
 [ssr]
 # Universal workerd SSR. This requires an imported FastCart SSR artifact and a
 # pinned workerd binary. Docker and the legacy Node sidecar are not used here.

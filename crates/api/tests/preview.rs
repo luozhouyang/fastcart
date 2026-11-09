@@ -1,22 +1,18 @@
-//! Draft page preview flow: token issuance and preview rendering.
+//! Draft page preview flow: token issuance and universal preview rendering.
 
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::response::{IntoResponse, Response};
 use fastcart_api::routes::preview::issue_preview_token;
+use fastcart_api::state::UniversalStorefront;
 use fastcart_api::{ApiConfig, AppContext, build_router};
-use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabase, StoreDatabaseManager};
-use fastcart_kernel::{Metadata, StoreId, now_timestamp};
-use fastcart_module_catalog::{CatalogService, CreateCollectionInput, CreateProductInput};
+use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
+use fastcart_kernel::{Metadata, StoreContext, StoreId, now_timestamp};
 use fastcart_module_content::{ContentService, CreatePageInput};
-use fastcart_module_theme::{RegisterThemeInput, ThemeService};
 use fastcart_platform::PlatformStore;
-use fastcart_runtime_api::{
-    RuntimeError, RuntimeMode, RuntimeRequest, RuntimeResponse, StorefrontRuntime,
-};
-use fastcart_storefront::{ThemeEditorRef, ThemeManifest};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -24,53 +20,108 @@ use tower::ServiceExt;
 const HOST: &str = "shop.example.com";
 const PREVIEW_SECRET: &str = "preview-integration-secret-0123456789abcdef";
 
-#[derive(Clone)]
-struct RecordingRuntime {
-    requests: Arc<Mutex<Vec<RuntimeRequest>>>,
+#[derive(Default)]
+struct RecordingUniversal {
+    calls: Mutex<Vec<PreviewCall>>,
 }
 
-impl RecordingRuntime {
-    fn new() -> (Self, Arc<Mutex<Vec<RuntimeRequest>>>) {
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                requests: requests.clone(),
-            },
-            requests,
-        )
-    }
+struct PreviewCall {
+    uri: String,
+    host: Option<String>,
+    store: StoreContext,
+    request_id: Option<String>,
+    scheme: String,
 }
 
 #[async_trait::async_trait]
-impl StorefrontRuntime for RecordingRuntime {
-    async fn render(&self, request: RuntimeRequest) -> Result<RuntimeResponse, RuntimeError> {
-        self.requests.lock().unwrap().push(request);
-        Ok(RuntimeResponse {
-            status: 200,
-            headers: vec![("content-type".to_owned(), "text/html".to_owned())],
-            body: fastcart_runtime_api::RuntimeBody::full("<h1>preview</h1>"),
-        })
+impl UniversalStorefront for RecordingUniversal {
+    async fn render(
+        &self,
+        _request: Request<Body>,
+        _store: StoreContext,
+        _request_id: Option<String>,
+        _scheme: String,
+    ) -> Response {
+        StatusCode::NOT_FOUND.into_response()
     }
 
-    async fn health_check(&self) -> Result<(), RuntimeError> {
+    async fn serve_asset(
+        &self,
+        _store_id: &str,
+        _path: String,
+        _headers: axum::http::HeaderMap,
+    ) -> Response {
+        StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn activate(
+        &self,
+        _store_id: &str,
+        _deployment_id: &str,
+        _artifact_path: String,
+    ) -> Result<(), String> {
         Ok(())
     }
 
-    async fn shutdown(&self) -> Result<(), RuntimeError> {
+    async fn rollback(&self, _store_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn render_preview(
+        &self,
+        request: Request<Body>,
+        store: StoreContext,
+        request_id: Option<String>,
+        scheme: String,
+    ) -> Response {
+        self.calls.lock().unwrap().push(PreviewCall {
+            uri: request.uri().to_string(),
+            host: request
+                .headers()
+                .get(axum::http::header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+            store,
+            request_id,
+            scheme,
+        });
+        (StatusCode::OK, "<h1>universal-preview</h1>").into_response()
+    }
+
+    async fn has_preview(&self, _store_id: &str) -> bool {
+        true
+    }
+
+    async fn serve_preview_asset(
+        &self,
+        _store_id: &str,
+        _path: String,
+        _headers: axum::http::HeaderMap,
+    ) -> Response {
+        StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn activate_preview(
+        &self,
+        _store_id: &str,
+        _deployment_id: &str,
+        _artifact_path: String,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn deactivate_preview(&self, _store_id: &str) -> Result<(), String> {
         Ok(())
     }
 }
 
 struct Fixture {
     app: Router,
-    database: StoreDatabase,
     store_id: String,
     page_id: String,
-    product_page_id: String,
-    collection_page_id: String,
     session: String,
     csrf: String,
-    requests: Arc<Mutex<Vec<RuntimeRequest>>>,
+    universal: Option<Arc<RecordingUniversal>>,
     _dir: tempfile::TempDir,
 }
 
@@ -78,16 +129,25 @@ impl Fixture {
     fn admin_cookie(&self) -> String {
         format!("fc_admin_session={}; fc_csrf={}", self.session, self.csrf)
     }
+
+    fn calls(&self) -> std::sync::MutexGuard<'_, Vec<PreviewCall>> {
+        self.universal
+            .as_ref()
+            .expect("fixture has a universal storefront")
+            .calls
+            .lock()
+            .unwrap()
+    }
 }
 
-async fn fixture(preview_secret: Option<&str>) -> Fixture {
+async fn fixture(preview_secret: Option<&str>, universal: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let platform = PlatformStore::in_memory().await.unwrap();
     let databases = Arc::new(StoreDatabaseManager::new(
         dir.path().join("stores"),
         DatabaseOptions::default().with_max_connections(2),
     ));
-    let (runtime, requests) = RecordingRuntime::new();
+    let universal = universal.then(|| Arc::new(RecordingUniversal::default()));
     let context = Arc::new(
         AppContext::new(
             ApiConfig {
@@ -100,7 +160,11 @@ async fn fixture(preview_secret: Option<&str>) -> Fixture {
             databases.clone(),
             StoreCache::default_capacity(),
         )
-        .with_storefront_runtime(Some(Arc::new(runtime))),
+        .with_universal_storefront(
+            universal
+                .clone()
+                .map(|runtime| runtime as Arc<dyn UniversalStorefront>),
+        ),
     );
     let app = build_router(context);
 
@@ -142,103 +206,12 @@ async fn fixture(preview_secret: Option<&str>) -> Fixture {
         .database(&StoreId::from_string(store_id.clone()))
         .await
         .unwrap();
-    let themes = ThemeService::new(database.clone());
-    let theme = themes
-        .register(RegisterThemeInput {
-            manifest: ThemeManifest {
-                id: "default".to_owned(),
-                name: "Default".to_owned(),
-                version: "1.0.0".to_owned(),
-                runtime: "node".to_owned(),
-                entry: "dist/server.js".to_owned(),
-                settings_schema: None,
-                assets_manifest: None,
-                editor: Some(ThemeEditorRef {
-                    entry: "editor.js".to_owned(),
-                    manifest: "editor.manifest.json".to_owned(),
-                    schema_version: 1,
-                }),
-                requires: None,
-                routes: [
-                    ("product".to_owned(), "/products/{handle}".to_owned()),
-                    ("collection".to_owned(), "/collections/{handle}".to_owned()),
-                ]
-                .into_iter()
-                .collect(),
-            },
-            bundle_path: "themes/default".to_owned(),
-            settings_schema: None,
-            assets_manifest: None,
-            settings: Some(json!({ "brand_color": "#111111" })),
-            editor_manifest: Some(editor_manifest()),
-        })
-        .await
-        .unwrap();
-    themes.activate(&theme.id).await.unwrap();
-
-    let catalog = CatalogService::new(database.clone());
-    let product = catalog
-        .create_product(CreateProductInput {
-            title: "Hoodie".to_owned(),
-            handle: Some("hoodie".to_owned()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    catalog.publish_product(&product.id).await.unwrap();
-    let collection = catalog
-        .create_collection(CreateCollectionInput {
-            title: "Featured".to_owned(),
-            handle: Some("featured".to_owned()),
-            is_published: Some(true),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    catalog
-        .add_product_to_collection(&product.id, &collection.id, 0)
-        .await
-        .unwrap();
-
-    let content = ContentService::new(database.clone());
-    let page = content
+    let page = ContentService::new(database.clone())
         .create_page(CreatePageInput {
             title: "About".to_owned(),
             handle: Some("about".to_owned()),
             page_type: Some("custom".to_owned()),
-            body: page_body(),
-            seo: json!({}),
-            metadata: Metadata::empty(),
-        })
-        .await
-        .unwrap();
-    let product_page = content
-        .create_page(CreatePageInput {
-            title: "Product".to_owned(),
-            handle: Some("product-template".to_owned()),
-            page_type: Some("product".to_owned()),
-            body: json!({
-                "schema_version": 1,
-                "content": [{ "type": "ProductDetail", "props": { "id": "pd-1" } }],
-                "root": { "props": {} },
-                "zones": {}
-            }),
-            seo: json!({}),
-            metadata: Metadata::empty(),
-        })
-        .await
-        .unwrap();
-    let collection_page = content
-        .create_page(CreatePageInput {
-            title: "Collection".to_owned(),
-            handle: Some("collection-template".to_owned()),
-            page_type: Some("collection".to_owned()),
-            body: json!({
-                "schema_version": 1,
-                "content": [{ "type": "CollectionDetail", "props": { "id": "cd-1" } }],
-                "root": { "props": {} },
-                "zones": {}
-            }),
+            body: json!({ "schema_version": 1, "content": [] }),
             seo: json!({}),
             metadata: Metadata::empty(),
         })
@@ -247,78 +220,13 @@ async fn fixture(preview_secret: Option<&str>) -> Fixture {
 
     Fixture {
         app,
-        database,
         store_id,
         page_id: page.id.as_str().to_owned(),
-        product_page_id: product_page.id.as_str().to_owned(),
-        collection_page_id: collection_page.id.as_str().to_owned(),
         session,
         csrf,
-        requests,
+        universal,
         _dir: dir,
     }
-}
-
-fn editor_manifest() -> Value {
-    json!({
-        "schema_version": 1,
-        "categories": {
-            "product": {
-                "title": "Product",
-                "components": ["ProductGrid", "ProductDetail", "CollectionDetail"]
-            }
-        },
-        "components": {
-            "CollectionDetail": {
-                "title": "Collection detail",
-                "category": "product",
-                "fields": {},
-                "defaultProps": {},
-                "slots": []
-            },
-            "ProductDetail": {
-                "title": "Product detail",
-                "category": "product",
-                "fields": {},
-                "defaultProps": {},
-                "slots": []
-            },
-            "ProductGrid": {
-                "title": "Product Grid",
-                "category": "product",
-                "fields": {
-                    "collection": {
-                        "type": "data_source",
-                        "source": "collection",
-                        "required": true
-                    },
-                    "limit": { "type": "number", "min": 1, "max": 24, "default": 4 }
-                },
-                "defaultProps": { "limit": 4 },
-                "slots": []
-            }
-        }
-    })
-}
-
-fn page_body() -> Value {
-    json!({
-        "schema_version": 1,
-        "content": [{
-            "type": "ProductGrid",
-            "props": {
-                "id": "grid-1",
-                "collection": {
-                    "id": "col_missing",
-                    "handle": "featured",
-                    "label": "Featured"
-                },
-                "limit": 4
-            }
-        }],
-        "root": { "props": {} },
-        "zones": {}
-    })
 }
 
 async fn request(
@@ -413,8 +321,8 @@ async fn issue_token(fixture: &Fixture) -> (String, i64, String) {
 }
 
 #[tokio::test]
-async fn preview_token_renders_the_draft_page_through_the_runtime() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+async fn preview_token_renders_through_the_universal_deployment() {
+    let fixture = fixture(Some(PREVIEW_SECRET), true).await;
     let (token, expires_at, jti) = issue_token(&fixture).await;
     assert!(expires_at > now_timestamp());
     assert_eq!(token.matches('.').count(), 1);
@@ -423,145 +331,21 @@ async fn preview_token_renders_the_draft_page_through_the_runtime() {
     let uri = format!("/preview/about?token={token}&x=1");
     let (status, body) = send_preview(&fixture.app, &uri).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, "<h1>preview</h1>");
+    assert_eq!(body, "<h1>universal-preview</h1>");
 
-    let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
-    assert_eq!(request.mode, RuntimeMode::Preview);
-    assert_eq!(request.method, "GET");
-    assert_eq!(request.url, "/about?x=1");
-    assert_eq!(request.store.domain, HOST);
-    let page = request.page.as_ref().expect("page context");
-    assert_eq!(page.id, fixture.page_id);
-    assert_eq!(page.handle, "about");
-    assert_eq!(page.status, "draft");
-    assert_eq!(page.body["content"][0]["type"], "ProductGrid");
-    let data = request.data.as_ref().expect("data bag");
-    let context = data.get("context").expect("reserved context entry");
-    assert_eq!(context["mode"], "preview");
-    assert_eq!(context["store"]["id"], fixture.store_id);
-    assert!(data.get("grid-1").is_some(), "resolved binding data");
-}
-
-#[tokio::test]
-async fn preview_resolves_dynamic_route_resources() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
-    let token = issue_preview_token(
-        PREVIEW_SECRET,
-        &fixture.store_id,
-        &fixture.product_page_id,
-        now_timestamp(),
-    )
-    .unwrap()
-    .token;
-
-    // A matching path selects its handle.
-    let (status, body) = send_preview(
-        &fixture.app,
-        &format!("/preview/products/hoodie?token={token}"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    {
-        let requests = fixture.requests.lock().unwrap();
-        let request = &requests[0];
-        assert_eq!(request.page.as_ref().unwrap().page_type, "product");
-        assert_eq!(request.url, "/products/hoodie");
-        let route = &request.data.as_ref().unwrap()["context"]["route"];
-        assert_eq!(route["kind"], "product");
-        assert_eq!(route["handle"], "hoodie");
-        assert_eq!(route["resource"]["product"]["title"], "Hoodie");
-    }
-
-    // A path that does not match auto-selects the first published record.
-    let (status, body) = send_preview(
-        &fixture.app,
-        &format!("/preview/product-template?token={token}"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    {
-        let requests = fixture.requests.lock().unwrap();
-        let request = &requests[1];
-        let route = &request.data.as_ref().unwrap()["context"]["route"];
-        assert_eq!(route["kind"], "product");
-        assert_eq!(route["handle"], "hoodie");
-    }
-
-    // An explicit handle wins over the auto-selection and is stripped from the
-    // URL handed to the theme.
-    let catalog = CatalogService::new(fixture.database.clone());
-    let tee = catalog
-        .create_product(CreateProductInput {
-            title: "Tee".to_owned(),
-            handle: Some("tee".to_owned()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    catalog.publish_product(&tee.id).await.unwrap();
-    let (status, body) = send_preview(
-        &fixture.app,
-        &format!("/preview/product-template?preview_handle=tee&x=1&token={token}"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    {
-        let requests = fixture.requests.lock().unwrap();
-        let request = &requests[2];
-        assert_eq!(request.url, "/product-template?x=1");
-        let route = &request.data.as_ref().unwrap()["context"]["route"];
-        assert_eq!(route["handle"], "tee");
-        assert_eq!(route["resource"]["product"]["title"], "Tee");
-    }
-
-    // A missing resource leaves the template renderable without route data.
-    let (status, body) = send_preview(
-        &fixture.app,
-        &format!("/preview/products/missing?token={token}"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    {
-        let requests = fixture.requests.lock().unwrap();
-        let request = &requests[3];
-        assert_eq!(request.page.as_ref().unwrap().page_type, "product");
-        assert!(request.data.as_ref().unwrap()["context"]["route"].is_null());
-    }
-}
-
-#[tokio::test]
-async fn preview_resolves_collection_route_resources() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
-    let token = issue_preview_token(
-        PREVIEW_SECRET,
-        &fixture.store_id,
-        &fixture.collection_page_id,
-        now_timestamp(),
-    )
-    .unwrap()
-    .token;
-
-    let (status, body) = send_preview(
-        &fixture.app,
-        &format!("/preview/collections/featured?token={token}"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let requests = fixture.requests.lock().unwrap();
-    let request = &requests[0];
-    assert_eq!(request.page.as_ref().unwrap().page_type, "collection");
-    let route = &request.data.as_ref().unwrap()["context"]["route"];
-    assert_eq!(route["kind"], "collection");
-    assert_eq!(route["handle"], "featured");
-    assert_eq!(route["resource"]["collection"]["title"], "Featured");
-    assert_eq!(route["resource"]["products"][0]["title"], "Hoodie");
+    let calls = fixture.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.uri, "/about?x=1", "the preview token is stripped");
+    assert_eq!(call.host.as_deref(), Some(HOST));
+    assert_eq!(call.store.domain, HOST);
+    assert!(call.request_id.is_some());
+    assert_eq!(call.scheme, "https");
 }
 
 #[tokio::test]
 async fn preview_renders_on_an_admin_host() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let fixture = fixture(Some(PREVIEW_SECRET), true).await;
     let (token, _, _) = issue_token(&fixture).await;
 
     // The admin is served from its own domain; the signed token names the
@@ -573,13 +357,14 @@ async fn preview_renders_on_an_admin_host() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests[0].store.domain, HOST);
+    let calls = fixture.calls();
+    assert_eq!(calls[0].store.domain, HOST);
+    assert_eq!(calls[0].host.as_deref(), Some(HOST));
 }
 
 #[tokio::test]
 async fn revoked_tokens_stop_rendering_immediately() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let fixture = fixture(Some(PREVIEW_SECRET), true).await;
     let (token, _, jti) = issue_token(&fixture).await;
     let admin_cookie = fixture.admin_cookie();
     let (status, body, _) = request(
@@ -602,7 +387,7 @@ async fn revoked_tokens_stop_rendering_immediately() {
     let (status, body) = send_preview(&fixture.app, &format!("/preview/about?token={token}")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert!(
-        fixture.requests.lock().unwrap().is_empty(),
+        fixture.calls().is_empty(),
         "revoked tokens must not reach the runtime"
     );
 
@@ -610,12 +395,12 @@ async fn revoked_tokens_stop_rendering_immediately() {
     let (fresh, _, _) = issue_token(&fixture).await;
     let (status, body) = send_preview(&fixture.app, &format!("/preview/about?token={fresh}")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+    assert_eq!(fixture.calls().len(), 1);
 }
 
 #[tokio::test]
 async fn invalid_tokens_are_rejected_without_invoking_the_runtime() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let fixture = fixture(Some(PREVIEW_SECRET), true).await;
     let (valid, _, _) = issue_token(&fixture).await;
 
     let (payload, signature) = valid.split_once('.').expect("token shape");
@@ -647,12 +432,12 @@ async fn invalid_tokens_are_rejected_without_invoking_the_runtime() {
     let (status, body) = send_preview(&fixture.app, "/preview/about").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 
-    assert!(fixture.requests.lock().unwrap().is_empty());
+    assert!(fixture.calls().is_empty());
 }
 
 #[tokio::test]
 async fn preview_is_disabled_without_a_secret() {
-    let fixture = fixture(None).await;
+    let fixture = fixture(None, true).await;
     let admin_cookie = fixture.admin_cookie();
     let (status, body, _) = request(
         &fixture.app,
@@ -673,12 +458,21 @@ async fn preview_is_disabled_without_a_secret() {
 
     let (status, body) = send_preview(&fixture.app, "/preview/about?token=anything").await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
-    assert!(fixture.requests.lock().unwrap().is_empty());
+    assert!(fixture.calls().is_empty());
+}
+
+#[tokio::test]
+async fn preview_without_a_universal_deployment_returns_not_found() {
+    let fixture = fixture(Some(PREVIEW_SECRET), false).await;
+    let (token, _, _) = issue_token(&fixture).await;
+
+    let (status, _) = send_preview(&fixture.app, &format!("/preview/about?token={token}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn missing_page_returns_not_found() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let fixture = fixture(Some(PREVIEW_SECRET), true).await;
     let admin_cookie = fixture.admin_cookie();
     let (status, body, _) = request(
         &fixture.app,
@@ -696,8 +490,8 @@ async fn missing_page_returns_not_found() {
 }
 
 #[tokio::test]
-async fn archived_pages_cannot_be_previewed() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+async fn archived_pages_cannot_issue_preview_tokens() {
+    let fixture = fixture(Some(PREVIEW_SECRET), true).await;
     let admin_cookie = fixture.admin_cookie();
     let (status, body, _) = request(
         &fixture.app,
@@ -729,24 +523,12 @@ async fn archived_pages_cannot_be_previewed() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-
-    // A token issued before archiving must stop rendering too.
-    let token = issue_preview_token(
-        PREVIEW_SECRET,
-        &fixture.store_id,
-        &fixture.page_id,
-        now_timestamp(),
-    )
-    .unwrap()
-    .token;
-    let (status, body) = send_preview(&fixture.app, &format!("/preview/about?token={token}")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert!(fixture.requests.lock().unwrap().is_empty());
+    assert!(fixture.calls().is_empty());
 }
 
 #[tokio::test]
 async fn preview_token_response_is_not_cacheable() {
-    let fixture = fixture(Some(PREVIEW_SECRET)).await;
+    let fixture = fixture(Some(PREVIEW_SECRET), true).await;
     let admin_cookie = fixture.admin_cookie();
     let response = fixture
         .app

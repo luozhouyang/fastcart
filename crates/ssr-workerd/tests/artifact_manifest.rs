@@ -1,4 +1,4 @@
-use fastcart_ssr::ArtifactManifest;
+use fastcart_ssr_workerd::ArtifactManifest;
 
 #[test]
 fn the_checked_in_example_matches_the_rust_manifest() {

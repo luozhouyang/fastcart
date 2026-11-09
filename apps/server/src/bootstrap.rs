@@ -25,8 +25,7 @@ pub async fn run(config: Config) -> Result<()> {
 
     tracing::info!(
         address = %address,
-        storefront_enabled = config.storefront.enabled,
-        runtime = %config.storefront.runtime,
+        ssr_enabled = config.ssr.enabled,
         "fastcart server listening"
     );
 
@@ -41,12 +40,7 @@ pub async fn run(config: Config) -> Result<()> {
     .context("server failed")?;
 
     maintenance.abort();
-    if let Some(runtime) = &state.storefront_runtime
-        && let Err(error) = runtime.shutdown().await
-    {
-        tracing::warn!(error = %error, "storefront runtime shutdown failed");
-    }
-    if let Some(runtime) = &state.universal_ssr {
+    if let Some(runtime) = &state.ssr_service {
         runtime.shutdown().await;
     }
     state.databases.close_all().await;

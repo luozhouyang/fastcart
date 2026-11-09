@@ -45,14 +45,6 @@ pub fn upload_router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
     )
 }
 
-/// Builds the legacy internal SSR-to-commerce router.
-///
-/// The internal namespace is an application boundary: it is not exposed on a
-/// separate public listener and still resolves the trusted store context.
-pub fn internal_router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
-    scoped(context)
-}
-
 /// Builds the server-only SSR commerce router.
 ///
 /// Store selection comes from the nested `{store_id}` path, never from the

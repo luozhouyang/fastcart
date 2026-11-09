@@ -14,9 +14,6 @@ use fastcart_email::{
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::StoreId;
 use fastcart_platform::PlatformStore;
-use fastcart_runtime_api::StorefrontRuntime;
-use fastcart_runtime_node::NodeRuntime;
-use fastcart_runtime_pool::RuntimePool;
 use fs2::FileExt as _;
 
 use crate::config::Config;
@@ -70,10 +67,8 @@ pub struct AppState {
     pub context: Arc<AppContext>,
     /// Per-store database manager, closed during graceful shutdown.
     pub databases: Arc<StoreDatabaseManager>,
-    /// Optional SSR runtime, shut down during graceful shutdown.
-    pub storefront_runtime: Option<Arc<dyn StorefrontRuntime>>,
-    /// Optional universal workerd runtime, shut down during graceful shutdown.
-    pub universal_ssr: Option<Arc<crate::universal::UniversalSsr>>,
+    /// Optional storefront SSR service, shut down during graceful shutdown.
+    pub ssr_service: Option<Arc<fastcart_ssr::SsrService>>,
     /// Process lock next to the platform database.
     _platform_lock: Option<ProcessLock>,
     /// Process lock for a shared SSR runtime directory.
@@ -140,33 +135,18 @@ impl AppState {
                 .stripe_webhook_secret
                 .clone()
                 .filter(|secret| !secret.is_empty()),
-            storefront_timeout_ms: config.storefront.request_timeout_ms,
-            storefront_streaming_enabled: config.storefront.streaming_enabled,
-            storefront_stream_timeout_ms: config.storefront.stream_timeout_ms,
-            internal_fetch_secret: config
-                .storefront
-                .internal_fetch_secret
-                .clone()
-                .filter(|secret| !secret.is_empty()),
             internal_ssr_token: config
                 .ssr
                 .internal_token
                 .clone()
                 .filter(|secret| !secret.is_empty()),
             internal_ssr_credentials: internal_ssr_credentials.clone(),
-            capability_secret: config
-                .storefront
-                .capability_secret
-                .clone()
-                .filter(|secret| !secret.is_empty()),
             preview_secret: config
                 .server
                 .preview_secret
                 .clone()
                 .filter(|secret| !secret.is_empty()),
             preview_frame_ancestors: config.server.preview_frame_ancestors.clone(),
-            themes_root: config.storefront.themes_dir.clone(),
-            storefront_runtime_kind: config.storefront.runtime.clone(),
             admin_base_url: config
                 .server
                 .admin_base_url
@@ -179,25 +159,18 @@ impl AppState {
             inquiry_retention_days: config.inquiries.retention_days,
             notification_retention_days: config.notifications.retention_days,
         };
-        let universal_ssr = crate::universal::UniversalSsr::initialize(
+        let ssr_service = fastcart_ssr::SsrService::initialize(
             &config.ssr,
             metrics.clone(),
             internal_ssr_credentials.clone(),
         )
         .await?;
-        let universal_storefront = universal_ssr.as_ref().map(|runtime| {
-            Arc::clone(runtime) as Arc<dyn fastcart_api::state::UniversalStorefront>
-        });
-        let storefront_runtime = build_storefront_runtime(&config.storefront)?;
-        if let Some(runtime) = storefront_runtime.as_ref()
-            && let Err(error) = runtime.health_check().await
-        {
-            tracing::warn!(error = %error, "storefront runtime health check failed; rendering will return 503 until it recovers");
-        }
+        let universal_storefront = ssr_service
+            .as_ref()
+            .map(|runtime| Arc::clone(runtime) as Arc<dyn fastcart_ssr::UniversalStorefront>);
         let email = build_email_service(&config.email)?;
         let context = Arc::new(
             AppContext::new(api_config, platform, databases.clone(), cache)
-                .with_storefront_runtime(storefront_runtime.clone())
                 .with_universal_storefront(universal_storefront)
                 .with_metrics(metrics)
                 .with_email(email),
@@ -206,8 +179,7 @@ impl AppState {
             config,
             context,
             databases,
-            storefront_runtime,
-            universal_ssr,
+            ssr_service,
             _platform_lock: platform_lock,
             _runtime_lock: runtime_lock,
         })
@@ -466,44 +438,6 @@ async fn internal_ssr_credentials(
             Ok(credentials)
         }
         Err(error) => Err(anyhow::Error::new(error).context("failed to load SSR credentials")),
-    }
-}
-
-fn build_storefront_runtime(
-    config: &crate::config::StorefrontConfig,
-) -> Result<Option<Arc<dyn StorefrontRuntime>>> {
-    if !config.enabled {
-        return Ok(None);
-    }
-    match config.runtime.as_str() {
-        "node" => {
-            let url = config
-                .node_url
-                .clone()
-                .context("storefront.node_url is required for the node runtime")?;
-            let mut workers: Vec<Arc<dyn StorefrontRuntime>> =
-                Vec::with_capacity(config.worker_count);
-            for _ in 0..config.worker_count.max(1) {
-                let mut runtime = NodeRuntime::new(url.clone());
-                if let Some(secret) = config.node_secret.clone() {
-                    runtime = runtime.with_secret(secret);
-                }
-                workers.push(Arc::new(runtime));
-            }
-            let pool = RuntimePool::with_capacity(workers, config.queue_capacity)
-                .context("failed to create the storefront runtime pool")?;
-            Ok(Some(Arc::new(pool)))
-        }
-        "v8" => {
-            tracing::warn!(
-                "the embedded V8 runtime is not available in this build; set storefront.runtime = \"node\" or disable storefront SSR"
-            );
-            Ok(None)
-        }
-        other => {
-            tracing::warn!(runtime = other, "unknown storefront runtime");
-            Ok(None)
-        }
     }
 }
 

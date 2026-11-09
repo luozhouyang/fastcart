@@ -31,11 +31,8 @@ fastcart-http.workspace = true
 fastcart-email.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-platform.workspace = true
-fastcart-runtime-api.workspace = true
 fastcart-ssr.workspace = true
 futures.workspace = true
-fastcart-runtime-node.workspace = true
-fastcart-runtime-pool.workspace = true
 fastcart-workflows.workspace = true
 
 [lints]

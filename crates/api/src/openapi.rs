@@ -493,13 +493,6 @@ fn normalize_operations(document: &mut Value) {
             {
                 parameters.push(csrf_parameter());
             }
-            if path.starts_with("/internal/storefront")
-                && !parameters
-                    .iter()
-                    .any(|parameter| parameter["name"] == "x-fastcart-internal-secret")
-            {
-                parameters.push(internal_secret_parameter());
-            }
             if path.starts_with("/api/v1/webhooks")
                 && !parameters
                     .iter()
@@ -588,8 +581,7 @@ fn generated_api() -> utoipa::openapi::OpenApi {
         .merge(crate::routes::health::openapi_router())
         .nest("/api/v1/platform", platform)
         .nest("/api/v1/admin", admin)
-        .nest("/api/v1/store", store.clone())
-        .nest("/internal/storefront", store)
+        .nest("/api/v1/store", store)
         .nest(
             "/api/v1/webhooks",
             crate::routes::webhooks::openapi_router(),
@@ -667,8 +659,6 @@ fn tag_for(path: &str) -> &'static str {
         "Store"
     } else if path.starts_with("/api/v1/webhooks") {
         "Webhooks"
-    } else if path.starts_with("/internal/storefront") {
-        "Internal"
     } else {
         "Operations"
     }
@@ -773,16 +763,6 @@ fn csrf_parameter() -> Value {
     })
 }
 
-fn internal_secret_parameter() -> Value {
-    json!({
-        "name": "x-fastcart-internal-secret",
-        "in": "header",
-        "required": true,
-        "description": "Shared secret that gates the internal SSR-to-commerce boundary.",
-        "schema": {"type": "string"},
-    })
-}
-
 fn webhook_signature_parameter() -> Value {
     json!({
         "name": "x-webhook-signature",
@@ -803,7 +783,6 @@ fn tags() -> Value {
         {"name": "Admin", "description": "Store-scoped administration."},
         {"name": "Store", "description": "Public storefront operations."},
         {"name": "Webhooks", "description": "Provider callbacks."},
-        {"name": "Internal", "description": "Trusted SSR-to-commerce boundary."},
         {"name": "Operations", "description": "Health and metrics."},
     ])
 }
@@ -942,14 +921,7 @@ mod tests {
             .iter()
             .filter_map(|tag| tag["name"].as_str())
             .collect();
-        for expected in [
-            "Platform",
-            "Admin",
-            "Store",
-            "Webhooks",
-            "Internal",
-            "Operations",
-        ] {
+        for expected in ["Platform", "Admin", "Store", "Webhooks", "Operations"] {
             assert!(tags.contains(expected), "missing tag {expected}");
         }
 
@@ -974,12 +946,11 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 191);
+        assert_eq!(count("/api/v1/admin"), 187);
         assert_eq!(count("/api/v1/store"), 46);
         assert_eq!(count("/api/v1/webhooks"), 1);
-        assert_eq!(count("/internal/storefront"), 46);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 308);
+        assert_eq!(paths.len(), 258);
 
         for key in [
             "/api/v1/platform/stores",
@@ -996,8 +967,6 @@ mod tests {
             "/api/v1/store/inquiry-forms/{handle}",
             "/api/v1/store/theme",
             "/api/v1/webhooks/payments/{provider}",
-            "/internal/storefront/carts/{cart_id}",
-            "/internal/storefront/theme",
             "/health/ready",
             "/metrics",
         ] {
@@ -1093,7 +1062,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 423);
+        assert_eq!(operation_count, 366);
     }
 
     #[test]

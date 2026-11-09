@@ -9,12 +9,8 @@ use axum::http::StatusCode;
 use axum::middleware;
 use axum::routing::{delete, get, post};
 use fastcart_http::{AdminActor, AdminAuthState, ApiError, ApiJson, ApiResult, PaginationQuery};
-use fastcart_kernel::{ActorContext, AppError, Pagination, StoreId, UserId};
-use fastcart_module_content::ContentService;
-use fastcart_module_theme::{RegisterThemeInput, ThemeService};
+use fastcart_kernel::{ActorContext, AppError, StoreId, UserId};
 use fastcart_platform::{CreateStoreInput, CreateUserInput, NewAudit, UpdateStoreInput};
-use fastcart_storefront::ThemeManifest;
-use serde_json::Value;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -167,8 +163,6 @@ async fn create_store(
         .await
     {
         tracing::warn!(store_id = %store.id, error = %error, "store provisioning failed");
-    } else {
-        ensure_default_theme(&context, &store.id).await;
     }
     context.resolver.invalidate_all().await;
     let store = context
@@ -351,7 +345,6 @@ async fn provision_store(
         .provisioning
         .provision(&store_id, Some(&owner))
         .await?;
-    ensure_default_theme(&context, &store_id).await;
     context.resolver.invalidate_all().await;
     Ok(Json(ProvisioningResponse {
         store: StoreDto::from(&report.store),
@@ -751,124 +744,4 @@ async fn revoke_api_token(
     let user_id = actor.require_user().map_err(ApiError::new)?;
     context.auth.revoke_api_token(user_id, &token_id).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Registers and activates the default theme for a newly provisioned store.
-///
-/// The helper is best-effort: a deployment without a default bundle still gets
-/// a working API, and the operator can register a theme through the admin API.
-async fn ensure_default_theme(context: &AppContext, store_id: &StoreId) {
-    let root = context.config.themes_root.clone();
-    let bundle_name = "default";
-    let bundle = root.join(bundle_name);
-    let manifest_bytes = match tokio::fs::read(bundle.join("theme.json")).await {
-        Ok(bytes) => bytes,
-        Err(_) => return,
-    };
-    let manifest: ThemeManifest = match serde_json::from_slice(&manifest_bytes) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            tracing::warn!(error = %error, "default theme manifest is invalid");
-            return;
-        }
-    };
-    if let Err(error) = manifest.validate() {
-        tracing::warn!(error = %error, "default theme manifest failed validation");
-        return;
-    }
-    if context.config.storefront_runtime_kind != "auto"
-        && manifest.runtime != context.config.storefront_runtime_kind
-    {
-        tracing::warn!(
-            declared = %manifest.runtime,
-            configured = %context.config.storefront_runtime_kind,
-            "default theme runtime does not match the deployment"
-        );
-        return;
-    }
-    let database = match context.databases.database(store_id).await {
-        Ok(database) => database,
-        Err(error) => {
-            tracing::warn!(store_id = %store_id, error = %error, "could not open store for default theme");
-            return;
-        }
-    };
-    let content_db = database.clone();
-    if let Err(error) = ContentService::new(content_db.clone())
-        .ensure_system_pages()
-        .await
-    {
-        tracing::warn!(store_id = %store_id, error = %error, "could not seed cart/checkout pages");
-    }
-    let service = ThemeService::new(database);
-    match service.active().await {
-        Ok(Some(_)) => return,
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(store_id = %store_id, error = %error, "could not read active theme");
-            return;
-        }
-    }
-    let editor_manifest = match manifest.editor.as_ref() {
-        Some(editor) => {
-            match fastcart_module_theme::load_editor_manifest(&root, bundle_name, &editor.manifest)
-                .await
-            {
-                Ok(manifest) => {
-                    Some(serde_json::to_value(manifest).unwrap_or(serde_json::Value::Null))
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, "default theme editor manifest is invalid");
-                    return;
-                }
-            }
-        }
-        None => None,
-    };
-    let settings_schema = match manifest.settings_schema.as_deref() {
-        Some(path) => load_theme_json(&bundle.join(path)).await,
-        None => None,
-    };
-    let assets_manifest = match manifest.assets_manifest.as_deref() {
-        Some(path) => load_theme_json(&bundle.join(path)).await,
-        None => None,
-    };
-    let input = RegisterThemeInput {
-        manifest: manifest.clone(),
-        bundle_path: bundle_name.to_owned(),
-        settings_schema,
-        assets_manifest,
-        settings: Some(serde_json::json!({})),
-        editor_manifest,
-    };
-    match service.register(input).await {
-        Ok(theme) => {
-            if let Err(error) = service.activate(&theme.id).await {
-                tracing::warn!(store_id = %store_id, error = %error, "could not activate default theme");
-            }
-        }
-        Err(error) => {
-            tracing::warn!(store_id = %store_id, error = %error, "could not register default theme");
-            // An existing version may already be registered; activate the
-            // newest matching version instead of failing the store creation.
-            if let Ok(page) = service
-                .list(Pagination {
-                    limit: 100,
-                    offset: 0,
-                })
-                .await
-                && let Some(theme) = page
-                    .data
-                    .into_iter()
-                    .find(|theme| theme.manifest.id == manifest.id)
-            {
-                let _ = service.activate(&theme.id).await;
-            }
-        }
-    }
-}
-
-async fn load_theme_json(path: &std::path::Path) -> Option<Value> {
-    let bytes = tokio::fs::read(path).await.ok()?;
-    serde_json::from_slice(&bytes).ok()
 }

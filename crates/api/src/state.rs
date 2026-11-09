@@ -5,92 +5,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use axum::response::IntoResponse;
 use tokio::sync::Mutex;
 
 use fastcart_email::EmailService;
 use fastcart_http::{Metrics, RateLimiter};
 use fastcart_infrastructure::{EventBus, LocalStorage, Storage, StoreCache, StoreDatabaseManager};
-use fastcart_kernel::{StoreContext, StoreId};
+use fastcart_kernel::StoreId;
 use fastcart_module_payment::{ManualProvider, ProviderRegistry, StripeProvider};
 use fastcart_platform::{AuthService, PlatformStore, StoreProvisioningService, StoreResolver};
-use fastcart_runtime_api::StorefrontRuntime;
 
-/// Process-wide universal SSR runtime.
-#[async_trait::async_trait]
-pub trait UniversalStorefront: Send + Sync {
-    /// Forwards a storefront request to the configured artifact runtime.
-    async fn render(
-        &self,
-        request: axum::http::Request<axum::body::Body>,
-        store: StoreContext,
-        request_id: Option<String>,
-        scheme: String,
-    ) -> axum::response::Response;
-
-    /// Serves one client asset from the active artifact.
-    async fn serve_asset(
-        &self,
-        store_id: &str,
-        path: String,
-        headers: axum::http::HeaderMap,
-    ) -> axum::response::Response;
-
-    /// Starts and activates a new deployment for one store.
-    async fn activate(
-        &self,
-        store_id: &str,
-        deployment_id: &str,
-        artifact_path: String,
-    ) -> Result<(), String>;
-
-    /// Restores the previous deployment for one store.
-    async fn rollback(&self, store_id: &str) -> Result<(), String>;
-
-    /// Invalidates cached SSR responses for one store.
-    async fn invalidate_cache(&self, _store_id: &str) {}
-
-    /// Renders through the store's preview deployment.
-    async fn render_preview(
-        &self,
-        _request: axum::http::Request<axum::body::Body>,
-        _store: StoreContext,
-        _request_id: Option<String>,
-        _scheme: String,
-    ) -> axum::response::Response {
-        axum::http::StatusCode::NOT_FOUND.into_response()
-    }
-
-    /// Returns whether the store has a preview deployment.
-    async fn has_preview(&self, _store_id: &str) -> bool {
-        false
-    }
-
-    /// Serves one client asset from the store's preview artifact.
-    async fn serve_preview_asset(
-        &self,
-        _store_id: &str,
-        _path: String,
-        _headers: axum::http::HeaderMap,
-    ) -> axum::response::Response {
-        axum::http::StatusCode::NOT_FOUND.into_response()
-    }
-
-    /// Starts and activates a preview deployment.
-    async fn activate_preview(
-        &self,
-        _store_id: &str,
-        _deployment_id: &str,
-        _artifact_path: String,
-    ) -> Result<(), String> {
-        Err("preview deployments are not supported".to_owned())
-    }
-
-    /// Stops the store's preview deployment.
-    async fn deactivate_preview(&self, _store_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-}
+pub use fastcart_ssr::UniversalStorefront;
 
 pub use fastcart_ssr_credentials::{
     CredentialManager as InternalSsrCredentials, CredentialMode,
@@ -123,24 +47,6 @@ pub struct ApiConfig {
     pub stripe_secret_key: Option<String>,
     /// Stripe webhook signing secret.
     pub stripe_webhook_secret: Option<String>,
-    /// Timeout applied to storefront SSR render requests in milliseconds.
-    pub storefront_timeout_ms: u64,
-    /// Whether runtimes may stream storefront responses.
-    ///
-    /// Enabled by default. Disabling it makes every render buffered, which is
-    /// useful behind proxies that cannot pass chunked responses through.
-    pub storefront_streaming_enabled: bool,
-    /// Total time budget for one streamed storefront response in milliseconds.
-    ///
-    /// A stream still has to produce its shell within
-    /// [`Self::storefront_timeout_ms`]; this larger budget bounds the whole
-    /// body.
-    pub storefront_stream_timeout_ms: u64,
-    /// Optional shared secret required by the internal storefront HTTP surface.
-    ///
-    /// When absent, internal routes are not mounted over HTTP; the in-process
-    /// bridge remains the only way to reach them.
-    pub internal_fetch_secret: Option<String>,
     /// Optional bearer token for the server-to-server SSR commerce API.
     ///
     /// When absent, `/internal/ssr/v1` is not mounted.
@@ -150,11 +56,6 @@ pub struct ApiConfig {
     /// When empty, [`Self::internal_ssr_token`] is used as an unscoped
     /// credential.
     pub internal_ssr_credentials: InternalSsrCredentials,
-    /// Optional secret used to sign theme capability grants.
-    ///
-    /// When set, grants carry a signed payload a capability endpoint sharing
-    /// the secret can verify statelessly. Unset mints opaque random tokens.
-    pub capability_secret: Option<String>,
     /// Optional signing secret for draft page preview tokens.
     ///
     /// When absent, preview token issuance and the preview render surface are
@@ -166,16 +67,6 @@ pub struct ApiConfig {
     /// Empty leaves framing unrestricted (the token remains the credential).
     /// Deployments should list the admin application origin.
     pub preview_frame_ancestors: Vec<String>,
-    /// Root directory containing trusted theme bundles.
-    ///
-    /// Used to load `editor.manifest.json` at registration and to keep bundle
-    /// paths confined to deployed theme code.
-    pub themes_root: PathBuf,
-    /// Runtime provider selected for this deployment (`v8` or `node`).
-    ///
-    /// Theme activation compares this with the manifest's declared runtime so a
-    /// theme cannot be activated onto an incompatible runtime.
-    pub storefront_runtime_kind: String,
     /// Optional admin application origin used for notification deep links.
     pub admin_base_url: Option<String>,
     /// Root directory backing the default local object storage adapter.
@@ -205,17 +96,10 @@ impl Default for ApiConfig {
             manual_payment_secret: None,
             stripe_secret_key: None,
             stripe_webhook_secret: None,
-            storefront_timeout_ms: 10_000,
-            storefront_streaming_enabled: true,
-            storefront_stream_timeout_ms: 30_000,
-            internal_fetch_secret: None,
             internal_ssr_token: None,
             internal_ssr_credentials: InternalSsrCredentials::default(),
-            capability_secret: None,
             preview_secret: None,
             preview_frame_ancestors: Vec::new(),
-            themes_root: PathBuf::from("./themes"),
-            storefront_runtime_kind: "node".to_owned(),
             admin_base_url: None,
             storage_root: PathBuf::from("./data/assets"),
             max_asset_upload_bytes: 100 * 1024 * 1024,
@@ -224,54 +108,6 @@ impl Default for ApiConfig {
             inquiry_retention_days: 365,
             notification_retention_days: 90,
         }
-    }
-}
-
-/// Maximum number of parsed theme editor manifests retained per process.
-const STOREFRONT_EDITOR_CACHE_CAPACITY: u64 = 1024;
-/// Maximum weighted bytes retained by the compiled page cache.
-///
-/// The cache weighs each entry by its serialized page body plus bindings, so
-/// many large pages cannot exhaust memory even though each body is capped at
-/// 1 MiB.
-const STOREFRONT_PAGE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
-/// Lifetime of compiled storefront entries.
-const STOREFRONT_CACHE_TTL: Duration = Duration::from_secs(300);
-/// Lifetime of the request-context customer and cart lookups.
-///
-/// These cache entries carry live commerce data, so the window is deliberately
-/// short: a mutation that bypasses explicit invalidation becomes visible within
-/// a couple of seconds, while bursts of SSR requests for the same visitor share
-/// one database round trip.
-const STOREFRONT_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(2);
-/// Maximum number of cached customer sessions and cart snapshots per process.
-const STOREFRONT_CONTEXT_CACHE_CAPACITY: u64 = 10_000;
-
-/// A validated page and the data bindings extracted in the same pass.
-///
-/// The compiled form is cached per store, page revision and active theme so a
-/// render neither re-parses nor re-validates an unchanged page. Cached values
-/// never carry live commerce data.
-#[derive(Clone, Debug)]
-pub struct CompiledPage {
-    /// Page metadata and validated body handed to the runtime.
-    pub page: fastcart_runtime_api::PageContext,
-    /// Bindings extracted from the validated body.
-    pub bindings: Vec<fastcart_storefront::BindingRequest>,
-}
-
-impl CompiledPage {
-    /// Estimates the memory retained by this cached entry.
-    ///
-    /// The estimate is intentionally cheap and slightly conservative: the
-    /// serialized body dominates, while bindings are small fixed-shape values.
-    #[must_use]
-    pub fn cache_weight(&self) -> u32 {
-        let body = serde_json::to_string(&self.page.body)
-            .map(|body| body.len())
-            .unwrap_or(0);
-        let bindings = self.bindings.len().saturating_mul(256);
-        u32::try_from(body.saturating_add(bindings)).unwrap_or(u32::MAX)
     }
 }
 
@@ -321,32 +157,8 @@ pub struct AppContext {
     pub shipping_providers: fastcart_module_shipping::FulfillmentProviderRegistry,
     /// HTTP request metrics.
     pub metrics: Arc<Metrics>,
-    /// Optional storefront SSR runtime shared by all stores.
-    pub storefront_runtime: Option<Arc<dyn StorefrontRuntime>>,
     /// Optional universal workerd storefront runtime.
     pub universal_storefront: Option<Arc<dyn UniversalStorefront>>,
-    /// Server-side resolver for theme data bindings.
-    pub storefront_data: fastcart_storefront_data::StorefrontDataResolver,
-    /// Parsed active theme editor manifests keyed by store, theme and revision.
-    ///
-    /// The value is `None` when the stored manifest is absent or invalid, so
-    /// invalid manifests are not re-parsed on every render.
-    pub storefront_editor_cache:
-        moka::future::Cache<String, Option<Arc<fastcart_storefront::ThemeEditorManifest>>>,
-    /// Compiled storefront pages keyed by store, page revision and theme.
-    pub storefront_page_cache: moka::future::Cache<String, Arc<CompiledPage>>,
-    /// Recently resolved storefront customer sessions.
-    ///
-    /// Keyed by store and a digest of the session token so raw tokens are not
-    /// retained in the cache. Values are `None` for invalid sessions.
-    pub storefront_customer_cache:
-        moka::future::Cache<String, Option<Arc<fastcart_module_customer::Customer>>>,
-    /// Recently resolved storefront cart snapshots for the request context.
-    ///
-    /// Keyed by store plus customer id (authenticated) or cart id (guest).
-    /// Explicitly invalidated by cart mutations; the short TTL bounds staleness
-    /// for writes that do not pass through those handlers.
-    pub storefront_cart_cache: moka::future::Cache<String, Option<Arc<fastcart_module_cart::Cart>>>,
     /// Provider-independent transactional email delivery.
     pub email: EmailService,
     /// Private object storage used for inquiry attachments.
@@ -514,38 +326,12 @@ impl AppContext {
             shipping_providers:
                 fastcart_module_shipping::FulfillmentProviderRegistry::with_defaults(),
             metrics: Arc::new(Metrics::new()),
-            storefront_runtime: None,
             universal_storefront: None,
-            storefront_data: fastcart_storefront_data::StorefrontDataResolver::new(),
-            storefront_editor_cache: moka::future::Cache::builder()
-                .max_capacity(STOREFRONT_EDITOR_CACHE_CAPACITY)
-                .time_to_live(STOREFRONT_CACHE_TTL)
-                .build(),
-            storefront_page_cache: moka::future::Cache::builder()
-                .max_capacity(STOREFRONT_PAGE_CACHE_BYTES)
-                .weigher(|_key: &String, value: &Arc<CompiledPage>| value.cache_weight())
-                .time_to_live(STOREFRONT_CACHE_TTL)
-                .build(),
-            storefront_customer_cache: moka::future::Cache::builder()
-                .max_capacity(STOREFRONT_CONTEXT_CACHE_CAPACITY)
-                .time_to_live(STOREFRONT_CONTEXT_CACHE_TTL)
-                .build(),
-            storefront_cart_cache: moka::future::Cache::builder()
-                .max_capacity(STOREFRONT_CONTEXT_CACHE_CAPACITY)
-                .time_to_live(STOREFRONT_CONTEXT_CACHE_TTL)
-                .build(),
             email: EmailService::with_default_registry(),
             storage,
             inquiry_limiter: RateLimiter::new(5, Duration::from_secs(10 * 60)),
             upload_limiter: RateLimiter::new(10, Duration::from_secs(60 * 60)),
         }
-    }
-
-    /// Installs the process-wide storefront runtime, if SSR is configured.
-    #[must_use]
-    pub fn with_storefront_runtime(mut self, runtime: Option<Arc<dyn StorefrontRuntime>>) -> Self {
-        self.storefront_runtime = runtime;
-        self
     }
 
     /// Replaces the process metrics collector.
@@ -577,16 +363,6 @@ impl AppContext {
     pub fn with_storage(mut self, storage: Arc<dyn Storage>) -> Self {
         self.storage = storage;
         self
-    }
-
-    /// Drops cached storefront cart snapshots after a cart mutation.
-    pub fn invalidate_storefront_carts(&self) {
-        self.storefront_cart_cache.invalidate_all();
-    }
-
-    /// Drops cached storefront customer sessions after login, logout or revocation.
-    pub fn invalidate_storefront_customers(&self) {
-        self.storefront_customer_cache.invalidate_all();
     }
 }
 

@@ -1,19 +1,17 @@
-//! The `theme` module: storefront theme registry and activation.
+//! The `theme` module: storefront theme settings registry and activation.
+//!
+//! Themes are deployment artifacts (ADR 0008). This module owns the registry
+//! metadata, the settings schema, settings revisions and activation history;
+//! rendering and assets belong to a deployed SSR artifact.
 
-mod bundle;
 pub mod domain;
 mod service;
 
 #[cfg(test)]
 mod tests;
 
-pub use bundle::{
-    bundle_directory_exists, load_assets_manifest, load_editor_manifest, load_settings_schema,
-    load_theme_bundle_file,
-};
 pub use domain::{
-    RegisterThemeInput, Theme, ThemeActivation, ThemeActivationRecord, ThemeCapabilityBinding,
-    ThemeCapabilityBindingInput, ThemeSettingsRevision, ThemeSettingsRevisionStatus,
-    UpdateThemeSettingsInput,
+    RegisterThemeInput, Theme, ThemeActivation, ThemeActivationRecord, ThemeSettingsRevision,
+    ThemeSettingsRevisionStatus, UpdateThemeSettingsInput,
 };
 pub use service::ThemeService;

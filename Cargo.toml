@@ -10,13 +10,8 @@ members = [
     "crates/workflows",
     "crates/api",
     "crates/storefront",
-    "crates/storefront-data",
-    "crates/storefront-runtime/runtime-api",
-    "crates/storefront-runtime/runtime-v8",
-    "crates/storefront-runtime/runtime-pool",
-    "crates/storefront-runtime/runtime-bridge",
-    "crates/storefront-runtime/runtime-node",
-    "crates/fastcart-ssr",
+    "crates/ssr",
+    "crates/ssr-workerd",
     "crates/ssr-credentials",
     "crates/plugin",
     "crates/ai",
@@ -122,16 +117,11 @@ fastcart-notifications = { path = "crates/notifications" }
 fastcart-email = { path = "crates/email" }
 fastcart-platform = { path = "crates/platform" }
 fastcart-plugin = { path = "crates/plugin" }
-fastcart-runtime-api = { path = "crates/storefront-runtime/runtime-api" }
-fastcart-runtime-bridge = { path = "crates/storefront-runtime/runtime-bridge" }
-fastcart-runtime-node = { path = "crates/storefront-runtime/runtime-node" }
-fastcart-runtime-pool = { path = "crates/storefront-runtime/runtime-pool" }
-fastcart-runtime-v8 = { path = "crates/storefront-runtime/runtime-v8" }
-fastcart-ssr = { path = "crates/fastcart-ssr" }
+fastcart-ssr = { path = "crates/ssr" }
 fastcart-ssr-credentials = { path = "crates/ssr-credentials" }
+fastcart-ssr-workerd = { path = "crates/ssr-workerd" }
 fastcart-server = { path = "apps/server" }
 fastcart-storefront = { path = "crates/storefront" }
-fastcart-storefront-data = { path = "crates/storefront-data" }
 fastcart-workflows = { path = "crates/workflows" }
 
 [workspace.lints.rust]

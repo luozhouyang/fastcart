@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+pub use fastcart_ssr::{SsrConfig, SsrCredentialsConfig, SsrDeploymentConfig};
+
 /// Complete server configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -21,7 +23,6 @@ pub struct Config {
     /// In-process cache settings.
     pub cache: CacheConfig,
     /// Storefront runtime settings.
-    pub storefront: StorefrontConfig,
     /// Universal workerd SSR settings.
     pub ssr: SsrConfig,
     /// Background job settings.
@@ -190,213 +191,6 @@ impl Default for CacheConfig {
     }
 }
 
-/// Storefront runtime settings.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct StorefrontConfig {
-    /// Whether storefront SSR is enabled.
-    pub enabled: bool,
-    /// Runtime provider: `v8` or `node`.
-    pub runtime: String,
-    /// Number of runtime workers.
-    pub worker_count: usize,
-    /// Maximum queued requests per worker pool.
-    pub queue_capacity: usize,
-    /// SSR request timeout in milliseconds.
-    pub request_timeout_ms: u64,
-    /// Whether themes may stream their HTML response.
-    pub streaming_enabled: bool,
-    /// Total time budget for one streamed response in milliseconds.
-    pub stream_timeout_ms: u64,
-    /// Base URL of the Node.js sidecar, used when `runtime = "node"`.
-    pub node_url: Option<String>,
-    /// Optional bearer secret for sidecar requests.
-    pub node_secret: Option<String>,
-    /// Optional shared secret enabling the internal storefront HTTP surface.
-    pub internal_fetch_secret: Option<String>,
-    /// Optional secret used to sign theme capability grants.
-    pub capability_secret: Option<String>,
-    /// Directory containing trusted theme bundles.
-    pub themes_dir: PathBuf,
-}
-
-impl Default for StorefrontConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            runtime: "node".to_owned(),
-            worker_count: 2,
-            queue_capacity: 128,
-            request_timeout_ms: 10_000,
-            streaming_enabled: true,
-            stream_timeout_ms: 30_000,
-            node_url: None,
-            node_secret: None,
-            internal_fetch_secret: None,
-            capability_secret: None,
-            themes_dir: PathBuf::from("./themes"),
-        }
-    }
-}
-
-/// Universal workerd SSR settings.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SsrConfig {
-    /// Whether the universal runtime is enabled.
-    pub enabled: bool,
-    /// Pinned workerd binary.
-    pub binary: PathBuf,
-    /// Source artifact directory (`fastcart-ssr.json` at its root).
-    pub artifact_path: PathBuf,
-    /// Directory for generated configs and imported artifacts.
-    pub runtime_dir: PathBuf,
-    /// Loopback address assigned to the runtime group.
-    pub listen: SocketAddr,
-    /// Deployment identity injected into SSR requests.
-    pub deployment_id: String,
-    /// Optional internal token injected into SSR requests.
-    pub internal_token: Option<String>,
-    /// Readiness timeout in milliseconds.
-    pub startup_timeout_ms: u64,
-    /// Graceful shutdown timeout in milliseconds.
-    pub shutdown_timeout_ms: u64,
-    /// Gateway request timeout in milliseconds.
-    pub request_timeout_ms: u64,
-    /// Minimum restart delay in milliseconds.
-    pub restart_backoff_ms: u64,
-    /// Maximum restarts before the group fails.
-    pub max_restarts: u32,
-    /// Time to keep a replaced deployment running for in-flight requests.
-    pub drain_timeout_ms: u64,
-    /// Maximum artifact size in bytes.
-    pub artifact_max_bytes: u64,
-    /// Maximum artifact file count.
-    pub artifact_max_files: u64,
-    /// Optional root that runtime activation paths must stay under.
-    pub artifact_root: Option<PathBuf>,
-    /// Optional JSON file for persisted internal SSR credentials.
-    ///
-    /// Defaults to `<runtime_dir>/internal-ssr-credentials.json`.
-    pub credentials_path: Option<PathBuf>,
-    /// Credential backend settings.
-    pub credentials: SsrCredentialsConfig,
-    /// Explicit per-store deployments. Empty starts one default deployment.
-    pub deployments: Vec<SsrDeploymentConfig>,
-}
-
-/// Credential backend settings.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SsrCredentialsConfig {
-    /// Backend identifier; only `file` is implemented.
-    pub backend: String,
-    /// `read_write` or `read_only`.
-    pub mode: String,
-    /// Optional file override; falls back to `ssr.credentials_path`.
-    pub path: Option<PathBuf>,
-    /// Background refresh interval; `0` disables polling.
-    pub refresh_interval_seconds: u64,
-    /// Fail startup when the backend cannot be read.
-    pub required: bool,
-    /// Seed an empty backend from configured deployment tokens.
-    pub seed_from_config: bool,
-    /// File encryption: `none` or `xchacha20poly1305`.
-    pub encryption: String,
-    /// Environment variable holding the base64 encryption key.
-    pub key_env: String,
-}
-
-impl Default for SsrCredentialsConfig {
-    fn default() -> Self {
-        Self {
-            backend: "file".to_owned(),
-            mode: "read_write".to_owned(),
-            path: None,
-            refresh_interval_seconds: 30,
-            required: true,
-            seed_from_config: true,
-            encryption: "none".to_owned(),
-            key_env: "FASTCART_SSR_CREDENTIALS_KEY".to_owned(),
-        }
-    }
-}
-
-/// One store deployment served by the universal runtime.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SsrDeploymentConfig {
-    /// Store served by this deployment.
-    pub store_id: String,
-    /// Deployment identity injected into SSR requests.
-    pub deployment_id: String,
-    /// Source artifact directory.
-    pub artifact_path: PathBuf,
-    /// Optional loopback listener; defaults to the next port after `ssr.listen`.
-    pub listen: Option<SocketAddr>,
-    /// Marks this deployment as a preview target for the store.
-    pub preview: bool,
-    /// Optional deployment-scoped internal token.
-    pub internal_token: Option<String>,
-}
-
-impl Default for SsrDeploymentConfig {
-    fn default() -> Self {
-        Self {
-            store_id: String::new(),
-            deployment_id: String::new(),
-            artifact_path: PathBuf::new(),
-            listen: None,
-            preview: false,
-            internal_token: None,
-        }
-    }
-}
-
-impl Default for SsrConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            binary: PathBuf::from("./workerd"),
-            artifact_path: PathBuf::from("./storefront-artifact"),
-            runtime_dir: PathBuf::from("./data/ssr"),
-            listen: SocketAddr::from(([127, 0, 0, 1], 18_888)),
-            deployment_id: "default".to_owned(),
-            internal_token: None,
-            startup_timeout_ms: 10_000,
-            shutdown_timeout_ms: 5_000,
-            request_timeout_ms: 30_000,
-            restart_backoff_ms: 1_000,
-            max_restarts: 3,
-            drain_timeout_ms: 5_000,
-            artifact_max_bytes: 100 * 1024 * 1024,
-            artifact_max_files: 5_000,
-            artifact_root: None,
-            credentials_path: None,
-            credentials: SsrCredentialsConfig::default(),
-            deployments: Vec::new(),
-        }
-    }
-}
-
-impl SsrConfig {
-    /// Resolved credential file path.
-    #[must_use]
-    pub fn credentials_file(&self) -> PathBuf {
-        self.credentials
-            .path
-            .clone()
-            .or_else(|| self.credentials_path.clone())
-            .unwrap_or_else(|| self.runtime_dir.join("internal-ssr-credentials.json"))
-    }
-
-    /// Whether credential writes are disabled.
-    #[must_use]
-    pub fn credentials_read_only(&self) -> bool {
-        self.credentials.mode == "read_only"
-    }
-}
-
 /// Payment provider settings.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -546,41 +340,6 @@ impl Config {
         }
         if let Ok(value) = env::var("FASTCART_STRIPE_WEBHOOK_SECRET") {
             self.payments.stripe_webhook_secret = Some(value);
-        }
-        if let Ok(value) = env::var("FASTCART_STOREFRONT_ENABLED") {
-            self.storefront.enabled = value
-                .parse()
-                .context("FASTCART_STOREFRONT_ENABLED must be true or false")?;
-        }
-        if let Ok(value) = env::var("FASTCART_STOREFRONT_RUNTIME") {
-            self.storefront.runtime = value;
-        }
-        if let Ok(value) = env::var("FASTCART_STOREFRONT_STREAMING") {
-            self.storefront.streaming_enabled = value
-                .parse()
-                .context("FASTCART_STOREFRONT_STREAMING must be true or false")?;
-        }
-        if let Ok(value) = env::var("FASTCART_STOREFRONT_STREAM_TIMEOUT_MS") {
-            self.storefront.stream_timeout_ms = value
-                .parse()
-                .context("FASTCART_STOREFRONT_STREAM_TIMEOUT_MS must be a number")?;
-        }
-        if let Ok(value) = env::var("FASTCART_STOREFRONT_NODE_URL") {
-            self.storefront.node_url = Some(value);
-        }
-        if let Ok(value) = env::var("FASTCART_STOREFRONT_NODE_SECRET") {
-            self.storefront.node_secret = Some(value);
-        }
-        if let Ok(value) = env::var("FASTCART_INTERNAL_FETCH_SECRET") {
-            self.storefront.internal_fetch_secret = Some(value);
-        }
-        if let Ok(value) = env::var("FASTCART_CAPABILITY_SECRET") {
-            self.storefront.capability_secret = Some(value);
-        }
-        if let Ok(value) = env::var("FASTCART_THEMES_DIR")
-            && !value.trim().is_empty()
-        {
-            self.storefront.themes_dir = PathBuf::from(value);
         }
         if let Ok(value) = env::var("FASTCART_SSR_ENABLED") {
             self.ssr.enabled = value
@@ -788,47 +547,6 @@ impl Config {
 
     /// Validates configuration invariants.
     pub fn validate(&self) -> Result<()> {
-        if self.ssr.enabled && self.storefront.enabled {
-            bail!("storefront.enabled and ssr.enabled are mutually exclusive");
-        }
-        if self.storefront.worker_count == 0 {
-            bail!("storefront.worker_count must be greater than zero");
-        }
-        if self.storefront.queue_capacity == 0 {
-            bail!("storefront.queue_capacity must be greater than zero");
-        }
-        if self.storefront.request_timeout_ms == 0 {
-            bail!("storefront.request_timeout_ms must be greater than zero");
-        }
-        if self.storefront.stream_timeout_ms == 0 {
-            bail!("storefront.stream_timeout_ms must be greater than zero");
-        }
-        if !matches!(self.storefront.runtime.as_str(), "v8" | "node") {
-            bail!("storefront.runtime must be either \"v8\" or \"node\"");
-        }
-        if self.storefront.enabled && self.storefront.runtime == "node" {
-            let Some(node_url) = self
-                .storefront
-                .node_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|url| !url.is_empty())
-            else {
-                bail!("storefront.node_url is required when the node runtime is enabled");
-            };
-            let node_secret = self
-                .storefront
-                .node_secret
-                .as_deref()
-                .map(str::trim)
-                .filter(|secret| !secret.is_empty());
-            if node_secret.is_none() && !is_loopback_sidecar_url(node_url) {
-                bail!(
-                    "storefront.node_secret is required when storefront.node_url ({node_url:?}) is \
-                     not loopback; set the same value as SIDECAR_SECRET on the sidecar"
-                );
-            }
-        }
         if self.ssr.enabled {
             if self.ssr.binary.as_os_str().is_empty() {
                 bail!("ssr.binary must not be empty");
@@ -1072,36 +790,6 @@ fn valid_origin(origin: &str) -> bool {
         && !rest.chars().any(char::is_whitespace)
 }
 
-/// Returns true when `url` points at a loopback sidecar host.
-///
-/// Recognizes `127.0.0.1`, `localhost` and `[::1]`, with or without an
-/// `http(s)://` scheme, port, path, or trailing dot. Only these literal forms
-/// count; hostnames are not resolved.
-fn is_loopback_sidecar_url(url: &str) -> bool {
-    let lower = url.trim().to_ascii_lowercase();
-    let rest = lower
-        .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"))
-        .unwrap_or(lower.as_str());
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    // `user:password@host` — the last `@` starts the actual host.
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
-        match bracketed.split_once(']') {
-            Some((host, suffix)) if suffix.is_empty() || suffix.starts_with(':') => host,
-            _ => return false,
-        }
-    } else if authority.matches(':').count() == 1 {
-        authority.split(':').next().unwrap_or_default()
-    } else {
-        authority
-    };
-    matches!(
-        host.trim_end_matches('.'),
-        "127.0.0.1" | "localhost" | "::1"
-    )
-}
-
 /// Parses a boolean environment variable value.
 fn parse_env_bool(value: &str, variable: &str) -> Result<bool> {
     value
@@ -1139,57 +827,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{Config, SsrDeploymentConfig};
-
-    fn node_config(node_url: &str, node_secret: Option<&str>) -> Config {
-        let mut config = Config::default();
-        config.storefront.enabled = true;
-        config.storefront.runtime = "node".to_owned();
-        config.storefront.node_url = Some(node_url.to_owned());
-        config.storefront.node_secret = node_secret.map(str::to_owned);
-        config
-    }
-
-    #[test]
-    fn defaults_are_valid() {
-        Config::default().validate().unwrap();
-    }
-
-    #[test]
-    fn node_runtime_accepts_loopback_sidecar_without_secret() {
-        for url in [
-            "http://127.0.0.1:8788",
-            "http://localhost:8788",
-            "https://[::1]:8788",
-            "http://LOCALHOST",
-            "127.0.0.1:8788",
-        ] {
-            node_config(url, None)
-                .validate()
-                .unwrap_or_else(|error| panic!("{url} must be accepted: {error}"));
-        }
-    }
-
-    #[test]
-    fn node_runtime_rejects_non_loopback_sidecar_without_secret() {
-        for url in ["https://sidecar.example.com:8788", "http://10.1.2.3:8788"] {
-            let error = node_config(url, None).validate().unwrap_err();
-            let message = error.to_string();
-            assert!(message.contains("storefront.node_secret"), "{message}");
-            assert!(message.contains(url), "{message}");
-        }
-
-        let error = node_config("https://sidecar.example.com:8788", Some("   "))
-            .validate()
-            .unwrap_err();
-        assert!(error.to_string().contains("storefront.node_secret"));
-    }
-
-    #[test]
-    fn node_runtime_accepts_non_loopback_sidecar_with_secret() {
-        node_config("https://sidecar.example.com:8788", Some("test-secret"))
-            .validate()
-            .unwrap();
-    }
 
     #[test]
     fn cookie_secure_and_cors_origins_overrides_apply() {
@@ -1235,22 +872,12 @@ mod tests {
     }
 
     #[test]
-    fn ssr_defaults_are_disabled_and_legacy_runtime_is_exclusive() {
+    fn ssr_defaults_are_disabled_and_ssr_invariants_are_enforced() {
         let mut config = Config::default();
         assert!(!config.ssr.enabled);
         config.validate().unwrap();
 
         config.ssr.enabled = true;
-        config.storefront.enabled = true;
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("mutually exclusive")
-        );
-
-        config.storefront.enabled = false;
         config.ssr.deployment_id = "bad id".to_owned();
         assert!(config.validate().is_err());
 
@@ -1320,7 +947,6 @@ mod tests {
 
         config.validate().unwrap();
         assert_eq!(config.server.port, 8080);
-        assert_eq!(config.storefront.worker_count, 2);
         assert_eq!(config.ssr.startup_timeout_ms, 10_000);
         assert_eq!(config.ssr.credentials.backend, "file");
         assert_eq!(config.ssr.credentials.mode, "read_write");

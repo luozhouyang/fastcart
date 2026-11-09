@@ -1,32 +1,23 @@
 //! SQLite-backed theme registry and activation service.
 
-use std::net::{IpAddr, Ipv4Addr};
-
 use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, PageResult, Pagination, ThemeActivationId, ThemeId, Timestamp, now_timestamp,
 };
-use fastcart_storefront::{
-    StorefrontError, ThemeEditorManifest, ThemeManifest, validate_bundle_path,
-};
+use fastcart_storefront::{StorefrontError, ThemeManifest};
 use serde_json::Value;
 use sqlx::{FromRow, Sqlite, Transaction};
 
 use crate::domain::{
-    RegisterThemeInput, Theme, ThemeActivationRecord, ThemeCapabilityBinding,
-    ThemeCapabilityBindingInput, ThemeSettingsRevision, ThemeSettingsRevisionStatus,
-    UpdateThemeSettingsInput,
+    RegisterThemeInput, Theme, ThemeActivationRecord, ThemeSettingsRevision,
+    ThemeSettingsRevisionStatus, UpdateThemeSettingsInput,
 };
 
-const THEME_COLUMNS: &str = "id, manifest, bundle_path, settings_schema, settings, \
-     assets_manifest, draft_settings, settings_revision, editor_manifest, schema_version, \
-     is_active, created_at, updated_at";
+const THEME_COLUMNS: &str = "id, manifest_id, name, version, settings_schema, settings, \
+     draft_settings, settings_revision, is_active, created_at, updated_at";
 
 const SETTINGS_REVISION_COLUMNS: &str = "id, theme_id, revision, settings, status, \
      created_by, created_at";
-
-const CAPABILITY_COLUMNS: &str = "id, theme_id, capability_id, endpoint, config, is_active, \
-     created_at, updated_at";
 
 /// Application service for the storefront theme registry.
 #[derive(Clone, Debug)]
@@ -74,7 +65,7 @@ impl ThemeService {
         self.audit.as_ref().map(|audit| audit.actor_id().to_owned())
     }
 
-    /// Registers a validated theme bundle.
+    /// Registers theme metadata, its settings schema and initial settings.
     ///
     /// The same manifest may be registered more than once at different
     /// versions; registering an existing `(manifest_id, version)` pair is a
@@ -82,49 +73,16 @@ impl ThemeService {
     pub async fn register(&self, input: RegisterThemeInput) -> Result<Theme, AppError> {
         let RegisterThemeInput {
             manifest,
-            bundle_path,
             settings_schema,
-            assets_manifest,
             settings,
-            editor_manifest,
         } = input;
 
         manifest.validate().map_err(storefront_error)?;
-        validate_bundle_path(&bundle_path).map_err(storefront_error)?;
         if let Some(schema) = settings_schema.as_ref() {
             validate_settings_schema(schema)?;
         }
         let settings = settings.unwrap_or_else(|| serde_json::json!({}));
         validate_settings(settings_schema.as_ref(), &settings)?;
-
-        let schema_version = manifest
-            .editor
-            .as_ref()
-            .map_or(1, |editor| editor.schema_version);
-        let editor_manifest = match (manifest.editor.as_ref(), editor_manifest) {
-            (Some(editor), Some(raw)) => {
-                let parsed = ThemeEditorManifest::parse(&raw).map_err(storefront_error)?;
-                if parsed.schema_version != editor.schema_version {
-                    return Err(AppError::validation(format!(
-                        "editor manifest schema version {} does not match theme manifest \
-                         version {}",
-                        parsed.schema_version, editor.schema_version
-                    )));
-                }
-                Some(raw)
-            }
-            (Some(_), None) => {
-                return Err(AppError::validation(
-                    "theme manifest references an editor manifest but none was supplied",
-                ));
-            }
-            (None, Some(_)) => {
-                return Err(AppError::validation(
-                    "editor_manifest supplied for a theme that does not declare an editor",
-                ));
-            }
-            (None, None) => None,
-        };
 
         if self
             .manifest_version_exists(&manifest.id, &manifest.version)
@@ -139,42 +97,25 @@ impl ThemeService {
         let id = ThemeId::new();
         let now = now_timestamp();
         let created_by = self.audit_actor_id();
-        let manifest_json = serialize_json(&manifest, "manifest")?;
         let settings_schema_json = match settings_schema.as_ref() {
             Some(schema) => Some(serialize_json(schema, "settings_schema")?),
             None => None,
         };
         let settings_json = serialize_json(&settings, "settings")?;
-        let assets_manifest_json = match assets_manifest.as_ref() {
-            Some(value) => Some(serialize_json(value, "assets_manifest")?),
-            None => None,
-        };
-        let editor_manifest_json = match editor_manifest.as_ref() {
-            Some(raw) => Some(serialize_json(raw, "editor_manifest")?),
-            None => None,
-        };
 
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         sqlx::query(
             "INSERT INTO themes \
-             (id, manifest_id, name, version, runtime, manifest, bundle_path, settings_schema, \
-              settings, assets_manifest, draft_settings, settings_revision, editor_manifest, \
-              schema_version, is_active, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?)",
+             (id, manifest_id, name, version, settings_schema, settings, is_active, \
+              created_at, updated_at, draft_settings, settings_revision) \
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, 1)",
         )
         .bind(id.as_str())
         .bind(&manifest.id)
         .bind(&manifest.name)
         .bind(&manifest.version)
-        .bind(&manifest.runtime)
-        .bind(&manifest_json)
-        .bind(&bundle_path)
         .bind(settings_schema_json.as_deref())
         .bind(&settings_json)
-        .bind(assets_manifest_json.as_deref())
-        .bind(None::<String>)
-        .bind(editor_manifest_json.as_deref())
-        .bind(i64::from(schema_version))
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
@@ -199,9 +140,6 @@ impl ThemeService {
             serde_json::json!({
                 "manifest_id": manifest.id,
                 "version": manifest.version,
-                "bundle_path": bundle_path,
-                "has_editor_manifest": editor_manifest_json.is_some(),
-                "has_assets_manifest": assets_manifest_json.is_some(),
             }),
         )
         .await?;
@@ -247,33 +185,6 @@ impl ThemeService {
             .await
             .map_err(database_error)?;
         row.map(ThemeRow::into_theme).transpose()
-    }
-
-    /// Loads and parses a theme's stored editor manifest.
-    ///
-    /// Returns a conflict when the theme exists but has no editor manifest or
-    /// when the stored payload no longer matches the editor contract.
-    pub async fn editor_manifest(&self, id: &ThemeId) -> Result<ThemeEditorManifest, AppError> {
-        let theme = self.get(id).await?;
-        let raw = theme
-            .editor_manifest
-            .ok_or_else(|| AppError::conflict(format!("theme has no editor manifest: {id}")))?;
-        ThemeEditorManifest::parse(&raw).map_err(|error| {
-            AppError::conflict(format!("stored theme editor manifest is invalid: {error}"))
-        })
-    }
-
-    /// Loads the active theme's editor manifest, when it declares one.
-    pub async fn active_editor_manifest(&self) -> Result<Option<ThemeEditorManifest>, AppError> {
-        let Some(theme) = self.active().await? else {
-            return Ok(None);
-        };
-        let Some(raw) = theme.editor_manifest else {
-            return Ok(None);
-        };
-        ThemeEditorManifest::parse(&raw).map(Some).map_err(|error| {
-            AppError::conflict(format!("stored theme editor manifest is invalid: {error}"))
-        })
     }
 
     /// Replaces a theme's settings after schema validation.
@@ -541,125 +452,6 @@ impl ThemeService {
         tx.commit().await.map_err(database_error)?;
 
         self.get(id).await
-    }
-
-    /// Lists a theme's capability bindings, including inactive ones.
-    pub async fn list_capability_bindings(
-        &self,
-        id: &ThemeId,
-    ) -> Result<Vec<ThemeCapabilityBinding>, AppError> {
-        self.fetch_row(id).await?;
-        let sql = format!(
-            "SELECT {CAPABILITY_COLUMNS} FROM theme_capability_bindings \
-             WHERE theme_id = ? ORDER BY capability_id ASC"
-        );
-        let rows = sqlx::query_as::<_, ThemeCapabilityBindingRow>(&sql)
-            .bind(id.as_str())
-            .fetch_all(self.db.pool())
-            .await
-            .map_err(database_error)?;
-        rows.into_iter()
-            .map(ThemeCapabilityBindingRow::into_binding)
-            .collect()
-    }
-
-    /// Creates or replaces a capability binding for a theme.
-    pub async fn upsert_capability_binding(
-        &self,
-        id: &ThemeId,
-        input: ThemeCapabilityBindingInput,
-    ) -> Result<ThemeCapabilityBinding, AppError> {
-        validate_capability_binding(&input)?;
-
-        let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
-        let now = now_timestamp();
-        let config_json = serialize_json(&input.config, "capability config")?;
-        let binding_id = format!("{}:{}", id.as_str(), input.capability_id);
-
-        sqlx::query(
-            "INSERT INTO theme_capability_bindings \
-             (id, theme_id, capability_id, endpoint, config, is_active, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT (theme_id, capability_id) DO UPDATE SET \
-             endpoint = excluded.endpoint, config = excluded.config, \
-             is_active = excluded.is_active, updated_at = excluded.updated_at",
-        )
-        .bind(&binding_id)
-        .bind(id.as_str())
-        .bind(&input.capability_id)
-        .bind(&input.endpoint)
-        .bind(&config_json)
-        .bind(if input.is_active { 1_i64 } else { 0_i64 })
-        .bind(now)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
-
-        let sql = format!(
-            "SELECT {CAPABILITY_COLUMNS} FROM theme_capability_bindings \
-             WHERE theme_id = ? AND capability_id = ?"
-        );
-        let binding = sqlx::query_as::<_, ThemeCapabilityBindingRow>(&sql)
-            .bind(id.as_str())
-            .bind(&input.capability_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(database_error)?
-            .into_binding()?;
-
-        self.append_audit(
-            &mut tx,
-            "theme.capability_bound",
-            "theme",
-            id.as_str(),
-            serde_json::json!({
-                "manifest_id": theme.manifest.id,
-                "capability_id": input.capability_id,
-            }),
-        )
-        .await?;
-        tx.commit().await.map_err(database_error)?;
-
-        Ok(binding)
-    }
-
-    /// Deletes one capability binding from a theme.
-    pub async fn delete_capability_binding(
-        &self,
-        id: &ThemeId,
-        capability_id: &str,
-    ) -> Result<(), AppError> {
-        let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        let theme = self.fetch_row_in(&mut tx, id).await?.into_theme()?;
-        let result = sqlx::query(
-            "DELETE FROM theme_capability_bindings WHERE theme_id = ? AND capability_id = ?",
-        )
-        .bind(id.as_str())
-        .bind(capability_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
-        if result.rows_affected() == 0 {
-            return Err(AppError::not_found(
-                "theme capability binding",
-                capability_id,
-            ));
-        }
-        self.append_audit(
-            &mut tx,
-            "theme.capability_unbound",
-            "theme",
-            id.as_str(),
-            serde_json::json!({
-                "manifest_id": theme.manifest.id,
-                "capability_id": capability_id,
-            }),
-        )
-        .await?;
-        tx.commit().await.map_err(database_error)?;
-        Ok(())
     }
 
     /// Activates a theme. Activating the active theme is a no-op.
@@ -1041,163 +833,6 @@ fn validate_settings(schema: Option<&Value>, settings: &Value) -> Result<(), App
         .map_err(|error| AppError::validation(format!("invalid theme settings: {error}")))
 }
 
-fn validate_capability_binding(input: &ThemeCapabilityBindingInput) -> Result<(), AppError> {
-    if input.capability_id.trim().is_empty() || input.capability_id.chars().count() > 120 {
-        return Err(AppError::validation(
-            "capability_id must be between 1 and 120 characters",
-        ));
-    }
-    validate_absolute_url(&input.endpoint)?;
-    if !input.config.is_object() {
-        return Err(AppError::validation(
-            "capability config must be a JSON object",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_absolute_url(endpoint: &str) -> Result<(), AppError> {
-    if endpoint.is_empty()
-        || endpoint.chars().count() > 2048
-        || endpoint.chars().any(char::is_whitespace)
-    {
-        return Err(AppError::validation(
-            "capability endpoint must be a non-empty absolute URL",
-        ));
-    }
-    let lower = endpoint.to_ascii_lowercase();
-    let Some(rest) = lower
-        .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"))
-    else {
-        return Err(AppError::validation(
-            "capability endpoint must be an absolute http(s) URL",
-        ));
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    if authority.is_empty() {
-        return Err(AppError::validation(
-            "capability endpoint must include a host",
-        ));
-    }
-    // In `user[:password]@host` the host starts after the last `@`.
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let Some(host) = endpoint_host(authority) else {
-        return Err(AppError::validation(
-            "capability endpoint must include a valid host",
-        ));
-    };
-    let host = host.trim_end_matches('.');
-    if host.is_empty() {
-        return Err(AppError::validation(
-            "capability endpoint must include a host",
-        ));
-    }
-    if let Some(reason) = forbidden_host_reason(host) {
-        return Err(AppError::validation(format!(
-            "capability endpoint host {host:?} is not allowed: {reason}"
-        )));
-    }
-    Ok(())
-}
-
-/// Extracts the host from a URL authority, dropping any port.
-fn endpoint_host(authority: &str) -> Option<&str> {
-    if let Some(bracketed) = authority.strip_prefix('[') {
-        let (host, suffix) = bracketed.split_once(']')?;
-        if !suffix.is_empty() && !suffix.starts_with(':') {
-            return None;
-        }
-        return Some(host);
-    }
-    if authority.matches(':').count() > 1 {
-        // Unbracketed IPv6 literal; such an authority cannot also carry a port.
-        return Some(authority);
-    }
-    Some(authority.split(':').next().unwrap_or_default())
-}
-
-/// Returns why `host` must not be used as a capability endpoint.
-///
-/// Only literal hosts present in the URL are inspected. DNS names other than
-/// `localhost` are accepted without resolution, so a name that resolves to an
-/// internal address, and DNS rebinding after this validation, are out of scope
-/// for this guard.
-fn forbidden_host_reason(host: &str) -> Option<&'static str> {
-    if host == "localhost" {
-        return Some("loopback hosts are not allowed");
-    }
-    // Percent-encoding (`%31%32%37...`) and IPv6 zone identifiers are not
-    // meaningful in a public endpoint and complicate host classification.
-    if host.contains('%') {
-        return Some("percent-encoded or scoped hosts are not allowed");
-    }
-    let Ok(address) = host.parse::<IpAddr>() else {
-        if looks_like_legacy_ipv4(host) {
-            return Some("non-canonical numeric addresses are not allowed");
-        }
-        return None;
-    };
-    match address {
-        IpAddr::V4(address) => forbidden_ipv4_reason(address),
-        IpAddr::V6(address) => {
-            if let Some(mapped) = address.to_ipv4_mapped() {
-                return forbidden_ipv4_reason(mapped);
-            }
-            if address.is_loopback() {
-                return Some("loopback addresses are not allowed");
-            }
-            if address.is_unspecified() {
-                return Some("unspecified addresses are not allowed");
-            }
-            let prefix = address.segments()[0];
-            if prefix & 0xffc0 == 0xfe80 {
-                return Some("link-local addresses are not allowed");
-            }
-            if prefix & 0xfe00 == 0xfc00 {
-                return Some("unique local addresses are not allowed");
-            }
-            None
-        }
-    }
-}
-
-/// Returns why an IPv4 address is not a safe capability endpoint host.
-fn forbidden_ipv4_reason(address: Ipv4Addr) -> Option<&'static str> {
-    if address == Ipv4Addr::new(169, 254, 169, 254) {
-        return Some("cloud metadata addresses are not allowed");
-    }
-    if address.is_loopback() {
-        return Some("loopback addresses are not allowed");
-    }
-    if address.is_unspecified() {
-        return Some("unspecified addresses are not allowed");
-    }
-    if address.is_link_local() {
-        return Some("link-local addresses are not allowed");
-    }
-    if address.is_private() {
-        return Some("private addresses are not allowed");
-    }
-    None
-}
-
-/// Returns true for numeric host forms such as `127.1`, `2130706433` and
-/// `0x7f000001` that URL parsers may normalize to an IPv4 address but that
-/// `IpAddr` does not parse.
-fn looks_like_legacy_ipv4(host: &str) -> bool {
-    if host.is_empty() {
-        return false;
-    }
-    if host.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        return true;
-    }
-    let Some(hex) = host.strip_prefix("0x") else {
-        return false;
-    };
-    !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit() || c == '.')
-}
-
 fn serialize_json<T: serde::Serialize>(value: &T, field: &str) -> Result<String, AppError> {
     serde_json::to_string(value)
         .map_err(|error| AppError::internal(format!("could not serialize {field}: {error}")))
@@ -1206,15 +841,13 @@ fn serialize_json<T: serde::Serialize>(value: &T, field: &str) -> Result<String,
 #[derive(Debug, FromRow)]
 struct ThemeRow {
     id: String,
-    manifest: String,
-    bundle_path: String,
+    manifest_id: String,
+    name: String,
+    version: String,
     settings_schema: Option<String>,
     settings: String,
-    assets_manifest: Option<String>,
     draft_settings: Option<String>,
     settings_revision: i64,
-    editor_manifest: Option<String>,
-    schema_version: i64,
     is_active: i64,
     created_at: i64,
     updated_at: i64,
@@ -1222,9 +855,11 @@ struct ThemeRow {
 
 impl ThemeRow {
     fn into_theme(self) -> Result<Theme, AppError> {
-        let manifest: ThemeManifest = serde_json::from_str(&self.manifest).map_err(|error| {
-            AppError::internal(format!("invalid stored theme manifest: {error}"))
-        })?;
+        let manifest = ThemeManifest {
+            id: self.manifest_id,
+            name: self.name,
+            version: self.version,
+        };
         let settings_schema: Option<Value> = match self.settings_schema {
             Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
                 AppError::internal(format!("invalid stored theme settings schema: {error}"))
@@ -1234,42 +869,20 @@ impl ThemeRow {
         let settings: Value = serde_json::from_str(&self.settings).map_err(|error| {
             AppError::internal(format!("invalid stored theme settings: {error}"))
         })?;
-        let assets_manifest: Option<Value> = match self.assets_manifest {
-            Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
-                AppError::internal(format!("invalid stored theme assets manifest: {error}"))
-            })?),
-            None => None,
-        };
         let draft_settings: Option<Value> = match self.draft_settings {
             Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
                 AppError::internal(format!("invalid stored theme settings draft: {error}"))
             })?),
             None => None,
         };
-        let editor_manifest: Option<Value> = match self.editor_manifest {
-            Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
-                AppError::internal(format!("invalid stored theme editor manifest: {error}"))
-            })?),
-            None => None,
-        };
-        let schema_version = u32::try_from(self.schema_version).map_err(|_| {
-            AppError::internal(format!(
-                "invalid stored theme schema version: {}",
-                self.schema_version
-            ))
-        })?;
 
         Ok(Theme {
             id: ThemeId::from_string(self.id),
             manifest,
-            bundle_path: self.bundle_path,
             settings_schema,
             settings,
-            assets_manifest,
             draft_settings,
             settings_revision: self.settings_revision,
-            editor_manifest,
-            schema_version,
             is_active: self.is_active != 0,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -1308,90 +921,5 @@ impl ThemeSettingsRevisionRow {
             created_by: self.created_by,
             created_at: self.created_at,
         })
-    }
-}
-
-#[derive(Debug, FromRow)]
-struct ThemeCapabilityBindingRow {
-    id: String,
-    theme_id: String,
-    capability_id: String,
-    endpoint: String,
-    config: String,
-    is_active: i64,
-    created_at: i64,
-    updated_at: i64,
-}
-
-impl ThemeCapabilityBindingRow {
-    fn into_binding(self) -> Result<ThemeCapabilityBinding, AppError> {
-        let config: Value = serde_json::from_str(&self.config).map_err(|error| {
-            AppError::internal(format!("invalid stored capability config: {error}"))
-        })?;
-        Ok(ThemeCapabilityBinding {
-            id: self.id,
-            theme_id: ThemeId::from_string(self.theme_id),
-            capability_id: self.capability_id,
-            endpoint: self.endpoint,
-            config,
-            is_active: self.is_active != 0,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use fastcart_kernel::AppError;
-
-    use super::validate_absolute_url;
-
-    #[test]
-    fn capability_endpoints_reject_internal_hosts() {
-        for endpoint in [
-            "http://localhost/hook",
-            "http://localhost.:8080/hook",
-            "http://127.0.0.1/hook",
-            "http://127.1.2.3:8080/hook",
-            "http://127.1/hook",
-            "http://2130706433/hook",
-            "http://0x7f000001/hook",
-            "http://017700000001/hook",
-            "http://127%2e0%2e0%2e1/hook",
-            "http://%6cocalhost/hook",
-            "https://[::1]:8788/render",
-            "http://0.0.0.0:8080/hook",
-            "http://[::]/hook",
-            "http://169.254.169.254/latest/meta-data",
-            "http://10.0.0.5/hook",
-            "http://172.16.5.4/hook",
-            "http://192.168.1.10/hook",
-            "http://[fe80::1]/hook",
-            "http://[fe80::1%25eth0]/hook",
-            "http://[fd00::1]/hook",
-            "http://[::ffff:127.0.0.1]/hook",
-            "http://[::ffff:169.254.169.254]/hook",
-            "http://user:password@127.0.0.1/hook",
-        ] {
-            let error = validate_absolute_url(endpoint).unwrap_err();
-            assert!(
-                matches!(error, AppError::Validation(_)),
-                "{endpoint} must be rejected as a validation error"
-            );
-        }
-    }
-
-    #[test]
-    fn capability_endpoints_accept_public_hosts() {
-        for endpoint in [
-            "https://plugins.example.com/chat",
-            "http://93.184.216.34:8080/hook",
-            "https://[2001:db8::1]:8443/hook",
-            "https://localhost.example.com/hook",
-        ] {
-            validate_absolute_url(endpoint)
-                .unwrap_or_else(|error| panic!("{endpoint} must be accepted: {error}"));
-        }
     }
 }
