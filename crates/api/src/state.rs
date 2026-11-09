@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use axum::response::IntoResponse;
+use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 
 use fastcart_email::EmailService;
@@ -89,6 +90,8 @@ pub struct InternalSsrToken {
     pub token: String,
     /// Store this token may access; `None` means all stores.
     pub store_id: Option<String>,
+    /// Unix expiry; `None` means no scheduled expiry.
+    pub expires_at: Option<i64>,
 }
 
 impl std::fmt::Debug for InternalSsrToken {
@@ -97,7 +100,102 @@ impl std::fmt::Debug for InternalSsrToken {
             .debug_struct("InternalSsrToken")
             .field("token", &"<redacted>")
             .field("store_id", &self.store_id)
+            .field("expires_at", &self.expires_at)
             .finish()
+    }
+}
+
+/// Mutable set of internal SSR credentials shared by auth and the gateway.
+#[derive(Clone, Default)]
+pub struct InternalSsrCredentials {
+    tokens: Arc<std::sync::RwLock<Vec<InternalSsrToken>>>,
+}
+
+impl std::fmt::Debug for InternalSsrCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.tokens.read().map_or(0, |tokens| tokens.len());
+        formatter
+            .debug_struct("InternalSsrCredentials")
+            .field("count", &len)
+            .finish()
+    }
+}
+
+impl InternalSsrCredentials {
+    /// Creates a credential set from initial tokens.
+    #[must_use]
+    pub fn new(tokens: Vec<InternalSsrToken>) -> Self {
+        Self {
+            tokens: Arc::new(std::sync::RwLock::new(tokens)),
+        }
+    }
+
+    /// Returns whether no credentials are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tokens.read().map_or(true, |tokens| tokens.is_empty())
+    }
+
+    /// Validates a bearer token and returns its store scope.
+    #[must_use]
+    pub fn validate(&self, provided: &str) -> Option<InternalSsrToken> {
+        let now = fastcart_kernel::now_timestamp();
+        let Ok(mut tokens) = self.tokens.write() else {
+            return None;
+        };
+        tokens.retain(|token| token.expires_at.is_none_or(|expiry| expiry > now));
+        tokens
+            .iter()
+            .find(|token| bool::from(provided.as_bytes().ct_eq(token.token.as_bytes())))
+            .cloned()
+    }
+
+    /// Returns the active token for a store, preferring a store-scoped entry.
+    #[must_use]
+    pub fn token_for_store(&self, store_id: &str) -> Option<String> {
+        let now = fastcart_kernel::now_timestamp();
+        let tokens = self.tokens.read().ok()?;
+        tokens
+            .iter()
+            .rev()
+            .find(|token| {
+                token.store_id.as_deref() == Some(store_id)
+                    && token.expires_at.is_none_or(|expiry| expiry > now)
+            })
+            .or_else(|| {
+                tokens.iter().rev().find(|token| {
+                    token.store_id.is_none() && token.expires_at.is_none_or(|expiry| expiry > now)
+                })
+            })
+            .map(|token| token.token.clone())
+    }
+
+    /// Adds a new store token and expires older scoped tokens after `grace_seconds`.
+    pub fn rotate(
+        &self,
+        store_id: &str,
+        token: String,
+        expires_at: Option<i64>,
+        grace_seconds: i64,
+    ) {
+        let now = fastcart_kernel::now_timestamp();
+        let deadline = now.saturating_add(grace_seconds.max(0));
+        if let Ok(mut tokens) = self.tokens.write() {
+            for existing in &mut *tokens {
+                if existing.store_id.as_deref() == Some(store_id) {
+                    existing.expires_at = Some(
+                        existing
+                            .expires_at
+                            .map_or(deadline, |value| value.min(deadline)),
+                    );
+                }
+            }
+            tokens.push(InternalSsrToken {
+                token,
+                store_id: Some(store_id.to_owned()),
+                expires_at,
+            });
+        }
     }
 }
 
@@ -149,9 +247,11 @@ pub struct ApiConfig {
     ///
     /// When absent, `/internal/ssr/v1` is not mounted.
     pub internal_ssr_token: Option<String>,
-    /// Optional scoped SSR credentials. Takes precedence over
-    /// [`Self::internal_ssr_token`] when non-empty.
-    pub internal_ssr_tokens: Vec<InternalSsrToken>,
+    /// Mutable scoped SSR credentials.
+    ///
+    /// When empty, [`Self::internal_ssr_token`] is used as an unscoped
+    /// credential.
+    pub internal_ssr_credentials: InternalSsrCredentials,
     /// Optional secret used to sign theme capability grants.
     ///
     /// When set, grants carry a signed payload a capability endpoint sharing
@@ -212,7 +312,7 @@ impl Default for ApiConfig {
             storefront_stream_timeout_ms: 30_000,
             internal_fetch_secret: None,
             internal_ssr_token: None,
-            internal_ssr_tokens: Vec::new(),
+            internal_ssr_credentials: InternalSsrCredentials::default(),
             capability_secret: None,
             preview_secret: None,
             preview_frame_ancestors: Vec::new(),
@@ -462,6 +562,19 @@ impl AppContext {
         databases: Arc<StoreDatabaseManager>,
         cache: StoreCache,
     ) -> Self {
+        let mut config = config;
+        if config.internal_ssr_credentials.is_empty()
+            && let Some(token) = config
+                .internal_ssr_token
+                .clone()
+                .filter(|token| !token.is_empty())
+        {
+            config.internal_ssr_credentials = InternalSsrCredentials::new(vec![InternalSsrToken {
+                token,
+                store_id: None,
+                expires_at: None,
+            }]);
+        }
         let auth = AuthService::new(platform.clone());
         let resolver = StoreResolver::new(platform.clone(), cache.clone());
         let provisioning = StoreProvisioningService::new(platform.clone(), databases.clone());

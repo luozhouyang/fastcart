@@ -22,6 +22,14 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/{store_id}/rollback", post(rollback))
         .route("/{store_id}/preview/activate", post(activate_preview))
         .route("/{store_id}/preview/deactivate", post(deactivate_preview))
+        .route("/{store_id}/rotate-token", post(rotate_token))
+}
+
+#[derive(Debug, Deserialize)]
+struct RotateTokenRequest {
+    token: String,
+    expires_at: Option<i64>,
+    grace_seconds: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +117,34 @@ fn ensure_scope(scope: &InternalSsrScope, store_id: &str) -> ApiResult<()> {
         return Err(ApiError::new(AppError::Forbidden));
     }
     Ok(())
+}
+
+async fn rotate_token(
+    State(context): State<Arc<AppContext>>,
+    Path(store_id): Path<String>,
+    Extension(scope): Extension<InternalSsrScope>,
+    Json(request): Json<RotateTokenRequest>,
+) -> ApiResult<Response> {
+    ensure_scope(&scope, &store_id)?;
+    ensure_active_store(&context, &store_id).await?;
+    if request.token.trim().len() < 16 {
+        return Err(ApiError::new(AppError::validation(
+            "internal token must be at least 16 bytes",
+        )));
+    }
+    let now = fastcart_kernel::now_timestamp();
+    if request.expires_at.is_some_and(|expiry| expiry <= now) {
+        return Err(ApiError::new(AppError::validation(
+            "token expiry must be in the future",
+        )));
+    }
+    context.config.internal_ssr_credentials.rotate(
+        &store_id,
+        request.token,
+        request.expires_at,
+        request.grace_seconds.unwrap_or(300),
+    );
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn ensure_active_store(context: &Arc<AppContext>, store_id: &str) -> ApiResult<()> {

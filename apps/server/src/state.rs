@@ -60,6 +60,7 @@ impl AppState {
             config.cache.max_capacity,
             Duration::from_secs(config.cache.ttl_seconds),
         );
+        let internal_ssr_credentials = internal_ssr_credentials(&config);
         let api_config = ApiConfig {
             service_name: "fastcart".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -96,7 +97,7 @@ impl AppState {
                 .internal_token
                 .clone()
                 .filter(|secret| !secret.is_empty()),
-            internal_ssr_tokens: internal_ssr_tokens(&config),
+            internal_ssr_credentials: internal_ssr_credentials.clone(),
             capability_secret: config
                 .storefront
                 .capability_secret
@@ -123,8 +124,12 @@ impl AppState {
             notification_retention_days: config.notifications.retention_days,
         };
         let metrics = Arc::new(fastcart_http::Metrics::new());
-        let universal_ssr =
-            crate::universal::UniversalSsr::initialize(&config.ssr, metrics.clone()).await?;
+        let universal_ssr = crate::universal::UniversalSsr::initialize(
+            &config.ssr,
+            metrics.clone(),
+            internal_ssr_credentials.clone(),
+        )
+        .await?;
         let universal_storefront = universal_ssr.as_ref().map(|runtime| {
             Arc::clone(runtime) as Arc<dyn fastcart_api::state::UniversalStorefront>
         });
@@ -312,21 +317,24 @@ fn store_email_env(store_id: &StoreId, key: &str) -> Option<String> {
 ///
 /// Explicit per-deployment tokens are used only when every deployment has one;
 /// otherwise the global token remains a single unscoped credential.
-fn internal_ssr_tokens(config: &Config) -> Vec<fastcart_api::state::InternalSsrToken> {
+fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsrCredentials {
     let global = config
         .ssr
         .internal_token
         .clone()
         .filter(|token| !token.is_empty());
     if config.ssr.deployments.is_empty() {
-        return global
-            .map(|token| {
-                vec![fastcart_api::state::InternalSsrToken {
-                    token,
-                    store_id: None,
-                }]
-            })
-            .unwrap_or_default();
+        return fastcart_api::state::InternalSsrCredentials::new(
+            global
+                .map(|token| {
+                    vec![fastcart_api::state::InternalSsrToken {
+                        token,
+                        store_id: None,
+                        expires_at: None,
+                    }]
+                })
+                .unwrap_or_default(),
+        );
     }
     if config
         .ssr
@@ -334,7 +342,32 @@ fn internal_ssr_tokens(config: &Config) -> Vec<fastcart_api::state::InternalSsrT
         .iter()
         .all(|deployment| deployment.internal_token.is_some())
     {
-        return config
+        return fastcart_api::state::InternalSsrCredentials::new(
+            config
+                .ssr
+                .deployments
+                .iter()
+                .filter_map(|deployment| {
+                    Some(fastcart_api::state::InternalSsrToken {
+                        token: deployment.internal_token.clone()?,
+                        store_id: Some(deployment.store_id.clone()),
+                        expires_at: None,
+                    })
+                })
+                .collect(),
+        );
+    }
+    if let Some(token) = global {
+        return fastcart_api::state::InternalSsrCredentials::new(vec![
+            fastcart_api::state::InternalSsrToken {
+                token,
+                store_id: None,
+                expires_at: None,
+            },
+        ]);
+    }
+    fastcart_api::state::InternalSsrCredentials::new(
+        config
             .ssr
             .deployments
             .iter()
@@ -342,27 +375,11 @@ fn internal_ssr_tokens(config: &Config) -> Vec<fastcart_api::state::InternalSsrT
                 Some(fastcart_api::state::InternalSsrToken {
                     token: deployment.internal_token.clone()?,
                     store_id: Some(deployment.store_id.clone()),
+                    expires_at: None,
                 })
             })
-            .collect();
-    }
-    if let Some(token) = global {
-        return vec![fastcart_api::state::InternalSsrToken {
-            token,
-            store_id: None,
-        }];
-    }
-    config
-        .ssr
-        .deployments
-        .iter()
-        .filter_map(|deployment| {
-            Some(fastcart_api::state::InternalSsrToken {
-                token: deployment.internal_token.clone()?,
-                store_id: Some(deployment.store_id.clone()),
-            })
-        })
-        .collect()
+            .collect(),
+    )
 }
 
 fn build_storefront_runtime(

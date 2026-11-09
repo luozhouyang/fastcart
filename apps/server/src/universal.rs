@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use fastcart_api::state::UniversalStorefront;
+use fastcart_api::state::{InternalSsrCredentials, UniversalStorefront};
 use fastcart_http::Metrics;
 use fastcart_kernel::StoreContext;
 use fastcart_ssr::artifact::{ArtifactLimits, ArtifactStore};
@@ -76,6 +76,7 @@ pub struct UniversalSsr {
     response_cache: RwLock<HashMap<String, CachedResponse>>,
     default: Option<Arc<Deployment>>,
     metrics: Arc<Metrics>,
+    credentials: InternalSsrCredentials,
     artifacts: ArtifactStore,
     artifact_root: Option<PathBuf>,
     state_path: PathBuf,
@@ -97,6 +98,7 @@ impl UniversalSsr {
     pub async fn initialize(
         config: &SsrConfig,
         metrics: Arc<Metrics>,
+        credentials: InternalSsrCredentials,
     ) -> Result<Option<Arc<Self>>> {
         if !config.enabled {
             return Ok(None);
@@ -196,6 +198,7 @@ impl UniversalSsr {
             response_cache: RwLock::new(HashMap::new()),
             default,
             metrics,
+            credentials,
             artifacts,
             artifact_root: config.artifact_root.clone(),
             state_path,
@@ -679,6 +682,7 @@ impl UniversalStorefront for UniversalSsr {
             market_id: None,
             scheme,
             preview: false,
+            internal_token: self.credentials.token_for_store(store.store_id.as_str()),
         };
         self.metrics.record_ssr_request();
         let cache_key = cache_key(&request, store.store_id.as_str());
@@ -794,6 +798,7 @@ impl UniversalStorefront for UniversalSsr {
             market_id: None,
             scheme,
             preview: true,
+            internal_token: self.credentials.token_for_store(store.store_id.as_str()),
         };
         match deployment
             .gateway
@@ -1250,10 +1255,14 @@ export default {
             artifact_root: None,
             deployments: Vec::new(),
         };
-        let runtime = UniversalSsr::initialize(&config, Arc::new(Metrics::new()))
-            .await
-            .expect("initialize")
-            .expect("enabled");
+        let runtime = UniversalSsr::initialize(
+            &config,
+            Arc::new(Metrics::new()),
+            InternalSsrCredentials::default(),
+        )
+        .await
+        .expect("initialize")
+        .expect("enabled");
         let request = Request::builder()
             .uri("/context")
             .body(Body::empty())
@@ -1290,6 +1299,32 @@ export default {
         assert_eq!(value["requestId"], "req_server");
         assert_eq!(value["proto"], "https");
         assert_eq!(value["token"], "server-secret");
+        runtime
+            .credentials
+            .rotate("store_01", "rotated-secret-token".to_owned(), None, 300);
+        let rotated = runtime
+            .render(
+                Request::builder()
+                    .uri("/context")
+                    .body(Body::empty())
+                    .expect("request"),
+                StoreContext {
+                    store_id: StoreId::from_string("store_01".to_owned()),
+                    domain: "shop.example".to_owned(),
+                    locale: "en-US".to_owned(),
+                    currency: CurrencyCode::new("USD").expect("currency"),
+                    timezone: "UTC".to_owned(),
+                },
+                Some("rotated".to_owned()),
+                "https".to_owned(),
+            )
+            .await;
+        let rotated_body = axum::body::to_bytes(rotated.into_body(), 1024)
+            .await
+            .expect("rotated body");
+        let rotated_value: serde_json::Value =
+            serde_json::from_slice(&rotated_body).expect("rotated json");
+        assert_eq!(rotated_value["token"], "rotated-secret-token");
 
         let first = runtime
             .render(
@@ -1558,10 +1593,14 @@ export default {
                 },
             ],
         };
-        let runtime = UniversalSsr::initialize(&config, Arc::new(Metrics::new()))
-            .await
-            .expect("initialize")
-            .expect("enabled");
+        let runtime = UniversalSsr::initialize(
+            &config,
+            Arc::new(Metrics::new()),
+            InternalSsrCredentials::default(),
+        )
+        .await
+        .expect("initialize")
+        .expect("enabled");
 
         for (store_id, deployment_id) in [("store_a", "deploy_a"), ("store_b", "deploy_b")] {
             let request = Request::builder()
@@ -1717,20 +1756,28 @@ export default {
             artifact_root: Some(root.path().to_path_buf()),
             deployments: Vec::new(),
         };
-        let runtime = UniversalSsr::initialize(&base, Arc::new(Metrics::new()))
-            .await
-            .expect("initialize")
-            .expect("enabled");
+        let runtime = UniversalSsr::initialize(
+            &base,
+            Arc::new(Metrics::new()),
+            InternalSsrCredentials::default(),
+        )
+        .await
+        .expect("initialize")
+        .expect("enabled");
         runtime
             .activate("store_persist", "deploy_persisted", &source_b)
             .await
             .expect("activate");
         runtime.shutdown().await;
 
-        let restarted = UniversalSsr::initialize(&base, Arc::new(Metrics::new()))
-            .await
-            .expect("restart")
-            .expect("enabled");
+        let restarted = UniversalSsr::initialize(
+            &base,
+            Arc::new(Metrics::new()),
+            InternalSsrCredentials::default(),
+        )
+        .await
+        .expect("restart")
+        .expect("enabled");
         let value = render_store(&restarted, "store_persist").await;
         assert_eq!(value["deployment"], "deploy_persisted");
         let missing = restarted

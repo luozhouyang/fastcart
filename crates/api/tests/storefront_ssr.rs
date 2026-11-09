@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fastcart_api::routes::preview::issue_preview_token;
-use fastcart_api::state::{InternalSsrToken, UniversalStorefront};
+use fastcart_api::state::{InternalSsrCredentials, InternalSsrToken, UniversalStorefront};
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::{Metadata, StoreContext, now_timestamp};
@@ -248,16 +248,18 @@ async fn fixture(
                 backup_dir: dir.path().join("backups"),
                 internal_fetch_secret: internal_secret,
                 internal_ssr_token: Some("ssr-internal-secret".to_owned()),
-                internal_ssr_tokens: vec![
+                internal_ssr_credentials: InternalSsrCredentials::new(vec![
                     InternalSsrToken {
                         token: "ssr-internal-secret".to_owned(),
                         store_id: Some(store.id.to_string()),
+                        expires_at: None,
                     },
                     InternalSsrToken {
                         token: "other-store-secret".to_owned(),
                         store_id: Some("store_other".to_owned()),
+                        expires_at: None,
                     },
-                ],
+                ]),
                 preview_secret: Some("preview-secret-that-is-at-least-32-bytes".to_owned()),
                 ..ApiConfig::default()
             },
@@ -1427,6 +1429,71 @@ async fn deployment_lifecycle_requires_the_internal_token() {
         .await
         .unwrap();
     assert_eq!(deactivate.status(), StatusCode::NO_CONTENT);
+
+    let rotate_body = serde_json::json!({
+        "token": "rotated-token-0123456789",
+        "grace_seconds": 300
+    });
+    let rotated = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/internal/ssr/v1/deployments/{}/rotate-token",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer ssr-internal-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(rotate_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated.status(), StatusCode::NO_CONTENT);
+
+    let new_token = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/internal/ssr/v1/stores/{}/context",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer rotated-token-0123456789")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(new_token.status(), StatusCode::OK);
+
+    let expired = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/internal/ssr/v1/deployments/{}/rotate-token",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer rotated-token-0123456789")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "token": "another-token-0123456789",
+                        "expires_at": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(expired.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

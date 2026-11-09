@@ -244,6 +244,19 @@ that store; a token scoped to store A is rejected on store B. If any deployment
 lacks a scoped token, the global `ssr.internal_token` remains an unscoped
 fallback. Runtime `activate` calls use the global token.
 
+Tokens can be rotated without restarting:
+
+```bash
+curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/rotate-token \
+  -H "authorization: Bearer $CURRENT_INTERNAL_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"token":"new-token-at-least-16-bytes","expires_at":1799999999,"grace_seconds":300}'
+```
+
+The new token becomes the gateway credential immediately; older scoped tokens
+remain valid for `grace_seconds` so in-flight Worker calls can finish. Rotation
+state is in memory and reverts to config on restart.
+
 `/preview/{path}?token=...` verifies the existing signed preview token and, when
 the store has a preview deployment, forwards to it with
 `x-fastcart-preview: 1`. Preview deployments inherit the production data policy;

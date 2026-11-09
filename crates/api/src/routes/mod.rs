@@ -294,7 +294,7 @@ pub struct InternalSsrScope {
 
 /// Authenticates the server-only SSR commerce API.
 pub async fn internal_ssr_auth_middleware(
-    State(tokens): State<Arc<Vec<crate::state::InternalSsrToken>>>,
+    State(credentials): State<crate::state::InternalSsrCredentials>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
@@ -310,10 +310,7 @@ pub async fn internal_ssr_auth_middleware(
                 .and_then(|value| value.to_str().ok())
         })
         .unwrap_or_default();
-    let matched = tokens
-        .iter()
-        .find(|credential| bool::from(provided.as_bytes().ct_eq(credential.token.as_bytes())));
-    let Some(credential) = matched else {
+    let Some(credential) = credentials.validate(provided) else {
         return Err(ApiError::new(AppError::Forbidden));
     };
     request.extensions_mut().insert(InternalSsrScope {

@@ -72,34 +72,20 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
         );
         router = router.nest("/internal/storefront", internal);
     }
-    let internal_ssr_tokens = if context.config.internal_ssr_tokens.is_empty() {
-        context
-            .config
-            .internal_ssr_token
-            .clone()
-            .filter(|token| !token.is_empty())
-            .map(|token| {
-                vec![crate::state::InternalSsrToken {
-                    token,
-                    store_id: None,
-                }]
-            })
-            .unwrap_or_default()
-    } else {
-        context.config.internal_ssr_tokens.clone()
-    };
-    if !internal_ssr_tokens.is_empty() {
-        let credentials = Arc::new(internal_ssr_tokens);
+    let internal_ssr_credentials = context.config.internal_ssr_credentials.clone();
+    if !internal_ssr_credentials.is_empty() {
         let internal = routes::store::internal_ssr_router(&context).layer(
             axum::middleware::from_fn_with_state(
-                credentials.clone(),
+                internal_ssr_credentials.clone(),
                 routes::internal_ssr_auth_middleware,
             ),
         );
         router = router.nest("/internal/ssr/v1/stores/{store_id}", internal);
-        let deployments = routes::universal_deployments::router().layer(
-            axum::middleware::from_fn_with_state(credentials, routes::internal_ssr_auth_middleware),
-        );
+        let deployments =
+            routes::universal_deployments::router().layer(axum::middleware::from_fn_with_state(
+                internal_ssr_credentials,
+                routes::internal_ssr_auth_middleware,
+            ));
         router = router.nest("/internal/ssr/v1/deployments", deployments);
     }
 

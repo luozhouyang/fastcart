@@ -69,6 +69,8 @@ pub struct SsrRequestContext {
     pub scheme: String,
     /// Whether this request targets a preview deployment.
     pub preview: bool,
+    /// Per-request internal token; overrides the gateway default.
+    pub internal_token: Option<String>,
 }
 
 /// Forwards storefront requests to one workerd service.
@@ -184,7 +186,11 @@ impl SsrGateway {
             context.scheme.as_str()
         };
         insert_header(&mut parts.headers, "x-forwarded-proto", scheme)?;
-        if let Some(token) = &self.internal_token {
+        if let Some(token) = context
+            .internal_token
+            .as_ref()
+            .or(self.internal_token.as_ref())
+        {
             insert_header(&mut parts.headers, "x-fastcart-internal-token", token)?;
         }
         if context.preview {

@@ -172,3 +172,10 @@ open.
 Deployments can carry store-scoped internal tokens; cross-store use is rejected.
 SSR requests, errors, cache hits/misses and active deployments are exported via
 Prometheus metrics. Token rotation and preview data isolation remain open.
+
+### Phase 18 status
+
+`POST /internal/ssr/v1/deployments/{store_id}/rotate-token` rotates scoped
+credentials with an optional expiry and grace window; the gateway uses the
+newest active token. Rotation is in memory and reverts to config on restart.
+Audit events and persistent credentials remain open.
