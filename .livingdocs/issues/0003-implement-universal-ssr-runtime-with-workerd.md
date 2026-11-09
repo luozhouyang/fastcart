@@ -126,3 +126,10 @@ are not root-confined yet.
 Activation paths are confined by `ssr.artifact_root`; successful default-mode
 activation is written atomically and reloaded on restart. Render/activation/drain
 paths emit structured tracing. Per-store credentials and metrics remain open.
+
+### Phase 11 status
+
+`templates/storefront-astro` builds and runs as a FastCart artifact. Generated
+workerd configs bind the client directory as `ASSETS`, which the Cloudflare
+adapter requires. Smoke and manual server tests pass; browser hydration and
+framework bindings remain open.

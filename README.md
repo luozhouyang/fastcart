@@ -13,8 +13,8 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 > shipping, tax and settings. `apps/storefront` is a TanStack Start reference
 > harness. The universal `workerd` SSR path is implemented
 > ([ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md));
-> TanStack Start/Astro templates and the default artifact build are still in
-> progress. The legacy Node sidecar remains transitional until parity.
+> TanStack Start and Astro templates exist; the default artifact build remains
+> in progress. The legacy Node sidecar remains transitional until parity.
 
 ## Why Fastcart
 

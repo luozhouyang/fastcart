@@ -13,6 +13,7 @@ packages/*/dist/
 themes/*/dist/
 templates/*/dist/
 templates/*/.wrangler/
+templates/*/.astro/
 
 # Local design documents (kept out of version control)
 /docs/

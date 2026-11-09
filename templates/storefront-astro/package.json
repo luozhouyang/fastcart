@@ -1,0 +1,23 @@
+{
+  "name": "@fastcart/storefront-astro",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "build:artifact": "astro build && node --experimental-strip-types scripts/package.mjs",
+    "test:artifact": "node scripts/smoke.mjs",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "^14.4.6",
+    "@fastcart/storefront-build": "workspace:*",
+    "astro": "^7.4.7"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.4",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.158.0"
+  }
+}

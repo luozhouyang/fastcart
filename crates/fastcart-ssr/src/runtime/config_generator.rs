@@ -36,12 +36,30 @@ pub fn generate_workerd_config(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let asset_dir = artifact.root().join(&manifest.assets.directory);
+    let (asset_service, asset_binding) = if asset_dir.is_dir() {
+        let asset_dir = std::fs::canonicalize(&asset_dir)
+            .map_err(|error| SsrError::InvalidRuntimeConfig(error.to_string()))?;
+        let path = asset_dir
+            .to_str()
+            .ok_or_else(|| SsrError::InvalidRuntimeConfig("non-UTF-8 asset path".to_owned()))?
+            .replace('\\', "/");
+        (
+            format!(
+                "    (name = \"assets\", disk = (path = {}, writable = false)),\n",
+                quote(&path)
+            ),
+            "  bindings = [\n    (name = \"ASSETS\", service = \"assets\"),\n  ],\n",
+        )
+    } else {
+        (String::new(), "")
+    };
     let text = format!(
         r#"using Workerd = import "/workerd/workerd.capnp";
 
 const config :Workerd.Config = (
   services = [
-    (name = "main", worker = .mainWorker),
+{asset_service}    (name = "main", worker = .mainWorker),
   ],
   sockets = [
     (name = "http", address = {}, http = (), service = "main"),
@@ -49,7 +67,7 @@ const config :Workerd.Config = (
 );
 
 const mainWorker :Workerd.Worker = (
-  modules = [
+{asset_binding}  modules = [
 {modules_text}
   ],
   compatibilityDate = {},

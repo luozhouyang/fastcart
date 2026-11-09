@@ -1,0 +1,18 @@
+---
+const message = "FastCart Astro SSR";
+const store = Astro.request.headers.get("x-fastcart-store-id");
+const deployment = Astro.request.headers.get("x-fastcart-deployment-id");
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>FastCart Astro Storefront</title>
+  </head>
+  <body>
+    <main>
+      <h1>{message}</h1>
+      <p data-testid="context">{store ?? "no-store"}:{deployment ?? "no-deployment"}</p>
+    </main>
+  </body>
+</html>

@@ -177,6 +177,11 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 11 (2026-11-09) added `templates/storefront-astro` and an `ASSETS` disk
+binding in generated workerd configs. Astro SSR, trusted headers, streaming,
+cookies, redirects and errors pass the workerd smoke test and a manual
+`fastcart-server` render; framework-specific bindings remain future work.
+
 Phase 10 (2026-11-09) added artifact-root confinement, atomic activation-state
 persistence for default mode, persisted-state reload and structured render
 tracing. Per-store credentials and SSR metrics remain hardening work.

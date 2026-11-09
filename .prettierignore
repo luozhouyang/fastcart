@@ -13,6 +13,7 @@ docs/architecture
 apps/storefront/src/routeTree.gen.ts
 templates/*/src/routeTree.gen.ts
 templates/*/.wrangler
+templates/*/.astro
 
 .claude
 

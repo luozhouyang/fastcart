@@ -8,6 +8,7 @@ export default tseslint.config(
     ignores: [
       "**/dist/**",
       "**/.tanstack/**",
+      "**/.astro/**",
       "**/node_modules/**",
       "**/.cargo-home/**",
       "**/.pnpm-store/**",
