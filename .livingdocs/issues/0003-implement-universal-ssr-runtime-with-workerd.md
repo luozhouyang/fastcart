@@ -139,3 +139,10 @@ framework bindings remain open.
 Assets support ETag/304, single byte ranges and `Accept-Ranges`; SSR documents
 default to `no-store`. Universal preview, compression and asset retention remain
 productization work.
+
+### Phase 13 status
+
+Preview deployments are separate from production, can be activated/deactivated
+with the internal token, and are selected by `/preview` after signed-token
+verification. Preview-specific assets, draft page data and an independent data
+policy remain open.

@@ -19,6 +19,8 @@ pub fn router() -> Router<Arc<AppContext>> {
     Router::new()
         .route("/{store_id}/activate", post(activate))
         .route("/{store_id}/rollback", post(rollback))
+        .route("/{store_id}/preview/activate", post(activate_preview))
+        .route("/{store_id}/preview/deactivate", post(deactivate_preview))
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +55,37 @@ async fn rollback(
     };
     runtime
         .rollback(&store_id)
+        .await
+        .map_err(|error| ApiError::new(AppError::conflict(error)))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn activate_preview(
+    State(context): State<Arc<AppContext>>,
+    Path(store_id): Path<String>,
+    Json(request): Json<ActivateRequest>,
+) -> ApiResult<Response> {
+    ensure_active_store(&context, &store_id).await?;
+    let Some(runtime) = context.universal_storefront.clone() else {
+        return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    runtime
+        .activate_preview(&store_id, &request.deployment_id, request.artifact_path)
+        .await
+        .map_err(|error| ApiError::new(AppError::validation(error)))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn deactivate_preview(
+    State(context): State<Arc<AppContext>>,
+    Path(store_id): Path<String>,
+) -> ApiResult<Response> {
+    ensure_active_store(&context, &store_id).await?;
+    let Some(runtime) = context.universal_storefront.clone() else {
+        return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    };
+    runtime
+        .deactivate_preview(&store_id)
         .await
         .map_err(|error| ApiError::new(AppError::conflict(error)))?;
     Ok(StatusCode::NO_CONTENT.into_response())

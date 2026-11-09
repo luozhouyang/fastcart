@@ -6,10 +6,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
+use fastcart_api::routes::preview::issue_preview_token;
 use fastcart_api::state::UniversalStorefront;
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
-use fastcart_kernel::{Metadata, StoreContext};
+use fastcart_kernel::{Metadata, StoreContext, now_timestamp};
 use fastcart_module_cart::{CartService, CreateCartInput};
 use fastcart_module_catalog::{CatalogService, CreateCollectionInput, CreateProductInput};
 use fastcart_module_content::{ContentService, CreatePageInput, UpdatePageInput};
@@ -63,6 +64,7 @@ impl StorefrontRuntime for RecordingRuntime {
 #[derive(Default)]
 struct RecordingUniversal {
     seen: Arc<Mutex<Vec<RecordedContext>>>,
+    preview: bool,
 }
 
 struct RecordedContext {
@@ -107,6 +109,33 @@ impl UniversalStorefront for RecordingUniversal {
     }
 
     async fn rollback(&self, _store_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn render_preview(
+        &self,
+        _request: Request<Body>,
+        _store: StoreContext,
+        _request_id: Option<String>,
+        _scheme: String,
+    ) -> Response {
+        (StatusCode::OK, "<h1>universal-preview</h1>").into_response()
+    }
+
+    async fn has_preview(&self, _store_id: &str) -> bool {
+        self.preview
+    }
+
+    async fn activate_preview(
+        &self,
+        _store_id: &str,
+        _deployment_id: &str,
+        _artifact_path: String,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn deactivate_preview(&self, _store_id: &str) -> Result<(), String> {
         Ok(())
     }
 }
@@ -219,6 +248,7 @@ async fn fixture(
                 backup_dir: dir.path().join("backups"),
                 internal_fetch_secret: internal_secret,
                 internal_ssr_token: Some("ssr-internal-secret".to_owned()),
+                preview_secret: Some("preview-secret-that-is-at-least-32-bytes".to_owned()),
                 ..ApiConfig::default()
             },
             platform,
@@ -1315,4 +1345,71 @@ async fn deployment_lifecycle_requires_the_internal_token() {
         .await
         .unwrap();
     assert_eq!(rollback.status(), StatusCode::NO_CONTENT);
+
+    let preview = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/internal/ssr/v1/deployments/{}/preview/activate",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer ssr-internal-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), StatusCode::NO_CONTENT);
+
+    let deactivate = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/internal/ssr/v1/deployments/{}/preview/deactivate",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer ssr-internal-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deactivate.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn preview_route_uses_the_universal_preview_deployment() {
+    let universal = Arc::new(RecordingUniversal {
+        preview: true,
+        ..RecordingUniversal::default()
+    });
+    let fixture = fixture(None, None, Some(universal)).await;
+    let token = issue_preview_token(
+        "preview-secret-that-is-at-least-32-bytes",
+        &fixture.store_id,
+        "page_test",
+        now_timestamp(),
+    )
+    .expect("preview token");
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/preview/products?token={}", token.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"<h1>universal-preview</h1>");
 }

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use axum::response::IntoResponse;
 use tokio::sync::Mutex;
 
 use fastcart_email::EmailService;
@@ -45,6 +46,37 @@ pub trait UniversalStorefront: Send + Sync {
 
     /// Restores the previous deployment for one store.
     async fn rollback(&self, store_id: &str) -> Result<(), String>;
+
+    /// Renders through the store's preview deployment.
+    async fn render_preview(
+        &self,
+        _request: axum::http::Request<axum::body::Body>,
+        _store: StoreContext,
+        _request_id: Option<String>,
+        _scheme: String,
+    ) -> axum::response::Response {
+        axum::http::StatusCode::NOT_FOUND.into_response()
+    }
+
+    /// Returns whether the store has a preview deployment.
+    async fn has_preview(&self, _store_id: &str) -> bool {
+        false
+    }
+
+    /// Starts and activates a preview deployment.
+    async fn activate_preview(
+        &self,
+        _store_id: &str,
+        _deployment_id: &str,
+        _artifact_path: String,
+    ) -> Result<(), String> {
+        Err("preview deployments are not supported".to_owned())
+    }
+
+    /// Stops the store's preview deployment.
+    async fn deactivate_preview(&self, _store_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// HTTP-facing configuration.

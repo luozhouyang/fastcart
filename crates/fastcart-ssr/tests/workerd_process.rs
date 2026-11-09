@@ -171,6 +171,7 @@ const mainWorker :Workerd.Worker = (
         currency: Some("USD".to_owned()),
         market_id: None,
         scheme: "https".to_owned(),
+        preview: false,
     };
     let streaming_gateway = gateway.clone().with_internal_token("internal-secret");
     let streaming_request = Request::builder()

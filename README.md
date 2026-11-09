@@ -224,6 +224,22 @@ curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/rollbac
   -H "authorization: Bearer $FASTCART_SSR_INTERNAL_TOKEN"
 ```
 
+Preview deployments are activated separately and never replace production:
+
+```bash
+curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/preview/activate \
+  -H "authorization: Bearer $FASTCART_SSR_INTERNAL_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"deployment_id":"preview_01","artifact_path":"/srv/fastcart/preview_01"}'
+curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/preview/deactivate \
+  -H "authorization: Bearer $FASTCART_SSR_INTERNAL_TOKEN"
+```
+
+`/preview/{path}?token=...` verifies the existing signed preview token and, when
+the store has a preview deployment, forwards to it with
+`x-fastcart-preview: 1`. Preview deployments inherit the production data policy;
+draft page data injection into framework workers is not implemented yet.
+
 The new artifact must pass `/__fastcart/health`; the old group drains for
 `ssr.drain_timeout_ms` while its assets remain available. With the default
 single-artifact mode, successful activation is written atomically to

@@ -291,6 +291,8 @@ pub struct SsrDeploymentConfig {
     pub artifact_path: PathBuf,
     /// Optional loopback listener; defaults to the next port after `ssr.listen`.
     pub listen: Option<SocketAddr>,
+    /// Marks this deployment as a preview target for the store.
+    pub preview: bool,
 }
 
 impl Default for SsrDeploymentConfig {
@@ -300,6 +302,7 @@ impl Default for SsrDeploymentConfig {
             deployment_id: String::new(),
             artifact_path: PathBuf::new(),
             listen: None,
+            preview: false,
         }
     }
 }
@@ -765,7 +768,7 @@ impl Config {
                     bail!("ssr.deployment_id must be 1-128 safe characters");
                 }
             } else {
-                let mut stores = Vec::new();
+                let mut stores: Vec<(String, bool)> = Vec::new();
                 let mut ports = Vec::new();
                 for (index, deployment) in self.ssr.deployments.iter().enumerate() {
                     if !is_safe_identifier(&deployment.store_id) {
@@ -789,13 +792,26 @@ impl Config {
                             "ssr.deployments[{index}].listen must be loopback with a non-zero port"
                         );
                     }
-                    if stores.contains(&deployment.store_id) {
-                        bail!("duplicate ssr deployment for store {}", deployment.store_id);
+                    if deployment.preview && deployment.store_id.is_empty() {
+                        bail!("preview ssr deployment requires a store_id");
+                    }
+                    if stores.iter().any(|(store, preview)| {
+                        store == &deployment.store_id && *preview == deployment.preview
+                    }) {
+                        bail!(
+                            "duplicate {} ssr deployment for store {}",
+                            if deployment.preview {
+                                "preview"
+                            } else {
+                                "production"
+                            },
+                            deployment.store_id
+                        );
                     }
                     if ports.contains(&listen.port()) {
                         bail!("duplicate ssr deployment listen port {}", listen.port());
                     }
-                    stores.push(deployment.store_id.clone());
+                    stores.push((deployment.store_id.clone(), deployment.preview));
                     ports.push(listen.port());
                 }
             }
@@ -1119,12 +1135,14 @@ mod tests {
                 deployment_id: "deploy_a".to_owned(),
                 artifact_path: PathBuf::from("./a"),
                 listen: Some("127.0.0.1:18891".parse().unwrap()),
+                preview: false,
             },
             SsrDeploymentConfig {
                 store_id: "store_b".to_owned(),
                 deployment_id: "deploy_b".to_owned(),
                 artifact_path: PathBuf::from("./b"),
                 listen: Some("127.0.0.1:18892".parse().unwrap()),
+                preview: false,
             },
         ];
         config.validate().unwrap();

@@ -67,6 +67,8 @@ pub struct SsrRequestContext {
     pub market_id: Option<String>,
     /// Public request scheme, after trusted-proxy handling.
     pub scheme: String,
+    /// Whether this request targets a preview deployment.
+    pub preview: bool,
 }
 
 /// Forwards storefront requests to one workerd service.
@@ -184,6 +186,9 @@ impl SsrGateway {
         insert_header(&mut parts.headers, "x-forwarded-proto", scheme)?;
         if let Some(token) = &self.internal_token {
             insert_header(&mut parts.headers, "x-fastcart-internal-token", token)?;
+        }
+        if context.preview {
+            insert_header(&mut parts.headers, "x-fastcart-preview", "1")?;
         }
         let body = reqwest::Body::wrap_stream(body.into_data_stream());
         self.forward_parts(parts.method, parts.uri, parts.headers, body)

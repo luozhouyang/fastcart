@@ -47,12 +47,15 @@ struct PersistedDeployment {
     store_id: String,
     deployment_id: String,
     artifact_path: PathBuf,
+    #[serde(default)]
+    preview: bool,
 }
 
 /// Universal storefront runtime registry.
 pub struct UniversalSsr {
     manager: Arc<Mutex<RuntimeManager>>,
     deployments: RwLock<HashMap<String, Arc<Deployment>>>,
+    previews: RwLock<HashMap<String, Arc<Deployment>>>,
     history: RwLock<HashMap<String, Vec<DeploymentMeta>>>,
     asset_roots: RwLock<Vec<PathBuf>>,
     default: Option<Arc<Deployment>>,
@@ -68,6 +71,7 @@ struct DeploymentSpec<'a> {
     deployment_id: &'a str,
     artifact_path: &'a Path,
     listen: SocketAddr,
+    preview: bool,
 }
 
 impl UniversalSsr {
@@ -101,6 +105,7 @@ impl UniversalSsr {
                         deployment_id: entry.deployment_id,
                         artifact_path: entry.artifact_path,
                         listen: None,
+                        preview: entry.preview,
                     })
                     .collect();
                 persisted
@@ -110,6 +115,7 @@ impl UniversalSsr {
         };
         let specs = deployment_specs(persisted_config.as_ref().unwrap_or(config));
         let mut deployments = HashMap::new();
+        let mut previews = HashMap::new();
         let mut default = None;
         let mut started = Vec::new();
         for spec in specs {
@@ -128,10 +134,14 @@ impl UniversalSsr {
                 Ok(deployment) => {
                     started.push(group);
                     if spec.store_id.is_some() {
-                        deployments.insert(
-                            spec.store_id.unwrap_or_default().to_owned(),
-                            Arc::new(deployment),
-                        );
+                        let deployment = Arc::new(deployment);
+                        if spec.preview {
+                            previews
+                                .insert(spec.store_id.unwrap_or_default().to_owned(), deployment);
+                        } else {
+                            deployments
+                                .insert(spec.store_id.unwrap_or_default().to_owned(), deployment);
+                        }
                     } else {
                         default = Some(Arc::new(deployment));
                     }
@@ -148,6 +158,7 @@ impl UniversalSsr {
         }
         let mut asset_roots: Vec<PathBuf> = deployments
             .values()
+            .chain(previews.values())
             .map(|deployment| deployment.asset_root.clone())
             .collect();
         if let Some(default) = &default {
@@ -156,6 +167,7 @@ impl UniversalSsr {
         Ok(Some(Arc::new(Self {
             manager: Arc::new(Mutex::new(manager)),
             deployments: RwLock::new(deployments),
+            previews: RwLock::new(previews),
             history: RwLock::new(HashMap::new()),
             asset_roots: RwLock::new(asset_roots),
             default,
@@ -215,6 +227,7 @@ impl UniversalSsr {
             deployment_id,
             artifact_path: &artifact_path,
             listen,
+            preview: false,
         };
         let limits = ArtifactLimits {
             max_bytes: self.config.artifact_max_bytes,
@@ -270,7 +283,7 @@ impl UniversalSsr {
     }
 
     async fn persist_state(&self) {
-        let entries: Vec<PersistedDeployment> = self
+        let mut entries: Vec<PersistedDeployment> = self
             .deployments
             .read()
             .await
@@ -279,8 +292,21 @@ impl UniversalSsr {
                 store_id: store_id.clone(),
                 deployment_id: deployment.deployment_id.clone(),
                 artifact_path: deployment.artifact_path.clone(),
+                preview: false,
             })
             .collect();
+        entries.extend(
+            self.previews
+                .read()
+                .await
+                .iter()
+                .map(|(store_id, deployment)| PersistedDeployment {
+                    store_id: store_id.clone(),
+                    deployment_id: deployment.deployment_id.clone(),
+                    artifact_path: deployment.artifact_path.clone(),
+                    preview: true,
+                }),
+        );
         if entries.is_empty() {
             return;
         }
@@ -331,6 +357,80 @@ impl UniversalSsr {
         });
     }
 
+    /// Starts a preview deployment without touching production.
+    pub async fn activate_preview(
+        &self,
+        store_id: &str,
+        deployment_id: &str,
+        artifact_path: &Path,
+    ) -> Result<()> {
+        validate_identifier("store_id", store_id)?;
+        validate_identifier("deployment_id", deployment_id)?;
+        let artifact_path = self.resolve_artifact_path(artifact_path).await?;
+        let listen = free_loopback_port()?;
+        let sequence = self.counter.fetch_add(1, Ordering::Relaxed);
+        let group =
+            RuntimeGroupId::new(format!("preview_{sequence}")).context("invalid preview group")?;
+        let spec = DeploymentSpec {
+            store_id: Some(store_id),
+            deployment_id,
+            artifact_path: &artifact_path,
+            listen,
+            preview: true,
+        };
+        let limits = ArtifactLimits {
+            max_bytes: self.config.artifact_max_bytes,
+            max_files: self.config.artifact_max_files,
+        };
+        let mut manager = self.manager.lock().await;
+        tracing::info!(store_id, deployment_id, path = %artifact_path.display(), "activating SSR preview");
+        let deployment = start_deployment(
+            &mut manager,
+            &self.artifacts,
+            limits,
+            &self.config,
+            &spec,
+            group,
+        )
+        .await?;
+        drop(manager);
+        let deployment = Arc::new(deployment);
+        let old = self
+            .previews
+            .write()
+            .await
+            .insert(store_id.to_owned(), deployment);
+        if let Some(old) = old {
+            let mut roots = self.asset_roots.write().await;
+            if !roots.iter().any(|root| root == &old.asset_root) {
+                roots.push(old.asset_root.clone());
+            }
+            drop(roots);
+            self.schedule_drain(old.group.clone());
+        }
+        self.persist_state().await;
+        Ok(())
+    }
+
+    /// Stops the store's preview deployment.
+    pub async fn deactivate_preview(&self, store_id: &str) -> Result<()> {
+        let Some(old) = self.previews.write().await.remove(store_id) else {
+            return Ok(());
+        };
+        let mut roots = self.asset_roots.write().await;
+        if !roots.iter().any(|root| root == &old.asset_root) {
+            roots.push(old.asset_root.clone());
+        }
+        drop(roots);
+        self.schedule_drain(old.group.clone());
+        self.persist_state().await;
+        Ok(())
+    }
+
+    async fn preview_deployment(&self, store_id: &str) -> Option<Arc<Deployment>> {
+        self.previews.read().await.get(store_id).cloned()
+    }
+
     /// Stops every runtime group during server shutdown.
     pub async fn shutdown(&self) {
         let mut manager = self.manager.lock().await;
@@ -339,6 +439,7 @@ impl UniversalSsr {
             .read()
             .await
             .values()
+            .chain(self.previews.read().await.values())
             .map(|deployment| deployment.group.clone())
             .collect();
         if let Some(default) = &self.default {
@@ -382,6 +483,7 @@ fn deployment_specs(config: &SsrConfig) -> Vec<DeploymentSpec<'_>> {
             deployment_id: &config.deployment_id,
             artifact_path: &config.artifact_path,
             listen: config.listen,
+            preview: false,
         }];
     }
     config
@@ -401,6 +503,7 @@ fn deployment_specs(config: &SsrConfig) -> Vec<DeploymentSpec<'_>> {
                 deployment_id: &deployment.deployment_id,
                 artifact_path: &deployment.artifact_path,
                 listen,
+                preview: deployment.preview,
             }
         })
         .collect()
@@ -492,6 +595,7 @@ impl UniversalStorefront for UniversalSsr {
             currency: Some(store.currency.to_string()),
             market_id: None,
             scheme,
+            preview: false,
         };
         let started = std::time::Instant::now();
         let result = deployment
@@ -543,6 +647,61 @@ impl UniversalStorefront for UniversalSsr {
             }
         }
         StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn render_preview(
+        &self,
+        request: axum::http::Request<Body>,
+        store: StoreContext,
+        request_id: Option<String>,
+        scheme: String,
+    ) -> Response {
+        let Some(deployment) = self.preview_deployment(store.store_id.as_str()).await else {
+            return (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({ "error": "SSR_PREVIEW_NOT_FOUND" })),
+            )
+                .into_response();
+        };
+        let context = SsrRequestContext {
+            store_id: store.store_id.to_string(),
+            deployment_id: deployment.deployment_id.clone(),
+            request_id: request_id.unwrap_or_else(|| "ssr-preview".to_owned()),
+            locale: Some(store.locale),
+            currency: Some(store.currency.to_string()),
+            market_id: None,
+            scheme,
+            preview: true,
+        };
+        match deployment
+            .gateway
+            .forward_streaming(request, &context)
+            .await
+        {
+            Ok(response) => into_response(response),
+            Err(error) => error_response(&error),
+        }
+    }
+
+    async fn has_preview(&self, store_id: &str) -> bool {
+        self.previews.read().await.contains_key(store_id)
+    }
+
+    async fn activate_preview(
+        &self,
+        store_id: &str,
+        deployment_id: &str,
+        artifact_path: String,
+    ) -> Result<(), String> {
+        self.activate_preview(store_id, deployment_id, Path::new(&artifact_path))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn deactivate_preview(&self, store_id: &str) -> Result<(), String> {
+        self.deactivate_preview(store_id)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn activate(
@@ -1029,6 +1188,31 @@ export default {
         serde_json::from_slice(&body).expect("json")
     }
 
+    async fn render_preview_store(runtime: &UniversalSsr, store_id: &str) -> serde_json::Value {
+        let response = runtime
+            .render_preview(
+                Request::builder()
+                    .uri("/context")
+                    .body(Body::empty())
+                    .expect("request"),
+                StoreContext {
+                    store_id: StoreId::from_string(store_id.to_owned()),
+                    domain: format!("{store_id}.example"),
+                    locale: "en-US".to_owned(),
+                    currency: CurrencyCode::new("USD").expect("currency"),
+                    timezone: "UTC".to_owned(),
+                },
+                Some(format!("preview_{store_id}")),
+                "https".to_owned(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        serde_json::from_slice(&body).expect("json")
+    }
+
     #[tokio::test]
     async fn routes_stores_to_isolated_deployments_and_assets() {
         let Some(binary) = workerd_binary() else {
@@ -1070,6 +1254,7 @@ export default {
                             .parse()
                             .expect("listen a"),
                     ),
+                    preview: false,
                 },
                 SsrDeploymentConfig {
                     store_id: "store_b".to_owned(),
@@ -1080,6 +1265,7 @@ export default {
                             .parse()
                             .expect("listen b"),
                     ),
+                    preview: false,
                 },
             ],
         };
@@ -1175,6 +1361,39 @@ export default {
         runtime.rollback("store_a").await.expect("rollback");
         let rolled_back = render_store(&runtime, "store_a").await;
         assert_eq!(rolled_back["deployment"], "deploy_a");
+
+        runtime
+            .activate_preview("store_a", "deploy_preview", &source_b)
+            .await
+            .expect("activate preview");
+        assert!(runtime.has_preview("store_a").await);
+        let preview = render_preview_store(&runtime, "store_a").await;
+        assert_eq!(preview["deployment"], "deploy_preview");
+        let production = render_store(&runtime, "store_a").await;
+        assert_eq!(production["deployment"], "deploy_a");
+        runtime
+            .deactivate_preview("store_a")
+            .await
+            .expect("deactivate preview");
+        assert!(!runtime.has_preview("store_a").await);
+        let missing_preview = runtime
+            .render_preview(
+                Request::builder()
+                    .uri("/context")
+                    .body(Body::empty())
+                    .expect("request"),
+                StoreContext {
+                    store_id: StoreId::from_string("store_a".to_owned()),
+                    domain: "store_a.example".to_owned(),
+                    locale: "en-US".to_owned(),
+                    currency: CurrencyCode::new("USD").expect("currency"),
+                    timezone: "UTC".to_owned(),
+                },
+                None,
+                "https".to_owned(),
+            )
+            .await;
+        assert_eq!(missing_preview.status(), StatusCode::NOT_FOUND);
         runtime.shutdown().await;
     }
 

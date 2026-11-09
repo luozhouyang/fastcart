@@ -177,6 +177,12 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 13 (2026-11-09) added separate preview deployments. Preview entries are
+activated through the internal token, selected only by `/preview` after signed
+token verification, and inject `x-fastcart-preview` while production remains
+untouched. Preview-specific assets and draft data injection remain follow-up
+work.
+
 Phase 12 (2026-11-09) added ETag/`If-None-Match`, single byte ranges,
 `Accept-Ranges` and a conservative `no-store` default for SSR documents. Asset
 compression, universal preview and asset retention remain productization work.

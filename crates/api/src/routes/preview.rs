@@ -217,9 +217,6 @@ pub(crate) async fn render(
         ))
         .into_response();
     };
-    let Some(runtime) = context.storefront_runtime.clone() else {
-        return ApiError::not_found("storefront route").into_response();
-    };
     let now = now_timestamp();
     let Some(token) = query.token.as_deref() else {
         return rejected_token();
@@ -248,6 +245,57 @@ pub(crate) async fn render(
         Ok(false) => {}
         Err(error) => return ApiError::new(error).into_response(),
     }
+
+    if let Some(universal) = context.universal_storefront.clone()
+        && universal.has_preview(store.id.as_str()).await
+    {
+        let currency = match CurrencyCode::new(store.currency_code.clone()) {
+            Ok(currency) => currency,
+            Err(error) => return ApiError::new(AppError::from(error)).into_response(),
+        };
+        let domain = store.primary_domain.clone().unwrap_or_default();
+        let request_id = request
+            .extensions()
+            .get::<RequestId>()
+            .map(|id| id.0.clone());
+        let scheme = request
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .filter(|value| *value == "http" || *value == "https")
+            .unwrap_or("https")
+            .to_owned();
+        let (mut parts, body) = request.into_parts();
+        let uri = match preview_runtime_url(&parts.uri).parse::<Uri>() {
+            Ok(uri) => uri,
+            Err(_) => {
+                return ApiError::new(AppError::validation("invalid preview path")).into_response();
+            }
+        };
+        parts.uri = uri;
+        if !domain.is_empty()
+            && let Ok(host) = domain.parse()
+        {
+            parts.headers.insert(HOST, host);
+        }
+        let preview_request = Request::from_parts(parts, body);
+        let store_context = StoreContext {
+            store_id: store.id.clone(),
+            domain,
+            locale: store.locale.clone(),
+            currency,
+            timezone: store.timezone.clone(),
+        };
+        return universal
+            .render_preview(preview_request, store_context, request_id, scheme)
+            .await;
+    }
+
+    let Some(runtime) = context.storefront_runtime.clone() else {
+        return ApiError::not_found("storefront route").into_response();
+    };
     let currency = match CurrencyCode::new(store.currency_code.clone()) {
         Ok(currency) => currency,
         Err(error) => return ApiError::new(AppError::from(error)).into_response(),
