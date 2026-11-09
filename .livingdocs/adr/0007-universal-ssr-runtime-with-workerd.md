@@ -177,6 +177,11 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 21 (2026-11-09) isolated preview assets under
+`/_fastcart/preview-assets/*`, propagated a trusted asset-prefix header, and
+made the generic template use it. Framework preview builds and asset GC remain
+open.
+
 Phase 20 (2026-11-09) isolated preview credentials: preview renders select only
 credentials marked preview, those credentials are read-only on store routes,
 and preview deployments without one receive no internal token. Field-level draft

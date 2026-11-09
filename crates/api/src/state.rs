@@ -69,6 +69,16 @@ pub trait UniversalStorefront: Send + Sync {
         false
     }
 
+    /// Serves one client asset from the store's preview artifact.
+    async fn serve_preview_asset(
+        &self,
+        _store_id: &str,
+        _path: String,
+        _headers: axum::http::HeaderMap,
+    ) -> axum::response::Response {
+        axum::http::StatusCode::NOT_FOUND.into_response()
+    }
+
     /// Starts and activates a preview deployment.
     async fn activate_preview(
         &self,

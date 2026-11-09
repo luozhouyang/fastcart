@@ -17,6 +17,29 @@ pub async fn serve(
     serve_path(context, path, headers).await
 }
 
+/// Serves an asset from the store's preview artifact.
+pub async fn serve_preview(
+    State(context): State<Arc<AppContext>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(runtime) = context.universal_storefront.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(store) = context.resolver.resolve_active(host).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    runtime
+        .serve_preview_asset(store.id.as_str(), path, headers)
+        .await
+}
+
 /// SvelteKit adapter compatibility: its immutable assets live at `/_app/*`.
 pub async fn serve_app(
     State(context): State<Arc<AppContext>>,

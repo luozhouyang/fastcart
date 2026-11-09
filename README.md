@@ -263,10 +263,14 @@ The file contains bearer secrets; keep the runtime directory operator-owned.
 
 `/preview/{path}?token=...` verifies the existing signed preview token and, when
 the store has a preview deployment, forwards to it with
-`x-fastcart-preview: 1`. A preview deployment only receives a credential marked
-`preview = true`; that credential is read-only on the commerce API. If no preview
-credential exists, the preview Worker gets no internal token. Draft page data
-injection into framework workers is not implemented yet.
+`x-fastcart-preview: 1` and `x-fastcart-assets-prefix:
+/_fastcart/preview-assets`. A preview deployment only receives a credential
+marked `preview = true`; that credential is read-only on the commerce API. If no
+preview credential exists, the preview Worker gets no internal token. Preview
+assets are served from the preview artifact at `/_fastcart/preview-assets/*`;
+templates that emit asset URLs must honor the prefix header (the generic
+template does). Draft page data injection into framework workers is not
+implemented yet.
 
 `/metrics` now includes `fastcart_ssr_requests_total`,
 `fastcart_ssr_errors_total`, `fastcart_ssr_cache_hits_total`,

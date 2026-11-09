@@ -126,6 +126,15 @@ impl UniversalStorefront for RecordingUniversal {
         self.preview
     }
 
+    async fn serve_preview_asset(
+        &self,
+        store_id: &str,
+        path: String,
+        _headers: axum::http::HeaderMap,
+    ) -> Response {
+        (StatusCode::OK, format!("preview-asset:{store_id}:{path}")).into_response()
+    }
+
     async fn activate_preview(
         &self,
         _store_id: &str,
@@ -1360,6 +1369,28 @@ async fn universal_assets_are_served_without_store_resolution() {
         .unwrap()
         .to_bytes();
     assert!(body.ends_with(b":_app/immutable/app.js"));
+
+    let preview_asset = active
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_fastcart/preview-assets/app.js")
+                .header("host", "shop.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_asset.status(), StatusCode::OK);
+    let body = preview_asset
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(body.starts_with(b"preview-asset:store_"));
+    assert!(body.ends_with(b":app.js"));
 
     let no_runtime = fixture(None, None, None).await;
     let missing = no_runtime

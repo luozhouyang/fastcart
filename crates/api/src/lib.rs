@@ -60,6 +60,10 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
             axum::routing::get(routes::universal_assets::serve),
         )
         .route(
+            "/_fastcart/preview-assets/{*path}",
+            axum::routing::get(routes::universal_assets::serve_preview),
+        )
+        .route(
             "/_app/{*path}",
             axum::routing::get(routes::universal_assets::serve_app),
         );

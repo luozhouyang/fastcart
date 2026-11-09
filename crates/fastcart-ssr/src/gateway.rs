@@ -196,6 +196,15 @@ impl SsrGateway {
         if context.preview {
             insert_header(&mut parts.headers, "x-fastcart-preview", "1")?;
         }
+        insert_header(
+            &mut parts.headers,
+            "x-fastcart-assets-prefix",
+            if context.preview {
+                "/_fastcart/preview-assets"
+            } else {
+                "/_fastcart/assets"
+            },
+        )?;
         let body = reqwest::Body::wrap_stream(body.into_data_stream());
         self.forward_parts(parts.method, parts.uri, parts.headers, body)
             .await

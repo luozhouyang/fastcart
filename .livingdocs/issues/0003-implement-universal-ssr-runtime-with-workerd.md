@@ -194,3 +194,10 @@ Preview deployments receive only preview-flagged credentials and those tokens ar
 read-only on store routes. Preview without a dedicated token has no internal API
 access. Field-level draft policies, preview asset roots and automatic preview
 deactivation remain open.
+
+### Phase 21 status
+
+Preview assets are served from the preview artifact at
+`/_fastcart/preview-assets/*`; the gateway injects a trusted prefix header and
+the generic template uses it. TanStack/Astro/SvelteKit still need preview-specific
+asset bases; asset GC remains open.

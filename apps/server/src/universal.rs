@@ -73,6 +73,7 @@ pub struct UniversalSsr {
     previews: RwLock<HashMap<String, Arc<Deployment>>>,
     history: RwLock<HashMap<String, Vec<DeploymentMeta>>>,
     asset_roots: RwLock<Vec<PathBuf>>,
+    preview_asset_roots: RwLock<Vec<PathBuf>>,
     response_cache: RwLock<HashMap<String, CachedResponse>>,
     default: Option<Arc<Deployment>>,
     metrics: Arc<Metrics>,
@@ -188,6 +189,10 @@ impl UniversalSsr {
         if let Some(default) = &default {
             asset_roots.push(default.asset_root.clone());
         }
+        let preview_asset_roots: Vec<PathBuf> = previews
+            .values()
+            .map(|deployment| deployment.asset_root.clone())
+            .collect();
         metrics.set_ssr_deployments(deployments.len() + previews.len());
         Ok(Some(Arc::new(Self {
             manager: Arc::new(Mutex::new(manager)),
@@ -195,6 +200,7 @@ impl UniversalSsr {
             previews: RwLock::new(previews),
             history: RwLock::new(HashMap::new()),
             asset_roots: RwLock::new(asset_roots),
+            preview_asset_roots: RwLock::new(preview_asset_roots),
             response_cache: RwLock::new(HashMap::new()),
             default,
             metrics,
@@ -475,6 +481,11 @@ impl UniversalSsr {
                 roots.push(old.asset_root.clone());
             }
             drop(roots);
+            let mut preview_roots = self.preview_asset_roots.write().await;
+            if !preview_roots.iter().any(|root| root == &old.asset_root) {
+                preview_roots.push(old.asset_root.clone());
+            }
+            drop(preview_roots);
             self.schedule_drain(old.group.clone());
         }
         self.refresh_deployment_metric().await;
@@ -492,6 +503,11 @@ impl UniversalSsr {
             roots.push(old.asset_root.clone());
         }
         drop(roots);
+        let mut preview_roots = self.preview_asset_roots.write().await;
+        if !preview_roots.iter().any(|root| root == &old.asset_root) {
+            preview_roots.push(old.asset_root.clone());
+        }
+        drop(preview_roots);
         self.schedule_drain(old.group.clone());
         self.refresh_deployment_metric().await;
         self.persist_state().await;
@@ -772,6 +788,28 @@ impl UniversalStorefront for UniversalSsr {
             return response;
         }
         for root in self.asset_roots.read().await.iter() {
+            let response = serve_asset(root, &path, &headers).await;
+            if response.status() != StatusCode::NOT_FOUND {
+                return response;
+            }
+        }
+        StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn serve_preview_asset(
+        &self,
+        store_id: &str,
+        path: String,
+        headers: axum::http::HeaderMap,
+    ) -> Response {
+        let Some(deployment) = self.preview_deployment(store_id).await else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let response = serve_asset(&deployment.asset_root, &path, &headers).await;
+        if response.status() != StatusCode::NOT_FOUND {
+            return response;
+        }
+        for root in self.preview_asset_roots.read().await.iter() {
             let response = serve_asset(root, &path, &headers).await;
             if response.status() != StatusCode::NOT_FOUND {
                 return response;
@@ -1728,11 +1766,29 @@ export default {
         let production = render_store(&runtime, "store_a").await;
         assert_eq!(production["deployment"], "deploy_a");
         assert_eq!(production["token"], "production-token");
+        let preview_asset = runtime
+            .serve_preview_asset("store_a", "app.js".to_owned(), axum::http::HeaderMap::new())
+            .await;
+        let preview_asset_body = axum::body::to_bytes(preview_asset.into_body(), 1024)
+            .await
+            .expect("preview asset");
+        assert_eq!(&preview_asset_body[..], b"asset-b");
+        let production_asset = runtime
+            .serve_asset("store_a", "app.js".to_owned(), axum::http::HeaderMap::new())
+            .await;
+        let production_asset_body = axum::body::to_bytes(production_asset.into_body(), 1024)
+            .await
+            .expect("production asset");
+        assert_eq!(&production_asset_body[..], b"asset-a");
         runtime
             .deactivate_preview("store_a")
             .await
             .expect("deactivate preview");
         assert!(!runtime.has_preview("store_a").await);
+        let missing_preview_asset = runtime
+            .serve_preview_asset("store_a", "app.js".to_owned(), axum::http::HeaderMap::new())
+            .await;
+        assert_eq!(missing_preview_asset.status(), StatusCode::NOT_FOUND);
         let missing_preview = runtime
             .render_preview(
                 Request::builder()

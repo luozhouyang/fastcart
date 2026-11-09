@@ -1,8 +1,8 @@
 const encoder = new TextEncoder();
 
-function html(body) {
+function html(body, assetsPrefix) {
   return new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FastCart Generic Storefront</title></head><body>${body}<script type="module" src="/_fastcart/assets/app.js"></script></body></html>`,
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FastCart Generic Storefront</title></head><body>${body}<script type="module" src="${assetsPrefix}/app.js"></script></body></html>`,
     { headers: { "content-type": "text/html; charset=utf-8" } },
   );
 }
@@ -53,6 +53,10 @@ export default {
     if (url.pathname === "/boom") {
       throw new Error("intentional fixture error");
     }
-    return html("<main><h1>FastCart Generic Fetch Handler</h1><p>No framework adapter.</p></main>");
+    const assetsPrefix = request.headers.get("x-fastcart-assets-prefix") ?? "/_fastcart/assets";
+    return html(
+      "<main><h1>FastCart Generic Fetch Handler</h1><p>No framework adapter.</p></main>",
+      assetsPrefix,
+    );
   },
 };
