@@ -5,8 +5,11 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use fastcart_http::ApiError;
 
-use crate::routes::preview::{PREVIEW_ASSET_COOKIE, verify_preview_token_unbound};
+use crate::routes::preview::{
+    PREVIEW_ASSET_COOKIE, configured_secret, is_revoked, verify_preview_token_unbound,
+};
 use crate::state::AppContext;
 
 /// Serves a client asset for the store resolved from `Host`.
@@ -36,12 +39,7 @@ pub async fn serve_preview(
     let Ok(store) = context.resolver.resolve_active(host).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(secret) = context
-        .config
-        .preview_secret
-        .as_deref()
-        .filter(|secret| !secret.is_empty())
-    else {
+    let Some(secret) = configured_secret(&context) else {
         return StatusCode::FORBIDDEN.into_response();
     };
     let Some(token) = preview_asset_token(&headers) else {
@@ -54,12 +52,21 @@ pub async fn serve_preview(
     if payload.store_id != store.id.as_str() {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let database = match context.databases.database(&store.id).await {
+        Ok(database) => database,
+        Err(error) => return ApiError::new(error.into()).into_response(),
+    };
+    match is_revoked(&database, &payload.jti, fastcart_kernel::now_timestamp()).await {
+        Ok(false) => {}
+        Ok(true) => return StatusCode::FORBIDDEN.into_response(),
+        Err(error) => return ApiError::new(error).into_response(),
+    }
     let mut response = runtime
         .serve_preview_asset(store.id.as_str(), path, headers)
         .await;
     response
         .headers_mut()
-        .insert(header::VARY, header::HeaderValue::from_static("Cookie"));
+        .append(header::VARY, header::HeaderValue::from_static("Cookie"));
     response
 }
 

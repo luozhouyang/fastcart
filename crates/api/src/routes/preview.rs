@@ -598,7 +598,7 @@ pub(crate) async fn render(
 ///
 /// Signature verification happens first; the denylist is only consulted for a
 /// cryptographically valid, unexpired token bound to the current store.
-async fn is_revoked(db: &StoreDatabase, jti: &str, now: i64) -> Result<bool, AppError> {
+pub(crate) async fn is_revoked(db: &StoreDatabase, jti: &str, now: i64) -> Result<bool, AppError> {
     let row = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM preview_token_revocations WHERE jti = ? AND expires_at > ?",
     )
@@ -612,7 +612,7 @@ async fn is_revoked(db: &StoreDatabase, jti: &str, now: i64) -> Result<bool, App
 
 /// Returns the configured preview secret, treating blank or weak values as
 /// absent so the preview surface stays disabled instead of weakening HMAC.
-fn configured_secret(context: &AppContext) -> Option<&str> {
+pub(crate) fn configured_secret(context: &AppContext) -> Option<&str> {
     context
         .config
         .preview_secret

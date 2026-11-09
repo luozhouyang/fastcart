@@ -254,3 +254,10 @@ Preview assets require an HttpOnly signed cookie scoped to
 `/_fastcart/preview-assets`, bound to the Host-resolved store and marked
 `Vary: Cookie`. The exact `/preview/` route is registered. Asset-time JTI
 revocation remains open.
+
+### Phase 30 status
+
+Preview asset authorization checks the signed token's `jti` against the store's
+revocation table after cookie/store validation. Revoked tokens get 403 and
+database failures fail closed. Cross-origin preview hosting and authorization
+caching remain open.

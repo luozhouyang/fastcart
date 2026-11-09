@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 30 (2026-11-09) made preview asset authorization honor the token's
+revocation record, so revoking a preview `jti` blocks assets immediately.
+Cross-origin preview hosting and authorization caching remain open.
+
 Phase 29 (2026-11-09) required a store-bound, HttpOnly signed preview cookie
 for `/_fastcart/preview-assets/*`, added `Vary: Cookie`, and registered the exact
 `/preview/` route. Asset-time JTI revocation remains open.

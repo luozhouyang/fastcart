@@ -58,8 +58,7 @@ Phase 29 restricts `/_fastcart/preview-assets/*`:
    explicit `/preview/` route closes that gap and is covered by the test.
 7. **No cookie revocation beyond token expiry.** Revoking the preview token's
    `jti` still stops new preview pages; an already-issued cookie remains valid
-   until token expiry for assets. Binding the cookie to revocation state would
-   require an asset-time revocation lookup.
+   until token expiry for assets. Phase 30 adds the asset-time revocation lookup.
 
 ## Verification
 

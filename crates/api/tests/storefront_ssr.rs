@@ -1345,8 +1345,9 @@ async fn universal_assets_are_served_without_store_resolution() {
         "page_1",
         now_timestamp(),
     )
-    .expect("preview token")
-    .token;
+    .expect("preview token");
+    let preview_token_value = preview_token.token.clone();
+    let preview_jti = preview_token.jti;
     let response = active
         .app
         .clone()
@@ -1390,7 +1391,7 @@ async fn universal_assets_are_served_without_store_resolution() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/preview/?token={preview_token}"))
+                .uri(format!("/preview/?token={preview_token_value}"))
                 .header("host", "shop.example.com")
                 .header("x-forwarded-proto", "https")
                 .body(Body::empty())
@@ -1476,6 +1477,31 @@ async fn universal_assets_are_served_without_store_resolution() {
         .await
         .unwrap();
     assert_eq!(wrong_store.status(), StatusCode::FORBIDDEN);
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO preview_token_revocations (jti, page_id, expires_at) VALUES (?, ?, ?)",
+    )
+    .bind(&preview_jti)
+    .bind("page_1")
+    .bind(now_timestamp() + 900)
+    .execute(active.database.pool())
+    .await
+    .expect("revoke preview token");
+    let revoked_asset = active
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_fastcart/preview-assets/app.js")
+                .header("host", "shop.example.com")
+                .header("cookie", format!("fastcart_preview={preview_token_value}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked_asset.status(), StatusCode::FORBIDDEN);
+
     let body = preview_asset
         .into_body()
         .collect()
