@@ -135,13 +135,22 @@ pub async fn internal_store_middleware(
         .map_err(|error| ApiError::new(error.into()))?
         .filter(|store| store.status == StoreStatus::Active)
         .ok_or_else(|| ApiError::new(AppError::not_found("store", store_id.as_str())))?;
-    if let Some(scope) = request.extensions().get::<InternalSsrScope>()
-        && scope
+    if let Some(scope) = request.extensions().get::<InternalSsrScope>() {
+        if scope
             .store_id
             .as_deref()
             .is_some_and(|allowed| allowed != store.id.as_str())
-    {
-        return Err(ApiError::new(AppError::Forbidden));
+        {
+            return Err(ApiError::new(AppError::Forbidden));
+        }
+        if scope.preview
+            && !matches!(
+                *request.method(),
+                axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+            )
+        {
+            return Err(ApiError::new(AppError::Forbidden));
+        }
     }
     let currency = CurrencyCode::new(store.currency_code.clone())
         .map_err(|error| ApiError::new(AppError::from(error)))?;

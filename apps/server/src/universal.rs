@@ -445,7 +445,7 @@ impl UniversalSsr {
             artifact_path: &artifact_path,
             listen,
             preview: true,
-            internal_token: self.config.internal_token.clone(),
+            internal_token: None,
         };
         let limits = ArtifactLimits {
             max_bytes: self.config.artifact_max_bytes,
@@ -582,10 +582,14 @@ fn deployment_specs(config: &SsrConfig) -> Vec<DeploymentSpec<'_>> {
                 artifact_path: &deployment.artifact_path,
                 listen,
                 preview: deployment.preview,
-                internal_token: deployment
-                    .internal_token
-                    .clone()
-                    .or_else(|| config.internal_token.clone()),
+                internal_token: if deployment.preview {
+                    deployment.internal_token.clone()
+                } else {
+                    deployment
+                        .internal_token
+                        .clone()
+                        .or_else(|| config.internal_token.clone())
+                },
             }
         })
         .collect()
@@ -682,7 +686,9 @@ impl UniversalStorefront for UniversalSsr {
             market_id: None,
             scheme,
             preview: false,
-            internal_token: self.credentials.token_for_store(store.store_id.as_str()),
+            internal_token: self
+                .credentials
+                .token_for_store(store.store_id.as_str(), false),
         };
         self.metrics.record_ssr_request();
         let cache_key = cache_key(&request, store.store_id.as_str());
@@ -798,7 +804,9 @@ impl UniversalStorefront for UniversalSsr {
             market_id: None,
             scheme,
             preview: true,
-            internal_token: self.credentials.token_for_store(store.store_id.as_str()),
+            internal_token: self
+                .credentials
+                .token_for_store(store.store_id.as_str(), true),
         };
         match deployment
             .gateway
@@ -1302,7 +1310,13 @@ export default {
         assert_eq!(value["token"], "server-secret");
         runtime
             .credentials
-            .rotate("store_01", "rotated-secret-token".to_owned(), None, 300)
+            .rotate(
+                "store_01",
+                "rotated-secret-token".to_owned(),
+                None,
+                300,
+                false,
+            )
             .expect("rotate credential");
         let rotated = runtime
             .render(
@@ -1596,14 +1610,24 @@ export default {
                 },
             ],
         };
-        let runtime = UniversalSsr::initialize(
-            &config,
-            Arc::new(Metrics::new()),
-            InternalSsrCredentials::default(),
-        )
-        .await
-        .expect("initialize")
-        .expect("enabled");
+        let credentials = InternalSsrCredentials::new(vec![
+            fastcart_api::state::InternalSsrToken {
+                token: "production-token".to_owned(),
+                store_id: Some("store_a".to_owned()),
+                expires_at: None,
+                preview: false,
+            },
+            fastcart_api::state::InternalSsrToken {
+                token: "preview-token".to_owned(),
+                store_id: Some("store_a".to_owned()),
+                expires_at: None,
+                preview: true,
+            },
+        ]);
+        let runtime = UniversalSsr::initialize(&config, Arc::new(Metrics::new()), credentials)
+            .await
+            .expect("initialize")
+            .expect("enabled");
 
         for (store_id, deployment_id) in [("store_a", "deploy_a"), ("store_b", "deploy_b")] {
             let request = Request::builder()
@@ -1700,8 +1724,10 @@ export default {
         assert!(runtime.has_preview("store_a").await);
         let preview = render_preview_store(&runtime, "store_a").await;
         assert_eq!(preview["deployment"], "deploy_preview");
+        assert_eq!(preview["token"], "preview-token");
         let production = render_store(&runtime, "store_a").await;
         assert_eq!(production["deployment"], "deploy_a");
+        assert_eq!(production["token"], "production-token");
         runtime
             .deactivate_preview("store_a")
             .await

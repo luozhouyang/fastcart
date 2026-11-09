@@ -253,11 +253,19 @@ async fn fixture(
                         token: "ssr-internal-secret".to_owned(),
                         store_id: Some(store.id.to_string()),
                         expires_at: None,
+                        preview: false,
                     },
                     InternalSsrToken {
                         token: "other-store-secret".to_owned(),
                         store_id: Some("store_other".to_owned()),
                         expires_at: None,
+                        preview: false,
+                    },
+                    InternalSsrToken {
+                        token: "preview-store-secret".to_owned(),
+                        store_id: Some(store.id.to_string()),
+                        expires_at: None,
+                        preview: true,
                     },
                 ]),
                 preview_secret: Some("preview-secret-that-is-at-least-32-bytes".to_owned()),
@@ -1277,6 +1285,39 @@ async fn internal_ssr_namespace_requires_token_and_uses_path_store() {
         .await
         .unwrap();
     assert_eq!(cross_store.status(), StatusCode::FORBIDDEN);
+
+    let preview_read = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&context_path)
+                .header("authorization", "Bearer preview-store-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_read.status(), StatusCode::OK);
+
+    let preview_write = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/internal/ssr/v1/stores/{}/carts",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer preview-store-secret")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_write.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

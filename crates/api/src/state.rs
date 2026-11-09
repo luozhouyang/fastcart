@@ -94,6 +94,9 @@ pub struct InternalSsrToken {
     pub store_id: Option<String>,
     /// Unix expiry; `None` means no scheduled expiry.
     pub expires_at: Option<i64>,
+    /// Whether this credential is for a preview deployment.
+    #[serde(default)]
+    pub preview: bool,
 }
 
 impl std::fmt::Debug for InternalSsrToken {
@@ -103,6 +106,7 @@ impl std::fmt::Debug for InternalSsrToken {
             .field("token", &"<redacted>")
             .field("store_id", &self.store_id)
             .field("expires_at", &self.expires_at)
+            .field("preview", &self.preview)
             .finish()
     }
 }
@@ -252,7 +256,7 @@ impl InternalSsrCredentials {
 
     /// Returns the active token for a store, preferring a store-scoped entry.
     #[must_use]
-    pub fn token_for_store(&self, store_id: &str) -> Option<String> {
+    pub fn token_for_store(&self, store_id: &str, preview: bool) -> Option<String> {
         let now = fastcart_kernel::now_timestamp();
         let tokens = self.tokens.read().ok()?;
         tokens
@@ -260,11 +264,17 @@ impl InternalSsrCredentials {
             .rev()
             .find(|token| {
                 token.store_id.as_deref() == Some(store_id)
+                    && token.preview == preview
                     && token.expires_at.is_none_or(|expiry| expiry > now)
             })
             .or_else(|| {
+                if preview {
+                    return None;
+                }
                 tokens.iter().rev().find(|token| {
-                    token.store_id.is_none() && token.expires_at.is_none_or(|expiry| expiry > now)
+                    token.store_id.is_none()
+                        && !token.preview
+                        && token.expires_at.is_none_or(|expiry| expiry > now)
                 })
             })
             .map(|token| token.token.clone())
@@ -277,12 +287,13 @@ impl InternalSsrCredentials {
         token: String,
         expires_at: Option<i64>,
         grace_seconds: i64,
+        preview: bool,
     ) -> Result<(), String> {
         let now = fastcart_kernel::now_timestamp();
         let deadline = now.saturating_add(grace_seconds.max(0));
         if let Ok(mut tokens) = self.tokens.write() {
             for existing in &mut *tokens {
-                if existing.store_id.as_deref() == Some(store_id) {
+                if existing.store_id.as_deref() == Some(store_id) && existing.preview == preview {
                     existing.expires_at = Some(
                         existing
                             .expires_at
@@ -294,6 +305,7 @@ impl InternalSsrCredentials {
                 token,
                 store_id: Some(store_id.to_owned()),
                 expires_at,
+                preview,
             });
         }
         self.persist().map_err(|error| error.to_string())
@@ -674,6 +686,7 @@ impl AppContext {
                 token,
                 store_id: None,
                 expires_at: None,
+                preview: false,
             }]);
         }
         let auth = AuthService::new(platform.clone());
@@ -854,12 +867,19 @@ mod credential_tests {
                 token: "initial-token-0123456789".to_owned(),
                 store_id: Some("store_a".to_owned()),
                 expires_at: None,
+                preview: false,
             }],
         );
         assert!(credentials.validate("initial-token-0123456789").is_some());
 
         credentials
-            .rotate("store_a", "rotated-token-0123456789".to_owned(), None, 0)
+            .rotate(
+                "store_a",
+                "rotated-token-0123456789".to_owned(),
+                None,
+                0,
+                false,
+            )
             .expect("rotate");
         assert!(credentials.validate("rotated-token-0123456789").is_some());
         assert!(credentials.validate("initial-token-0123456789").is_none());
@@ -890,6 +910,7 @@ mod credential_tests {
                 token: "expired-token-0123456789".to_owned(),
                 store_id: None,
                 expires_at: Some(1),
+                preview: false,
             }],
         );
         assert!(credentials.is_empty());

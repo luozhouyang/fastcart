@@ -290,6 +290,8 @@ pub async fn internal_fetch_auth_middleware(
 pub struct InternalSsrScope {
     /// Allowed store; `None` means all stores.
     pub store_id: Option<String>,
+    /// Whether the credential is read-only preview access.
+    pub preview: bool,
 }
 
 /// Authenticates the server-only SSR commerce API.
@@ -315,6 +317,7 @@ pub async fn internal_ssr_auth_middleware(
     };
     request.extensions_mut().insert(InternalSsrScope {
         store_id: credential.store_id.clone(),
+        preview: credential.preview,
     });
     Ok(next.run(request).await)
 }

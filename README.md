@@ -254,16 +254,19 @@ curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/rotate-
 ```
 
 The new token becomes the gateway credential immediately; older scoped tokens
-remain valid for `grace_seconds` so in-flight Worker calls can finish. Rotation
-state is persisted atomically to `ssr.credentials_path` (default
+remain valid for `grace_seconds` so in-flight Worker calls can finish. Add
+`"preview": true` to rotate a preview-only credential. Rotation state is
+persisted atomically to `ssr.credentials_path` (default
 `<runtime_dir>/internal-ssr-credentials.json`, mode `0600` on Unix) and reloaded
 on restart. Config tokens are merged into the persisted set when they are new.
 The file contains bearer secrets; keep the runtime directory operator-owned.
 
 `/preview/{path}?token=...` verifies the existing signed preview token and, when
 the store has a preview deployment, forwards to it with
-`x-fastcart-preview: 1`. Preview deployments inherit the production data policy;
-draft page data injection into framework workers is not implemented yet.
+`x-fastcart-preview: 1`. A preview deployment only receives a credential marked
+`preview = true`; that credential is read-only on the commerce API. If no preview
+credential exists, the preview Worker gets no internal token. Draft page data
+injection into framework workers is not implemented yet.
 
 `/metrics` now includes `fastcart_ssr_requests_total`,
 `fastcart_ssr_errors_total`, `fastcart_ssr_cache_hits_total`,

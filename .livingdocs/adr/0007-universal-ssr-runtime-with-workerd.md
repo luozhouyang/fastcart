@@ -177,6 +177,11 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 20 (2026-11-09) isolated preview credentials: preview renders select only
+credentials marked preview, those credentials are read-only on store routes,
+and preview deployments without one receive no internal token. Field-level draft
+policies and preview asset roots remain open.
+
 Phase 19 (2026-11-09) added a persistent, atomically written credential store
 with Unix `0600` mode, rotation reload and expired-token filtering. Secret
 manager integration, revocation and multi-instance coordination remain open.

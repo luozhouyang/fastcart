@@ -330,6 +330,7 @@ fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsr
                     token,
                     store_id: None,
                     expires_at: None,
+                    preview: false,
                 }]
             })
             .unwrap_or_default()
@@ -348,6 +349,7 @@ fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsr
                     token: deployment.internal_token.clone()?,
                     store_id: Some(deployment.store_id.clone()),
                     expires_at: None,
+                    preview: deployment.preview,
                 })
             })
             .collect()
@@ -356,6 +358,7 @@ fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsr
             token,
             store_id: None,
             expires_at: None,
+            preview: false,
         }]
     } else {
         config
@@ -367,6 +370,7 @@ fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsr
                     token: deployment.internal_token.clone()?,
                     store_id: Some(deployment.store_id.clone()),
                     expires_at: None,
+                    preview: deployment.preview,
                 })
             })
             .collect()

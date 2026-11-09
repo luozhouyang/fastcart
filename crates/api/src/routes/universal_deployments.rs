@@ -30,6 +30,8 @@ struct RotateTokenRequest {
     token: String,
     expires_at: Option<i64>,
     grace_seconds: Option<i64>,
+    #[serde(default)]
+    preview: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +111,9 @@ async fn deactivate_preview(
 }
 
 fn ensure_scope(scope: &InternalSsrScope, store_id: &str) -> ApiResult<()> {
+    if scope.preview {
+        return Err(ApiError::new(AppError::Forbidden));
+    }
     if scope
         .store_id
         .as_deref()
@@ -146,6 +151,7 @@ async fn rotate_token(
             request.token,
             request.expires_at,
             request.grace_seconds.unwrap_or(300),
+            request.preview,
         )
         .map_err(|error| ApiError::new(AppError::internal(error)))?;
     Ok(StatusCode::NO_CONTENT.into_response())

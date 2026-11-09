@@ -187,3 +187,10 @@ Rotated credentials are persisted atomically to
 mode `0600`), reloaded on restart, and merged with new config tokens. Expired
 tokens are filtered. Secret-manager integration, explicit revocation and
 multi-instance coordination remain open.
+
+### Phase 20 status
+
+Preview deployments receive only preview-flagged credentials and those tokens are
+read-only on store routes. Preview without a dedicated token has no internal API
+access. Field-level draft policies, preview asset roots and automatic preview
+deactivation remain open.
