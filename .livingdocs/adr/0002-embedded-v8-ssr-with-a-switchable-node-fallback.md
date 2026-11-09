@@ -3,12 +3,18 @@ type: ADR
 title: Embedded V8 SSR with a switchable Node fallback
 description: Implement deno_core V8 rendering and keep Node as a config-selectable fallback.
 owner: luozhouyang
-status: Accepted
+status: Superseded
 implementation: not-started
+superseded_by: 0007
 timestamp: 2026-11-06T16:17:43Z
 ---
 
 # 0002. Embedded V8 SSR with a switchable Node fallback
+
+> **Superseded by [ADR 0007](0007-universal-ssr-runtime-with-workerd.md).**
+> This record documents the earlier embedded-V8 decision for historical context.
+> FastCart no longer plans to implement `runtime-v8` or the `v8`/`node`/`auto`
+> runtime switch. The universal workerd runtime replaces both adapters.
 
 ## Context
 

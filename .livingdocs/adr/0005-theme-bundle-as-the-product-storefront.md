@@ -3,12 +3,20 @@ type: ADR
 title: Theme bundle as the product storefront
 description: The theme bundle and Rust SSR pipeline are the storefront; the TanStack app is a harness.
 owner: luozhouyang
-status: Accepted
+status: Superseded
 implementation: partial
+superseded_by: 0007
 timestamp: 2026-11-06T16:17:43Z
 ---
 
 # 0005. Theme bundle as the product storefront
+
+> **Superseded by [ADR 0007](0007-universal-ssr-runtime-with-workerd.md).**
+> The universal SSR runtime accepts framework-built Worker artifacts, so the
+> theme bundle is no longer the only product storefront contract. The theme
+> registry remains transitional, while `apps/storefront` becomes the TanStack
+> Start reference for the new architecture. TanStack Start and Astro storefronts
+> are first-class targets.
 
 ## Context
 

@@ -1,3 +1,8 @@
+> **Legacy / transitional.** This Node sidecar is not part of the target
+> architecture. FastCart is replacing the Node/V8 adapters with the universal
+> `workerd` SSR runtime. Do not extend this component; see
+> [ADR 0007](../../.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md).
+
 # @fastcart/theme-sidecar
 
 Node.js sidecar for the Fastcart `NodeRuntime`. It loads a trusted theme

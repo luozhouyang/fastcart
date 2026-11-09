@@ -2,12 +2,19 @@
 type: Issue
 title: Implement embedded V8 SSR with runtime switching
 description: Make runtime-v8 a real deno_core adapter with v8/node/auto selection and parity tests.
-status: open
+status: superseded
 labels: [area:ssr]
 timestamp: 2026-11-06T16:18:26Z
+superseded_by: 0003
 ---
 
 ## 0001. Implement embedded V8 SSR with runtime switching
+
+> **Superseded by [Issue 0003](0003-implement-universal-ssr-runtime-with-workerd.md)
+> and [ADR 0007](../adr/0007-universal-ssr-runtime-with-workerd.md).**
+> Do not implement `runtime-v8`, `runtime-node` switching or the `auto` fallback.
+> The universal workerd runtime replaces both adapters; the scope and
+> acceptance criteria below are historical and must not be executed.
 
 Implements [ADR 0002](../adr/0002-embedded-v8-ssr-with-a-switchable-node-fallback.md) and the storefront requirement in [PRD 0001](../prd/0001-fastcart-v1-platform-requirements.md). The Node sidecar is the only working SSR adapter today; `runtime-v8` is a stub. This work makes V8 a real adapter and lets a deployment choose `v8`, `node` or `auto` without rebuilding.
 

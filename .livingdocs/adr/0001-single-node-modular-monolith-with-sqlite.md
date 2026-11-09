@@ -12,13 +12,13 @@ timestamp: 2026-11-06T16:17:43Z
 
 ## Context
 
-Fastcart targets self-hosted independent stores that want Medusa-class commerce capabilities without operating a distributed system. The platform architecture sets mandatory PostgreSQL, Redis, Kubernetes and message brokers as explicit non-goals for the first release. The current codebase is a single Rust workspace with a platform database, one SQLite database per store, in-process events, a transactional outbox and a persistent SQLite job queue; the React admin and theme SSR are separate front ends over the same HTTP API.
+Fastcart targets self-hosted independent stores that want Medusa-class commerce capabilities without operating a distributed system. The platform architecture sets mandatory PostgreSQL, Redis, Kubernetes and message brokers as explicit non-goals for the first release. The current codebase is a single Rust workspace with a platform database, one SQLite database per store, in-process events, a transactional outbox and a persistent SQLite job queue; the React admin is served from the same deployment and storefront SSR is delegated to a process-isolated runtime.
 
 A decision is required because adding a second database, a broker or a distributed scheduler would change deployment, failure modes and the minimum operator skill level for every future feature.
 
 ## Decision
 
-We will ship Fastcart as one Rust modular monolith deployable as a single process image, with SQLite as the only required datastore: a platform database for the store registry, users, sessions and provisioning, and one SQLite database per store for commerce data. Events, webhooks, jobs and workflows run in-process against the store database and the outbox; no Redis, PostgreSQL or external broker is required for a supported deployment. The Node SSR sidecar is an optional companion process, not a mandatory service. Infrastructure boundaries stay behind traits so a PostgreSQL adapter can be added later without changing module APIs.
+We will ship Fastcart as one Rust modular monolith deployed as a single `fastcart-serve` process, with SQLite as the only required datastore: a platform database for the store registry, users, sessions and provisioning, and one SQLite database per store for commerce data. Events, webhooks, jobs and workflows run in-process against the store database and the outbox; no Redis, PostgreSQL or external broker is required for a supported deployment. The universal SSR runtime (`workerd`) is an optional companion process, not a mandatory service, and is managed by `fastcart-serve` under [ADR 0007](0007-universal-ssr-runtime-with-workerd.md). Infrastructure boundaries stay behind traits so a PostgreSQL adapter can be added later without changing module APIs.
 
 **Rejected alternatives:**
 
@@ -48,14 +48,14 @@ We will ship Fastcart as one Rust modular monolith deployable as a single proces
 
 ## Verification
 
-**Implementation impact:** `Cargo.toml`, `apps/server`, `crates/infrastructure`, `crates/api`, `Dockerfile`, `docker-compose.yml`.
+**Implementation impact:** `Cargo.toml`, `apps/server`, `crates/infrastructure`, `crates/api`, `crates/fastcart-ssr`.
 
 **Verification criteria:**
 
-- A clean deployment starts from the documented image with only the platform database, a store directory and optional sidecar configuration.
+- A clean deployment starts from the documented binary with only the platform database, a store directory and optional workerd runtime configuration.
 - `cargo test --workspace` passes without a PostgreSQL or Redis service.
 - The isolation suite provisions two stores and observes no shared commerce rows.
-- The Docker health check reaches `/health/ready` with no external datastore.
+- The health check reaches `/health/ready` with no external datastore.
 
 ## Implementation status
 
@@ -64,6 +64,8 @@ databases and in-process outbox/job queue exist (`Cargo.toml`,
 `apps/server/src/main.rs`, `crates/infrastructure/src/store_db_manager.rs`,
 `crates/infrastructure/src/event_bus.rs`, `crates/infrastructure/src/jobs.rs`,
 `migrations/platform`, `migrations/store`). The PostgreSQL adapter and a written
-single-node deployment-limits/scale-up guide do not exist yet.
+single-node deployment-limits/scale-up guide do not exist yet. The universal
+`workerd` runtime is not implemented; the legacy Node sidecar remains
+transitional under ADR 0007.
 
 This ADR is a decision, not a claim of completion.

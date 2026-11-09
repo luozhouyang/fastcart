@@ -422,7 +422,7 @@ impl Config {
             self.storefront.themes_dir = PathBuf::from(value);
         }
         if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
-            // An empty pass-through value (for example from docker-compose)
+            // An empty pass-through value from an orchestrator
             // disables preview rather than configuring a zero-byte secret.
             self.server.preview_secret = (!value.trim().is_empty()).then_some(value);
         }

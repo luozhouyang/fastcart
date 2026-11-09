@@ -8,6 +8,8 @@ data
 docs/architecture
 .livingdocs/index.md
 .livingdocs/*/index.md
+# Kept verbatim from the approved architecture plan
+.livingdocs/architecture/universal-ssr-runtime.md
 apps/storefront/src/routeTree.gen.ts
 
 .claude

@@ -1,15 +1,14 @@
 # Fastcart Storefront (development harness)
 
-This app is a non-production development harness for experimenting with
-TanStack Start. It is not the product storefront and is not shipped or required
-in production.
+This app is a development harness and reference for the first framework target
+of the universal SSR runtime. It is not the production storefront yet.
 
-Production storefront routes and commerce UI live in theme bundles under
-[`themes/`](../../themes/), primarily [`themes/default`](../../themes/default).
-Those routes are rendered by the Rust API through the Node sidecar; the embedded
-V8 runtime is still a stub. See
-[ADR 0005](../../.livingdocs/adr/0005-theme-bundle-as-the-product-storefront.md)
-for the decision.
+The target architecture runs framework-built Fetch-handler artifacts in a
+process-isolated `workerd` runtime managed by `fastcart-serve`. TanStack Start is
+the first supported framework; the legacy theme bundles and Node sidecar are
+transitional and will be removed after the migration. See
+[ADR 0007](../../.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md) and
+the [universal SSR runtime plan](../../.livingdocs/architecture/universal-ssr-runtime.md).
 
 ## Current scope
 
@@ -24,5 +23,5 @@ Vite serves it on port 3000.
 
 ## Related
 
-- [Theme sidecar](../theme-sidecar/README.md) — the HTTP rendering contract.
+- [Universal SSR runtime plan](../../.livingdocs/architecture/universal-ssr-runtime.md).
 - [Repository README](../../README.md).

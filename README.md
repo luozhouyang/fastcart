@@ -2,23 +2,22 @@
 
 A lightweight, self-hosted, multi-store commerce platform built with Rust and React.
 
-Fastcart aims to deliver the developer experience of modern headless commerce platforms while keeping deployment simple: a single Rust modular monolith, one SQLite database per store, a React admin application, and an embedded storefront runtime.
+Fastcart aims to deliver the developer experience of modern headless commerce platforms while keeping deployment simple: a single Rust modular monolith, one SQLite database per store, a React admin application, and a process-isolated universal SSR runtime.
 
-> **Status: broad Rust backend, a narrow but functional Admin, and a storefront shell.**
+> **Status: broad Rust backend, an operational Admin, and a storefront runtime in migration.**
 > The Rust platform, commerce modules, workflows, HTTP APIs, theme registry,
 > webhook and email delivery, observability and OpenAPI document are implemented
 > and covered by unit and integration tests. Typed TypeScript SDKs provide the
-> front-end client surface. The React Admin is a real application covering
-> orders, catalog draft create/list/export, inventory, customers, content,
-> themes, forms, inbox, notifications and settings, but it has no price-authoring,
-> promotion, region, shipping or tax screens even though the backend exposes
-> those operations. `apps/storefront` is a non-production development harness.
-> Storefront SSR is wired through the Node sidecar; the embedded V8 adapter is
-> still a stub, and selecting it disables SSR.
+> front-end client surface. The React Admin covers orders, catalog, inventory,
+> customers, promotions, content, themes, forms, inbox, notifications, regions,
+> shipping, tax and settings. `apps/storefront` is a TanStack Start reference
+> harness. Storefront SSR is being replaced by the universal `workerd` runtime
+> ([ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md)).
+> The legacy Node sidecar remains transitional until the migration lands.
 
 ## Why Fastcart
 
-- **Simple to deploy.** Single-node, single-binary first. No mandatory Redis, PostgreSQL or message broker.
+- **Simple to deploy.** Single-node first. The commerce server is one binary; SSR runs in a supervised, process-isolated runtime. No mandatory Docker, Redis, PostgreSQL or message broker.
 - **Multi-store by design.** Every store owns an isolated SQLite database; store context is resolved per request from trusted platform metadata.
 - **Rust performance.** Async Rust with Axum and Tokio, integer money, explicit module boundaries.
 - **Medusa-style modules.** Catalog, pricing, inventory, customer, cart, promotion, checkout, order, payment, shipping, tax, content and webhooks are independent crates; workflows compose them.
@@ -60,7 +59,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - SQLite-backed persistent job queue with atomic claiming and lease expiry.
 - Signed webhook delivery from outbox events with idempotent fan-out, retry/backoff, crash recovery and replay.
 - Provider-independent transactional email with queued `send_email` jobs, SMTP (`lettre`) and Resend (`resend-rs`) providers, plus log and in-memory test providers.
-- Storefront SSR through the Node sidecar: `worker_count` creates that many HTTP clients behind a Rust semaphore with `queue_capacity` in-flight slots and fail-fast rejection, while the sidecar runs each render in its own worker thread with heap and wall-clock limits. The sidecar itself has no global concurrency cap, and the worker cap is not CPU isolation. Active theme context and trusted store resolution are applied before rendering.
+- Storefront SSR: the accepted target is a framework-agnostic universal runtime. `fastcart-serve` resolves the store, strips client-supplied internal headers, injects trusted context and forwards the request to a process-isolated `workerd` runtime, which executes a standard Fetch-handler artifact and calls the internal Commerce API. The legacy Node sidecar (worker thread, heap and wall-clock limits, no CPU isolation) remains transitional and must not be extended; see [ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md).
 - Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; email jobs; simple job handlers.
 - Store-scoped Moka cache with generation-based invalidation.
 - Prometheus-compatible `/metrics` with latency histograms, plus baseline security response headers.
@@ -71,21 +70,21 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 
 ## Repository layout
 
-| Path                         | Purpose                                                          |
-| ---------------------------- | ---------------------------------------------------------------- |
-| `apps/server`                | Axum server bootstrap, configuration, graceful shutdown          |
-| `apps/admin`                 | React Admin application for the implemented store operations     |
-| `apps/storefront`            | TanStack Start harness (non-production; see README)              |
-| `crates/kernel`              | IDs, money, contexts, validation, errors                         |
-| `crates/platform`            | Platform DB, stores, domains, auth, RBAC, provisioning           |
-| `crates/infrastructure`      | SQLite pools, migrations, cache, outbox, jobs, storage           |
-| `crates/http`                | Error envelope, extractors, auth/store middleware, rate limiting |
-| `crates/modules/*`           | The independent commerce modules listed above                    |
-| `crates/workflows`           | Cart pricing, checkout and maintenance workflows                 |
-| `crates/api`                 | Versioned HTTP surface and DTOs                                  |
-| `crates/plugin`, `crates/ai` | Extension foundations                                            |
-| `migrations/platform`        | Platform schema                                                  |
-| `migrations/store`           | Per-store schema (catalog, pricing, inventory, orders, …)        |
+| Path                         | Purpose                                                           |
+| ---------------------------- | ----------------------------------------------------------------- |
+| `apps/server`                | Axum server bootstrap, configuration, graceful shutdown           |
+| `apps/admin`                 | React Admin application for the implemented store operations      |
+| `apps/storefront`            | TanStack Start reference harness (first universal-runtime target) |
+| `crates/kernel`              | IDs, money, contexts, validation, errors                          |
+| `crates/platform`            | Platform DB, stores, domains, auth, RBAC, provisioning            |
+| `crates/infrastructure`      | SQLite pools, migrations, cache, outbox, jobs, storage            |
+| `crates/http`                | Error envelope, extractors, auth/store middleware, rate limiting  |
+| `crates/modules/*`           | The independent commerce modules listed above                     |
+| `crates/workflows`           | Cart pricing, checkout and maintenance workflows                  |
+| `crates/api`                 | Versioned HTTP surface and DTOs                                   |
+| `crates/plugin`, `crates/ai` | Extension foundations                                             |
+| `migrations/platform`        | Platform schema                                                   |
+| `migrations/store`           | Per-store schema (catalog, pricing, inventory, orders, …)         |
 
 ## Getting started
 
@@ -113,122 +112,83 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_SMTP_HOST`, `FASTCART_SMTP_PORT`, `FASTCART_SMTP_USERNAME`,
   `FASTCART_SMTP_PASSWORD`, `FASTCART_SMTP_SECURITY` — SMTP delivery
 - `FASTCART_RESEND_API_KEY` — Resend delivery
-- `FASTCART_STOREFRONT_ENABLED`, `FASTCART_STOREFRONT_RUNTIME` — enable SSR (default off) and select `node`/`v8`
+- `FASTCART_STOREFRONT_ENABLED` — enable SSR (default off)
 - `FASTCART_STOREFRONT_STREAMING`, `FASTCART_STOREFRONT_STREAM_TIMEOUT_MS` — allow streamed HTML (default on) and its total time budget (default 30s)
-- `FASTCART_STOREFRONT_NODE_URL`, `FASTCART_STOREFRONT_NODE_SECRET` — Node sidecar endpoint and bearer secret
-- `FASTCART_THEMES_DIR` — trusted theme bundle directory (default `./themes`)
-- `FASTCART_INTERNAL_FETCH_SECRET` — mounts the secret-gated `/internal/storefront` HTTP surface
+- `FASTCART_THEMES_DIR` — trusted theme bundle directory (default `./themes`); transitional until artifacts replace theme bundles
+- `FASTCART_INTERNAL_FETCH_SECRET` — legacy secret-gated `/internal/storefront` surface; the target SSR gateway uses a scoped internal credential
 - `FASTCART_CAPABILITY_SECRET` — signs theme capability grants so plugin endpoints can verify them
 
-Storefront SSR uses the Node sidecar (`runtime = "node"`, the default runtime).
-The embedded `v8` provider is not built yet; starting with `runtime = "v8"`
-logs a warning and serves API routes without SSR.
+### Storefront SSR (target architecture)
 
-Build the bundled theme and start the sidecar before enabling storefront SSR:
+The accepted design is a framework-agnostic universal SSR runtime:
+`fastcart-serve` forwards storefront requests to a process-isolated `workerd`
+runtime, which executes a standard Fetch-handler artifact and calls the internal
+Commerce API. TanStack Start is the first supported framework; Astro is second.
+The artifact contract, runtime manager, gateway, trusted request context and
+deployment lifecycle are specified in [ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md)
+and the [universal SSR runtime plan](.livingdocs/architecture/universal-ssr-runtime.md).
+Implementation has not started.
+
+The legacy Node renderer (`runtime-node`, `apps/theme-sidecar`,
+`FASTCART_STOREFRONT_RUNTIME=node|v8`) remains in the tree only as transitional
+code. It is not the target deployment, must not be extended, and will be removed
+once the workerd path passes parity. Node and Docker are not required by the
+target architecture. For local migration testing only, the legacy sidecar still
+starts with:
 
 ```bash
 pnpm --filter @fastcart/theme-default build
 SIDECAR_SECRET=change-me pnpm --filter @fastcart/theme-sidecar start
+# and set FASTCART_STOREFRONT_NODE_SECRET=change-me on the server
 ```
 
-The sidecar listens on `127.0.0.1:8788` by default; set `HOST=0.0.0.0` in a
-container and always pair a non-loopback bind with `SIDECAR_SECRET`. New stores
-get the default theme registered and activated automatically when the bundle is
-present under `storefront.themes_dir`.
+### Storefront trust model
 
-Themes may return a `ReadableStream` or async iterable from `render`. When
-`streaming_enabled` is on, the sidecar forwards the theme's status and headers
-and then the HTML bytes as they are produced, marking the response with
-`x-fastcart-mode: stream`. The bundled default theme uses
-`renderToReadableStream`, so the document head, styles and shell reach the
-browser before the page tree finishes. Buffered themes and older hosts keep the
-existing JSON contract. Streaming requires the reverse proxy to pass chunked
-responses through without buffering.
-
-### Theme trust model
-
-Theme bundles are **trusted server-side code**. Registering and activating a
-theme is a privileged operation: the sidecar imports the bundle in a worker
-thread and the bundle can use Node APIs, including the filesystem and network.
-The worker caps heap and wall-clock time; it does not cap CPU or provide an
-operating-system sandbox. It is a reliability boundary, not a security boundary.
-
-Run the sidecar with the same care as any application server: a non-root user,
-a read-only root filesystem with only the theme directory writable during
-deploys, no unnecessary network egress, and an OS/container security profile.
-Keep the sidecar bound to loopback or behind `SIDECAR_SECRET`. If untrusted
-third-party themes become a requirement, use a separate sidecar per trust
-domain or wait for the embedded V8 runtime, which can restrict host access at
-the isolate level.
-
-Themes may also declare dynamic routes in `theme.json`, for example
-`"routes": { "product": "/products/{handle}", "collection": "/collections/{handle}" }`.
-A published page whose `page_type` matches the route kind is used as the
-template; the host resolves the referenced record and exposes it to the theme as
-`data.context.route`. The sitemap only advertises those URLs when the route and
-a published template exist. Draft previews follow the same matching: the
-preview path selects the handle, an optional `preview_handle` query parameter
-overrides it, and otherwise the first published record of the template's kind
-is used. Sitemap entries carry the record's UTC update time as `<lastmod>`;
-`changefreq`/`priority` are omitted because search engines ignore them, and
-`hreflang` alternates require a translation model the platform does not yet
-have.
-
-Theme editor contract: `editor.manifest.json` is the stable, data-only contract
-used by the admin palette, inspector and server-side page validation.
-`editor.js` is an optional executable component registry for hosts that want to
-render theme components themselves. Theme bundles inline their own React copy,
-so `editor.js` must run in an isolated document such as a sandboxed iframe; it
-must not be imported into another React application's tree.
+Storefront artifacts are **trusted server-side code**. Registering and activating
+an artifact is a privileged, audited operation. The target runtime executes
+artifacts in a process-isolated `workerd` group; a workerd isolate is a
+reliability boundary, not an operating-system sandbox. Untrusted third-party code
+requires a dedicated process group plus an OS or VM boundary, and storefront
+code never receives database access, payment secrets, admin credentials or other
+backend secrets. Static assets are served by Rust, not by the Worker. See
+[ADR 0003](.livingdocs/adr/0003-trusted-theme-bundles-with-worker-limits.md).
 
 Local development uses `cookie_secure = false` and explicit `cors_origins` in `config/config.example.toml`.
 
-## Deployment (Docker Compose)
+## Deployment
 
-`docker-compose.yml` runs the production-shaped stack as three containers:
+Docker is **not** a supported deployment path. The Dockerfiles, Compose stack,
+Admin nginx image and theme-sidecar image have been removed from the repository;
+do not reintroduce them for the workerd migration.
 
-| Service         | Image                    | Role                                                                          | Published port             |
-| --------------- | ------------------------ | ----------------------------------------------------------------------------- | -------------------------- |
-| `fastcart`      | `fastcart/server`        | Rust API and storefront host; SQLite data lives in the `data` volume          | `127.0.0.1:8080`           |
-| `theme-sidecar` | `fastcart/theme-sidecar` | Node 22 renderer for the bundled theme; internal-only render and asset server | none (`8788` in the stack) |
-| `admin`         | `fastcart/admin`         | nginx serving the Admin SPA and proxying `/api/` to `fastcart:8080`           | `127.0.0.1:8081`           |
+The target topology is two local processes on one host:
 
-The server and sidecar images both build `themes/default` from source and bake
-the bundle in; rebuild those two images after changing the theme. The Admin
-image contains only `apps/admin/dist` and nginx, not `node_modules`. The server
-image sets `FASTCART_THEMES_DIR=/app/themes`, and the sidecar resolves the
-auto-registered default bundle at `/app/themes/default`.
+| Process          | Role                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ |
+| `fastcart-serve` | Public HTTP entry point, commerce API, Admin, static assets, SQLite, store resolution and SSR management     |
+| `workerd`        | Pinned, process-isolated SSR runtime; executes framework-built Fetch-handler artifacts on a private listener |
 
-Create secrets, then build and start the stack:
+`workerd` is pinned to a tested version and compatibility date. `fastcart-serve`
+generates its configuration, starts and health-checks it, and restarts it with
+backoff. The SSR gateway strips client-supplied internal context headers and
+injects a trusted store/deployment/request context before forwarding. Static
+assets are served by Rust at `/_fastcart/assets/`.
 
-```bash
-export SIDECAR_SECRET="$(openssl rand -base64 48)"
-export FASTCART_PREVIEW_SECRET="$(openssl rand -base64 48)"
-export FASTCART_CAPABILITY_SECRET="$(openssl rand -base64 48)"
-export FASTCART_COOKIE_SECURE=true   # when served over HTTPS
-docker compose build
-docker compose up -d
-```
+The universal runtime, artifact pipeline, supervisor and gateway are **not
+implemented yet**, so this topology is not runnable today. The legacy Node
+sidecar is a migration aid only; it is not the supported deployment and must not
+be extended. See [ADR 0007](.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md).
 
-Open the Admin at <http://127.0.0.1:8081>. For local HTTP-only testing set
-`FASTCART_COOKIE_SECURE=false`; otherwise the browser will not send the secure
-session cookie over plain HTTP.
+Configuration is TOML plus environment overrides. Required and recommended
+settings:
 
-Required and recommended environment:
-
-- `SIDECAR_SECRET` — long random bearer token. Compose passes it to the sidecar
-  as `SIDECAR_SECRET` and to the server as `FASTCART_STOREFRONT_NODE_SECRET`, so
-  both sides always match. Compose refuses to render without it.
-- `FASTCART_STOREFRONT_NODE_SECRET` — the server-side copy of the sidecar
-  secret. Set it to the same value when running the containers without Compose;
-  Compose derives it from `SIDECAR_SECRET`.
 - `FASTCART_PREVIEW_SECRET` — at least 32 bytes; enables draft preview. Without
   it the preview endpoints return `501 Not Implemented`.
-- `FASTCART_CAPABILITY_SECRET` — signs theme capability grants. Set a long
-  random value in production when themes use capability endpoints.
-- `FASTCART_INTERNAL_FETCH_SECRET` — shared secret that mounts the
-  secret-gated `/internal/storefront` surface; needed when a theme or sidecar
-  calls that boundary.
+- `FASTCART_CAPABILITY_SECRET` — signs capability grants. Set a long random
+  value in production when plugins use capability endpoints.
+- `FASTCART_INTERNAL_FETCH_SECRET` — legacy shared secret for the
+  `/internal/storefront` surface. The target gateway replaces it with a scoped
+  internal runtime credential.
 - `FASTCART_COOKIE_SECURE=true` — required behind TLS so session and CSRF
   cookies are marked `Secure`.
 - `FASTCART_STORE_<STORE>_STRIPE_SECRET_KEY`,
@@ -248,44 +208,36 @@ Required and recommended environment:
   `X-Forwarded-For` chain the server may trust (for example the external TLS
   proxy). Empty means forwarding headers are ignored and the socket peer is
   used; this prevents clients from rotating `X-Forwarded-For` to bypass
-  cart/checkout/inquiry limits. The Admin nginx container proxies only `/api/`
-  for the Admin, not storefront writes, so it normally does not need to be
-  listed.
+  cart/checkout/inquiry limits.
 - `FASTCART_PREVIEW_FRAME_ANCESTORS` — the Admin origin allowed to embed the
   preview iframe, for example `https://admin.example.com`.
 - `FASTCART_ADMIN_BASE_URL` — absolute Admin URL used in notification deep
-  links; defaults to `http://localhost:8081` in Compose.
+  links.
 
-The Admin container is the browser origin: nginx serves the SPA, and `/api/`
-requests are proxied to the server with `Host` set to the Admin host and
-`X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto`
-forwarded. This keeps session and CSRF cookies same-origin, so the Admin needs
-no CORS configuration. TLS termination is external: put a reverse proxy in
-front of the loopback Admin port (`8081`) and the loopback server port (`8080`)
-for storefront hosts, and forward `X-Forwarded-Proto` from that proxy. The Admin
-nginx config forwards the incoming scheme to the server.
+TLS termination is external: put a reverse proxy in front of the loopback
+`fastcart-serve` port and forward `X-Forwarded-Proto` from that proxy. The target
+topology serves the Admin from `fastcart-serve`; the legacy separate Admin image
+is not supported and its artifacts have been removed.
 
-Health endpoints: the server exposes `/health/live` (used by its container
-healthcheck), the sidecar exposes `/health`, and the Admin nginx container
-exposes `/healthz`. `docker compose up` waits for the sidecar before starting the
-server and for the server before starting the Admin. The `data` named volume
-persists `/app/data`; removing containers does not remove it.
+Health endpoints: `fastcart-serve` exposes `/health/live` and `/health/ready`.
+The target `workerd` runtime exposes an internal `/health` endpoint that is
+never public.
 
 ## HTTP API
 
 All endpoints are under `/api/v1` unless noted.
 
-| Namespace                  | Purpose                                          |
-| -------------------------- | ------------------------------------------------ |
-| `/platform/*`              | Installation, auth, stores, domains, memberships |
-| `/admin/*`                 | Store-scoped administration                      |
-| `/store/*`                 | Public storefront and customer operations        |
-| `/webhooks/payments/*`     | Provider callbacks                               |
-| `/internal/storefront`     | Trusted SSR-to-commerce boundary                 |
-| `/health`, `/health/ready` | Liveness and readiness                           |
-| `/metrics`                 | Prometheus-compatible process metrics            |
-| `/api/v1/openapi.json`     | OpenAPI 3.1 document                             |
-| `/*`                       | Storefront SSR fallback on store hosts           |
+| Namespace                  | Purpose                                                                             |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| `/platform/*`              | Installation, auth, stores, domains, memberships                                    |
+| `/admin/*`                 | Store-scoped administration                                                         |
+| `/store/*`                 | Public storefront and customer operations                                           |
+| `/webhooks/payments/*`     | Provider callbacks                                                                  |
+| `/internal/*`              | SSR-to-commerce boundary (legacy `/internal/storefront`; target `/internal/ssr/v1`) |
+| `/health`, `/health/ready` | Liveness and readiness                                                              |
+| `/metrics`                 | Prometheus-compatible process metrics                                               |
+| `/api/v1/openapi.json`     | OpenAPI 3.1 document                                                                |
+| `/*`                       | Storefront SSR fallback (legacy theme runtime; target gateway)                      |
 
 Key flows:
 
@@ -331,7 +283,7 @@ material and are intentionally not versioned.
 ## Roadmap
 
 - React admin and storefront feature UIs.
-- Embedded V8 runtime adapter.
+- Universal `workerd` SSR runtime, artifact pipeline and TanStack Start/Astro adapters.
 - Additional payment, shipping, tax, email and search providers.
 - PostgreSQL adapter for high-traffic stores.
 
