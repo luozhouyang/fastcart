@@ -106,3 +106,10 @@ Rust serves active-artifact client assets at `/_fastcart/assets/*` with
 traversal protection, content types and immutable caching. The TanStack template
 uses that base without changing its router base. Per-store artifacts, range
 requests and compression remain later phases.
+
+### Phase 8 status
+
+`[[ssr.deployments]]` selects an isolated workerd group per store and assets are
+served from the matching artifact. Unknown stores return 404. The registry is
+boot-time configuration; activation, rollback, draining and per-store tokens
+remain Phase 9.

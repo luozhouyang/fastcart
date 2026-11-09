@@ -204,6 +204,12 @@ The artifact must contain `fastcart-ssr.json` and expose
 Client assets are served by Rust at `/_fastcart/assets/*`; the TanStack template
 sets its Vite base to that prefix while keeping page routes at `/`.
 
+To serve multiple stores, add one `[[ssr.deployments]]` entry per store with its
+own `store_id`, `deployment_id`, artifact and loopback `listen` port. Each entry
+gets an isolated workerd group; an unknown store receives `404` instead of
+falling back to another store. Leave `deployments` empty for the single
+default-artifact mode.
+
 Configuration is TOML plus environment overrides. Required and recommended
 settings:
 

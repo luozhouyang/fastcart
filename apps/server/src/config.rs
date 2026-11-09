@@ -271,6 +271,33 @@ pub struct SsrConfig {
     pub artifact_max_bytes: u64,
     /// Maximum artifact file count.
     pub artifact_max_files: u64,
+    /// Explicit per-store deployments. Empty starts one default deployment.
+    pub deployments: Vec<SsrDeploymentConfig>,
+}
+
+/// One store deployment served by the universal runtime.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SsrDeploymentConfig {
+    /// Store served by this deployment.
+    pub store_id: String,
+    /// Deployment identity injected into SSR requests.
+    pub deployment_id: String,
+    /// Source artifact directory.
+    pub artifact_path: PathBuf,
+    /// Optional loopback listener; defaults to the next port after `ssr.listen`.
+    pub listen: Option<SocketAddr>,
+}
+
+impl Default for SsrDeploymentConfig {
+    fn default() -> Self {
+        Self {
+            store_id: String::new(),
+            deployment_id: String::new(),
+            artifact_path: PathBuf::new(),
+            listen: None,
+        }
+    }
 }
 
 impl Default for SsrConfig {
@@ -290,6 +317,7 @@ impl Default for SsrConfig {
             max_restarts: 3,
             artifact_max_bytes: 100 * 1024 * 1024,
             artifact_max_files: 5_000,
+            deployments: Vec::new(),
         }
     }
 }
@@ -689,9 +717,6 @@ impl Config {
             if self.ssr.binary.as_os_str().is_empty() {
                 bail!("ssr.binary must not be empty");
             }
-            if self.ssr.artifact_path.as_os_str().is_empty() {
-                bail!("ssr.artifact_path must not be empty");
-            }
             if self.ssr.runtime_dir.as_os_str().is_empty() {
                 bail!("ssr.runtime_dir must not be empty");
             }
@@ -701,16 +726,6 @@ impl Config {
             if !self.ssr.listen.ip().is_loopback() {
                 bail!("ssr.listen must bind to loopback in this phase");
             }
-            if self.ssr.deployment_id.is_empty()
-                || self.ssr.deployment_id.len() > 128
-                || !self
-                    .ssr
-                    .deployment_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-            {
-                bail!("ssr.deployment_id must be 1-128 safe characters");
-            }
             if self.ssr.startup_timeout_ms == 0
                 || self.ssr.shutdown_timeout_ms == 0
                 || self.ssr.request_timeout_ms == 0
@@ -719,6 +734,48 @@ impl Config {
             }
             if self.ssr.artifact_max_bytes == 0 || self.ssr.artifact_max_files == 0 {
                 bail!("ssr artifact limits must be greater than zero");
+            }
+            if self.ssr.deployments.is_empty() {
+                if self.ssr.artifact_path.as_os_str().is_empty() {
+                    bail!("ssr.artifact_path must not be empty");
+                }
+                if !is_safe_identifier(&self.ssr.deployment_id) {
+                    bail!("ssr.deployment_id must be 1-128 safe characters");
+                }
+            } else {
+                let mut stores = Vec::new();
+                let mut ports = Vec::new();
+                for (index, deployment) in self.ssr.deployments.iter().enumerate() {
+                    if !is_safe_identifier(&deployment.store_id) {
+                        bail!("ssr.deployments[{index}].store_id must be 1-128 safe characters");
+                    }
+                    if !is_safe_identifier(&deployment.deployment_id) {
+                        bail!(
+                            "ssr.deployments[{index}].deployment_id must be 1-128 safe characters"
+                        );
+                    }
+                    if deployment.artifact_path.as_os_str().is_empty() {
+                        bail!("ssr.deployments[{index}].artifact_path must not be empty");
+                    }
+                    let listen = deployment.listen.unwrap_or_else(|| {
+                        let offset = u16::try_from(index).unwrap_or(u16::MAX);
+                        let port = self.ssr.listen.port().saturating_add(offset);
+                        SocketAddr::new(self.ssr.listen.ip(), port)
+                    });
+                    if listen.port() == 0 || !listen.ip().is_loopback() {
+                        bail!(
+                            "ssr.deployments[{index}].listen must be loopback with a non-zero port"
+                        );
+                    }
+                    if stores.contains(&deployment.store_id) {
+                        bail!("duplicate ssr deployment for store {}", deployment.store_id);
+                    }
+                    if ports.contains(&listen.port()) {
+                        bail!("duplicate ssr deployment listen port {}", listen.port());
+                    }
+                    stores.push(deployment.store_id.clone());
+                    ports.push(listen.port());
+                }
             }
         }
         if self.jobs.enabled && self.jobs.worker_count == 0 {
@@ -889,9 +946,20 @@ fn parse_origin_list(value: &str, variable: &str) -> Result<Vec<String>> {
     Ok(origins)
 }
 
+/// Returns whether a configured identifier is safe for a runtime group and header.
+fn is_safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use std::path::PathBuf;
+
+    use super::{Config, SsrDeploymentConfig};
 
     fn node_config(node_url: &str, node_secret: Option<&str>) -> Config {
         let mut config = Config::default();
@@ -1016,6 +1084,40 @@ mod tests {
 
         config.ssr.listen = "127.0.0.1:18888".parse().unwrap();
         config.ssr.startup_timeout_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn ssr_deployments_must_be_unique_and_loopback() {
+        let mut config = Config::default();
+        config.ssr.enabled = true;
+        config.ssr.deployments = vec![
+            SsrDeploymentConfig {
+                store_id: "store_a".to_owned(),
+                deployment_id: "deploy_a".to_owned(),
+                artifact_path: PathBuf::from("./a"),
+                listen: Some("127.0.0.1:18891".parse().unwrap()),
+            },
+            SsrDeploymentConfig {
+                store_id: "store_b".to_owned(),
+                deployment_id: "deploy_b".to_owned(),
+                artifact_path: PathBuf::from("./b"),
+                listen: Some("127.0.0.1:18892".parse().unwrap()),
+            },
+        ];
+        config.validate().unwrap();
+
+        config.ssr.deployments[1].store_id = "store_a".to_owned();
+        assert!(config.validate().is_err());
+        config.ssr.deployments[1].store_id = "store_b".to_owned();
+
+        config.ssr.deployments[1].listen = Some("0.0.0.0:18892".parse().unwrap());
+        assert!(config.validate().is_err());
+        config.ssr.deployments[1].listen = Some("127.0.0.1:18891".parse().unwrap());
+        assert!(config.validate().is_err());
+
+        config.ssr.deployments[1].listen = Some("127.0.0.1:18892".parse().unwrap());
+        config.ssr.deployments[1].store_id = "bad id".to_owned();
         assert!(config.validate().is_err());
     }
 

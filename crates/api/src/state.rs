@@ -28,7 +28,7 @@ pub trait UniversalStorefront: Send + Sync {
     ) -> axum::response::Response;
 
     /// Serves one client asset from the active artifact.
-    async fn serve_asset(&self, path: String) -> axum::response::Response;
+    async fn serve_asset(&self, store_id: &str, path: String) -> axum::response::Response;
 }
 
 /// HTTP-facing configuration.

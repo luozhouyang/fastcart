@@ -177,6 +177,12 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 8 (2026-11-09) added a config-backed multi-store registry. Each
+`[[ssr.deployments]]` entry gets an isolated workerd group; storefront requests
+select by resolved store id and unknown stores return 404. Asset serving resolves
+the store from `Host`. Database-backed activation, rollback and per-store
+credentials remain Phase 9.
+
 Phase 7 (2026-11-09) added Rust static-asset serving at `/_fastcart/assets/*`
 from the active artifact, with traversal rejection, content types and immutable
 caching. The TanStack template now emits asset URLs under that prefix while

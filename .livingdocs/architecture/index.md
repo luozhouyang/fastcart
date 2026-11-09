@@ -10,3 +10,4 @@
 * [Universal SSR Runtime Phase 5 Review](ssr-phase5-review.md) - phase 5 review
 * [Universal SSR Runtime Phase 6 Review](ssr-phase6-review.md) - phase 6 review
 * [Universal SSR Runtime Phase 7 Review](ssr-phase7-review.md) - phase 7 review
+* [Universal SSR Runtime Phase 8 Review](ssr-phase8-review.md) - phase 8 review

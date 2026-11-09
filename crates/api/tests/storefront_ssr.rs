@@ -88,8 +88,8 @@ impl UniversalStorefront for RecordingUniversal {
         (StatusCode::OK, "<h1>universal</h1>").into_response()
     }
 
-    async fn serve_asset(&self, path: String) -> Response {
-        (StatusCode::OK, format!("asset:{path}")).into_response()
+    async fn serve_asset(&self, store_id: &str, path: String) -> Response {
+        (StatusCode::OK, format!("asset:{store_id}:{path}")).into_response()
     }
 }
 
@@ -1214,6 +1214,7 @@ async fn universal_assets_are_served_without_store_resolution() {
         .oneshot(
             Request::builder()
                 .uri("/_fastcart/assets/assets/app.js")
+                .header("host", "shop.example.com")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1221,7 +1222,8 @@ async fn universal_assets_are_served_without_store_resolution() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], b"asset:assets/app.js");
+    assert!(body.starts_with(b"asset:store_"));
+    assert!(body.ends_with(b":assets/app.js"));
 
     let no_runtime = fixture(None, None, None).await;
     let missing = no_runtime
