@@ -88,7 +88,12 @@ impl UniversalStorefront for RecordingUniversal {
         (StatusCode::OK, "<h1>universal</h1>").into_response()
     }
 
-    async fn serve_asset(&self, store_id: &str, path: String) -> Response {
+    async fn serve_asset(
+        &self,
+        store_id: &str,
+        path: String,
+        _headers: axum::http::HeaderMap,
+    ) -> Response {
         (StatusCode::OK, format!("asset:{store_id}:{path}")).into_response()
     }
 

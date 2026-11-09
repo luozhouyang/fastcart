@@ -523,16 +523,21 @@ impl UniversalStorefront for UniversalSsr {
         }
     }
 
-    async fn serve_asset(&self, store_id: &str, path: String) -> Response {
+    async fn serve_asset(
+        &self,
+        store_id: &str,
+        path: String,
+        headers: axum::http::HeaderMap,
+    ) -> Response {
         let Some(deployment) = self.deployment(store_id).await else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        let response = serve_asset(&deployment.asset_root, &path).await;
+        let response = serve_asset(&deployment.asset_root, &path, &headers).await;
         if response.status() != StatusCode::NOT_FOUND {
             return response;
         }
         for root in self.asset_roots.read().await.iter() {
-            let response = serve_asset(root, &path).await;
+            let response = serve_asset(root, &path, &headers).await;
             if response.status() != StatusCode::NOT_FOUND {
                 return response;
             }
@@ -558,7 +563,15 @@ impl UniversalStorefront for UniversalSsr {
     }
 }
 
-async fn serve_asset(root: &std::path::Path, path: &str) -> Response {
+async fn serve_asset(
+    root: &std::path::Path,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    use axum::http::header::{
+        ACCEPT_RANGES, CACHE_CONTROL, CONTENT_RANGE, ETAG, IF_NONE_MATCH, RANGE,
+    };
+
     let mut relative = std::path::PathBuf::new();
     for component in std::path::Path::new(path).components() {
         match component {
@@ -578,22 +591,100 @@ async fn serve_asset(root: &std::path::Path, path: &str) -> Response {
     if !full.starts_with(&root) || !full.is_file() {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let Ok(metadata) = tokio::fs::metadata(&full).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let len = metadata.len();
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_secs());
+    let etag = format!("\"{len:x}-{modified:x}\"");
+    let cache_control = "public, max-age=31536000, immutable";
+    if headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
+    {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(ETAG, &etag)
+            .header(CACHE_CONTROL, cache_control)
+            .header(ACCEPT_RANGES, "bytes")
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::NOT_MODIFIED.into_response());
+    }
     let Ok(bytes) = tokio::fs::read(&full).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let content_type = content_type(&full);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, content_type)
-        .header(
-            axum::http::header::CACHE_CONTROL,
-            "public, max-age=31536000, immutable",
-        )
-        .body(Body::from(bytes))
-        .unwrap_or_else(|error| {
-            tracing::error!(error = %error, "failed to build asset response");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        })
+    let range = headers
+        .get(RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_range(value, len));
+    let (status, body, content_range) = match range {
+        Some(Ok((start, end))) => (
+            StatusCode::PARTIAL_CONTENT,
+            bytes[start..=end].to_vec(),
+            Some(format!("bytes {start}-{end}/{len}")),
+        ),
+        Some(Err(())) => {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(CONTENT_RANGE, format!("bytes */{len}"))
+                .body(Body::empty())
+                .unwrap_or_else(|_| StatusCode::RANGE_NOT_SATISFIABLE.into_response());
+        }
+        None => (StatusCode::OK, bytes, None),
+    };
+    let mut builder = Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_TYPE, content_type(&full))
+        .header(CACHE_CONTROL, cache_control)
+        .header(ETAG, &etag)
+        .header(ACCEPT_RANGES, "bytes");
+    if let Some(content_range) = content_range {
+        builder = builder.header(CONTENT_RANGE, content_range);
+    }
+    builder.body(Body::from(body)).unwrap_or_else(|error| {
+        tracing::error!(error = %error, "failed to build asset response");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })
+}
+
+/// Parses one byte range. Returns `Ok((start, end))` or `Err` when unsatisfiable.
+fn parse_range(value: &str, len: u64) -> Option<Result<(usize, usize), ()>> {
+    let value = value.strip_prefix("bytes=")?;
+    if value.contains(',') {
+        return Some(Err(()));
+    }
+    let (start, end) = value.split_once('-')?;
+    if len == 0 {
+        return Some(Err(()));
+    }
+    let (start, end) = if start.is_empty() {
+        let suffix: u64 = end.parse().ok()?;
+        if suffix == 0 {
+            return Some(Err(()));
+        }
+        let suffix = suffix.min(len);
+        (len - suffix, len - 1)
+    } else {
+        let start: u64 = start.parse().ok()?;
+        let end = if end.is_empty() {
+            len - 1
+        } else {
+            end.parse::<u64>().ok()?.min(len - 1)
+        };
+        if start > end || start >= len {
+            return Some(Err(()));
+        }
+        (start, end)
+    };
+    Some(Ok((
+        usize::try_from(start).ok()?,
+        usize::try_from(end).ok()?,
+    )))
 }
 
 fn content_type(path: &std::path::Path) -> &'static str {
@@ -627,6 +718,12 @@ fn into_response(response: SsrResponse) -> Response {
     if let Some(headers) = builder.headers_mut() {
         for (name, value) in &response.headers {
             headers.append(name, value.clone());
+        }
+        if !headers.contains_key(axum::http::header::CACHE_CONTROL) {
+            headers.insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            );
         }
     }
     let body = match response.body {
@@ -807,6 +904,13 @@ export default {
             )
             .await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store"
+        );
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .expect("body");
@@ -817,7 +921,13 @@ export default {
         assert_eq!(value["proto"], "https");
         assert_eq!(value["token"], "server-secret");
 
-        let asset = runtime.serve_asset("store_01", "app.js".to_owned()).await;
+        let asset = runtime
+            .serve_asset(
+                "store_01",
+                "app.js".to_owned(),
+                axum::http::HeaderMap::new(),
+            )
+            .await;
         assert_eq!(asset.status(), StatusCode::OK);
         assert_eq!(
             asset
@@ -833,17 +943,62 @@ export default {
                 .unwrap(),
             "public, max-age=31536000, immutable"
         );
+        let etag = asset
+            .headers()
+            .get(axum::http::header::ETAG)
+            .expect("etag")
+            .to_str()
+            .expect("etag text")
+            .to_owned();
         let asset_body = axum::body::to_bytes(asset.into_body(), 1024)
             .await
             .expect("asset body");
         assert_eq!(&asset_body[..], b"console.log('asset');");
+        let mut conditional = axum::http::HeaderMap::new();
+        conditional.insert(
+            axum::http::header::IF_NONE_MATCH,
+            axum::http::HeaderValue::from_str(&etag).expect("if-none-match"),
+        );
+        let not_modified = runtime
+            .serve_asset("store_01", "app.js".to_owned(), conditional)
+            .await;
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+
+        let mut range = axum::http::HeaderMap::new();
+        range.insert(
+            axum::http::header::RANGE,
+            axum::http::HeaderValue::from_static("bytes=0-6"),
+        );
+        let partial = runtime
+            .serve_asset("store_01", "app.js".to_owned(), range)
+            .await;
+        assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            partial
+                .headers()
+                .get(axum::http::header::CONTENT_RANGE)
+                .unwrap(),
+            "bytes 0-6/21"
+        );
+        let partial_body = axum::body::to_bytes(partial.into_body(), 1024)
+            .await
+            .expect("partial body");
+        assert_eq!(&partial_body[..], b"console");
 
         let traversal = runtime
-            .serve_asset("store_01", "../fastcart-ssr.json".to_owned())
+            .serve_asset(
+                "store_01",
+                "../fastcart-ssr.json".to_owned(),
+                axum::http::HeaderMap::new(),
+            )
             .await;
         assert_eq!(traversal.status(), StatusCode::NOT_FOUND);
         let missing = runtime
-            .serve_asset("store_01", "missing.js".to_owned())
+            .serve_asset(
+                "store_01",
+                "missing.js".to_owned(),
+                axum::http::HeaderMap::new(),
+            )
             .await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         runtime.shutdown().await;
@@ -982,7 +1137,9 @@ export default {
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
         for (store_id, expected) in [("store_a", "asset-a"), ("store_b", "asset-b")] {
-            let asset = runtime.serve_asset(store_id, "app.js".to_owned()).await;
+            let asset = runtime
+                .serve_asset(store_id, "app.js".to_owned(), axum::http::HeaderMap::new())
+                .await;
             assert_eq!(asset.status(), StatusCode::OK);
             let body = axum::body::to_bytes(asset.into_body(), 1024)
                 .await
@@ -998,7 +1155,9 @@ export default {
             .expect("activate");
         let activated = render_store(&runtime, "store_a").await;
         assert_eq!(activated["deployment"], "deploy_a2");
-        let asset = runtime.serve_asset("store_a", "app.js".to_owned()).await;
+        let asset = runtime
+            .serve_asset("store_a", "app.js".to_owned(), axum::http::HeaderMap::new())
+            .await;
         let body = axum::body::to_bytes(asset.into_body(), 1024)
             .await
             .expect("asset");

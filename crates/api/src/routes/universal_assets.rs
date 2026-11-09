@@ -26,5 +26,5 @@ pub async fn serve(
     let Ok(store) = context.resolver.resolve_active(host).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    runtime.serve_asset(store.id.as_str(), path).await
+    runtime.serve_asset(store.id.as_str(), path, headers).await
 }

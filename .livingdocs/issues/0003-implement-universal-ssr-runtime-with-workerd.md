@@ -133,3 +133,9 @@ paths emit structured tracing. Per-store credentials and metrics remain open.
 workerd configs bind the client directory as `ASSETS`, which the Cloudflare
 adapter requires. Smoke and manual server tests pass; browser hydration and
 framework bindings remain open.
+
+### Phase 12 status
+
+Assets support ETag/304, single byte ranges and `Accept-Ranges`; SSR documents
+default to `no-store`. Universal preview, compression and asset retention remain
+productization work.

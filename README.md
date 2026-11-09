@@ -201,8 +201,10 @@ deployment_id = "default"
 The artifact must contain `fastcart-ssr.json` and expose
 `/__fastcart/health`; the binary is the pinned workerd build from
 `scripts/install-workerd.sh`. `ssr.listen` is loopback-only in this phase.
-Client assets are served by Rust at `/_fastcart/assets/*`; the TanStack template
-sets its Vite base to that prefix while keeping page routes at `/`.
+Client assets are served by Rust at `/_fastcart/assets/*` with immutable caching,
+ETag/304 and single byte ranges; the TanStack template sets its Vite base to
+that prefix while keeping page routes at `/`. SSR documents default to
+`Cache-Control: no-store` unless the Worker sets a cache header.
 
 To serve multiple stores, add one `[[ssr.deployments]]` entry per store with its
 own `store_id`, `deployment_id`, artifact and loopback `listen` port. Each entry
