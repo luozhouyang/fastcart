@@ -241,6 +241,12 @@ importers:
         specifier: ^4.158.0
         version: 4.158.0(@types/node@22.20.5)
 
+  templates/storefront-generic:
+    dependencies:
+      '@fastcart/storefront-build':
+        specifier: workspace:*
+        version: link:../../packages/storefront-build
+
   templates/storefront-tanstack:
     dependencies:
       '@fastcart/storefront-build':

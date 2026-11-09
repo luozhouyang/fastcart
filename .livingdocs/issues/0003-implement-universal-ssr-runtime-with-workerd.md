@@ -152,3 +152,9 @@ policy remain open.
 Workers can opt into route-level SSR caching with `Cache-Control`; Rust caches
 cookie-free GET responses, reports HIT/MISS, and invalidates per store on
 mutations. SWR, cache tags and shared caches remain productization work.
+
+### Phase 15 status
+
+`templates/storefront-generic` proves a framework-free Fetch handler builds and
+runs as a FastCart artifact without runtime changes. SvelteKit, React Router and
+Vike adapters remain future work.

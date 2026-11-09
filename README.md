@@ -77,6 +77,8 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 | `apps/admin`                    | React Admin application for the implemented store operations      |
 | `apps/storefront`               | TanStack Start reference harness (first universal-runtime target) |
 | `templates/storefront-tanstack` | TanStack Start starter and artifact packager                      |
+| `templates/storefront-astro`    | Astro starter and Cloudflare adapter artifact packager            |
+| `templates/storefront-generic`  | Framework-free Fetch Handler artifact fixture                     |
 | `crates/kernel`                 | IDs, money, contexts, validation, errors                          |
 | `crates/platform`               | Platform DB, stores, domains, auth, RBAC, provisioning            |
 | `crates/infrastructure`         | SQLite pools, migrations, cache, outbox, jobs, storage            |

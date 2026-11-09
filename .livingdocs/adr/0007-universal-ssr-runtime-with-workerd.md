@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 15 (2026-11-09) added a framework-free Fetch Handler template and smoke
+test. The core gateway required no changes, validating the artifact contract.
+Additional framework adapters remain future work.
+
 Phase 14 (2026-11-09) added opt-in route-level SSR caching controlled by the
 Worker's `Cache-Control`, with store-wide invalidation on mutations, preview
 bypass and cache HIT/MISS headers. SWR and shared/persistent caches remain
