@@ -87,6 +87,10 @@ impl UniversalStorefront for RecordingUniversal {
         });
         (StatusCode::OK, "<h1>universal</h1>").into_response()
     }
+
+    async fn serve_asset(&self, path: String) -> Response {
+        (StatusCode::OK, format!("asset:{path}")).into_response()
+    }
 }
 
 struct StreamingRuntime;
@@ -1199,4 +1203,37 @@ async fn internal_ssr_namespace_requires_token_and_uses_path_store() {
         .await
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn universal_assets_are_served_without_store_resolution() {
+    let active = fixture(None, None, Some(Arc::new(RecordingUniversal::default()))).await;
+    let response = active
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_fastcart/assets/assets/app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"asset:assets/app.js");
+
+    let no_runtime = fixture(None, None, None).await;
+    let missing = no_runtime
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_fastcart/assets/app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }

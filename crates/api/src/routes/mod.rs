@@ -35,6 +35,7 @@ pub mod store_inventory;
 pub mod store_regions;
 pub mod store_theme;
 pub mod storefront;
+pub mod universal_assets;
 pub mod webhooks;
 
 use std::collections::BTreeSet;

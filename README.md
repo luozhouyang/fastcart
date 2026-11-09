@@ -201,6 +201,8 @@ deployment_id = "default"
 The artifact must contain `fastcart-ssr.json` and expose
 `/__fastcart/health`; the binary is the pinned workerd build from
 `scripts/install-workerd.sh`. `ssr.listen` is loopback-only in this phase.
+Client assets are served by Rust at `/_fastcart/assets/*`; the TanStack template
+sets its Vite base to that prefix while keeping page routes at `/`.
 
 Configuration is TOML plus environment overrides. Required and recommended
 settings:

@@ -54,6 +54,10 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
         .route(
             "/preview/{*path}",
             axum::routing::get(routes::preview::render),
+        )
+        .route(
+            "/_fastcart/assets/{*path}",
+            axum::routing::get(routes::universal_assets::serve),
         );
 
     // The internal surface is only reachable over HTTP when a secret is

@@ -25,6 +25,7 @@ pub struct UniversalSsr {
     gateway: SsrGateway,
     group: RuntimeGroupId,
     deployment_id: String,
+    asset_root: std::path::PathBuf,
 }
 
 impl UniversalSsr {
@@ -41,6 +42,7 @@ impl UniversalSsr {
         let artifact = store
             .import(&config.artifact_path, limits)
             .context("failed to import the SSR artifact")?;
+        let asset_root = artifact.root().join(&artifact.manifest().assets.directory);
         let mut manager_config =
             RuntimeManagerConfig::new(config.runtime_dir.join("runtime"), config.binary.clone());
         manager_config.startup_timeout = Duration::from_millis(config.startup_timeout_ms);
@@ -67,6 +69,7 @@ impl UniversalSsr {
             gateway,
             group,
             deployment_id: config.deployment_id.clone(),
+            asset_root,
         })))
     }
 
@@ -101,6 +104,74 @@ impl UniversalStorefront for UniversalSsr {
             Ok(response) => into_response(response),
             Err(error) => error_response(&error),
         }
+    }
+
+    async fn serve_asset(&self, path: String) -> Response {
+        serve_asset(&self.asset_root, &path).await
+    }
+}
+
+async fn serve_asset(root: &std::path::Path, path: &str) -> Response {
+    let mut relative = std::path::PathBuf::new();
+    for component in std::path::Path::new(path).components() {
+        match component {
+            std::path::Component::Normal(segment) => relative.push(segment),
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(root) = tokio::fs::canonicalize(root).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(full) = tokio::fs::canonicalize(root.join(&relative)).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !full.starts_with(&root) || !full.is_file() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(bytes) = tokio::fs::read(&full).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let content_type = content_type(&full);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .header(
+            axum::http::header::CACHE_CONTROL,
+            "public, max-age=31536000, immutable",
+        )
+        .body(Body::from(bytes))
+        .unwrap_or_else(|error| {
+            tracing::error!(error = %error, "failed to build asset response");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })
+}
+
+fn content_type(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json",
+        "html" => "text/html; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
     }
 }
 
@@ -226,6 +297,7 @@ export default {
 "#,
         )
         .expect("worker");
+        std::fs::write(source.join("client/app.js"), "console.log('asset');").expect("asset");
         std::fs::write(
             source.join("fastcart-ssr.json"),
             serde_json::to_vec_pretty(&manifest()).expect("manifest"),
@@ -293,6 +365,32 @@ export default {
         assert_eq!(value["requestId"], "req_server");
         assert_eq!(value["proto"], "https");
         assert_eq!(value["token"], "server-secret");
+
+        let asset = runtime.serve_asset("app.js".to_owned()).await;
+        assert_eq!(asset.status(), StatusCode::OK);
+        assert_eq!(
+            asset
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            asset
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+        let asset_body = axum::body::to_bytes(asset.into_body(), 1024)
+            .await
+            .expect("asset body");
+        assert_eq!(&asset_body[..], b"console.log('asset');");
+
+        let traversal = runtime.serve_asset("../fastcart-ssr.json".to_owned()).await;
+        assert_eq!(traversal.status(), StatusCode::NOT_FOUND);
+        let missing = runtime.serve_asset("missing.js".to_owned()).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         runtime.shutdown().await;
     }
 }

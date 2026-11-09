@@ -99,3 +99,10 @@ The server-only `/internal/ssr/v1/stores/{store_id}` namespace requires a bearer
 token and resolves the active store from the path. `@fastcart/storefront-sdk/server`
 rewrites public SDK paths to this namespace. Token scoping and Worker-side SDK
 use remain Phase 8 work.
+
+### Phase 7 status
+
+Rust serves active-artifact client assets at `/_fastcart/assets/*` with
+traversal protection, content types and immutable caching. The TanStack template
+uses that base without changing its router base. Per-store artifacts, range
+requests and compression remain later phases.

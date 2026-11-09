@@ -177,6 +177,12 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 7 (2026-11-09) added Rust static-asset serving at `/_fastcart/assets/*`
+from the active artifact, with traversal rejection, content types and immutable
+caching. The TanStack template now emits asset URLs under that prefix while
+keeping its router base at `/`. Per-store artifact selection and range/compressed
+responses remain later phases.
+
 Phase 6 (2026-11-09) added the server-only commerce namespace
 `/internal/ssr/v1/stores/{store_id}` and
 `@fastcart/storefront-sdk/server`. The namespace requires a bearer token,
