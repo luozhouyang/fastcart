@@ -177,6 +177,15 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 1 (2026-11-09) added `crates/fastcart-ssr` with a supervised
+`WorkerdProcess` (SIGTERM, forced-kill deadline, log capture, readiness probe)
+and an `SsrGateway` that forwards HTTP requests and preserves the response body
+as a stream. The gateway is not yet mounted in `fastcart-server`; that is Phase 4.
+Request bodies are buffered `Bytes` in Phase 1, and the caller still supplies
+the workerd Cap'n Proto file. The integration test starts a real workerd child,
+proxies POST/GET requests, checks status and headers, and verifies shutdown; it
+skips when no pinned binary is available.
+
 The current repository still contains the legacy Node sidecar and the
 `runtime-v8` stub. These are transitional and must not be extended while the
 workerd migration is in progress.

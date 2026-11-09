@@ -16,6 +16,7 @@ members = [
     "crates/storefront-runtime/runtime-pool",
     "crates/storefront-runtime/runtime-bridge",
     "crates/storefront-runtime/runtime-node",
+    "crates/fastcart-ssr",
     "crates/plugin",
     "crates/ai",
     "crates/cli",
@@ -73,6 +74,7 @@ hmac = "0.12.1"
 http-body-util = "0.1.3"
 minijinja = "3.0.5"
 moka = { version = "0.12.16", features = ["future", "sync"] }
+nix = { version = "0.30.1", features = ["signal"] }
 rand = "0.8.5"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
@@ -123,6 +125,7 @@ fastcart-runtime-bridge = { path = "crates/storefront-runtime/runtime-bridge" }
 fastcart-runtime-node = { path = "crates/storefront-runtime/runtime-node" }
 fastcart-runtime-pool = { path = "crates/storefront-runtime/runtime-pool" }
 fastcart-runtime-v8 = { path = "crates/storefront-runtime/runtime-v8" }
+fastcart-ssr = { path = "crates/fastcart-ssr" }
 fastcart-server = { path = "apps/server" }
 fastcart-storefront = { path = "crates/storefront" }
 fastcart-storefront-data = { path = "crates/storefront-data" }

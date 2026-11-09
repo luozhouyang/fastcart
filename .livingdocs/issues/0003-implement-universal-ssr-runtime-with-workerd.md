@@ -59,4 +59,11 @@ workerd fixtures substitute for them; do not add features to the legacy path.
 Validated on 2026-11-09 with workerd `v1.20261109.1`; see
 [ADR 0007](../adr/0007-universal-ssr-runtime-with-workerd.md#implementation-status)
 and `experiments/workerd`. The basic Fetch handler, Web APIs, streaming, service
-bindings, TanStack Start and Astro fixtures pass. Phase 1 has not started.
+bindings, TanStack Start and Astro fixtures pass.
+
+### Phase 1 status
+
+`crates/fastcart-ssr` now starts a supervised workerd process, proxies
+requests with streamed responses, reports health and shuts down with SIGTERM.
+The gateway is not mounted in `fastcart-server` yet; Phase 4 owns that wiring.
+Artifact validation and runtime configuration generation remain Phase 2/3 work.
