@@ -1246,6 +1246,100 @@ impl OrderService {
     /// After-sales workflows use this after a crash between recording the
     /// refund and linking it to a return or claim, so the retry can complete
     /// the link without attempting another refund.
+    /// Backfills order-refund ledger rows for provider refunds that succeeded
+    /// without a corresponding local row.
+    ///
+    /// The admin refund path moves provider money first and records the local
+    /// row second. A crash in between leaves the payment ledger ahead of the
+    /// order ledger; this reconciliation repairs that gap idempotently.
+    pub async fn reconcile_provider_refunds(&self) -> Result<u64, AppError> {
+        let rows = sqlx::query_as::<_, (String, String, i64, String, Option<String>)>(
+            "SELECT r.id, r.order_id, r.amount, r.currency_code, r.provider_refund_id \
+             FROM refunds r \
+             WHERE r.order_id IS NOT NULL AND r.status = 'succeeded' \
+               AND NOT EXISTS (\
+                   SELECT 1 FROM order_refunds o \
+                   WHERE o.order_id = r.order_id AND o.payment_id IS r.payment_id \
+                     AND o.amount = r.amount AND o.status != 'failed'\
+               )",
+        )
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let now = now_timestamp();
+        let mut reconciled = 0_u64;
+        for (provider_refund_id, order_id, amount, currency_code, provider_id) in rows {
+            let Some(total): Option<i64> =
+                sqlx::query_scalar("SELECT total FROM orders WHERE id = ?")
+                    .bind(&order_id)
+                    .fetch_optional(self.db.pool())
+                    .await
+                    .map_err(database_error)?
+            else {
+                continue;
+            };
+            let mut tx = self.db.begin().await.map_err(AppError::from)?;
+            let inserted = sqlx::query(
+                "INSERT INTO order_refunds \
+                 (id, order_id, payment_id, amount, currency_code, status, reason, \
+                  provider_refund_id, created_at, updated_at) \
+                 VALUES (?, ?, NULL, ?, ?, 'succeeded', 'reconciled provider refund', ?, ?, ?)",
+            )
+            .bind(RefundId::new().as_str())
+            .bind(&order_id)
+            .bind(amount)
+            .bind(&currency_code)
+            .bind(
+                provider_id
+                    .as_deref()
+                    .unwrap_or(provider_refund_id.as_str()),
+            )
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if inserted.rows_affected() == 0 {
+                tx.rollback().await.map_err(database_error)?;
+                continue;
+            }
+            let refunded: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(amount), 0) FROM order_refunds \
+                 WHERE order_id = ? AND status != 'failed'",
+            )
+            .bind(&order_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            let (refund_status, payment_status) = if refunded >= total {
+                (RefundStatus::Refunded, PaymentStatus::Refunded)
+            } else {
+                (
+                    RefundStatus::PartiallyRefunded,
+                    PaymentStatus::PartiallyRefunded,
+                )
+            };
+            sqlx::query(
+                "UPDATE orders SET refund_status = ?, payment_status = ?, updated_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(refund_status.as_str())
+            .bind(payment_status.as_str())
+            .bind(now)
+            .bind(&order_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            tx.commit().await.map_err(database_error)?;
+            reconciled += 1;
+        }
+        Ok(reconciled)
+    }
+
     pub async fn refund_id_by_idempotency_key(
         &self,
         idempotency_key: &str,
@@ -2867,5 +2961,34 @@ mod tests {
                 .data
                 .is_empty()
         );
+    }
+    #[tokio::test]
+    async fn reconciles_provider_refunds_missing_from_the_order_ledger() {
+        let service = service().await;
+        let order = service
+            .create_order(order_input(vec![item(1000, 1)]))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO refunds \
+             (id, payment_id, order_id, amount, currency_code, status, provider_refund_id, \
+              reason, created_at, updated_at) \
+             VALUES ('refund_provider', NULL, ?, 400, 'USD', 'succeeded', 'ch_123', NULL, 0, 0)",
+        )
+        .bind(order.id.as_str())
+        .execute(service.db.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(service.reconcile_provider_refunds().await.unwrap(), 1);
+        let refreshed = service.get(&order.id).await.unwrap();
+        assert_eq!(refreshed.refunds.len(), 1);
+        assert_eq!(refreshed.refunds[0].amount, 400);
+        assert_eq!(refreshed.refunds[0].status, "succeeded");
+        assert_eq!(refreshed.payment_status, PaymentStatus::PartiallyRefunded);
+        assert_eq!(refreshed.refund_status, RefundStatus::PartiallyRefunded);
+
+        // Replaying the reconciliation does not duplicate the local row.
+        assert_eq!(service.reconcile_provider_refunds().await.unwrap(), 0);
     }
 }

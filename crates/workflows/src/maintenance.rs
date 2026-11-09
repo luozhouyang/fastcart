@@ -44,6 +44,8 @@ pub struct MaintenanceReport {
     pub reservations_released: u64,
     /// Checkout sessions failed by expiry.
     pub checkouts_expired: u64,
+    /// Order-refund rows backfilled from succeeded provider refunds.
+    pub refunds_reconciled: u64,
     /// Outbox events dispatched.
     pub outbox_dispatched: u64,
     /// Store audits delivered to the platform audit log.
@@ -177,6 +179,25 @@ pub async fn run_maintenance_with_notifications(
                 Ok(count) => report.checkouts_expired += count,
                 Err(error) => {
                     tracing::warn!(store_id = %store.id, error = %error, "checkout expiry failed");
+                    report.failures += 1;
+                }
+            }
+            match OrderService::new(database.clone())
+                .reconcile_provider_refunds()
+                .await
+            {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::warn!(
+                            store_id = %store.id,
+                            count,
+                            "backfilled order refunds from provider refunds"
+                        );
+                    }
+                    report.refunds_reconciled += count;
+                }
+                Err(error) => {
+                    tracing::warn!(store_id = %store.id, error = %error, "refund reconciliation failed");
                     report.failures += 1;
                 }
             }
