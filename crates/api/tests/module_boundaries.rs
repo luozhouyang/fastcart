@@ -24,6 +24,65 @@ const SHARED_TABLES: &[&str] = &[
 /// without an owner review.
 const ALLOWED: &[(&str, &str, &str)] = &[];
 
+/// Reviewed cross-module reads.
+///
+/// Reads are less dangerous than writes, but they still couple a module to
+/// another module's schema. Prefer the owning service; when a read must stay
+/// local (reporting joins, referential guards), record it here.
+const READ_ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "catalog",
+        "sales_channels",
+        "catalog validates a sales channel id against the store table",
+    ),
+    (
+        "catalog",
+        "cart_items",
+        "catalog reports best sellers from cart rows",
+    ),
+    (
+        "catalog",
+        "order_items",
+        "catalog reports best sellers from order rows",
+    ),
+    (
+        "checkout",
+        "carts",
+        "checkout snapshots the cart before creating an order",
+    ),
+    ("checkout", "cart_items", "checkout snapshots cart lines"),
+    (
+        "checkout",
+        "payment_sessions",
+        "checkout reads payment session state",
+    ),
+    (
+        "pricing",
+        "customer_groups",
+        "pricing resolves customer group membership",
+    ),
+    (
+        "pricing",
+        "sales_channels",
+        "pricing validates a sales channel id",
+    ),
+    (
+        "tax",
+        "product_variants",
+        "tax category deletion checks variant references",
+    ),
+    (
+        "pricing",
+        "product_variant_price_set",
+        "pricing checks the catalog-owned variant link inside its own transaction; writes go through CatalogService",
+    ),
+    (
+        "order",
+        "refunds",
+        "order reconciliation reads provider refunds to repair the order ledger",
+    ),
+];
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -98,6 +157,54 @@ fn write_targets(source: &str) -> Vec<(String, usize)> {
     targets
 }
 
+/// Returns `(table, 1-based line)` for each table read by SELECT ... FROM/JOIN.
+fn read_targets(source: &str) -> Vec<(String, usize)> {
+    let mut targets = Vec::new();
+    let mut in_test_module = false;
+    for (index, line) in source.lines().enumerate() {
+        if line.trim_start().starts_with("#[cfg(test)]") {
+            in_test_module = true;
+        }
+        if in_test_module {
+            continue;
+        }
+        let upper = line.to_ascii_uppercase();
+        if upper.trim_start().starts_with("DELETE FROM ") {
+            continue;
+        }
+        for keyword in ["FROM", "JOIN"] {
+            let mut offset = 0;
+            while let Some(found) = upper[offset..].find(keyword) {
+                let after = offset + found + keyword.len();
+                let before_ok = if keyword == "FROM" {
+                    offset + found == 0
+                        || !upper.as_bytes()[offset + found - 1].is_ascii_alphanumeric()
+                } else {
+                    true
+                };
+                if !before_ok {
+                    offset = after;
+                    continue;
+                }
+                let rest = line[after..].trim_start();
+                if rest.starts_with('(') {
+                    offset = after;
+                    continue;
+                }
+                let table: String = rest
+                    .chars()
+                    .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                    .collect();
+                if !table.is_empty() {
+                    targets.push((table.to_ascii_lowercase(), index + 1));
+                }
+                offset = after;
+            }
+        }
+    }
+    targets
+}
+
 /// Maps a table to the module that owns it. Unknown tables are ignored so this
 /// guard only governs tables that have a declared owner.
 fn owner_for(table: &str) -> Option<&'static str> {
@@ -163,6 +270,14 @@ fn allowed(module: &str, table: &str) -> bool {
     })
 }
 
+fn read_allowed(module: &str, table: &str) -> bool {
+    READ_ALLOWED
+        .iter()
+        .any(|(allowed_module, allowed_table, _)| {
+            *allowed_module == module && *allowed_table == table
+        })
+}
+
 #[test]
 fn modules_only_write_their_own_tables() {
     let mut violations = Vec::new();
@@ -191,6 +306,58 @@ fn modules_only_write_their_own_tables() {
         "cross-module writes must go through the owning module's service or be added to ALLOWED with a reason:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn modules_only_read_their_own_tables() {
+    let mut violations = Vec::new();
+    for (module, src) in modules() {
+        for file in source_files(&src) {
+            let source = fs::read_to_string(&file).expect("read module source");
+            for (table, line) in read_targets(&source) {
+                let Some(owner) = owner_for(&table) else {
+                    continue;
+                };
+                if owner != module && !read_allowed(&module, &table) {
+                    violations.push(format!(
+                        "{}:{} reads `{}`, owned by the `{}` module",
+                        file.display(),
+                        line,
+                        table,
+                        owner
+                    ));
+                }
+            }
+        }
+    }
+    violations.sort();
+    assert!(
+        violations.is_empty(),
+        "cross-module reads must go through the owning module's service or be added to READ_ALLOWED with a reason:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn read_exceptions_still_exist() {
+    let mut seen = Vec::new();
+    for (module, src) in modules() {
+        for file in source_files(&src) {
+            let source = fs::read_to_string(&file).expect("read module source");
+            for (table, _) in read_targets(&source) {
+                if read_allowed(&module, &table) {
+                    seen.push((module.clone(), table));
+                }
+            }
+        }
+    }
+    for (module, table, reason) in READ_ALLOWED {
+        assert!(
+            seen.iter()
+                .any(|(seen_module, seen_table)| seen_module == module && seen_table == table),
+            "stale module-boundary read exception ({module} -> {table}: {reason}); remove it"
+        );
+    }
 }
 
 #[test]

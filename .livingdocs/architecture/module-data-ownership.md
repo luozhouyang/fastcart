@@ -11,8 +11,10 @@ data ownership, so this document is the reviewed contract and
   tables directly.
 - Cross-module **writes** must go through the owning module's service or an
   orchestrator (`crates/workflows`, HTTP routes) that composes both modules.
-- Cross-module reads are tolerated only when the read is part of a validated
-  invariant (for example checkout snapshotting a cart). Prefer service calls for
+- Cross-module **reads** must go through the owning service unless the read is
+  part of a validated invariant (for example checkout snapshotting a cart, or a
+  referential guard). Every exception is listed in `READ_ALLOWED` in the guard
+  test with a reason; new direct reads fail CI. Prefer service calls for
   anything that grows.
 - Shared infrastructure tables (`settings`, `jobs`, `outbox`,
   `audit_outbox`, `idempotency_keys`, `workflow_executions`, `workflow_steps`)
@@ -46,12 +48,29 @@ data ownership, so this document is the reviewed contract and
 
 ## Current reviewed exceptions
 
-The guard records these in `ALLOWED` with a reason. They are debt, not a
-license for new violations.
+The guard records writes in `ALLOWED` and reads in `READ_ALLOWED`, each with a
+reason. They are debt, not a license for new violations.
+
+### Writes
 
 None. The former order→inventory and pricing→catalog link writes now go through
 `InventoryService::reverse_return_write_off` and
 `CatalogService::attach_price_set` respectively.
 
+### Reads
+
+| Module     | Table                       | Why                                                               |
+| ---------- | --------------------------- | ----------------------------------------------------------------- |
+| `catalog`  | `sales_channels`            | validates a sales-channel id against the store table              |
+| `catalog`  | `cart_items`, `order_items` | best-seller reporting joins across commerce rows                  |
+| `checkout` | `carts`, `cart_items`       | snapshots the cart before creating an order                       |
+| `checkout` | `payment_sessions`          | reads payment session state for checkout                          |
+| `pricing`  | `customer_groups`           | resolves customer-group membership                                |
+| `pricing`  | `sales_channels`            | validates a sales-channel id                                      |
+| `pricing`  | `product_variant_price_set` | checks the catalog-owned link inside pricing's own transaction    |
+| `tax`      | `product_variants`          | tax-category deletion checks variant references                   |
+| `order`    | `refunds`                   | refund reconciliation reads provider refunds to repair the ledger |
+
 Adding an exception requires a reviewer and a concrete removal plan; the
-`allowed_exceptions_still_exist` test rejects stale entries.
+`allowed_exceptions_still_exist` and `read_exceptions_still_exist` tests reject
+stale entries.
