@@ -43,6 +43,11 @@ pub const PREVIEW_TOKEN_TTL_SECONDS: i64 = 15 * 60;
 /// HttpOnly cookie scoped to the preview asset route.
 pub(crate) const PREVIEW_ASSET_COOKIE: &str = "fastcart_preview";
 
+/// Cache key for a positive preview asset revocation check.
+pub(crate) fn asset_authorization_key(store_id: &str, jti: &str) -> String {
+    format!("{store_id}:{jti}")
+}
+
 /// Minimum acceptable preview signing-key length in bytes.
 pub const MIN_PREVIEW_SECRET_BYTES: usize = 32;
 

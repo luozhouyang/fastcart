@@ -8,7 +8,8 @@ use axum::response::{IntoResponse, Response};
 use fastcart_http::ApiError;
 
 use crate::routes::preview::{
-    PREVIEW_ASSET_COOKIE, configured_secret, is_revoked, verify_preview_token_unbound,
+    PREVIEW_ASSET_COOKIE, asset_authorization_key, configured_secret, is_revoked,
+    verify_preview_token_unbound,
 };
 use crate::state::AppContext;
 
@@ -52,14 +53,27 @@ pub async fn serve_preview(
     if payload.store_id != store.id.as_str() {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let database = match context.databases.database(&store.id).await {
-        Ok(database) => database,
-        Err(error) => return ApiError::new(error.into()).into_response(),
-    };
-    match is_revoked(&database, &payload.jti, fastcart_kernel::now_timestamp()).await {
-        Ok(false) => {}
-        Ok(true) => return StatusCode::FORBIDDEN.into_response(),
-        Err(error) => return ApiError::new(error).into_response(),
+    let cache_key = asset_authorization_key(store.id.as_str(), &payload.jti);
+    if context
+        .preview_asset_authorizations
+        .get(&cache_key)
+        .await
+        .is_none()
+    {
+        let database = match context.databases.database(&store.id).await {
+            Ok(database) => database,
+            Err(error) => return ApiError::new(error.into()).into_response(),
+        };
+        match is_revoked(&database, &payload.jti, fastcart_kernel::now_timestamp()).await {
+            Ok(false) => {
+                context
+                    .preview_asset_authorizations
+                    .insert(cache_key, ())
+                    .await;
+            }
+            Ok(true) => return StatusCode::FORBIDDEN.into_response(),
+            Err(error) => return ApiError::new(error).into_response(),
+        }
     }
     let mut response = runtime
         .serve_preview_asset(store.id.as_str(), path, headers)

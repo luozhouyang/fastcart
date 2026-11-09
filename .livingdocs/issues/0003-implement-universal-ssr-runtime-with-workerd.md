@@ -259,5 +259,10 @@ revocation remains open.
 
 Preview asset authorization checks the signed token's `jti` against the store's
 revocation table after cookie/store validation. Revoked tokens get 403 and
-database failures fail closed. Cross-origin preview hosting and authorization
-caching remain open.
+database failures fail closed. Cross-origin preview hosting remains open.
+
+### Phase 31 status
+
+Positive preview asset authorization checks are cached for 30 seconds in a
+bounded Moka cache and invalidated by the admin revoke endpoint. Other instances
+may lag by the TTL; cache metrics remain open.

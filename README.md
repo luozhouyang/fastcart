@@ -311,9 +311,11 @@ SameSite=Lax `fastcart_preview` cookie scoped to
 `Path=/_fastcart/preview-assets`; the token is the signed preview capability.
 The asset route requires a valid cookie whose store matches the Host-resolved
 store, checks the preview token's `jti` against the store's revocation table,
-returns `403` otherwise, and adds `Vary: Cookie`. This keeps preview assets out
-of shared caches, prevents cross-store reuse, and makes token revocation apply
-to assets immediately.
+returns `403` otherwise, and adds `Vary: Cookie`. Positive revocation checks are
+cached in-process for up to 30 seconds (10k entries) and invalidated by the admin
+revoke endpoint; another instance may lag by that TTL. This keeps preview assets
+out of shared caches, prevents cross-store reuse, and makes token revocation
+apply to assets immediately in the revoking process.
 
 Retired production and preview artifacts are reference-counted. After
 `drain_timeout_ms`, a replaced group is stopped and its digest directory is

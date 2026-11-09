@@ -197,6 +197,7 @@ struct Fixture {
     app: Router,
     database: fastcart_infrastructure::StoreDatabase,
     platform: PlatformStore,
+    preview_asset_authorizations: moka::future::Cache<String, ()>,
     store_id: String,
     _dir: tempfile::TempDir,
 }
@@ -290,9 +291,10 @@ async fn fixture(
         .with_universal_storefront(universal),
     );
     Fixture {
-        app: build_router(context),
+        app: build_router(context.clone()),
         database: database.clone(),
         platform: fixture_platform,
+        preview_asset_authorizations: context.preview_asset_authorizations.clone(),
         store_id: store.id.to_string(),
         _dir: dir,
     }
@@ -1487,6 +1489,10 @@ async fn universal_assets_are_served_without_store_resolution() {
     .execute(active.database.pool())
     .await
     .expect("revoke preview token");
+    active
+        .preview_asset_authorizations
+        .invalidate(&format!("{}:{preview_jti}", active.store_id))
+        .await;
     let revoked_asset = active
         .app
         .clone()

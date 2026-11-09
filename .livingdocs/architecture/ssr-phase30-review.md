@@ -34,8 +34,9 @@ Phase 30 makes preview token revocation apply to preview assets:
 
 ## Findings
 
-1. **Assets now require a database round trip.** Preview traffic is low and the
-   `jti` lookup uses the primary key; this is acceptable for correctness.
+1. **Assets now require a database round trip on a cache miss.** Preview traffic
+   is low and the `jti` lookup uses the primary key; Phase 31 adds a short
+   positive cache with admin invalidation.
 2. **Revocation is immediate.** A revoked preview token cannot fetch assets even
    if its cookie is still present, until the revocation row is pruned after
    expiry.

@@ -621,6 +621,7 @@ pub struct RevokePreviewTokenRequest {
     responses((status = 204))
 )]
 async fn revoke_preview_token(
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
@@ -639,6 +640,7 @@ async fn revoke_preview_token(
     ContentService::new(db.clone()).get_page(&page_id).await?;
     let now = now_timestamp();
     let store_id = db.store_id().as_str().to_owned();
+    let asset_authorization_key = crate::routes::preview::asset_authorization_key(&store_id, jti);
     let mut tx = db.begin().await.map_err(AppError::from)?;
     sqlx::query("DELETE FROM preview_token_revocations WHERE expires_at <= ?")
         .bind(now)
@@ -670,6 +672,10 @@ async fn revoke_preview_token(
     tx.commit()
         .await
         .map_err(fastcart_infrastructure::database_error)?;
+    context
+        .preview_asset_authorizations
+        .invalidate(&asset_authorization_key)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 

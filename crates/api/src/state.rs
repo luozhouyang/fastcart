@@ -303,6 +303,8 @@ pub struct AppContext {
     pub checkout_limiter: RateLimiter,
     /// Draft preview render limiter, keyed by client address.
     pub preview_limiter: RateLimiter,
+    /// Short-lived positive cache for preview asset revocation checks.
+    pub preview_asset_authorizations: moka::future::Cache<String, ()>,
     /// Payment webhook limiter, keyed by client address.
     pub webhook_limiter: RateLimiter,
     /// Login attempt limiter.
@@ -499,6 +501,10 @@ impl AppContext {
             cart_write_limiter: RateLimiter::new(120, Duration::from_secs(60)),
             checkout_limiter: RateLimiter::new(20, Duration::from_secs(60)),
             preview_limiter: RateLimiter::new(120, Duration::from_secs(60)),
+            preview_asset_authorizations: moka::future::Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(30))
+                .build(),
             webhook_limiter: RateLimiter::new(600, Duration::from_secs(60)),
             login_limiter: RateLimiter::new(10, Duration::from_secs(5 * 60)),
             customer_email_limiter: RateLimiter::new(5, Duration::from_secs(15 * 60)),
