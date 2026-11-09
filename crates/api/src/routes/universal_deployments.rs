@@ -138,12 +138,16 @@ async fn rotate_token(
             "token expiry must be in the future",
         )));
     }
-    context.config.internal_ssr_credentials.rotate(
-        &store_id,
-        request.token,
-        request.expires_at,
-        request.grace_seconds.unwrap_or(300),
-    );
+    context
+        .config
+        .internal_ssr_credentials
+        .rotate(
+            &store_id,
+            request.token,
+            request.expires_at,
+            request.grace_seconds.unwrap_or(300),
+        )
+        .map_err(|error| ApiError::new(AppError::internal(error)))?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

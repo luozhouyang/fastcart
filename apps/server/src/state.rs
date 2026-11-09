@@ -323,50 +323,22 @@ fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsr
         .internal_token
         .clone()
         .filter(|token| !token.is_empty());
-    if config.ssr.deployments.is_empty() {
-        return fastcart_api::state::InternalSsrCredentials::new(
-            global
-                .map(|token| {
-                    vec![fastcart_api::state::InternalSsrToken {
-                        token,
-                        store_id: None,
-                        expires_at: None,
-                    }]
-                })
-                .unwrap_or_default(),
-        );
-    }
-    if config
+    let tokens = if config.ssr.deployments.is_empty() {
+        global
+            .map(|token| {
+                vec![fastcart_api::state::InternalSsrToken {
+                    token,
+                    store_id: None,
+                    expires_at: None,
+                }]
+            })
+            .unwrap_or_default()
+    } else if config
         .ssr
         .deployments
         .iter()
         .all(|deployment| deployment.internal_token.is_some())
     {
-        return fastcart_api::state::InternalSsrCredentials::new(
-            config
-                .ssr
-                .deployments
-                .iter()
-                .filter_map(|deployment| {
-                    Some(fastcart_api::state::InternalSsrToken {
-                        token: deployment.internal_token.clone()?,
-                        store_id: Some(deployment.store_id.clone()),
-                        expires_at: None,
-                    })
-                })
-                .collect(),
-        );
-    }
-    if let Some(token) = global {
-        return fastcart_api::state::InternalSsrCredentials::new(vec![
-            fastcart_api::state::InternalSsrToken {
-                token,
-                store_id: None,
-                expires_at: None,
-            },
-        ]);
-    }
-    fastcart_api::state::InternalSsrCredentials::new(
         config
             .ssr
             .deployments
@@ -378,8 +350,33 @@ fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsr
                     expires_at: None,
                 })
             })
-            .collect(),
-    )
+            .collect()
+    } else if let Some(token) = global {
+        vec![fastcart_api::state::InternalSsrToken {
+            token,
+            store_id: None,
+            expires_at: None,
+        }]
+    } else {
+        config
+            .ssr
+            .deployments
+            .iter()
+            .filter_map(|deployment| {
+                Some(fastcart_api::state::InternalSsrToken {
+                    token: deployment.internal_token.clone()?,
+                    store_id: Some(deployment.store_id.clone()),
+                    expires_at: None,
+                })
+            })
+            .collect()
+    };
+    let path = config
+        .ssr
+        .credentials_path
+        .clone()
+        .unwrap_or_else(|| config.ssr.runtime_dir.join("internal-ssr-credentials.json"));
+    fastcart_api::state::InternalSsrCredentials::load(path, tokens)
 }
 
 fn build_storefront_runtime(

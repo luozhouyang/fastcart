@@ -255,7 +255,10 @@ curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/rotate-
 
 The new token becomes the gateway credential immediately; older scoped tokens
 remain valid for `grace_seconds` so in-flight Worker calls can finish. Rotation
-state is in memory and reverts to config on restart.
+state is persisted atomically to `ssr.credentials_path` (default
+`<runtime_dir>/internal-ssr-credentials.json`, mode `0600` on Unix) and reloaded
+on restart. Config tokens are merged into the persisted set when they are new.
+The file contains bearer secrets; keep the runtime directory operator-owned.
 
 `/preview/{path}?token=...` verifies the existing signed preview token and, when
 the store has a preview deployment, forwards to it with

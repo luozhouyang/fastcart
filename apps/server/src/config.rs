@@ -275,6 +275,10 @@ pub struct SsrConfig {
     pub artifact_max_files: u64,
     /// Optional root that runtime activation paths must stay under.
     pub artifact_root: Option<PathBuf>,
+    /// Optional JSON file for persisted internal SSR credentials.
+    ///
+    /// Defaults to `<runtime_dir>/internal-ssr-credentials.json`.
+    pub credentials_path: Option<PathBuf>,
     /// Explicit per-store deployments. Empty starts one default deployment.
     pub deployments: Vec<SsrDeploymentConfig>,
 }
@@ -329,6 +333,7 @@ impl Default for SsrConfig {
             artifact_max_bytes: 100 * 1024 * 1024,
             artifact_max_files: 5_000,
             artifact_root: None,
+            credentials_path: None,
             deployments: Vec::new(),
         }
     }
@@ -587,6 +592,9 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_SSR_ARTIFACT_ROOT") {
             self.ssr.artifact_root = Some(PathBuf::from(value));
         }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_PATH") {
+            self.ssr.credentials_path = Some(PathBuf::from(value));
+        }
         if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
             // An empty pass-through value from an orchestrator
             // disables preview rather than configuring a zero-byte secret.
@@ -762,6 +770,14 @@ impl Config {
                 .is_some_and(|root| root.as_os_str().is_empty())
             {
                 bail!("ssr.artifact_root must not be empty when set");
+            }
+            if self
+                .ssr
+                .credentials_path
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty())
+            {
+                bail!("ssr.credentials_path must not be empty when set");
             }
             if self.ssr.deployments.is_empty() {
                 if self.ssr.artifact_path.as_os_str().is_empty() {

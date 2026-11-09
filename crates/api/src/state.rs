@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use axum::response::IntoResponse;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
@@ -84,7 +86,7 @@ pub trait UniversalStorefront: Send + Sync {
 }
 
 /// One server-to-server SSR credential and its optional store scope.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InternalSsrToken {
     /// Bearer token value.
     pub token: String,
@@ -109,6 +111,13 @@ impl std::fmt::Debug for InternalSsrToken {
 #[derive(Clone, Default)]
 pub struct InternalSsrCredentials {
     tokens: Arc<std::sync::RwLock<Vec<InternalSsrToken>>>,
+    state_path: Option<PathBuf>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedCredentials {
+    version: u32,
+    tokens: Vec<InternalSsrToken>,
 }
 
 impl std::fmt::Debug for InternalSsrCredentials {
@@ -117,6 +126,7 @@ impl std::fmt::Debug for InternalSsrCredentials {
         formatter
             .debug_struct("InternalSsrCredentials")
             .field("count", &len)
+            .field("persistent", &self.state_path.is_some())
             .finish()
     }
 }
@@ -127,7 +137,97 @@ impl InternalSsrCredentials {
     pub fn new(tokens: Vec<InternalSsrToken>) -> Self {
         Self {
             tokens: Arc::new(std::sync::RwLock::new(tokens)),
+            state_path: None,
         }
+    }
+
+    /// Loads persisted credentials, merges any new config tokens, and writes
+    /// the resulting set back atomically.
+    ///
+    /// A missing or invalid state file falls back to `configured`. Parse
+    /// failures are logged and ignored rather than failing server startup.
+    #[must_use]
+    pub fn load(path: impl Into<PathBuf>, configured: Vec<InternalSsrToken>) -> Self {
+        let path = path.into();
+        let mut tokens = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<PersistedCredentials>(&bytes) {
+                Ok(persisted) if persisted.version == 1 => persisted.tokens,
+                Ok(_) => {
+                    tracing::warn!(path = %path.display(), "unsupported SSR credential state version");
+                    configured.clone()
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, path = %path.display(), "ignoring invalid SSR credential state");
+                    configured.clone()
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => configured.clone(),
+            Err(error) => {
+                tracing::warn!(error = %error, path = %path.display(), "failed to read SSR credential state");
+                configured.clone()
+            }
+        };
+        let now = fastcart_kernel::now_timestamp();
+        tokens.retain(|token| token.expires_at.is_none_or(|expiry| expiry > now));
+        for token in configured {
+            if token.expires_at.is_some_and(|expiry| expiry <= now) {
+                continue;
+            }
+            if !tokens.iter().any(|existing| existing.token == token.token) {
+                tokens.push(token);
+            }
+        }
+        let credentials = Self {
+            tokens: Arc::new(std::sync::RwLock::new(tokens)),
+            state_path: Some(path),
+        };
+        if let Err(error) = credentials.persist() {
+            tracing::warn!(error = %error, "failed to persist SSR credentials");
+        }
+        credentials
+    }
+
+    fn persist(&self) -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        let Some(path) = &self.state_path else {
+            return Ok(());
+        };
+        let now = fastcart_kernel::now_timestamp();
+        let tokens: Vec<InternalSsrToken> = {
+            let tokens = self
+                .tokens
+                .read()
+                .map_err(|_| std::io::Error::other("credential lock poisoned"))?;
+            tokens
+                .iter()
+                .filter(|token| token.expires_at.is_none_or(|expiry| expiry > now))
+                .cloned()
+                .collect()
+        };
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let staging = path.with_extension("json.tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&staging)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        serde_json::to_writer_pretty(&mut file, &PersistedCredentials { version: 1, tokens })
+            .map_err(std::io::Error::other)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        std::fs::rename(&staging, path)?;
+        Ok(())
     }
 
     /// Returns whether no credentials are configured.
@@ -177,7 +277,7 @@ impl InternalSsrCredentials {
         token: String,
         expires_at: Option<i64>,
         grace_seconds: i64,
-    ) {
+    ) -> Result<(), String> {
         let now = fastcart_kernel::now_timestamp();
         let deadline = now.saturating_add(grace_seconds.max(0));
         if let Ok(mut tokens) = self.tokens.write() {
@@ -196,6 +296,7 @@ impl InternalSsrCredentials {
                 expires_at,
             });
         }
+        self.persist().map_err(|error| error.to_string())
     }
 }
 
@@ -736,5 +837,61 @@ mod provider_tests {
         assert_eq!(store_env_suffix(&store), "STORE_01AB_CD_EF");
         let plain = StoreId::from_string("abc123");
         assert_eq!(store_env_suffix(&plain), "ABC123");
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::{InternalSsrCredentials, InternalSsrToken};
+
+    #[test]
+    fn persisted_credentials_survive_reload_and_rotate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        let credentials = InternalSsrCredentials::load(
+            &path,
+            vec![InternalSsrToken {
+                token: "initial-token-0123456789".to_owned(),
+                store_id: Some("store_a".to_owned()),
+                expires_at: None,
+            }],
+        );
+        assert!(credentials.validate("initial-token-0123456789").is_some());
+
+        credentials
+            .rotate("store_a", "rotated-token-0123456789".to_owned(), None, 0)
+            .expect("rotate");
+        assert!(credentials.validate("rotated-token-0123456789").is_some());
+        assert!(credentials.validate("initial-token-0123456789").is_none());
+
+        let reloaded = InternalSsrCredentials::load(&path, Vec::new());
+        assert!(reloaded.validate("rotated-token-0123456789").is_some());
+        assert!(reloaded.validate("initial-token-0123456789").is_none());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn expired_credentials_are_not_loaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        let credentials = InternalSsrCredentials::load(
+            &path,
+            vec![InternalSsrToken {
+                token: "expired-token-0123456789".to_owned(),
+                store_id: None,
+                expires_at: Some(1),
+            }],
+        );
+        assert!(credentials.is_empty());
     }
 }

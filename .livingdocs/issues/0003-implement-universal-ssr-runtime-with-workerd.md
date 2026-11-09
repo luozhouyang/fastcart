@@ -179,3 +179,11 @@ Prometheus metrics. Token rotation and preview data isolation remain open.
 credentials with an optional expiry and grace window; the gateway uses the
 newest active token. Rotation is in memory and reverts to config on restart.
 Audit events and persistent credentials remain open.
+
+### Phase 19 status
+
+Rotated credentials are persisted atomically to
+`ssr.credentials_path` (default `<runtime_dir>/internal-ssr-credentials.json`,
+mode `0600`), reloaded on restart, and merged with new config tokens. Expired
+tokens are filtered. Secret-manager integration, explicit revocation and
+multi-instance coordination remain open.

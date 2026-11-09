@@ -87,6 +87,8 @@ enabled = false
 # internal_token = "replace-with-a-long-random-token"
 # Runtime activation may only read artifacts under this root.
 # artifact_root = "./data/ssr/deployments"
+# Persistent credential state; defaults to <runtime_dir>/internal-ssr-credentials.json.
+# credentials_path = "./data/ssr/internal-ssr-credentials.json"
 startup_timeout_ms = 10000
 shutdown_timeout_ms = 5000
 request_timeout_ms = 30000

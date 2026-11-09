@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 19 (2026-11-09) added a persistent, atomically written credential store
+with Unix `0600` mode, rotation reload and expired-token filtering. Secret
+manager integration, revocation and multi-instance coordination remain open.
+
 Phase 18 (2026-11-09) added online token rotation with a grace window, mutable
 shared credentials, per-request gateway token selection and expiry purging.
 Rotation is in memory and reverts to config on restart.

@@ -1253,6 +1253,7 @@ export default {
             artifact_max_bytes: 10 * 1024 * 1024,
             artifact_max_files: 100,
             artifact_root: None,
+            credentials_path: None,
             deployments: Vec::new(),
         };
         let runtime = UniversalSsr::initialize(
@@ -1301,7 +1302,8 @@ export default {
         assert_eq!(value["token"], "server-secret");
         runtime
             .credentials
-            .rotate("store_01", "rotated-secret-token".to_owned(), None, 300);
+            .rotate("store_01", "rotated-secret-token".to_owned(), None, 300)
+            .expect("rotate credential");
         let rotated = runtime
             .render(
                 Request::builder()
@@ -1566,6 +1568,7 @@ export default {
             artifact_max_bytes: 10 * 1024 * 1024,
             artifact_max_files: 100,
             artifact_root: Some(root.path().to_path_buf()),
+            credentials_path: None,
             deployments: vec![
                 SsrDeploymentConfig {
                     store_id: "store_a".to_owned(),
@@ -1754,6 +1757,7 @@ export default {
             artifact_max_bytes: 10 * 1024 * 1024,
             artifact_max_files: 100,
             artifact_root: Some(root.path().to_path_buf()),
+            credentials_path: None,
             deployments: Vec::new(),
         };
         let runtime = UniversalSsr::initialize(
