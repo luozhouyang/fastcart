@@ -210,6 +210,22 @@ gets an isolated workerd group; an unknown store receives `404` instead of
 falling back to another store. Leave `deployments` empty for the single
 default-artifact mode.
 
+While the server is running, the internal token can start a replacement
+deployment without dropping the active one first:
+
+```bash
+curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/activate \
+  -H "authorization: Bearer $FASTCART_SSR_INTERNAL_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"deployment_id":"deploy_02","artifact_path":"/srv/fastcart/deploy_02"}'
+curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/rollback \
+  -H "authorization: Bearer $FASTCART_SSR_INTERNAL_TOKEN"
+```
+
+The new artifact must pass `/__fastcart/health`; the old group drains for
+`ssr.drain_timeout_ms` while its assets remain available. Activation state is
+in memory and reverts to `[[ssr.deployments]]` on restart.
+
 Configuration is TOML plus environment overrides. Required and recommended
 settings:
 

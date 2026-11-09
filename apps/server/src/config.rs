@@ -267,6 +267,8 @@ pub struct SsrConfig {
     pub restart_backoff_ms: u64,
     /// Maximum restarts before the group fails.
     pub max_restarts: u32,
+    /// Time to keep a replaced deployment running for in-flight requests.
+    pub drain_timeout_ms: u64,
     /// Maximum artifact size in bytes.
     pub artifact_max_bytes: u64,
     /// Maximum artifact file count.
@@ -315,6 +317,7 @@ impl Default for SsrConfig {
             request_timeout_ms: 30_000,
             restart_backoff_ms: 1_000,
             max_restarts: 3,
+            drain_timeout_ms: 5_000,
             artifact_max_bytes: 100 * 1024 * 1024,
             artifact_max_files: 5_000,
             deployments: Vec::new(),
@@ -556,6 +559,11 @@ impl Config {
             self.ssr.max_restarts = value
                 .parse()
                 .context("FASTCART_SSR_MAX_RESTARTS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_DRAIN_TIMEOUT_MS") {
+            self.ssr.drain_timeout_ms = value
+                .parse()
+                .context("FASTCART_SSR_DRAIN_TIMEOUT_MS must be a number")?;
         }
         if let Ok(value) = env::var("FASTCART_SSR_ARTIFACT_MAX_BYTES") {
             self.ssr.artifact_max_bytes = value

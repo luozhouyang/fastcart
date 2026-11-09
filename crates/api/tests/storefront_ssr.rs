@@ -91,6 +91,19 @@ impl UniversalStorefront for RecordingUniversal {
     async fn serve_asset(&self, store_id: &str, path: String) -> Response {
         (StatusCode::OK, format!("asset:{store_id}:{path}")).into_response()
     }
+
+    async fn activate(
+        &self,
+        _store_id: &str,
+        _deployment_id: &str,
+        _artifact_path: String,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _store_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 struct StreamingRuntime;
@@ -1238,4 +1251,63 @@ async fn universal_assets_are_served_without_store_resolution() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn deployment_lifecycle_requires_the_internal_token() {
+    let fixture = fixture(None, None, Some(Arc::new(RecordingUniversal::default()))).await;
+    let activate_path = format!("/internal/ssr/v1/deployments/{}/activate", fixture.store_id);
+    let body = serde_json::json!({
+        "deployment_id": "deploy_next",
+        "artifact_path": "/tmp/next-artifact"
+    });
+
+    let unauthorized = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&activate_path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::FORBIDDEN);
+
+    let authorized = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&activate_path)
+                .header("authorization", "Bearer ssr-internal-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::NO_CONTENT);
+
+    let rollback = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/internal/ssr/v1/deployments/{}/rollback",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer ssr-internal-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rollback.status(), StatusCode::NO_CONTENT);
 }

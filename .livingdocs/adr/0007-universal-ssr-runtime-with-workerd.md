@@ -177,6 +177,12 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 9 (2026-11-09) added authenticated activation and rollback. A replacement
+starts and becomes healthy before the active pointer swaps; the old group drains
+on a timer and its asset roots remain readable. Activation is in memory and
+reverts to config on restart; persistence and artifact-root confinement remain
+later work.
+
 Phase 8 (2026-11-09) added a config-backed multi-store registry. Each
 `[[ssr.deployments]]` entry gets an isolated workerd group; storefront requests
 select by resolved store id and unknown stores return 404. Asset serving resolves

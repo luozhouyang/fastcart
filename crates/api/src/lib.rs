@@ -70,9 +70,16 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
     }
     if let Some(token) = context.config.internal_ssr_token.clone() {
         let internal = routes::store::internal_ssr_router(&context).layer(
-            axum::middleware::from_fn_with_state(token, routes::internal_ssr_auth_middleware),
+            axum::middleware::from_fn_with_state(
+                token.clone(),
+                routes::internal_ssr_auth_middleware,
+            ),
         );
         router = router.nest("/internal/ssr/v1/stores/{store_id}", internal);
+        let deployments = routes::universal_deployments::router().layer(
+            axum::middleware::from_fn_with_state(token, routes::internal_ssr_auth_middleware),
+        );
+        router = router.nest("/internal/ssr/v1/deployments", deployments);
     }
 
     let router = router

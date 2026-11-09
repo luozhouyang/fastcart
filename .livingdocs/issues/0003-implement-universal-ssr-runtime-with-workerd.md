@@ -113,3 +113,10 @@ requests and compression remain later phases.
 served from the matching artifact. Unknown stores return 404. The registry is
 boot-time configuration; activation, rollback, draining and per-store tokens
 remain Phase 9.
+
+### Phase 9 status
+
+Authenticated activation and rollback start a replacement, wait for health,
+swap atomically and drain the old group. Retired asset roots stay readable
+during the drain window. Activation is not restart-persistent and artifact paths
+are not root-confined yet.

@@ -1,8 +1,10 @@
 //! Universal workerd storefront runtime wiring.
 
 use std::collections::HashMap;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -17,30 +19,44 @@ use fastcart_ssr::{
     SsrRequestContext, SsrResponse,
 };
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::config::SsrConfig;
 
 /// One active storefront deployment.
+#[derive(Clone)]
 struct Deployment {
     group: RuntimeGroupId,
     gateway: SsrGateway,
     deployment_id: String,
     asset_root: PathBuf,
+    artifact_path: PathBuf,
+}
+
+/// A deployment that can be restored by a rollback.
+#[derive(Clone)]
+struct DeploymentMeta {
+    deployment_id: String,
+    artifact_path: PathBuf,
 }
 
 /// Universal storefront runtime registry.
 pub struct UniversalSsr {
-    manager: Mutex<RuntimeManager>,
-    deployments: HashMap<String, Arc<Deployment>>,
+    manager: Arc<Mutex<RuntimeManager>>,
+    deployments: RwLock<HashMap<String, Arc<Deployment>>>,
+    history: RwLock<HashMap<String, Vec<DeploymentMeta>>>,
+    asset_roots: RwLock<Vec<PathBuf>>,
     default: Option<Arc<Deployment>>,
+    artifacts: ArtifactStore,
+    config: SsrConfig,
+    counter: AtomicU64,
 }
 
 struct DeploymentSpec<'a> {
     store_id: Option<&'a str>,
     deployment_id: &'a str,
     artifact_path: &'a Path,
-    listen: std::net::SocketAddr,
+    listen: SocketAddr,
 }
 
 impl UniversalSsr {
@@ -49,7 +65,7 @@ impl UniversalSsr {
         if !config.enabled {
             return Ok(None);
         }
-        let store = ArtifactStore::new(config.runtime_dir.join("artifacts"));
+        let artifacts = ArtifactStore::new(config.runtime_dir.join("artifacts"));
         let limits = ArtifactLimits {
             max_bytes: config.artifact_max_bytes,
             max_files: config.artifact_max_files,
@@ -70,8 +86,15 @@ impl UniversalSsr {
         for spec in specs {
             let group = RuntimeGroupId::new(spec.store_id.unwrap_or("default"))
                 .context("invalid SSR runtime group")?;
-            let result =
-                start_deployment(&mut manager, &store, limits, config, &spec, group.clone()).await;
+            let result = start_deployment(
+                &mut manager,
+                &artifacts,
+                limits,
+                config,
+                &spec,
+                group.clone(),
+            )
+            .await;
             match result {
                 Ok(deployment) => {
                     started.push(group);
@@ -94,11 +117,133 @@ impl UniversalSsr {
                 }
             }
         }
+        let mut asset_roots: Vec<PathBuf> = deployments
+            .values()
+            .map(|deployment| deployment.asset_root.clone())
+            .collect();
+        if let Some(default) = &default {
+            asset_roots.push(default.asset_root.clone());
+        }
         Ok(Some(Arc::new(Self {
-            manager: Mutex::new(manager),
-            deployments,
+            manager: Arc::new(Mutex::new(manager)),
+            deployments: RwLock::new(deployments),
+            history: RwLock::new(HashMap::new()),
+            asset_roots: RwLock::new(asset_roots),
             default,
+            artifacts,
+            config: config.clone(),
+            counter: AtomicU64::new(0),
         })))
+    }
+
+    /// Starts a new artifact for one store and drains the replaced deployment.
+    pub async fn activate(
+        &self,
+        store_id: &str,
+        deployment_id: &str,
+        artifact_path: &Path,
+    ) -> Result<()> {
+        self.replace(store_id, deployment_id, artifact_path, true)
+            .await
+    }
+
+    /// Restores the deployment replaced by the last activation.
+    pub async fn rollback(&self, store_id: &str) -> Result<()> {
+        let previous = {
+            let mut history = self.history.write().await;
+            history.get_mut(store_id).and_then(std::vec::Vec::pop)
+        };
+        let Some(previous) = previous else {
+            bail!("no previous deployment for {store_id}");
+        };
+        self.replace(
+            store_id,
+            &previous.deployment_id,
+            &previous.artifact_path,
+            true,
+        )
+        .await
+    }
+
+    async fn replace(
+        &self,
+        store_id: &str,
+        deployment_id: &str,
+        artifact_path: &Path,
+        record_history: bool,
+    ) -> Result<()> {
+        validate_identifier("store_id", store_id)?;
+        validate_identifier("deployment_id", deployment_id)?;
+        let listen = free_loopback_port()?;
+        let sequence = self.counter.fetch_add(1, Ordering::Relaxed);
+        let group = RuntimeGroupId::new(format!("active_{sequence}"))
+            .context("invalid activation group")?;
+        let spec = DeploymentSpec {
+            store_id: Some(store_id),
+            deployment_id,
+            artifact_path,
+            listen,
+        };
+        let limits = ArtifactLimits {
+            max_bytes: self.config.artifact_max_bytes,
+            max_files: self.config.artifact_max_files,
+        };
+        let mut manager = self.manager.lock().await;
+        let deployment = start_deployment(
+            &mut manager,
+            &self.artifacts,
+            limits,
+            &self.config,
+            &spec,
+            group,
+        )
+        .await?;
+        drop(manager);
+
+        let deployment = Arc::new(deployment);
+        let old = self
+            .deployments
+            .write()
+            .await
+            .insert(store_id.to_owned(), deployment);
+        let previous = old.or_else(|| self.default.clone());
+        if record_history && let Some(previous) = &previous {
+            let mut history = self.history.write().await;
+            let entries = history.entry(store_id.to_owned()).or_default();
+            entries.push(DeploymentMeta {
+                deployment_id: previous.deployment_id.clone(),
+                artifact_path: previous.artifact_path.clone(),
+            });
+            if entries.len() > 3 {
+                entries.remove(0);
+            }
+        }
+        if let Some(previous) = previous {
+            let mut roots = self.asset_roots.write().await;
+            if !roots.iter().any(|root| root == &previous.asset_root) {
+                roots.push(previous.asset_root.clone());
+            }
+            drop(roots);
+            if self
+                .default
+                .as_ref()
+                .is_none_or(|default| default.group.as_str() != previous.group.as_str())
+            {
+                self.schedule_drain(previous.group.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn schedule_drain(&self, group: RuntimeGroupId) {
+        let manager = Arc::clone(&self.manager);
+        let delay = Duration::from_millis(self.config.drain_timeout_ms.max(1));
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            if let Err(error) = manager.lock().await.stop_group(&group).await {
+                tracing::warn!(error = %error, group = %group, "failed to drain SSR group");
+            }
+        });
     }
 
     /// Stops every runtime group during server shutdown.
@@ -106,6 +251,8 @@ impl UniversalSsr {
         let mut manager = self.manager.lock().await;
         let mut groups: Vec<RuntimeGroupId> = self
             .deployments
+            .read()
+            .await
             .values()
             .map(|deployment| deployment.group.clone())
             .collect();
@@ -119,8 +266,13 @@ impl UniversalSsr {
         }
     }
 
-    fn deployment(&self, store_id: &str) -> Option<&Arc<Deployment>> {
-        self.deployments.get(store_id).or(self.default.as_ref())
+    async fn deployment(&self, store_id: &str) -> Option<Arc<Deployment>> {
+        self.deployments
+            .read()
+            .await
+            .get(store_id)
+            .cloned()
+            .or_else(|| self.default.clone())
     }
 }
 
@@ -140,7 +292,7 @@ fn deployment_specs(config: &SsrConfig) -> Vec<DeploymentSpec<'_>> {
         .map(|(index, deployment)| {
             let listen = deployment.listen.unwrap_or_else(|| {
                 let offset = u16::try_from(index).unwrap_or(u16::MAX);
-                std::net::SocketAddr::new(
+                SocketAddr::new(
                     config.listen.ip(),
                     config.listen.port().saturating_add(offset),
                 )
@@ -192,7 +344,29 @@ async fn start_deployment(
         gateway,
         deployment_id: spec.deployment_id.to_owned(),
         asset_root,
+        artifact_path: spec.artifact_path.to_owned(),
     })
+}
+
+fn free_loopback_port() -> Result<SocketAddr> {
+    let listener = TcpListener::bind("127.0.0.1:0").context("failed to reserve a loopback port")?;
+    let address = listener
+        .local_addr()
+        .context("failed to read loopback port")?;
+    drop(listener);
+    Ok(address)
+}
+
+fn validate_identifier(label: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("{label} must be 1-128 safe characters");
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -204,7 +378,7 @@ impl UniversalStorefront for UniversalSsr {
         request_id: Option<String>,
         scheme: String,
     ) -> Response {
-        let Some(deployment) = self.deployment(store.store_id.as_str()) else {
+        let Some(deployment) = self.deployment(store.store_id.as_str()).await else {
             return (
                 StatusCode::NOT_FOUND,
                 axum::Json(json!({ "error": "SSR_DEPLOYMENT_NOT_FOUND" })),
@@ -231,10 +405,37 @@ impl UniversalStorefront for UniversalSsr {
     }
 
     async fn serve_asset(&self, store_id: &str, path: String) -> Response {
-        let Some(deployment) = self.deployment(store_id) else {
+        let Some(deployment) = self.deployment(store_id).await else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        serve_asset(&deployment.asset_root, &path).await
+        let response = serve_asset(&deployment.asset_root, &path).await;
+        if response.status() != StatusCode::NOT_FOUND {
+            return response;
+        }
+        for root in self.asset_roots.read().await.iter() {
+            let response = serve_asset(root, &path).await;
+            if response.status() != StatusCode::NOT_FOUND {
+                return response;
+            }
+        }
+        StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn activate(
+        &self,
+        store_id: &str,
+        deployment_id: &str,
+        artifact_path: String,
+    ) -> Result<(), String> {
+        self.activate(store_id, deployment_id, Path::new(&artifact_path))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn rollback(&self, store_id: &str) -> Result<(), String> {
+        self.rollback(store_id)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -457,6 +658,7 @@ export default {
             shutdown_timeout_ms: 5_000,
             restart_backoff_ms: 10,
             max_restarts: 1,
+            drain_timeout_ms: 100,
             artifact_max_bytes: 10 * 1024 * 1024,
             artifact_max_files: 100,
             deployments: Vec::new(),
@@ -527,6 +729,31 @@ export default {
         runtime.shutdown().await;
     }
 
+    async fn render_store(runtime: &UniversalSsr, store_id: &str) -> serde_json::Value {
+        let response = runtime
+            .render(
+                Request::builder()
+                    .uri("/context")
+                    .body(Body::empty())
+                    .expect("request"),
+                StoreContext {
+                    store_id: StoreId::from_string(store_id.to_owned()),
+                    domain: format!("{store_id}.example"),
+                    locale: "en-US".to_owned(),
+                    currency: CurrencyCode::new("USD").expect("currency"),
+                    timezone: "UTC".to_owned(),
+                },
+                Some(format!("req_{store_id}")),
+                "https".to_owned(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        serde_json::from_slice(&body).expect("json")
+    }
+
     #[tokio::test]
     async fn routes_stores_to_isolated_deployments_and_assets() {
         let Some(binary) = workerd_binary() else {
@@ -537,6 +764,7 @@ export default {
         let source_a = artifact(&root.path().join("a"));
         let source_b = artifact(&root.path().join("b"));
         std::fs::write(source_a.join("client/app.js"), "asset-a").expect("asset a");
+        std::fs::write(source_a.join("client/old.js"), "old-a").expect("old asset a");
         std::fs::write(source_b.join("client/app.js"), "asset-b").expect("asset b");
         let config = SsrConfig {
             enabled: true,
@@ -553,13 +781,14 @@ export default {
             shutdown_timeout_ms: 5_000,
             restart_backoff_ms: 10,
             max_restarts: 1,
+            drain_timeout_ms: 100,
             artifact_max_bytes: 10 * 1024 * 1024,
             artifact_max_files: 100,
             deployments: vec![
                 SsrDeploymentConfig {
                     store_id: "store_a".to_owned(),
                     deployment_id: "deploy_a".to_owned(),
-                    artifact_path: source_a,
+                    artifact_path: source_a.clone(),
                     listen: Some(
                         format!("127.0.0.1:{}", free_port())
                             .parse()
@@ -569,7 +798,7 @@ export default {
                 SsrDeploymentConfig {
                     store_id: "store_b".to_owned(),
                     deployment_id: "deploy_b".to_owned(),
-                    artifact_path: source_b,
+                    artifact_path: source_b.clone(),
                     listen: Some(
                         format!("127.0.0.1:{}", free_port())
                             .parse()
@@ -639,6 +868,33 @@ export default {
                 .expect("asset");
             assert_eq!(&body[..], expected.as_bytes());
         }
+
+        let source_c = artifact(&root.path().join("c"));
+        std::fs::write(source_c.join("client/app.js"), "asset-c").expect("asset c");
+        runtime
+            .activate("store_a", "deploy_a2", &source_c)
+            .await
+            .expect("activate");
+        let activated = render_store(&runtime, "store_a").await;
+        assert_eq!(activated["deployment"], "deploy_a2");
+        let asset = runtime.serve_asset("store_a", "app.js".to_owned()).await;
+        let body = axum::body::to_bytes(asset.into_body(), 1024)
+            .await
+            .expect("asset");
+        assert_eq!(&body[..], b"asset-c");
+
+        assert!(
+            runtime
+                .activate("store_a", "deploy_bad", &root.path().join("missing"))
+                .await
+                .is_err()
+        );
+        let still_active = render_store(&runtime, "store_a").await;
+        assert_eq!(still_active["deployment"], "deploy_a2");
+
+        runtime.rollback("store_a").await.expect("rollback");
+        let rolled_back = render_store(&runtime, "store_a").await;
+        assert_eq!(rolled_back["deployment"], "deploy_a");
         runtime.shutdown().await;
     }
 }

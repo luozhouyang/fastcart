@@ -90,6 +90,7 @@ shutdown_timeout_ms = 5000
 request_timeout_ms = 30000
 restart_backoff_ms = 1000
 max_restarts = 3
+drain_timeout_ms = 5000
 artifact_max_bytes = 104857600
 artifact_max_files = 5000
 

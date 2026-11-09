@@ -29,6 +29,17 @@ pub trait UniversalStorefront: Send + Sync {
 
     /// Serves one client asset from the active artifact.
     async fn serve_asset(&self, store_id: &str, path: String) -> axum::response::Response;
+
+    /// Starts and activates a new deployment for one store.
+    async fn activate(
+        &self,
+        store_id: &str,
+        deployment_id: &str,
+        artifact_path: String,
+    ) -> Result<(), String>;
+
+    /// Restores the previous deployment for one store.
+    async fn rollback(&self, store_id: &str) -> Result<(), String>;
 }
 
 /// HTTP-facing configuration.
