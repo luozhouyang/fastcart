@@ -85,6 +85,8 @@ enabled = false
 # listen = "127.0.0.1:18888"
 # deployment_id = "default"
 # internal_token = "replace-with-a-long-random-token"
+# Runtime activation may only read artifacts under this root.
+# artifact_root = "./data/ssr/deployments"
 startup_timeout_ms = 10000
 shutdown_timeout_ms = 5000
 request_timeout_ms = 30000

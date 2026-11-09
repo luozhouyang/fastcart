@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 10 (2026-11-09) added artifact-root confinement, atomic activation-state
+persistence for default mode, persisted-state reload and structured render
+tracing. Per-store credentials and SSR metrics remain hardening work.
+
 Phase 9 (2026-11-09) added authenticated activation and rollback. A replacement
 starts and becomes healthy before the active pointer swaps; the old group drains
 on a timer and its asset roots remain readable. Activation is in memory and

@@ -120,3 +120,9 @@ Authenticated activation and rollback start a replacement, wait for health,
 swap atomically and drain the old group. Retired asset roots stay readable
 during the drain window. Activation is not restart-persistent and artifact paths
 are not root-confined yet.
+
+### Phase 10 status
+
+Activation paths are confined by `ssr.artifact_root`; successful default-mode
+activation is written atomically and reloaded on restart. Render/activation/drain
+paths emit structured tracing. Per-store credentials and metrics remain open.

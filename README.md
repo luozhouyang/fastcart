@@ -223,8 +223,12 @@ curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/rollbac
 ```
 
 The new artifact must pass `/__fastcart/health`; the old group drains for
-`ssr.drain_timeout_ms` while its assets remain available. Activation state is
-in memory and reverts to `[[ssr.deployments]]` on restart.
+`ssr.drain_timeout_ms` while its assets remain available. With the default
+single-artifact mode, successful activation is written atomically to
+`data/ssr/deployment-state.json` and reloaded on restart. An explicit
+`[[ssr.deployments]]` list remains authoritative for those stores. When
+`ssr.artifact_root` is set, activation paths are canonicalized and must stay
+under it.
 
 Configuration is TOML plus environment overrides. Required and recommended
 settings:

@@ -273,6 +273,8 @@ pub struct SsrConfig {
     pub artifact_max_bytes: u64,
     /// Maximum artifact file count.
     pub artifact_max_files: u64,
+    /// Optional root that runtime activation paths must stay under.
+    pub artifact_root: Option<PathBuf>,
     /// Explicit per-store deployments. Empty starts one default deployment.
     pub deployments: Vec<SsrDeploymentConfig>,
 }
@@ -320,6 +322,7 @@ impl Default for SsrConfig {
             drain_timeout_ms: 5_000,
             artifact_max_bytes: 100 * 1024 * 1024,
             artifact_max_files: 5_000,
+            artifact_root: None,
             deployments: Vec::new(),
         }
     }
@@ -575,6 +578,9 @@ impl Config {
                 .parse()
                 .context("FASTCART_SSR_ARTIFACT_MAX_FILES must be a number")?;
         }
+        if let Ok(value) = env::var("FASTCART_SSR_ARTIFACT_ROOT") {
+            self.ssr.artifact_root = Some(PathBuf::from(value));
+        }
         if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
             // An empty pass-through value from an orchestrator
             // disables preview rather than configuring a zero-byte secret.
@@ -742,6 +748,14 @@ impl Config {
             }
             if self.ssr.artifact_max_bytes == 0 || self.ssr.artifact_max_files == 0 {
                 bail!("ssr artifact limits must be greater than zero");
+            }
+            if self
+                .ssr
+                .artifact_root
+                .as_ref()
+                .is_some_and(|root| root.as_os_str().is_empty())
+            {
+                bail!("ssr.artifact_root must not be empty when set");
             }
             if self.ssr.deployments.is_empty() {
                 if self.ssr.artifact_path.as_os_str().is_empty() {

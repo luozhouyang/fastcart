@@ -18,6 +18,7 @@ use fastcart_ssr::{
     RuntimeGroupId, RuntimeManager, RuntimeManagerConfig, SsrBody, SsrError, SsrGateway,
     SsrRequestContext, SsrResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
 
@@ -40,6 +41,14 @@ struct DeploymentMeta {
     artifact_path: PathBuf,
 }
 
+/// Activation state written atomically after a successful swap.
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedDeployment {
+    store_id: String,
+    deployment_id: String,
+    artifact_path: PathBuf,
+}
+
 /// Universal storefront runtime registry.
 pub struct UniversalSsr {
     manager: Arc<Mutex<RuntimeManager>>,
@@ -48,6 +57,8 @@ pub struct UniversalSsr {
     asset_roots: RwLock<Vec<PathBuf>>,
     default: Option<Arc<Deployment>>,
     artifacts: ArtifactStore,
+    artifact_root: Option<PathBuf>,
+    state_path: PathBuf,
     config: SsrConfig,
     counter: AtomicU64,
 }
@@ -79,7 +90,25 @@ impl UniversalSsr {
         manager_config.max_restarts = config.max_restarts;
         let mut manager = RuntimeManager::new(manager_config)
             .context("failed to create the SSR runtime manager")?;
-        let specs = deployment_specs(config);
+        let state_path = config.runtime_dir.join("deployment-state.json");
+        let persisted_config = if config.deployments.is_empty() {
+            load_persisted(&state_path).await.map(|entries| {
+                let mut persisted = config.clone();
+                persisted.deployments = entries
+                    .into_iter()
+                    .map(|entry| crate::config::SsrDeploymentConfig {
+                        store_id: entry.store_id,
+                        deployment_id: entry.deployment_id,
+                        artifact_path: entry.artifact_path,
+                        listen: None,
+                    })
+                    .collect();
+                persisted
+            })
+        } else {
+            None
+        };
+        let specs = deployment_specs(persisted_config.as_ref().unwrap_or(config));
         let mut deployments = HashMap::new();
         let mut default = None;
         let mut started = Vec::new();
@@ -131,6 +160,8 @@ impl UniversalSsr {
             asset_roots: RwLock::new(asset_roots),
             default,
             artifacts,
+            artifact_root: config.artifact_root.clone(),
+            state_path,
             config: config.clone(),
             counter: AtomicU64::new(0),
         })))
@@ -174,6 +205,7 @@ impl UniversalSsr {
     ) -> Result<()> {
         validate_identifier("store_id", store_id)?;
         validate_identifier("deployment_id", deployment_id)?;
+        let artifact_path = self.resolve_artifact_path(artifact_path).await?;
         let listen = free_loopback_port()?;
         let sequence = self.counter.fetch_add(1, Ordering::Relaxed);
         let group = RuntimeGroupId::new(format!("active_{sequence}"))
@@ -181,7 +213,7 @@ impl UniversalSsr {
         let spec = DeploymentSpec {
             store_id: Some(store_id),
             deployment_id,
-            artifact_path,
+            artifact_path: &artifact_path,
             listen,
         };
         let limits = ArtifactLimits {
@@ -218,7 +250,9 @@ impl UniversalSsr {
                 entries.remove(0);
             }
         }
+        self.persist_state().await;
         if let Some(previous) = previous {
+            tracing::info!(store_id, previous = %previous.deployment_id, "draining replaced SSR deployment");
             let mut roots = self.asset_roots.write().await;
             if !roots.iter().any(|root| root == &previous.asset_root) {
                 roots.push(previous.asset_root.clone());
@@ -233,6 +267,57 @@ impl UniversalSsr {
             }
         }
         Ok(())
+    }
+
+    async fn persist_state(&self) {
+        let entries: Vec<PersistedDeployment> = self
+            .deployments
+            .read()
+            .await
+            .iter()
+            .map(|(store_id, deployment)| PersistedDeployment {
+                store_id: store_id.clone(),
+                deployment_id: deployment.deployment_id.clone(),
+                artifact_path: deployment.artifact_path.clone(),
+            })
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        let Ok(serialized) = serde_json::to_vec_pretty(&entries) else {
+            tracing::warn!("failed to serialize SSR deployment state");
+            return;
+        };
+        let staging = self.state_path.with_extension("json.tmp");
+        if let Some(parent) = self.state_path.parent()
+            && let Err(error) = tokio::fs::create_dir_all(parent).await
+        {
+            tracing::warn!(error = %error, "failed to create SSR state directory");
+            return;
+        }
+        if let Err(error) = tokio::fs::write(&staging, serialized).await {
+            tracing::warn!(error = %error, "failed to write SSR deployment state");
+            return;
+        }
+        if let Err(error) = tokio::fs::rename(&staging, &self.state_path).await {
+            tracing::warn!(error = %error, "failed to commit SSR deployment state");
+        }
+    }
+
+    async fn resolve_artifact_path(&self, path: &Path) -> Result<PathBuf> {
+        let Some(root) = &self.artifact_root else {
+            return Ok(path.to_owned());
+        };
+        let root = tokio::fs::canonicalize(root)
+            .await
+            .with_context(|| format!("failed to resolve artifact root {}", root.display()))?;
+        let candidate = tokio::fs::canonicalize(path)
+            .await
+            .with_context(|| format!("failed to resolve artifact path {}", path.display()))?;
+        if !candidate.starts_with(&root) {
+            bail!("artifact path must stay under {}", root.display());
+        }
+        Ok(candidate)
     }
 
     fn schedule_drain(&self, group: RuntimeGroupId) {
@@ -273,6 +358,20 @@ impl UniversalSsr {
             .get(store_id)
             .cloned()
             .or_else(|| self.default.clone())
+    }
+}
+
+async fn load_persisted(path: &Path) -> Option<Vec<PersistedDeployment>> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    match serde_json::from_slice(&bytes) {
+        Ok(entries) => {
+            let entries: Vec<PersistedDeployment> = entries;
+            (!entries.is_empty()).then_some(entries)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, path = %path.display(), "ignoring invalid SSR deployment state");
+            None
+        }
     }
 }
 
@@ -394,13 +493,33 @@ impl UniversalStorefront for UniversalSsr {
             market_id: None,
             scheme,
         };
-        match deployment
+        let started = std::time::Instant::now();
+        let result = deployment
             .gateway
             .forward_streaming(request, &context)
-            .await
-        {
-            Ok(response) => into_response(response),
-            Err(error) => error_response(&error),
+            .await;
+        let elapsed_ms = started.elapsed().as_millis();
+        match result {
+            Ok(response) => {
+                tracing::debug!(
+                    store_id = context.store_id,
+                    deployment_id = context.deployment_id,
+                    status = %response.status,
+                    elapsed_ms,
+                    "universal SSR render"
+                );
+                into_response(response)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    store_id = context.store_id,
+                    deployment_id = context.deployment_id,
+                    error = %error,
+                    elapsed_ms,
+                    "universal SSR render failed"
+                );
+                error_response(&error)
+            }
         }
     }
 
@@ -661,6 +780,7 @@ export default {
             drain_timeout_ms: 100,
             artifact_max_bytes: 10 * 1024 * 1024,
             artifact_max_files: 100,
+            artifact_root: None,
             deployments: Vec::new(),
         };
         let runtime = UniversalSsr::initialize(&config)
@@ -784,6 +904,7 @@ export default {
             drain_timeout_ms: 100,
             artifact_max_bytes: 10 * 1024 * 1024,
             artifact_max_files: 100,
+            artifact_root: Some(root.path().to_path_buf()),
             deployments: vec![
                 SsrDeploymentConfig {
                     store_id: "store_a".to_owned(),
@@ -896,5 +1017,73 @@ export default {
         let rolled_back = render_store(&runtime, "store_a").await;
         assert_eq!(rolled_back["deployment"], "deploy_a");
         runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn activation_state_survives_restart() {
+        let Some(binary) = workerd_binary() else {
+            eprintln!("skipping: no workerd binary");
+            return;
+        };
+        let root = tempfile::tempdir().expect("root");
+        let source_a = artifact(&root.path().join("a"));
+        let source_b = artifact(&root.path().join("b"));
+        let runtime_dir = root.path().join("runtime");
+        let base = SsrConfig {
+            enabled: true,
+            binary,
+            artifact_path: source_a,
+            runtime_dir: runtime_dir.clone(),
+            listen: format!("127.0.0.1:{}", free_port())
+                .parse()
+                .expect("listen"),
+            deployment_id: "default".to_owned(),
+            internal_token: Some("server-secret".to_owned()),
+            request_timeout_ms: 10_000,
+            startup_timeout_ms: 10_000,
+            shutdown_timeout_ms: 5_000,
+            restart_backoff_ms: 10,
+            max_restarts: 1,
+            drain_timeout_ms: 100,
+            artifact_max_bytes: 10 * 1024 * 1024,
+            artifact_max_files: 100,
+            artifact_root: Some(root.path().to_path_buf()),
+            deployments: Vec::new(),
+        };
+        let runtime = UniversalSsr::initialize(&base)
+            .await
+            .expect("initialize")
+            .expect("enabled");
+        runtime
+            .activate("store_persist", "deploy_persisted", &source_b)
+            .await
+            .expect("activate");
+        runtime.shutdown().await;
+
+        let restarted = UniversalSsr::initialize(&base)
+            .await
+            .expect("restart")
+            .expect("enabled");
+        let value = render_store(&restarted, "store_persist").await;
+        assert_eq!(value["deployment"], "deploy_persisted");
+        let missing = restarted
+            .render(
+                Request::builder()
+                    .uri("/context")
+                    .body(Body::empty())
+                    .expect("request"),
+                StoreContext {
+                    store_id: StoreId::from_string("store_other".to_owned()),
+                    domain: "other.example".to_owned(),
+                    locale: "en-US".to_owned(),
+                    currency: CurrencyCode::new("USD").expect("currency"),
+                    timezone: "UTC".to_owned(),
+                },
+                None,
+                "https".to_owned(),
+            )
+            .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        restarted.shutdown().await;
     }
 }
