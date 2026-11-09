@@ -201,3 +201,10 @@ Preview assets are served from the preview artifact at
 `/_fastcart/preview-assets/*`; the gateway injects a trusted prefix header and
 the generic template uses it. TanStack/Astro/SvelteKit still need preview-specific
 asset bases; asset GC remains open.
+
+### Phase 22 status
+
+Scoped internal tokens can be revoked immediately via
+`POST /internal/ssr/v1/deployments/{store_id}/revoke-token`; revocation is
+persisted and idempotent. Audit events and multi-instance coordination remain
+open.

@@ -1542,6 +1542,44 @@ async fn deployment_lifecycle_requires_the_internal_token() {
         .unwrap();
     assert_eq!(new_token.status(), StatusCode::OK);
 
+    let revoked = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/internal/ssr/v1/deployments/{}/revoke-token",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer ssr-internal-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"token": "rotated-token-0123456789"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+
+    let after_revoke = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/internal/ssr/v1/stores/{}/context",
+                    fixture.store_id
+                ))
+                .header("authorization", "Bearer rotated-token-0123456789")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_revoke.status(), StatusCode::FORBIDDEN);
+
     let expired = fixture
         .app
         .clone()
@@ -1552,7 +1590,7 @@ async fn deployment_lifecycle_requires_the_internal_token() {
                     "/internal/ssr/v1/deployments/{}/rotate-token",
                     fixture.store_id
                 ))
-                .header("authorization", "Bearer rotated-token-0123456789")
+                .header("authorization", "Bearer ssr-internal-secret")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({

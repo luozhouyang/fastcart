@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 22 (2026-11-09) added explicit scoped-token revocation through the
+internal lifecycle API. Audit events, token fingerprints and multi-instance
+coordination remain open.
+
 Phase 21 (2026-11-09) isolated preview assets under
 `/_fastcart/preview-assets/*`, propagated a trusted asset-prefix header, and
 made the generic template use it. Framework preview builds and asset GC remain

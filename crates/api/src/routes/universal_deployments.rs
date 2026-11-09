@@ -23,6 +23,12 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/{store_id}/preview/activate", post(activate_preview))
         .route("/{store_id}/preview/deactivate", post(deactivate_preview))
         .route("/{store_id}/rotate-token", post(rotate_token))
+        .route("/{store_id}/revoke-token", post(revoke_token))
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokeTokenRequest {
+    token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +159,22 @@ async fn rotate_token(
             request.grace_seconds.unwrap_or(300),
             request.preview,
         )
+        .map_err(|error| ApiError::new(AppError::internal(error)))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn revoke_token(
+    State(context): State<Arc<AppContext>>,
+    Path(store_id): Path<String>,
+    Extension(scope): Extension<InternalSsrScope>,
+    Json(request): Json<RevokeTokenRequest>,
+) -> ApiResult<Response> {
+    ensure_scope(&scope, &store_id)?;
+    ensure_active_store(&context, &store_id).await?;
+    context
+        .config
+        .internal_ssr_credentials
+        .revoke(&store_id, &request.token)
         .map_err(|error| ApiError::new(AppError::internal(error)))?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

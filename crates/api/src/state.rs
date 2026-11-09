@@ -290,6 +290,27 @@ impl InternalSsrCredentials {
             .map(|token| token.token.clone())
     }
 
+    /// Removes a scoped token immediately.
+    ///
+    /// Returns whether a token was removed. Persistence failures are reported
+    /// after the in-memory revocation.
+    pub fn revoke(&self, store_id: &str, token: &str) -> Result<bool, String> {
+        let removed = {
+            let mut tokens = self
+                .tokens
+                .write()
+                .map_err(|_| "credential lock poisoned".to_owned())?;
+            let before = tokens.len();
+            tokens.retain(|existing| {
+                !(existing.store_id.as_deref() == Some(store_id)
+                    && bool::from(token.as_bytes().ct_eq(existing.token.as_bytes())))
+            });
+            tokens.len() != before
+        };
+        self.persist().map_err(|error| error.to_string())?;
+        Ok(removed)
+    }
+
     /// Adds a new store token and expires older scoped tokens after `grace_seconds`.
     pub fn rotate(
         &self,
