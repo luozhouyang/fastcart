@@ -71,5 +71,10 @@ The gateway is not mounted in `fastcart-server` yet; Phase 4 owns that wiring.
 
 The artifact manifest schema, TypeScript packager and Rust validator/store are
 in place. Rust and TypeScript share a digest fixture, and traversal, symlinks,
-missing entries and size limits are enforced. Runtime configuration generation
-and deployment records remain Phase 3 work.
+missing entries and size limits are enforced.
+
+### Phase 3 status
+
+`RuntimeManager` now generates workerd configuration for a stored artifact and
+manages group start, health, stop and restart with backoff and a restart limit.
+Background crash monitoring and persisted group state remain Phase 8/9 work.

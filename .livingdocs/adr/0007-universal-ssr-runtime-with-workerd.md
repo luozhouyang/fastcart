@@ -177,6 +177,13 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 3 (2026-11-09) added `RuntimeManager` and a deterministic Cap'n Proto
+generator. A manager starts, health-checks, stops and restarts a runtime group,
+applies a restart backoff and stops after the configured restart limit. Configs
+are generated under `groups/<id>/config.capnp` with the entry module first.
+Background crash monitoring, persisted group state, log files and bindings are
+still later-phase work.
+
 Phase 2 (2026-11-09) added the versioned `fastcart-ssr.json` schema, a
 TypeScript packager (`packages/storefront-build`) and the Rust artifact
 parser/validator/content-addressed store. Rust and TypeScript share a

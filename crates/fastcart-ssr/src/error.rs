@@ -42,4 +42,16 @@ pub enum SsrError {
     /// The process did not stop within the configured deadline.
     #[error("workerd did not stop within {0:?}")]
     ShutdownTimeout(Duration),
+    /// The requested runtime group is unknown.
+    #[error("unknown runtime group: {0}")]
+    UnknownGroup(String),
+    /// The runtime group already has a running process.
+    #[error("runtime group is already running: {0}")]
+    AlreadyRunning(String),
+    /// The group's restart limit was reached.
+    #[error("runtime group restart limit reached: {0}")]
+    RestartLimit(String),
+    /// An artifact cannot be represented as a workerd configuration.
+    #[error("invalid runtime configuration: {0}")]
+    InvalidRuntimeConfig(String),
 }

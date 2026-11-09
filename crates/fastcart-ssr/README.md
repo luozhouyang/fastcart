@@ -12,6 +12,14 @@ Process supervisor and HTTP gateway for the universal workerd SSR runtime.
 - `WorkerdConfig`: binary/config paths, listen address, health path and
   timeouts.
 
+## Runtime manager
+
+`RuntimeManager` starts one workerd process per runtime group, generates
+`groups/<id>/config.capnp` from a stored artifact, probes
+`/__fastcart/health`, applies a restart backoff and enforces `max_restarts`.
+Group state, restart counters and logs are currently in memory; persisted
+deployment state and background crash monitoring are later phases.
+
 ## Artifact contract
 
 `fastcart_ssr::artifact` parses and validates `fastcart-ssr.json`, computes a

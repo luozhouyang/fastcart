@@ -10,9 +10,11 @@ mod config;
 mod error;
 mod gateway;
 mod process;
+pub mod runtime;
 
 pub use artifact::{Artifact, ArtifactError, ArtifactLimits, ArtifactManifest, ArtifactStore};
 pub use config::WorkerdConfig;
 pub use error::SsrError;
 pub use gateway::{SsrBody, SsrGateway, SsrResponse};
 pub use process::{RuntimeHealth, RuntimeStatus, WorkerdProcess};
+pub use runtime::{RuntimeGroupId, RuntimeManager, RuntimeManagerConfig};

@@ -21,6 +21,12 @@ pub enum RuntimeStatus {
     Healthy,
     /// The process is running but its health probe failed.
     Unhealthy,
+    /// The supervisor is restarting the process.
+    Restarting,
+    /// The process is draining in-flight requests.
+    Draining,
+    /// The process stopped and will not be restarted automatically.
+    Failed,
     /// The process is not running.
     Stopped,
 }
