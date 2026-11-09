@@ -794,6 +794,12 @@ async fn ensure_default_theme(context: &AppContext, store_id: &StoreId) {
         }
     };
     let content_db = database.clone();
+    if let Err(error) = ContentService::new(content_db.clone())
+        .ensure_system_pages()
+        .await
+    {
+        tracing::warn!(store_id = %store_id, error = %error, "could not seed cart/checkout pages");
+    }
     let service = ThemeService::new(database);
     match service.active().await {
         Ok(Some(_)) => return,
@@ -859,9 +865,6 @@ async fn ensure_default_theme(context: &AppContext, store_id: &StoreId) {
                 let _ = service.activate(&theme.id).await;
             }
         }
-    }
-    if let Err(error) = ContentService::new(content_db).ensure_system_pages().await {
-        tracing::warn!(store_id = %store_id, error = %error, "could not seed cart/checkout pages");
     }
 }
 

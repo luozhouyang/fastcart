@@ -327,7 +327,7 @@ impl ContentService {
                 "root": { "props": {} },
                 "content": [{
                     "type": "Heading",
-                    "props": { "id": format!("{handle}-title"), "level": 1, "text": title }
+                    "props": { "id": format!("{handle}-title"), "level": "1", "text": title }
                 }],
                 "zones": {}
             });

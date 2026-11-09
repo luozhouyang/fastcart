@@ -318,7 +318,9 @@ pnpm install
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
 ```
 
-The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries, SQLite write serialization under concurrency, and cross-store tenant isolation. The OpenAPI tests assert a 3.1.0 document, namespace coverage and resolvable schema references; there is no TypeScript code-generation or type-parity check in the repository.
+The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries, SQLite write serialization under concurrency, and cross-store tenant isolation.
+
+`pnpm e2e:browser` is a real-browser smoke test for the `/cart` and `/checkout` deep links. It drives headless Chrome against a running server (`FASTCART_BASE_URL`, `FASTCART_HOST`), waits for hydration, and asserts the cart drawer opened. Playwright is intentionally not a dependency; the script uses the Chrome binary already required by the deployment environment. The OpenAPI tests assert a 3.1.0 document, namespace coverage and resolvable schema references; there is no TypeScript code-generation or type-parity check in the repository.
 
 ## Documentation
 

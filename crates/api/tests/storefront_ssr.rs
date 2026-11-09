@@ -206,9 +206,13 @@ fn editor_manifest() -> serde_json::Value {
                 "category": "text",
                 "fields": {
                     "text": { "type": "text", "required": true },
-                    "level": { "type": "number", "min": 1, "max": 6, "default": 1 }
+                    "level": {
+                        "type": "select",
+                        "options": [{ "value": "1", "label": "H1" }],
+                        "default": "1"
+                    }
                 },
-                "defaultProps": { "text": "Heading", "level": 1 },
+                "defaultProps": { "text": "Heading", "level": "1" },
                 "slots": []
             }
         }
