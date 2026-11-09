@@ -17,6 +17,7 @@ members = [
     "crates/storefront-runtime/runtime-bridge",
     "crates/storefront-runtime/runtime-node",
     "crates/fastcart-ssr",
+    "crates/ssr-credentials",
     "crates/plugin",
     "crates/ai",
     "crates/cli",
@@ -127,6 +128,7 @@ fastcart-runtime-node = { path = "crates/storefront-runtime/runtime-node" }
 fastcart-runtime-pool = { path = "crates/storefront-runtime/runtime-pool" }
 fastcart-runtime-v8 = { path = "crates/storefront-runtime/runtime-v8" }
 fastcart-ssr = { path = "crates/fastcart-ssr" }
+fastcart-ssr-credentials = { path = "crates/ssr-credentials" }
 fastcart-server = { path = "apps/server" }
 fastcart-storefront = { path = "crates/storefront" }
 fastcart-storefront-data = { path = "crates/storefront-data" }

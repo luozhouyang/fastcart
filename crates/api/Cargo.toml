@@ -51,6 +51,7 @@ fastcart-storefront.workspace = true
 fastcart-storefront-data.workspace = true
 fastcart-runtime-api.workspace = true
 fastcart-platform.workspace = true
+fastcart-ssr-credentials.workspace = true
 fastcart-workflows.workspace = true
 moka.workspace = true
 uuid.workspace = true

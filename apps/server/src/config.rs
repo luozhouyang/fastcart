@@ -279,8 +279,41 @@ pub struct SsrConfig {
     ///
     /// Defaults to `<runtime_dir>/internal-ssr-credentials.json`.
     pub credentials_path: Option<PathBuf>,
+    /// Credential backend settings.
+    pub credentials: SsrCredentialsConfig,
     /// Explicit per-store deployments. Empty starts one default deployment.
     pub deployments: Vec<SsrDeploymentConfig>,
+}
+
+/// Credential backend settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SsrCredentialsConfig {
+    /// Backend identifier; only `file` is implemented.
+    pub backend: String,
+    /// `read_write` or `read_only`.
+    pub mode: String,
+    /// Optional file override; falls back to `ssr.credentials_path`.
+    pub path: Option<PathBuf>,
+    /// Background refresh interval; `0` disables polling.
+    pub refresh_interval_seconds: u64,
+    /// Fail startup when the backend cannot be read.
+    pub required: bool,
+    /// Seed an empty backend from configured deployment tokens.
+    pub seed_from_config: bool,
+}
+
+impl Default for SsrCredentialsConfig {
+    fn default() -> Self {
+        Self {
+            backend: "file".to_owned(),
+            mode: "read_write".to_owned(),
+            path: None,
+            refresh_interval_seconds: 30,
+            required: true,
+            seed_from_config: true,
+        }
+    }
 }
 
 /// One store deployment served by the universal runtime.
@@ -334,8 +367,27 @@ impl Default for SsrConfig {
             artifact_max_files: 5_000,
             artifact_root: None,
             credentials_path: None,
+            credentials: SsrCredentialsConfig::default(),
             deployments: Vec::new(),
         }
+    }
+}
+
+impl SsrConfig {
+    /// Resolved credential file path.
+    #[must_use]
+    pub fn credentials_file(&self) -> PathBuf {
+        self.credentials
+            .path
+            .clone()
+            .or_else(|| self.credentials_path.clone())
+            .unwrap_or_else(|| self.runtime_dir.join("internal-ssr-credentials.json"))
+    }
+
+    /// Whether credential writes are disabled.
+    #[must_use]
+    pub fn credentials_read_only(&self) -> bool {
+        self.credentials.mode == "read_only"
     }
 }
 
@@ -595,6 +647,30 @@ impl Config {
         if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_PATH") {
             self.ssr.credentials_path = Some(PathBuf::from(value));
         }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_BACKEND") {
+            self.ssr.credentials.backend = value;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_MODE") {
+            self.ssr.credentials.mode = value;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_FILE") {
+            self.ssr.credentials.path = Some(PathBuf::from(value));
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_REFRESH_SECONDS") {
+            self.ssr.credentials.refresh_interval_seconds = value
+                .parse()
+                .context("FASTCART_SSR_CREDENTIALS_REFRESH_SECONDS must be a number")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_REQUIRED") {
+            self.ssr.credentials.required = value
+                .parse()
+                .context("FASTCART_SSR_CREDENTIALS_REQUIRED must be true or false")?;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_SEED") {
+            self.ssr.credentials.seed_from_config = value
+                .parse()
+                .context("FASTCART_SSR_CREDENTIALS_SEED must be true or false")?;
+        }
         if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
             // An empty pass-through value from an orchestrator
             // disables preview rather than configuring a zero-byte secret.
@@ -778,6 +854,24 @@ impl Config {
                 .is_some_and(|path| path.as_os_str().is_empty())
             {
                 bail!("ssr.credentials_path must not be empty when set");
+            }
+            if !matches!(self.ssr.credentials.backend.as_str(), "file") {
+                bail!("ssr.credentials.backend must be \"file\"");
+            }
+            if !matches!(
+                self.ssr.credentials.mode.as_str(),
+                "read_write" | "read_only"
+            ) {
+                bail!("ssr.credentials.mode must be read_write or read_only");
+            }
+            if self
+                .ssr
+                .credentials
+                .path
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty())
+            {
+                bail!("ssr.credentials.path must not be empty when set");
             }
             if self.ssr.deployments.is_empty() {
                 if self.ssr.artifact_path.as_os_str().is_empty() {
@@ -1149,6 +1243,15 @@ mod tests {
         config.ssr.listen = "127.0.0.1:18888".parse().unwrap();
         config.ssr.startup_timeout_ms = 0;
         assert!(config.validate().is_err());
+
+        config.ssr.startup_timeout_ms = 10_000;
+        config.ssr.credentials.backend = "vault".to_owned();
+        assert!(config.validate().is_err());
+        config.ssr.credentials.backend = "file".to_owned();
+        config.ssr.credentials.mode = "write".to_owned();
+        assert!(config.validate().is_err());
+        config.ssr.credentials.mode = "read_only".to_owned();
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1197,6 +1300,9 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.server.port, 8080);
         assert_eq!(config.storefront.worker_count, 2);
+        assert_eq!(config.ssr.startup_timeout_ms, 10_000);
+        assert_eq!(config.ssr.credentials.backend, "file");
+        assert_eq!(config.ssr.credentials.mode, "read_write");
     }
 
     #[test]

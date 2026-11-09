@@ -855,6 +855,7 @@ dependencies = [
  "fastcart-notifications",
  "fastcart-platform",
  "fastcart-runtime-api",
+ "fastcart-ssr-credentials",
  "fastcart-storefront",
  "fastcart-storefront-data",
  "fastcart-workflows",
@@ -1452,6 +1453,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastcart-ssr-credentials"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fastcart-kernel",
+ "fs2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fastcart-storefront"
 version = "0.1.0"
 dependencies = [
@@ -1596,6 +1614,16 @@ checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
 dependencies = [
  "lazy_static",
  "num",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

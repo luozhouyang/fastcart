@@ -214,3 +214,10 @@ open.
 Lifecycle activation, rollback, preview and credential changes write platform
 audit records without token material. Actorless internal actions, client-IP
 attribution and tamper-evident audit storage remain open.
+
+### Phase 24 status
+
+Credential storage is abstracted behind `fastcart-ssr-credentials`; the file
+backend supports CAS, read-only mode, startup policy and revision polling.
+`[ssr.credentials]` documents backend/mode/refresh/seeding. Kubernetes and Vault
+backends were intentionally excluded; backend metrics and encryption remain open.

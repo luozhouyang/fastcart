@@ -60,7 +60,7 @@ impl AppState {
             config.cache.max_capacity,
             Duration::from_secs(config.cache.ttl_seconds),
         );
-        let internal_ssr_credentials = internal_ssr_credentials(&config);
+        let internal_ssr_credentials = internal_ssr_credentials(&config).await?;
         let api_config = ApiConfig {
             service_name: "fastcart".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -317,7 +317,9 @@ fn store_email_env(store_id: &StoreId, key: &str) -> Option<String> {
 ///
 /// Explicit per-deployment tokens are used only when every deployment has one;
 /// otherwise the global token remains a single unscoped credential.
-fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsrCredentials {
+async fn internal_ssr_credentials(
+    config: &Config,
+) -> anyhow::Result<fastcart_api::state::InternalSsrCredentials> {
     let global = config
         .ssr
         .internal_token
@@ -375,12 +377,35 @@ fn internal_ssr_credentials(config: &Config) -> fastcart_api::state::InternalSsr
             })
             .collect()
     };
-    let path = config
-        .ssr
-        .credentials_path
-        .clone()
-        .unwrap_or_else(|| config.ssr.runtime_dir.join("internal-ssr-credentials.json"));
-    fastcart_api::state::InternalSsrCredentials::load(path, tokens)
+    let read_only = config.ssr.credentials_read_only();
+    let backend =
+        fastcart_api::state::FileCredentialBackend::new(config.ssr.credentials_file(), read_only);
+    let mode = if read_only {
+        fastcart_api::state::CredentialMode::ReadOnly
+    } else {
+        fastcart_api::state::CredentialMode::ReadWrite
+    };
+    match fastcart_api::state::InternalSsrCredentials::load(
+        std::sync::Arc::new(backend),
+        tokens.clone(),
+        config.ssr.credentials.seed_from_config,
+        mode,
+    )
+    .await
+    {
+        Ok(credentials) => {
+            let interval = config.ssr.credentials.refresh_interval_seconds;
+            if interval > 0 {
+                credentials.spawn_refresh(std::time::Duration::from_secs(interval));
+            }
+            Ok(credentials)
+        }
+        Err(error) if !config.ssr.credentials.required => {
+            tracing::warn!(error = %error, "SSR credential backend unavailable; using config fallback");
+            Ok(fastcart_api::state::InternalSsrCredentials::new(tokens))
+        }
+        Err(error) => Err(anyhow::Error::new(error).context("failed to load SSR credentials")),
+    }
 }
 
 fn build_storefront_runtime(

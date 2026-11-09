@@ -156,6 +156,15 @@ async fn deactivate_preview(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+fn credential_error(error: fastcart_ssr_credentials::CredentialError) -> ApiError {
+    match error {
+        fastcart_ssr_credentials::CredentialError::ReadOnly => {
+            ApiError::new(AppError::conflict("credential backend is read-only"))
+        }
+        other => ApiError::new(AppError::internal(other.to_string())),
+    }
+}
+
 fn ensure_scope(scope: &InternalSsrScope, store_id: &str) -> ApiResult<()> {
     if scope.preview {
         return Err(ApiError::new(AppError::Forbidden));
@@ -199,7 +208,8 @@ async fn rotate_token(
             request.grace_seconds.unwrap_or(300),
             request.preview,
         )
-        .map_err(|error| ApiError::new(AppError::internal(error)))?;
+        .await
+        .map_err(credential_error)?;
     audit(
         &context,
         &store_id,
@@ -227,7 +237,8 @@ async fn revoke_token(
         .config
         .internal_ssr_credentials
         .revoke(&store_id, &request.token)
-        .map_err(|error| ApiError::new(AppError::internal(error)))?;
+        .await
+        .map_err(credential_error)?;
     audit(
         &context,
         &store_id,

@@ -26,3 +26,4 @@
 * [Universal SSR Runtime Phase 21 Review](ssr-phase21-review.md) - phase 21 review
 * [Universal SSR Runtime Phase 22 Review](ssr-phase22-review.md) - phase 22 review
 * [Universal SSR Runtime Phase 23 Review](ssr-phase23-review.md) - phase 23 review
+* [Universal SSR Runtime Phase 24 Review](ssr-phase24-review.md) - phase 24 review

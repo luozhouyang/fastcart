@@ -89,6 +89,7 @@ enabled = false
 # artifact_root = "./data/ssr/deployments"
 # Persistent credential state; defaults to <runtime_dir>/internal-ssr-credentials.json.
 # credentials_path = "./data/ssr/internal-ssr-credentials.json"
+
 startup_timeout_ms = 10000
 shutdown_timeout_ms = 5000
 request_timeout_ms = 30000
@@ -97,6 +98,15 @@ max_restarts = 3
 drain_timeout_ms = 5000
 artifact_max_bytes = 104857600
 artifact_max_files = 5000
+
+[ssr.credentials]
+# Only the file backend is implemented in this phase. The trait is pluggable.
+backend = "file"
+mode = "read_write" # or read_only for externally managed secrets
+# path = "./data/ssr/internal-ssr-credentials.json"
+refresh_interval_seconds = 30
+required = true
+seed_from_config = true
 
 # Multi-store deployments. Leave empty to serve every store from the single
 # artifact_path above. Each entry gets its own workerd group and listener.

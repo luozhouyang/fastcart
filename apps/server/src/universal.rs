@@ -1300,6 +1300,7 @@ export default {
             artifact_max_files: 100,
             artifact_root: None,
             credentials_path: None,
+            credentials: crate::config::SsrCredentialsConfig::default(),
             deployments: Vec::new(),
         };
         let runtime = UniversalSsr::initialize(
@@ -1355,6 +1356,7 @@ export default {
                 300,
                 false,
             )
+            .await
             .expect("rotate credential");
         let rotated = runtime
             .render(
@@ -1621,6 +1623,7 @@ export default {
             artifact_max_files: 100,
             artifact_root: Some(root.path().to_path_buf()),
             credentials_path: None,
+            credentials: crate::config::SsrCredentialsConfig::default(),
             deployments: vec![
                 SsrDeploymentConfig {
                     store_id: "store_a".to_owned(),
@@ -1840,6 +1843,7 @@ export default {
             artifact_max_files: 100,
             artifact_root: Some(root.path().to_path_buf()),
             credentials_path: None,
+            credentials: crate::config::SsrCredentialsConfig::default(),
             deployments: Vec::new(),
         };
         let runtime = UniversalSsr::initialize(
