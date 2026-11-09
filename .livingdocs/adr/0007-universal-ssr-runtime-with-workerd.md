@@ -177,6 +177,11 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 16 (2026-11-09) added a SvelteKit template. The adapter Worker is bundled
+with wrangler dry-run, `_app` assets are served through a compatibility route,
+and generated workerd configs include a no-op cache service for Cache API
+callers. Real shared cache and browser hydration remain future work.
+
 Phase 15 (2026-11-09) added a framework-free Fetch Handler template and smoke
 test. The core gateway required no changes, validating the artifact contract.
 Additional framework adapters remain future work.

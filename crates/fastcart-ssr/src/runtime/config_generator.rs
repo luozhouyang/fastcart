@@ -59,6 +59,7 @@ pub fn generate_workerd_config(
 
 const config :Workerd.Config = (
   services = [
+    (name = "cache", worker = .cacheWorker),
 {asset_service}    (name = "main", worker = .mainWorker),
   ],
   sockets = [
@@ -67,15 +68,24 @@ const config :Workerd.Config = (
 );
 
 const mainWorker :Workerd.Worker = (
+  cacheApiOutbound = "cache",
 {asset_binding}  modules = [
 {modules_text}
   ],
   compatibilityDate = {},
   compatibilityFlags = [{flags}],
 );
+
+const cacheWorker :Workerd.Worker = (
+  modules = [
+    (name = "cache.js", esModule = {}),
+  ],
+  compatibilityDate = "2026-11-01",
+);
 "#,
         quote(&listen_addr.to_string()),
         quote(&manifest.runtime.compatibility_date),
+        quote("export default { fetch() { return new Response(null, { status: 404 }); } };"),
     );
     std::fs::write(&config_path, text)
         .map_err(|error| SsrError::InvalidRuntimeConfig(error.to_string()))?;

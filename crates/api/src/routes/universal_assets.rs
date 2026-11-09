@@ -14,6 +14,19 @@ pub async fn serve(
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    serve_path(context, path, headers).await
+}
+
+/// SvelteKit adapter compatibility: its immutable assets live at `/_app/*`.
+pub async fn serve_app(
+    State(context): State<Arc<AppContext>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    serve_path(context, format!("_app/{path}"), headers).await
+}
+
+async fn serve_path(context: Arc<AppContext>, path: String, headers: HeaderMap) -> Response {
     let Some(runtime) = context.universal_storefront.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };

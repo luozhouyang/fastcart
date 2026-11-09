@@ -1273,6 +1273,27 @@ async fn universal_assets_are_served_without_store_resolution() {
     assert!(body.starts_with(b"asset:store_"));
     assert!(body.ends_with(b":assets/app.js"));
 
+    let sveltekit_asset = active
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_app/immutable/app.js")
+                .header("host", "shop.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sveltekit_asset.status(), StatusCode::OK);
+    let body = sveltekit_asset
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(body.ends_with(b":_app/immutable/app.js"));
+
     let no_runtime = fixture(None, None, None).await;
     let missing = no_runtime
         .app

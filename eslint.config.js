@@ -9,6 +9,7 @@ export default tseslint.config(
       "**/dist/**",
       "**/.tanstack/**",
       "**/.astro/**",
+      "**/.svelte-kit/**",
       "**/node_modules/**",
       "**/.cargo-home/**",
       "**/.pnpm-store/**",

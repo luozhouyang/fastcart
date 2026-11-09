@@ -158,3 +158,11 @@ mutations. SWR, cache tags and shared caches remain productization work.
 `templates/storefront-generic` proves a framework-free Fetch handler builds and
 runs as a FastCart artifact without runtime changes. SvelteKit, React Router and
 Vike adapters remain future work.
+
+### Phase 16 status
+
+`templates/storefront-sveltekit` builds a bundled Cloudflare-adapter Worker,
+runs under workerd, and serves `_app` assets through a Rust compatibility route.
+The framework matrix now includes TanStack Start, Astro, SvelteKit and a generic
+Fetch handler. Real Cache API, browser hydration and React Router/Vike remain
+open.
