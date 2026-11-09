@@ -208,3 +208,9 @@ Scoped internal tokens can be revoked immediately via
 `POST /internal/ssr/v1/deployments/{store_id}/revoke-token`; revocation is
 persisted and idempotent. Audit events and multi-instance coordination remain
 open.
+
+### Phase 23 status
+
+Lifecycle activation, rollback, preview and credential changes write platform
+audit records without token material. Actorless internal actions, client-IP
+attribution and tamper-evident audit storage remain open.

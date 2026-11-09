@@ -9,7 +9,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use fastcart_http::{ApiError, ApiResult};
 use fastcart_kernel::AppError;
-use fastcart_platform::StoreStatus;
+use fastcart_platform::{NewAudit, StoreStatus};
 use serde::Deserialize;
 
 use super::InternalSsrScope;
@@ -58,9 +58,21 @@ async fn activate(
         return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
     runtime
-        .activate(&store_id, &request.deployment_id, request.artifact_path)
+        .activate(
+            &store_id,
+            &request.deployment_id,
+            request.artifact_path.clone(),
+        )
         .await
         .map_err(|error| ApiError::new(AppError::validation(error)))?;
+    audit(
+        &context,
+        &store_id,
+        "ssr.deployment.activate",
+        &request.deployment_id,
+        serde_json::json!({"artifact_path": request.artifact_path}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -78,6 +90,14 @@ async fn rollback(
         .rollback(&store_id)
         .await
         .map_err(|error| ApiError::new(AppError::conflict(error)))?;
+    audit(
+        &context,
+        &store_id,
+        "ssr.deployment.rollback",
+        &store_id,
+        serde_json::Value::Null,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -93,9 +113,21 @@ async fn activate_preview(
         return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
     };
     runtime
-        .activate_preview(&store_id, &request.deployment_id, request.artifact_path)
+        .activate_preview(
+            &store_id,
+            &request.deployment_id,
+            request.artifact_path.clone(),
+        )
         .await
         .map_err(|error| ApiError::new(AppError::validation(error)))?;
+    audit(
+        &context,
+        &store_id,
+        "ssr.preview.activate",
+        &request.deployment_id,
+        serde_json::json!({"artifact_path": request.artifact_path}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -113,6 +145,14 @@ async fn deactivate_preview(
         .deactivate_preview(&store_id)
         .await
         .map_err(|error| ApiError::new(AppError::conflict(error)))?;
+    audit(
+        &context,
+        &store_id,
+        "ssr.preview.deactivate",
+        &store_id,
+        serde_json::Value::Null,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -160,6 +200,18 @@ async fn rotate_token(
             request.preview,
         )
         .map_err(|error| ApiError::new(AppError::internal(error)))?;
+    audit(
+        &context,
+        &store_id,
+        "ssr.credential.rotate",
+        &store_id,
+        serde_json::json!({
+            "preview": request.preview,
+            "expires_at": request.expires_at,
+            "grace_seconds": request.grace_seconds.unwrap_or(300),
+        }),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -176,7 +228,36 @@ async fn revoke_token(
         .internal_ssr_credentials
         .revoke(&store_id, &request.token)
         .map_err(|error| ApiError::new(AppError::internal(error)))?;
+    audit(
+        &context,
+        &store_id,
+        "ssr.credential.revoke",
+        &store_id,
+        serde_json::Value::Null,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn audit(
+    context: &AppContext,
+    store_id: &str,
+    action: &str,
+    resource_id: &str,
+    data: serde_json::Value,
+) {
+    let entry = NewAudit {
+        actor_id: None,
+        store_id: Some(store_id.to_owned()),
+        action: action.to_owned(),
+        resource_type: Some("ssr_deployment".to_owned()),
+        resource_id: Some(resource_id.to_owned()),
+        data,
+        ip_address: None,
+    };
+    if let Err(error) = context.platform.record_audit(entry).await {
+        tracing::warn!(error = %error, action, "failed to write SSR audit log");
+    }
 }
 
 async fn ensure_active_store(context: &Arc<AppContext>, store_id: &str) -> ApiResult<()> {

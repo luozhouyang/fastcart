@@ -196,6 +196,7 @@ impl StorefrontRuntime for TimeoutRuntime {
 struct Fixture {
     app: Router,
     database: fastcart_infrastructure::StoreDatabase,
+    platform: PlatformStore,
     store_id: String,
     _dir: tempfile::TempDir,
 }
@@ -250,6 +251,7 @@ async fn fixture(
         .unwrap();
     themes.activate(&theme.id).await.unwrap();
 
+    let fixture_platform = platform.clone();
     let context = Arc::new(
         AppContext::new(
             ApiConfig {
@@ -290,6 +292,7 @@ async fn fixture(
     Fixture {
         app: build_router(context),
         database: database.clone(),
+        platform: fixture_platform,
         store_id: store.id.to_string(),
         _dir: dir,
     }
@@ -1604,6 +1607,33 @@ async fn deployment_lifecycle_requires_the_internal_token() {
         .await
         .unwrap();
     assert_eq!(expired.status(), StatusCode::BAD_REQUEST);
+
+    let logs = fixture
+        .platform
+        .list_audit_logs(
+            Some(&fastcart_kernel::StoreId::from_string(
+                fixture.store_id.clone(),
+            )),
+            fastcart_kernel::Pagination {
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("audit logs");
+    for action in [
+        "ssr.deployment.activate",
+        "ssr.deployment.rollback",
+        "ssr.preview.activate",
+        "ssr.preview.deactivate",
+        "ssr.credential.rotate",
+        "ssr.credential.revoke",
+    ] {
+        assert!(
+            logs.iter().any(|entry| entry.action == action),
+            "missing audit action {action}"
+        );
+    }
 }
 
 #[tokio::test]
