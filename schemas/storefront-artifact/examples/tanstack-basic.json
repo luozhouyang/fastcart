@@ -1,0 +1,31 @@
+{
+  "schema_version": "1",
+  "artifact_id": "tanstack-basic",
+  "framework": {
+    "name": "tanstack-start",
+    "version": "1.169.5"
+  },
+  "runtime": {
+    "engine": "workerd",
+    "compatibility_date": "2026-11-01",
+    "compatibility_flags": [],
+    "required_capabilities": ["fetch", "streams", "web-crypto"]
+  },
+  "entry": {
+    "type": "worker",
+    "path": "worker/index.js",
+    "export": "default"
+  },
+  "assets": {
+    "directory": "client",
+    "base_path": "/_fastcart/assets/"
+  },
+  "rendering": {
+    "mode": "hybrid",
+    "streaming": true
+  },
+  "build": {
+    "build_id": "build_123",
+    "created_at": "2026-11-01T10:00:00Z"
+  }
+}

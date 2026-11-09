@@ -12,8 +12,17 @@ Process supervisor and HTTP gateway for the universal workerd SSR runtime.
 - `WorkerdConfig`: binary/config paths, listen address, health path and
   timeouts.
 
-The crate does not yet know about FastCart artifacts, deployment records,
-trusted request context or static assets. Those are later phases of the
+## Artifact contract
+
+`fastcart_ssr::artifact` parses and validates `fastcart-ssr.json`, computes a
+deterministic SHA-256 tree digest, rejects traversal/symlinks/missing entry or
+assets, and stores artifacts content-addressed under
+`<store>/<digest>`. The matching TypeScript packager lives in
+[`packages/storefront-build`](../../packages/storefront-build) and the JSON
+Schema is in [`schemas/storefront-artifact`](../../schemas/storefront-artifact).
+
+The crate does not yet know about deployment records, trusted request context or
+static assets. Those are later phases of the
 [universal SSR runtime](../../.livingdocs/architecture/universal-ssr-runtime.md)
 plan.
 

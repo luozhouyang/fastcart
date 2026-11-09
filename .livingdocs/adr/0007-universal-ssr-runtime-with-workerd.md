@@ -177,6 +177,13 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 2 (2026-11-09) added the versioned `fastcart-ssr.json` schema, a
+TypeScript packager (`packages/storefront-build`) and the Rust artifact
+parser/validator/content-addressed store. Rust and TypeScript share a
+cross-language digest fixture; missing entries, traversal, symlinks, duplicate
+capabilities and oversized trees are rejected. Stored artifacts are immutable by
+digest addressing; OS read-only permissions wait for deployment activation.
+
 Phase 1 (2026-11-09) added `crates/fastcart-ssr` with a supervised
 `WorkerdProcess` (SIGTERM, forced-kill deadline, log capture, readiness probe)
 and an `SsrGateway` that forwards HTTP requests and preserves the response body

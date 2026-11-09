@@ -5,11 +5,13 @@
 //! those arrive in later phases. The public API is small so the commerce server
 //! does not depend on workerd configuration details.
 
+pub mod artifact;
 mod config;
 mod error;
 mod gateway;
 mod process;
 
+pub use artifact::{Artifact, ArtifactError, ArtifactLimits, ArtifactManifest, ArtifactStore};
 pub use config::WorkerdConfig;
 pub use error::SsrError;
 pub use gateway::{SsrBody, SsrGateway, SsrResponse};

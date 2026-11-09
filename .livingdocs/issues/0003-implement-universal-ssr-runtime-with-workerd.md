@@ -66,4 +66,10 @@ bindings, TanStack Start and Astro fixtures pass.
 `crates/fastcart-ssr` now starts a supervised workerd process, proxies
 requests with streamed responses, reports health and shuts down with SIGTERM.
 The gateway is not mounted in `fastcart-server` yet; Phase 4 owns that wiring.
-Artifact validation and runtime configuration generation remain Phase 2/3 work.
+
+### Phase 2 status
+
+The artifact manifest schema, TypeScript packager and Rust validator/store are
+in place. Rust and TypeScript share a digest fixture, and traversal, symlinks,
+missing entries and size limits are enforced. Runtime configuration generation
+and deployment records remain Phase 3 work.
