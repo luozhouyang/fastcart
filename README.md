@@ -300,8 +300,11 @@ marked `preview = true`; that credential is read-only on the commerce API. If no
 preview credential exists, the preview Worker gets no internal token. Preview
 assets are served from the preview artifact at `/_fastcart/preview-assets/*`;
 templates that emit asset URLs must honor the prefix header (the generic
-template does). Draft page data injection into framework workers is not
-implemented yet.
+template does). TanStack Start and Astro accept `FASTCART_ASSET_PREFIX` at build
+time; SvelteKit preview builds use `appDir = "_fastcart/preview-assets"` because
+`paths.assets` only accepts absolute URLs. Each template has
+`build:artifact:preview` and `test:artifact:preview` scripts. Draft page data
+injection into framework workers is not implemented yet.
 
 Retired production and preview artifacts are reference-counted. After
 `drain_timeout_ms`, a replaced group is stopped and its digest directory is

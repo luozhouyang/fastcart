@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 28 (2026-11-09) added preview-specific asset bases for TanStack Start,
+Astro and SvelteKit, including preview build/smoke scripts and CI coverage.
+Separate builds are required; preview asset authorization remains open.
+
 Phase 27 (2026-11-09) added a startup scan that removes artifact digest
 directories not referenced by the deployments started in that process.
 Concurrent runtime writers and sweep metrics remain open.

@@ -8,7 +8,9 @@
     "build": "vite build",
     "build:artifact": "vite build && node --experimental-strip-types scripts/package.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:artifact": "node scripts/smoke.mjs"
+    "test:artifact": "node scripts/smoke.mjs",
+    "build:artifact:preview": "node scripts/preview-build.mjs",
+    "test:artifact:preview": "node scripts/preview-smoke.mjs"
   },
   "dependencies": {
     "@fastcart/storefront-build": "workspace:*",

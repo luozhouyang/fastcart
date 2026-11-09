@@ -13,6 +13,16 @@ pnpm build:artifact
 Point `ssr.artifact_path` at that directory and `ssr.binary` at the pinned
 workerd binary.
 
+For a preview artifact whose client URLs use FastCart's preview asset prefix:
+
+```bash
+pnpm build:artifact:preview
+pnpm test:artifact:preview
+```
+
+The preview build sets `FASTCART_ASSET_PREFIX=/_fastcart/preview-assets/`;
+FastCart serves that path from the active preview artifact.
+
 Routes used by the runtime compatibility checks:
 
 - `/` — SSR with a server function loader

@@ -8,6 +8,8 @@
     "build": "vite build",
     "build:artifact": "vite build && wrangler deploy --dry-run --outdir .svelte-kit/bundle && node --experimental-strip-types scripts/package.mjs",
     "test:artifact": "node scripts/smoke.mjs",
+    "build:artifact:preview": "node scripts/preview-build.mjs",
+    "test:artifact:preview": "node scripts/preview-smoke.mjs",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {

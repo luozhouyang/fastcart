@@ -240,3 +240,11 @@ at the same time. Startup orphan sweeping and dedicated GC metrics remain open.
 Initialization sweeps artifact digest directories that are not referenced by
 the deployments it just started; active/shared directories are preserved and
 scan failures are logged. One writer per runtime directory is assumed.
+
+### Phase 28 status
+
+TanStack Start and Astro accept `FASTCART_ASSET_PREFIX`; SvelteKit uses
+`appDir = "_fastcart/preview-assets"` because `paths.assets` requires an absolute
+URL. All templates have preview build/smoke scripts and CI coverage. Production
+and preview artifacts are separate builds; preview asset authorization remains
+open.

@@ -1,4 +1,6 @@
 ---
+import "../styles.css";
+
 const message = "FastCart Astro SSR";
 const store = Astro.request.headers.get("x-fastcart-store-id");
 const deployment = Astro.request.headers.get("x-fastcart-deployment-id");

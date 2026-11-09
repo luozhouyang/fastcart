@@ -62,6 +62,8 @@ jobs:
       - run: bash scripts/install-workerd.sh
       - run: pnpm --filter @fastcart/storefront-tanstack build:artifact
       - run: pnpm --filter @fastcart/storefront-tanstack test:artifact
+      - run: pnpm --filter @fastcart/storefront-tanstack build:artifact:preview
+      - run: pnpm --filter @fastcart/storefront-tanstack test:artifact:preview
   astro-template:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -78,6 +80,8 @@ jobs:
       - run: bash scripts/install-workerd.sh
       - run: pnpm --filter @fastcart/storefront-astro build:artifact
       - run: pnpm --filter @fastcart/storefront-astro test:artifact
+      - run: pnpm --filter @fastcart/storefront-astro build:artifact:preview
+      - run: pnpm --filter @fastcart/storefront-astro test:artifact:preview
   generic-template:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -110,3 +114,5 @@ jobs:
       - run: bash scripts/install-workerd.sh
       - run: pnpm --filter @fastcart/storefront-sveltekit build:artifact
       - run: pnpm --filter @fastcart/storefront-sveltekit test:artifact
+      - run: pnpm --filter @fastcart/storefront-sveltekit build:artifact:preview
+      - run: pnpm --filter @fastcart/storefront-sveltekit test:artifact:preview

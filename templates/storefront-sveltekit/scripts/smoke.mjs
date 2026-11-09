@@ -64,7 +64,14 @@ const cacheWorker :Workerd.Worker = (
 
     const home = await fetch(`${base}/`);
     assert(home.status === 200, `home status ${home.status}`);
-    assert((await home.text()).includes("FastCart SvelteKit SSR"), "home body");
+    const homeBody = await home.text();
+    assert(homeBody.includes("FastCart SvelteKit SSR"), "home body");
+    if (process.env.FASTCART_EXPECT_ASSET_PREFIX) {
+      assert(
+        homeBody.includes(process.env.FASTCART_EXPECT_ASSET_PREFIX),
+        `home asset prefix ${process.env.FASTCART_EXPECT_ASSET_PREFIX}`,
+      );
+    }
 
     const echo = await fetch(`${base}/echo`, {
       method: "POST",
