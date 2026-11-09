@@ -16,8 +16,9 @@ Phase 29 restricts `/_fastcart/preview-assets/*`:
   cookie containing the same signed preview token.
 - The cookie is scoped to `Path=/_fastcart/preview-assets`, so it is not sent to
   ordinary storefront or production asset requests.
-- The attribute set is `SameSite=Lax`, `Max-Age` until token expiry, and `Secure`
-  when the preview request is HTTPS.
+- The attribute set is `Max-Age` until token expiry and `Secure` when the preview
+  request is HTTPS. Phase 33 changes HTTPS to `SameSite=None; Partitioned` for
+  cross-origin iframes; HTTP remains `SameSite=Lax`.
 - The preview asset route requires:
   1. a configured preview secret,
   2. a valid, unexpired signed token,

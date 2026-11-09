@@ -210,13 +210,15 @@ fn attach_preview_asset_cookie(
     if !response.status().is_success() {
         return response;
     }
-    let mut cookie = format!(
-        "{PREVIEW_ASSET_COOKIE}={token}; Path=/_fastcart/preview-assets; HttpOnly; SameSite=Lax; Max-Age={}",
+    let same_site = if scheme == "https" {
+        "; Secure; SameSite=None; Partitioned"
+    } else {
+        "; SameSite=Lax"
+    };
+    let cookie = format!(
+        "{PREVIEW_ASSET_COOKIE}={token}; Path=/_fastcart/preview-assets; HttpOnly; Max-Age={}{same_site}",
         max_age.max(0)
     );
-    if scheme == "https" {
-        cookie.push_str("; Secure");
-    }
     match axum::http::HeaderValue::from_str(&cookie) {
         Ok(value) => {
             response

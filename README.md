@@ -314,9 +314,11 @@ time; SvelteKit preview builds use `appDir = "_fastcart/preview-assets"` because
 `build:artifact:preview` and `test:artifact:preview` scripts. Draft page data
 injection into framework workers is not implemented yet.
 
-Preview assets are not public. A successful preview render sets an HttpOnly,
-SameSite=Lax `fastcart_preview` cookie scoped to
-`Path=/_fastcart/preview-assets`; the token is the signed preview capability.
+Preview assets are not public. A successful preview render sets an HttpOnly
+`fastcart_preview` cookie scoped to `Path=/_fastcart/preview-assets`; the token is
+the signed preview capability. On HTTPS it is `SameSite=None; Secure;
+Partitioned` so the admin UI can embed a preview iframe served from the store
+domain (CHIPS-compatible browsers); on HTTP it stays `SameSite=Lax`.
 The asset route requires a valid cookie whose store matches the Host-resolved
 store, checks the preview token's `jti` against the store's revocation table,
 returns `403` otherwise, and adds `Vary: Cookie`. Positive revocation checks are

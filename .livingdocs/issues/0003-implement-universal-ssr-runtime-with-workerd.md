@@ -274,3 +274,10 @@ Startup acquires advisory locks next to the platform SQLite database and, when
 SSR is enabled, in the SSR runtime directory. A second `fastcart-serve` fails
 before opening databases. Multi-process operation is explicitly unsupported;
 HA/shared-database coordination is a separate architecture change.
+
+### Phase 33 status
+
+HTTPS preview asset cookies are `SameSite=None; Secure; Partitioned` so the
+admin can embed a store-domain preview iframe in CHIPS-capable browsers; HTTP
+keeps `SameSite=Lax`. Third-party-cookie-blocked browsers fall back to a
+top-level preview.

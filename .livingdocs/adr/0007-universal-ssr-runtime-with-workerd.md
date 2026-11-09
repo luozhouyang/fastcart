@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 33 (2026-11-09) made the preview asset cookie cross-origin capable on
+HTTPS (`SameSite=None; Secure; Partitioned`) and documented the admin iframe
+store-origin requirement and third-party-cookie fallback.
+
 Phase 32 (2026-11-09) added startup advisory locks for the platform data
 directory and SSR runtime directory. Only one `fastcart-serve` may use a data
 directory; multi-process operation is explicitly unsupported.

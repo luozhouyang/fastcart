@@ -1415,11 +1415,39 @@ async fn universal_assets_are_served_without_store_resolution() {
     assert!(set_cookie.contains("Path=/_fastcart/preview-assets"));
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("Secure"));
+    assert!(set_cookie.contains("SameSite=None"));
+    assert!(set_cookie.contains("Partitioned"));
     let cookie = set_cookie
         .split(';')
         .next()
         .expect("cookie pair")
         .to_owned();
+
+    let http_preview = active
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/preview/?token={preview_token_value}"))
+                .header("host", "shop.example.com")
+                .header("x-forwarded-proto", "http")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let http_cookie = http_preview
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .find_map(|value| {
+            let value = value.to_str().ok()?;
+            value.starts_with("fastcart_preview=").then_some(value)
+        })
+        .expect("http preview cookie");
+    assert!(http_cookie.contains("SameSite=Lax"));
+    assert!(!http_cookie.contains("Secure"));
+    assert!(!http_cookie.contains("Partitioned"));
 
     let unauthenticated = active
         .app
