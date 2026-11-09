@@ -166,3 +166,9 @@ runs under workerd, and serves `_app` assets through a Rust compatibility route.
 The framework matrix now includes TanStack Start, Astro, SvelteKit and a generic
 Fetch handler. Real Cache API, browser hydration and React Router/Vike remain
 open.
+
+### Phase 17 status
+
+Deployments can carry store-scoped internal tokens; cross-store use is rejected.
+SSR requests, errors, cache hits/misses and active deployments are exported via
+Prometheus metrics. Token rotation and preview data isolation remain open.

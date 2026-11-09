@@ -96,6 +96,7 @@ impl AppState {
                 .internal_token
                 .clone()
                 .filter(|secret| !secret.is_empty()),
+            internal_ssr_tokens: internal_ssr_tokens(&config),
             capability_secret: config
                 .storefront
                 .capability_secret
@@ -121,7 +122,9 @@ impl AppState {
             inquiry_retention_days: config.inquiries.retention_days,
             notification_retention_days: config.notifications.retention_days,
         };
-        let universal_ssr = crate::universal::UniversalSsr::initialize(&config.ssr).await?;
+        let metrics = Arc::new(fastcart_http::Metrics::new());
+        let universal_ssr =
+            crate::universal::UniversalSsr::initialize(&config.ssr, metrics.clone()).await?;
         let universal_storefront = universal_ssr.as_ref().map(|runtime| {
             Arc::clone(runtime) as Arc<dyn fastcart_api::state::UniversalStorefront>
         });
@@ -136,6 +139,7 @@ impl AppState {
             AppContext::new(api_config, platform, databases.clone(), cache)
                 .with_storefront_runtime(storefront_runtime.clone())
                 .with_universal_storefront(universal_storefront)
+                .with_metrics(metrics)
                 .with_email(email),
         );
         Ok(Self {
@@ -302,6 +306,63 @@ fn store_email_env(store_id: &StoreId, key: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+/// Builds store-scoped internal SSR credentials from deployment config.
+///
+/// Explicit per-deployment tokens are used only when every deployment has one;
+/// otherwise the global token remains a single unscoped credential.
+fn internal_ssr_tokens(config: &Config) -> Vec<fastcart_api::state::InternalSsrToken> {
+    let global = config
+        .ssr
+        .internal_token
+        .clone()
+        .filter(|token| !token.is_empty());
+    if config.ssr.deployments.is_empty() {
+        return global
+            .map(|token| {
+                vec![fastcart_api::state::InternalSsrToken {
+                    token,
+                    store_id: None,
+                }]
+            })
+            .unwrap_or_default();
+    }
+    if config
+        .ssr
+        .deployments
+        .iter()
+        .all(|deployment| deployment.internal_token.is_some())
+    {
+        return config
+            .ssr
+            .deployments
+            .iter()
+            .filter_map(|deployment| {
+                Some(fastcart_api::state::InternalSsrToken {
+                    token: deployment.internal_token.clone()?,
+                    store_id: Some(deployment.store_id.clone()),
+                })
+            })
+            .collect();
+    }
+    if let Some(token) = global {
+        return vec![fastcart_api::state::InternalSsrToken {
+            token,
+            store_id: None,
+        }];
+    }
+    config
+        .ssr
+        .deployments
+        .iter()
+        .filter_map(|deployment| {
+            Some(fastcart_api::state::InternalSsrToken {
+                token: deployment.internal_token.clone()?,
+                store_id: Some(deployment.store_id.clone()),
+            })
+        })
+        .collect()
 }
 
 fn build_storefront_runtime(

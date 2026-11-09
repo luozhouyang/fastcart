@@ -82,6 +82,25 @@ pub trait UniversalStorefront: Send + Sync {
     }
 }
 
+/// One server-to-server SSR credential and its optional store scope.
+#[derive(Clone)]
+pub struct InternalSsrToken {
+    /// Bearer token value.
+    pub token: String,
+    /// Store this token may access; `None` means all stores.
+    pub store_id: Option<String>,
+}
+
+impl std::fmt::Debug for InternalSsrToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InternalSsrToken")
+            .field("token", &"<redacted>")
+            .field("store_id", &self.store_id)
+            .finish()
+    }
+}
+
 /// HTTP-facing configuration.
 #[derive(Clone, Debug)]
 pub struct ApiConfig {
@@ -130,6 +149,9 @@ pub struct ApiConfig {
     ///
     /// When absent, `/internal/ssr/v1` is not mounted.
     pub internal_ssr_token: Option<String>,
+    /// Optional scoped SSR credentials. Takes precedence over
+    /// [`Self::internal_ssr_token`] when non-empty.
+    pub internal_ssr_tokens: Vec<InternalSsrToken>,
     /// Optional secret used to sign theme capability grants.
     ///
     /// When set, grants carry a signed payload a capability endpoint sharing
@@ -190,6 +212,7 @@ impl Default for ApiConfig {
             storefront_stream_timeout_ms: 30_000,
             internal_fetch_secret: None,
             internal_ssr_token: None,
+            internal_ssr_tokens: Vec::new(),
             capability_secret: None,
             preview_secret: None,
             preview_frame_ancestors: Vec::new(),
@@ -504,6 +527,13 @@ impl AppContext {
     #[must_use]
     pub fn with_storefront_runtime(mut self, runtime: Option<Arc<dyn StorefrontRuntime>>) -> Self {
         self.storefront_runtime = runtime;
+        self
+    }
+
+    /// Replaces the process metrics collector.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = metrics;
         self
     }
 

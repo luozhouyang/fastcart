@@ -285,10 +285,17 @@ pub async fn internal_fetch_auth_middleware(
     Ok(next.run(request).await)
 }
 
+/// Store scope attached by the internal SSR credential middleware.
+#[derive(Clone, Debug)]
+pub struct InternalSsrScope {
+    /// Allowed store; `None` means all stores.
+    pub store_id: Option<String>,
+}
+
 /// Authenticates the server-only SSR commerce API.
 pub async fn internal_ssr_auth_middleware(
-    State(expected): State<String>,
-    request: Request,
+    State(tokens): State<Arc<Vec<crate::state::InternalSsrToken>>>,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     let provided = request
@@ -303,9 +310,15 @@ pub async fn internal_ssr_auth_middleware(
                 .and_then(|value| value.to_str().ok())
         })
         .unwrap_or_default();
-    if expected.is_empty() || !bool::from(provided.as_bytes().ct_eq(expected.as_bytes())) {
+    let matched = tokens
+        .iter()
+        .find(|credential| bool::from(provided.as_bytes().ct_eq(credential.token.as_bytes())));
+    let Some(credential) = matched else {
         return Err(ApiError::new(AppError::Forbidden));
-    }
+    };
+    request.extensions_mut().insert(InternalSsrScope {
+        store_id: credential.store_id.clone(),
+    });
     Ok(next.run(request).await)
 }
 

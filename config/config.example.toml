@@ -104,6 +104,9 @@ artifact_max_files = 5000
 # artifact_path = "./deployments/store_01"
 # listen = "127.0.0.1:18889"
 # preview = true
+# Deployment-scoped token; when every deployment has one, each store gets its
+# own credential. Falls back to ssr.internal_token.
+# internal_token = "replace-with-a-deployment-scoped-token"
 
 [jobs]
 enabled = true

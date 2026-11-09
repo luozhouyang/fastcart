@@ -293,6 +293,8 @@ pub struct SsrDeploymentConfig {
     pub listen: Option<SocketAddr>,
     /// Marks this deployment as a preview target for the store.
     pub preview: bool,
+    /// Optional deployment-scoped internal token.
+    pub internal_token: Option<String>,
 }
 
 impl Default for SsrDeploymentConfig {
@@ -303,6 +305,7 @@ impl Default for SsrDeploymentConfig {
             artifact_path: PathBuf::new(),
             listen: None,
             preview: false,
+            internal_token: None,
         }
     }
 }
@@ -782,6 +785,13 @@ impl Config {
                     if deployment.artifact_path.as_os_str().is_empty() {
                         bail!("ssr.deployments[{index}].artifact_path must not be empty");
                     }
+                    if deployment
+                        .internal_token
+                        .as_deref()
+                        .is_some_and(|token| token.trim().len() < 16)
+                    {
+                        bail!("ssr.deployments[{index}].internal_token must be at least 16 bytes");
+                    }
                     let listen = deployment.listen.unwrap_or_else(|| {
                         let offset = u16::try_from(index).unwrap_or(u16::MAX);
                         let port = self.ssr.listen.port().saturating_add(offset);
@@ -1136,6 +1146,7 @@ mod tests {
                 artifact_path: PathBuf::from("./a"),
                 listen: Some("127.0.0.1:18891".parse().unwrap()),
                 preview: false,
+                internal_token: None,
             },
             SsrDeploymentConfig {
                 store_id: "store_b".to_owned(),
@@ -1143,6 +1154,7 @@ mod tests {
                 artifact_path: PathBuf::from("./b"),
                 listen: Some("127.0.0.1:18892".parse().unwrap()),
                 preview: false,
+                internal_token: None,
             },
         ];
         config.validate().unwrap();

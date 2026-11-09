@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 17 (2026-11-09) added per-deployment internal credentials with store
+scoping and SSR Prometheus metrics. Token rotation and preview data isolation
+remain productization work.
+
 Phase 16 (2026-11-09) added a SvelteKit template. The adapter Worker is bundled
 with wrangler dry-run, `_app` assets are served through a compatibility route,
 and generated workerd configs include a no-op cache service for Cache API

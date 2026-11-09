@@ -238,10 +238,20 @@ curl -X POST http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/preview
   -H "authorization: Bearer $FASTCART_SSR_INTERNAL_TOKEN"
 ```
 
+Each `[[ssr.deployments]]` entry can set its own `internal_token`. When every
+deployment defines one, the internal commerce API accepts only that token for
+that store; a token scoped to store A is rejected on store B. If any deployment
+lacks a scoped token, the global `ssr.internal_token` remains an unscoped
+fallback. Runtime `activate` calls use the global token.
+
 `/preview/{path}?token=...` verifies the existing signed preview token and, when
 the store has a preview deployment, forwards to it with
 `x-fastcart-preview: 1`. Preview deployments inherit the production data policy;
 draft page data injection into framework workers is not implemented yet.
+
+`/metrics` now includes `fastcart_ssr_requests_total`,
+`fastcart_ssr_errors_total`, `fastcart_ssr_cache_hits_total`,
+`fastcart_ssr_cache_misses_total` and `fastcart_ssr_deployments`.
 
 Workers can opt into route-level SSR caching by returning
 `Cache-Control: public, s-maxage=<seconds>` (or `max-age`). Rust caches only

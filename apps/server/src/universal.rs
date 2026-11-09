@@ -12,6 +12,7 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use fastcart_api::state::UniversalStorefront;
+use fastcart_http::Metrics;
 use fastcart_kernel::StoreContext;
 use fastcart_ssr::artifact::{ArtifactLimits, ArtifactStore};
 use fastcart_ssr::{
@@ -74,6 +75,7 @@ pub struct UniversalSsr {
     asset_roots: RwLock<Vec<PathBuf>>,
     response_cache: RwLock<HashMap<String, CachedResponse>>,
     default: Option<Arc<Deployment>>,
+    metrics: Arc<Metrics>,
     artifacts: ArtifactStore,
     artifact_root: Option<PathBuf>,
     state_path: PathBuf,
@@ -87,11 +89,15 @@ struct DeploymentSpec<'a> {
     artifact_path: &'a Path,
     listen: SocketAddr,
     preview: bool,
+    internal_token: Option<String>,
 }
 
 impl UniversalSsr {
     /// Imports configured artifacts and starts one workerd group per deployment.
-    pub async fn initialize(config: &SsrConfig) -> Result<Option<Arc<Self>>> {
+    pub async fn initialize(
+        config: &SsrConfig,
+        metrics: Arc<Metrics>,
+    ) -> Result<Option<Arc<Self>>> {
         if !config.enabled {
             return Ok(None);
         }
@@ -121,6 +127,7 @@ impl UniversalSsr {
                         artifact_path: entry.artifact_path,
                         listen: None,
                         preview: entry.preview,
+                        internal_token: None,
                     })
                     .collect();
                 persisted
@@ -179,6 +186,7 @@ impl UniversalSsr {
         if let Some(default) = &default {
             asset_roots.push(default.asset_root.clone());
         }
+        metrics.set_ssr_deployments(deployments.len() + previews.len());
         Ok(Some(Arc::new(Self {
             manager: Arc::new(Mutex::new(manager)),
             deployments: RwLock::new(deployments),
@@ -187,6 +195,7 @@ impl UniversalSsr {
             asset_roots: RwLock::new(asset_roots),
             response_cache: RwLock::new(HashMap::new()),
             default,
+            metrics,
             artifacts,
             artifact_root: config.artifact_root.clone(),
             state_path,
@@ -244,6 +253,7 @@ impl UniversalSsr {
             artifact_path: &artifact_path,
             listen,
             preview: false,
+            internal_token: self.config.internal_token.clone(),
         };
         let limits = ArtifactLimits {
             max_bytes: self.config.artifact_max_bytes,
@@ -280,6 +290,7 @@ impl UniversalSsr {
             }
         }
         self.invalidate_store_cache(store_id).await;
+        self.refresh_deployment_metric().await;
         self.persist_state().await;
         if let Some(previous) = previous {
             tracing::info!(store_id, previous = %previous.deployment_id, "draining replaced SSR deployment");
@@ -431,6 +442,7 @@ impl UniversalSsr {
             artifact_path: &artifact_path,
             listen,
             preview: true,
+            internal_token: self.config.internal_token.clone(),
         };
         let limits = ArtifactLimits {
             max_bytes: self.config.artifact_max_bytes,
@@ -462,6 +474,7 @@ impl UniversalSsr {
             drop(roots);
             self.schedule_drain(old.group.clone());
         }
+        self.refresh_deployment_metric().await;
         self.persist_state().await;
         Ok(())
     }
@@ -477,8 +490,14 @@ impl UniversalSsr {
         }
         drop(roots);
         self.schedule_drain(old.group.clone());
+        self.refresh_deployment_metric().await;
         self.persist_state().await;
         Ok(())
+    }
+
+    async fn refresh_deployment_metric(&self) {
+        let count = self.deployments.read().await.len() + self.previews.read().await.len();
+        self.metrics.set_ssr_deployments(count);
     }
 
     async fn preview_deployment(&self, store_id: &str) -> Option<Arc<Deployment>> {
@@ -504,6 +523,7 @@ impl UniversalSsr {
                 tracing::warn!(error = %error, group = %group, "failed to stop the universal SSR runtime");
             }
         }
+        self.metrics.set_ssr_deployments(0);
     }
 
     async fn deployment(&self, store_id: &str) -> Option<Arc<Deployment>> {
@@ -538,6 +558,7 @@ fn deployment_specs(config: &SsrConfig) -> Vec<DeploymentSpec<'_>> {
             artifact_path: &config.artifact_path,
             listen: config.listen,
             preview: false,
+            internal_token: config.internal_token.clone(),
         }];
     }
     config
@@ -558,6 +579,10 @@ fn deployment_specs(config: &SsrConfig) -> Vec<DeploymentSpec<'_>> {
                 artifact_path: &deployment.artifact_path,
                 listen,
                 preview: deployment.preview,
+                internal_token: deployment
+                    .internal_token
+                    .clone()
+                    .or_else(|| config.internal_token.clone()),
             }
         })
         .collect()
@@ -567,7 +592,7 @@ async fn start_deployment(
     manager: &mut RuntimeManager,
     store: &ArtifactStore,
     limits: ArtifactLimits,
-    config: &SsrConfig,
+    _config: &SsrConfig,
     spec: &DeploymentSpec<'_>,
     group: RuntimeGroupId,
 ) -> Result<Deployment> {
@@ -594,7 +619,7 @@ async fn start_deployment(
     let gateway = manager
         .gateway(&group)
         .context("failed to create the SSR gateway")?
-        .with_internal_token(config.internal_token.clone().unwrap_or_default());
+        .with_internal_token(spec.internal_token.clone().unwrap_or_default());
     Ok(Deployment {
         group,
         gateway,
@@ -655,11 +680,14 @@ impl UniversalStorefront for UniversalSsr {
             scheme,
             preview: false,
         };
+        self.metrics.record_ssr_request();
         let cache_key = cache_key(&request, store.store_id.as_str());
-        if let Some(key) = &cache_key
-            && let Some(response) = self.cached_response(key).await
-        {
-            return response;
+        if let Some(key) = &cache_key {
+            if let Some(response) = self.cached_response(key).await {
+                self.metrics.record_ssr_cache_hit();
+                return response;
+            }
+            self.metrics.record_ssr_cache_miss();
         }
 
         let started = std::time::Instant::now();
@@ -707,6 +735,7 @@ impl UniversalStorefront for UniversalSsr {
                 into_response(response)
             }
             Err(error) => {
+                self.metrics.record_ssr_error();
                 tracing::warn!(
                     store_id = context.store_id,
                     deployment_id = context.deployment_id,
@@ -755,6 +784,7 @@ impl UniversalStorefront for UniversalSsr {
             )
                 .into_response();
         };
+        self.metrics.record_ssr_request();
         let context = SsrRequestContext {
             store_id: store.store_id.to_string(),
             deployment_id: deployment.deployment_id.clone(),
@@ -771,7 +801,10 @@ impl UniversalStorefront for UniversalSsr {
             .await
         {
             Ok(response) => into_response(response),
-            Err(error) => error_response(&error),
+            Err(error) => {
+                self.metrics.record_ssr_error();
+                error_response(&error)
+            }
         }
     }
 
@@ -1217,7 +1250,7 @@ export default {
             artifact_root: None,
             deployments: Vec::new(),
         };
-        let runtime = UniversalSsr::initialize(&config)
+        let runtime = UniversalSsr::initialize(&config, Arc::new(Metrics::new()))
             .await
             .expect("initialize")
             .expect("enabled");
@@ -1509,6 +1542,7 @@ export default {
                             .expect("listen a"),
                     ),
                     preview: false,
+                    internal_token: None,
                 },
                 SsrDeploymentConfig {
                     store_id: "store_b".to_owned(),
@@ -1520,10 +1554,11 @@ export default {
                             .expect("listen b"),
                     ),
                     preview: false,
+                    internal_token: None,
                 },
             ],
         };
-        let runtime = UniversalSsr::initialize(&config)
+        let runtime = UniversalSsr::initialize(&config, Arc::new(Metrics::new()))
             .await
             .expect("initialize")
             .expect("enabled");
@@ -1682,7 +1717,7 @@ export default {
             artifact_root: Some(root.path().to_path_buf()),
             deployments: Vec::new(),
         };
-        let runtime = UniversalSsr::initialize(&base)
+        let runtime = UniversalSsr::initialize(&base, Arc::new(Metrics::new()))
             .await
             .expect("initialize")
             .expect("enabled");
@@ -1692,7 +1727,7 @@ export default {
             .expect("activate");
         runtime.shutdown().await;
 
-        let restarted = UniversalSsr::initialize(&base)
+        let restarted = UniversalSsr::initialize(&base, Arc::new(Metrics::new()))
             .await
             .expect("restart")
             .expect("enabled");

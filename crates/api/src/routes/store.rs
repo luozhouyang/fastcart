@@ -15,8 +15,8 @@ use fastcart_kernel::{AppError, CurrencyCode, StoreContext, StoreId};
 use fastcart_platform::StoreStatus;
 
 use super::{
-    StoreDbState, customer_auth_middleware, not_implemented, publishable_key_middleware,
-    store_database_middleware,
+    InternalSsrScope, StoreDbState, customer_auth_middleware, not_implemented,
+    publishable_key_middleware, store_database_middleware,
 };
 use crate::state::AppContext;
 
@@ -135,6 +135,14 @@ pub async fn internal_store_middleware(
         .map_err(|error| ApiError::new(error.into()))?
         .filter(|store| store.status == StoreStatus::Active)
         .ok_or_else(|| ApiError::new(AppError::not_found("store", store_id.as_str())))?;
+    if let Some(scope) = request.extensions().get::<InternalSsrScope>()
+        && scope
+            .store_id
+            .as_deref()
+            .is_some_and(|allowed| allowed != store.id.as_str())
+    {
+        return Err(ApiError::new(AppError::Forbidden));
+    }
     let currency = CurrencyCode::new(store.currency_code.clone())
         .map_err(|error| ApiError::new(AppError::from(error)))?;
     request.extensions_mut().insert(StoreContext {

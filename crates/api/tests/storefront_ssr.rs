@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fastcart_api::routes::preview::issue_preview_token;
-use fastcart_api::state::UniversalStorefront;
+use fastcart_api::state::{InternalSsrToken, UniversalStorefront};
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::{Metadata, StoreContext, now_timestamp};
@@ -248,6 +248,16 @@ async fn fixture(
                 backup_dir: dir.path().join("backups"),
                 internal_fetch_secret: internal_secret,
                 internal_ssr_token: Some("ssr-internal-secret".to_owned()),
+                internal_ssr_tokens: vec![
+                    InternalSsrToken {
+                        token: "ssr-internal-secret".to_owned(),
+                        store_id: Some(store.id.to_string()),
+                    },
+                    InternalSsrToken {
+                        token: "other-store-secret".to_owned(),
+                        store_id: Some("store_other".to_owned()),
+                    },
+                ],
                 preview_secret: Some("preview-secret-that-is-at-least-32-bytes".to_owned()),
                 ..ApiConfig::default()
             },
@@ -1251,6 +1261,20 @@ async fn internal_ssr_namespace_requires_token_and_uses_path_store() {
         .await
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    let cross_store = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&context_path)
+                .header("authorization", "Bearer other-store-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cross_store.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

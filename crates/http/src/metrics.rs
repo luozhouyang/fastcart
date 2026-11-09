@@ -33,6 +33,11 @@ pub struct Metrics {
     bucket_counts: [AtomicU64; LATENCY_BUCKETS_SECONDS.len()],
     duration_micros_total: AtomicU64,
     storefront_data_failures_total: AtomicU64,
+    ssr_requests_total: AtomicU64,
+    ssr_errors_total: AtomicU64,
+    ssr_cache_hits_total: AtomicU64,
+    ssr_cache_misses_total: AtomicU64,
+    ssr_deployments: AtomicI64,
 }
 
 impl Default for Metrics {
@@ -56,6 +61,11 @@ impl Metrics {
             bucket_counts: std::array::from_fn(|_| AtomicU64::new(0)),
             duration_micros_total: AtomicU64::new(0),
             storefront_data_failures_total: AtomicU64::new(0),
+            ssr_requests_total: AtomicU64::new(0),
+            ssr_errors_total: AtomicU64::new(0),
+            ssr_cache_hits_total: AtomicU64::new(0),
+            ssr_cache_misses_total: AtomicU64::new(0),
+            ssr_deployments: AtomicI64::new(0),
         }
     }
 
@@ -63,6 +73,34 @@ impl Metrics {
     pub fn record_storefront_data_failure(&self) {
         self.storefront_data_failures_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one universal SSR request.
+    pub fn record_ssr_request(&self) {
+        self.ssr_requests_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one universal SSR request failure.
+    pub fn record_ssr_error(&self) {
+        self.ssr_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one universal SSR cache hit.
+    pub fn record_ssr_cache_hit(&self) {
+        self.ssr_cache_hits_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one universal SSR cache miss.
+    pub fn record_ssr_cache_miss(&self) {
+        self.ssr_cache_misses_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Sets the number of active universal SSR deployments.
+    pub fn set_ssr_deployments(&self, deployments: usize) {
+        self.ssr_deployments.store(
+            i64::try_from(deployments).unwrap_or(i64::MAX),
+            Ordering::Relaxed,
+        );
     }
 
     /// Marks a request as started.
@@ -137,6 +175,56 @@ impl Metrics {
             output,
             "fastcart_storefront_data_failures_total {}",
             self.storefront_data_failures_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_requests_total Universal SSR requests."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_ssr_requests_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_requests_total {}",
+            self.ssr_requests_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_errors_total Universal SSR request failures."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_ssr_errors_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_errors_total {}",
+            self.ssr_errors_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_cache_hits_total Universal SSR response cache hits."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_ssr_cache_hits_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_cache_hits_total {}",
+            self.ssr_cache_hits_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_cache_misses_total Universal SSR response cache misses."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_ssr_cache_misses_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_cache_misses_total {}",
+            self.ssr_cache_misses_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_deployments Active universal SSR deployments."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_ssr_deployments gauge");
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_deployments {}",
+            self.ssr_deployments.load(Ordering::Relaxed).max(0)
         );
         let _ = writeln!(
             output,
@@ -224,6 +312,12 @@ mod tests {
         metrics.end_request(404, Duration::from_millis(200));
         metrics.end_request(500, Duration::from_secs(40));
         metrics.record_storefront_data_failure();
+        metrics.record_ssr_request();
+        metrics.record_ssr_request();
+        metrics.record_ssr_error();
+        metrics.record_ssr_cache_hit();
+        metrics.record_ssr_cache_miss();
+        metrics.set_ssr_deployments(2);
 
         let rendered = metrics.render();
         assert!(rendered.contains("fastcart_http_requests_total 4"));
@@ -233,6 +327,11 @@ mod tests {
         assert!(rendered.contains("fastcart_http_response_status_total{class=\"4xx\"} 1"));
         assert!(rendered.contains("fastcart_http_response_status_total{class=\"5xx\"} 1"));
         assert!(rendered.contains("fastcart_http_requests_in_flight 0"));
+        assert!(rendered.contains("fastcart_ssr_requests_total 2"));
+        assert!(rendered.contains("fastcart_ssr_errors_total 1"));
+        assert!(rendered.contains("fastcart_ssr_cache_hits_total 1"));
+        assert!(rendered.contains("fastcart_ssr_cache_misses_total 1"));
+        assert!(rendered.contains("fastcart_ssr_deployments 2"));
         assert!(rendered.contains("fastcart_http_request_duration_seconds_bucket{le=\"0.005\"} 1"));
         assert!(rendered.contains("fastcart_http_request_duration_seconds_bucket{le=\"0.1\"} 2"));
         assert!(rendered.contains("fastcart_http_request_duration_seconds_bucket{le=\"0.25\"} 3"));

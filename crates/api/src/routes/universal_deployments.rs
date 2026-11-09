@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -12,6 +12,7 @@ use fastcart_kernel::AppError;
 use fastcart_platform::StoreStatus;
 use serde::Deserialize;
 
+use super::InternalSsrScope;
 use crate::state::AppContext;
 
 /// Builds the deployment lifecycle router.
@@ -32,8 +33,10 @@ struct ActivateRequest {
 async fn activate(
     State(context): State<Arc<AppContext>>,
     Path(store_id): Path<String>,
+    Extension(scope): Extension<InternalSsrScope>,
     Json(request): Json<ActivateRequest>,
 ) -> ApiResult<Response> {
+    ensure_scope(&scope, &store_id)?;
     ensure_active_store(&context, &store_id).await?;
     let Some(runtime) = context.universal_storefront.clone() else {
         return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
@@ -48,7 +51,9 @@ async fn activate(
 async fn rollback(
     State(context): State<Arc<AppContext>>,
     Path(store_id): Path<String>,
+    Extension(scope): Extension<InternalSsrScope>,
 ) -> ApiResult<Response> {
+    ensure_scope(&scope, &store_id)?;
     ensure_active_store(&context, &store_id).await?;
     let Some(runtime) = context.universal_storefront.clone() else {
         return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
@@ -63,8 +68,10 @@ async fn rollback(
 async fn activate_preview(
     State(context): State<Arc<AppContext>>,
     Path(store_id): Path<String>,
+    Extension(scope): Extension<InternalSsrScope>,
     Json(request): Json<ActivateRequest>,
 ) -> ApiResult<Response> {
+    ensure_scope(&scope, &store_id)?;
     ensure_active_store(&context, &store_id).await?;
     let Some(runtime) = context.universal_storefront.clone() else {
         return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
@@ -79,7 +86,9 @@ async fn activate_preview(
 async fn deactivate_preview(
     State(context): State<Arc<AppContext>>,
     Path(store_id): Path<String>,
+    Extension(scope): Extension<InternalSsrScope>,
 ) -> ApiResult<Response> {
+    ensure_scope(&scope, &store_id)?;
     ensure_active_store(&context, &store_id).await?;
     let Some(runtime) = context.universal_storefront.clone() else {
         return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
@@ -89,6 +98,17 @@ async fn deactivate_preview(
         .await
         .map_err(|error| ApiError::new(AppError::conflict(error)))?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+fn ensure_scope(scope: &InternalSsrScope, store_id: &str) -> ApiResult<()> {
+    if scope
+        .store_id
+        .as_deref()
+        .is_some_and(|allowed| allowed != store_id)
+    {
+        return Err(ApiError::new(AppError::Forbidden));
+    }
+    Ok(())
 }
 
 async fn ensure_active_store(context: &Arc<AppContext>, store_id: &str) -> ApiResult<()> {
