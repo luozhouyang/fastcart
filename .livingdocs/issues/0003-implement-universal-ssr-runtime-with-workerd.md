@@ -146,3 +146,9 @@ Preview deployments are separate from production, can be activated/deactivated
 with the internal token, and are selected by `/preview` after signed-token
 verification. Preview-specific assets, draft page data and an independent data
 policy remain open.
+
+### Phase 14 status
+
+Workers can opt into route-level SSR caching with `Cache-Control`; Rust caches
+cookie-free GET responses, reports HIT/MISS, and invalidates per store on
+mutations. SWR, cache tags and shared caches remain productization work.

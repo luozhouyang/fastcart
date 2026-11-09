@@ -90,6 +90,11 @@ pub async fn admin_audit_middleware(
         && let Some(actor) = actor
     {
         let status = response.status().as_u16();
+        if let Some(store_id) = &actor.store_id
+            && let Some(runtime) = &context.universal_storefront
+        {
+            runtime.invalidate_cache(store_id.as_str()).await;
+        }
         record_store_audit(
             &context,
             &actor,
@@ -224,6 +229,10 @@ pub async fn storefront_context_invalidation_middleware(
 ) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    let store_id = request
+        .extensions()
+        .get::<StoreContext>()
+        .map(|store| store.store_id.clone());
     let response = next.run(request).await;
     let cacheable = !matches!(
         method,
@@ -246,6 +255,11 @@ pub async fn storefront_context_invalidation_middleware(
             context.invalidate_storefront_customers();
             // Login, logout and profile changes can alter cart ownership.
             context.invalidate_storefront_carts();
+        }
+        if let Some(store_id) = &store_id
+            && let Some(runtime) = &context.universal_storefront
+        {
+            runtime.invalidate_cache(store_id.as_str()).await;
         }
     }
     response

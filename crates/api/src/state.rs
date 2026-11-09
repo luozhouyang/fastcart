@@ -47,6 +47,9 @@ pub trait UniversalStorefront: Send + Sync {
     /// Restores the previous deployment for one store.
     async fn rollback(&self, store_id: &str) -> Result<(), String>;
 
+    /// Invalidates cached SSR responses for one store.
+    async fn invalidate_cache(&self, _store_id: &str) {}
+
     /// Renders through the store's preview deployment.
     async fn render_preview(
         &self,

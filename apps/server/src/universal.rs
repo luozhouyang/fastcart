@@ -5,7 +5,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use axum::body::Body;
@@ -18,6 +18,7 @@ use fastcart_ssr::{
     RuntimeGroupId, RuntimeManager, RuntimeManagerConfig, SsrBody, SsrError, SsrGateway,
     SsrRequestContext, SsrResponse,
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
@@ -41,6 +42,19 @@ struct DeploymentMeta {
     artifact_path: PathBuf,
 }
 
+/// One buffered SSR response eligible for route-level caching.
+#[derive(Clone)]
+struct CachedResponse {
+    status: StatusCode,
+    headers: axum::http::HeaderMap,
+    body: bytes::Bytes,
+    stored: Instant,
+    ttl: Duration,
+}
+
+const MAX_CACHE_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CACHE_ENTRIES: usize = 1_000;
+
 /// Activation state written atomically after a successful swap.
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedDeployment {
@@ -58,6 +72,7 @@ pub struct UniversalSsr {
     previews: RwLock<HashMap<String, Arc<Deployment>>>,
     history: RwLock<HashMap<String, Vec<DeploymentMeta>>>,
     asset_roots: RwLock<Vec<PathBuf>>,
+    response_cache: RwLock<HashMap<String, CachedResponse>>,
     default: Option<Arc<Deployment>>,
     artifacts: ArtifactStore,
     artifact_root: Option<PathBuf>,
@@ -170,6 +185,7 @@ impl UniversalSsr {
             previews: RwLock::new(previews),
             history: RwLock::new(HashMap::new()),
             asset_roots: RwLock::new(asset_roots),
+            response_cache: RwLock::new(HashMap::new()),
             default,
             artifacts,
             artifact_root: config.artifact_root.clone(),
@@ -263,6 +279,7 @@ impl UniversalSsr {
                 entries.remove(0);
             }
         }
+        self.invalidate_store_cache(store_id).await;
         self.persist_state().await;
         if let Some(previous) = previous {
             tracing::info!(store_id, previous = %previous.deployment_id, "draining replaced SSR deployment");
@@ -328,6 +345,43 @@ impl UniversalSsr {
         if let Err(error) = tokio::fs::rename(&staging, &self.state_path).await {
             tracing::warn!(error = %error, "failed to commit SSR deployment state");
         }
+    }
+
+    async fn cached_response(&self, key: &str) -> Option<Response> {
+        let entry = {
+            let mut cache = self.response_cache.write().await;
+            let entry = cache.get(key).cloned()?;
+            if entry.stored.elapsed() > entry.ttl {
+                cache.remove(key);
+                return None;
+            }
+            entry
+        };
+        let mut builder = Response::builder().status(entry.status);
+        if let Some(headers) = builder.headers_mut() {
+            for (name, value) in &entry.headers {
+                headers.append(name, value.clone());
+            }
+            headers.insert(
+                "x-fastcart-cache",
+                axum::http::HeaderValue::from_static("HIT"),
+            );
+            headers.insert(
+                axum::http::header::AGE,
+                axum::http::HeaderValue::from_str(&entry.stored.elapsed().as_secs().to_string())
+                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("0")),
+            );
+        }
+        builder.body(Body::from(entry.body)).ok()
+    }
+
+    /// Invalidates cached SSR responses for one store.
+    pub async fn invalidate_store_cache(&self, store_id: &str) {
+        let prefix = format!("{store_id}:");
+        self.response_cache
+            .write()
+            .await
+            .retain(|key, _| !key.starts_with(&prefix));
     }
 
     async fn resolve_artifact_path(&self, path: &Path) -> Result<PathBuf> {
@@ -573,6 +627,10 @@ fn validate_identifier(label: &str, value: &str) -> Result<()> {
 
 #[async_trait::async_trait]
 impl UniversalStorefront for UniversalSsr {
+    async fn invalidate_cache(&self, store_id: &str) {
+        self.invalidate_store_cache(store_id).await;
+    }
+
     async fn render(
         &self,
         request: axum::http::Request<Body>,
@@ -597,6 +655,13 @@ impl UniversalStorefront for UniversalSsr {
             scheme,
             preview: false,
         };
+        let cache_key = cache_key(&request, store.store_id.as_str());
+        if let Some(key) = &cache_key
+            && let Some(response) = self.cached_response(key).await
+        {
+            return response;
+        }
+
         let started = std::time::Instant::now();
         let result = deployment
             .gateway
@@ -604,7 +669,7 @@ impl UniversalStorefront for UniversalSsr {
             .await;
         let elapsed_ms = started.elapsed().as_millis();
         match result {
-            Ok(response) => {
+            Ok(mut response) => {
                 tracing::debug!(
                     store_id = context.store_id,
                     deployment_id = context.deployment_id,
@@ -612,6 +677,33 @@ impl UniversalStorefront for UniversalSsr {
                     elapsed_ms,
                     "universal SSR render"
                 );
+                if response.status == StatusCode::OK
+                    && let Some(key) = cache_key
+                    && let Some(ttl) = cache_ttl(&response.headers)
+                    && let Some(body) = buffer_body(std::mem::replace(
+                        &mut response.body,
+                        SsrBody::Full(bytes::Bytes::new()),
+                    ))
+                    .await
+                {
+                    let cached = CachedResponse {
+                        status: response.status,
+                        headers: response.headers.clone(),
+                        body: body.clone(),
+                        stored: Instant::now(),
+                        ttl,
+                    };
+                    let mut cache = self.response_cache.write().await;
+                    if cache.len() >= MAX_CACHE_ENTRIES {
+                        cache.clear();
+                    }
+                    cache.insert(key, cached);
+                    response.body = SsrBody::Full(body);
+                    response.headers.insert(
+                        "x-fastcart-cache",
+                        axum::http::HeaderValue::from_static("MISS"),
+                    );
+                }
                 into_response(response)
             }
             Err(error) => {
@@ -846,6 +938,85 @@ fn parse_range(value: &str, len: u64) -> Option<Result<(usize, usize), ()>> {
     )))
 }
 
+fn cache_key(request: &axum::http::Request<Body>, store_id: &str) -> Option<String> {
+    if request.method() != axum::http::Method::GET {
+        return None;
+    }
+    if request
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION)
+        || request.headers().contains_key(axum::http::header::COOKIE)
+        || request
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().contains("no-cache"))
+    {
+        return None;
+    }
+    let language = request
+        .headers()
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    Some(format!(
+        "{store_id}:{}:{language}",
+        request
+            .uri()
+            .path_and_query()
+            .map_or("/", axum::http::uri::PathAndQuery::as_str)
+    ))
+}
+
+fn cache_ttl(headers: &axum::http::HeaderMap) -> Option<Duration> {
+    if headers.contains_key(axum::http::header::SET_COOKIE) {
+        return None;
+    }
+    let value = headers
+        .get(axum::http::header::CACHE_CONTROL)?
+        .to_str()
+        .ok()?;
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("no-store") || lower.contains("private") {
+        return None;
+    }
+    let mut ttl = None;
+    for part in lower.split(',') {
+        let part = part.trim();
+        let Some(seconds) = part
+            .strip_prefix("s-maxage=")
+            .or_else(|| part.strip_prefix("max-age="))
+        else {
+            continue;
+        };
+        let Ok(seconds) = seconds.trim().parse::<u64>() else {
+            continue;
+        };
+        ttl = Some(Duration::from_secs(seconds));
+        if part.starts_with("s-maxage=") {
+            break;
+        }
+    }
+    ttl.filter(|ttl| !ttl.is_zero())
+}
+
+async fn buffer_body(body: SsrBody) -> Option<bytes::Bytes> {
+    match body {
+        SsrBody::Full(bytes) => (bytes.len() <= MAX_CACHE_ENTRY_BYTES).then_some(bytes),
+        SsrBody::Stream(mut stream) => {
+            let mut output = bytes::BytesMut::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.ok()?;
+                if output.len() + chunk.len() > MAX_CACHE_ENTRY_BYTES {
+                    return None;
+                }
+                output.extend_from_slice(&chunk);
+            }
+            Some(output.freeze())
+        }
+    }
+}
+
 fn content_type(path: &std::path::Path) -> &'static str {
     match path
         .extension()
@@ -988,6 +1159,13 @@ export default {
     if (url.pathname === "/__fastcart/health") {
       return Response.json({ status: "ok" });
     }
+    if (url.pathname === "/cached") {
+      globalThis.__fastcartCacheCount = (globalThis.__fastcartCacheCount || 0) + 1;
+      return Response.json(
+        { count: globalThis.__fastcartCacheCount },
+        { headers: { "cache-control": "public, max-age=60" } },
+      );
+    }
     return Response.json({
       path: url.pathname,
       store: request.headers.get("x-fastcart-store-id"),
@@ -1079,6 +1257,82 @@ export default {
         assert_eq!(value["requestId"], "req_server");
         assert_eq!(value["proto"], "https");
         assert_eq!(value["token"], "server-secret");
+
+        let first = runtime
+            .render(
+                Request::builder()
+                    .uri("/cached")
+                    .body(Body::empty())
+                    .expect("request"),
+                StoreContext {
+                    store_id: StoreId::from_string("store_01".to_owned()),
+                    domain: "shop.example".to_owned(),
+                    locale: "en-US".to_owned(),
+                    currency: CurrencyCode::new("USD").expect("currency"),
+                    timezone: "UTC".to_owned(),
+                },
+                Some("cache_1".to_owned()),
+                "https".to_owned(),
+            )
+            .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = axum::body::to_bytes(first.into_body(), 1024)
+            .await
+            .expect("first body");
+        let first_value: serde_json::Value =
+            serde_json::from_slice(&first_body).expect("first json");
+        let second = runtime
+            .render(
+                Request::builder()
+                    .uri("/cached")
+                    .body(Body::empty())
+                    .expect("request"),
+                StoreContext {
+                    store_id: StoreId::from_string("store_01".to_owned()),
+                    domain: "shop.example".to_owned(),
+                    locale: "en-US".to_owned(),
+                    currency: CurrencyCode::new("USD").expect("currency"),
+                    timezone: "UTC".to_owned(),
+                },
+                Some("cache_2".to_owned()),
+                "https".to_owned(),
+            )
+            .await;
+        assert_eq!(
+            second.headers().get("x-fastcart-cache").expect("cache hit"),
+            "HIT"
+        );
+        let second_body = axum::body::to_bytes(second.into_body(), 1024)
+            .await
+            .expect("second body");
+        let second_value: serde_json::Value =
+            serde_json::from_slice(&second_body).expect("second json");
+        assert_eq!(first_value["count"], second_value["count"]);
+
+        runtime.invalidate_cache("store_01").await;
+        let third = runtime
+            .render(
+                Request::builder()
+                    .uri("/cached")
+                    .body(Body::empty())
+                    .expect("request"),
+                StoreContext {
+                    store_id: StoreId::from_string("store_01".to_owned()),
+                    domain: "shop.example".to_owned(),
+                    locale: "en-US".to_owned(),
+                    currency: CurrencyCode::new("USD").expect("currency"),
+                    timezone: "UTC".to_owned(),
+                },
+                Some("cache_3".to_owned()),
+                "https".to_owned(),
+            )
+            .await;
+        let third_body = axum::body::to_bytes(third.into_body(), 1024)
+            .await
+            .expect("third body");
+        let third_value: serde_json::Value =
+            serde_json::from_slice(&third_body).expect("third json");
+        assert_ne!(first_value["count"], third_value["count"]);
 
         let asset = runtime
             .serve_asset(

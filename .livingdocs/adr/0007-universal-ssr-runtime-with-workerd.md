@@ -177,6 +177,11 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 14 (2026-11-09) added opt-in route-level SSR caching controlled by the
+Worker's `Cache-Control`, with store-wide invalidation on mutations, preview
+bypass and cache HIT/MISS headers. SWR and shared/persistent caches remain
+productization work.
+
 Phase 13 (2026-11-09) added separate preview deployments. Preview entries are
 activated through the internal token, selected only by `/preview` after signed
 token verification, and inject `x-fastcart-preview` while production remains

@@ -240,6 +240,13 @@ the store has a preview deployment, forwards to it with
 `x-fastcart-preview: 1`. Preview deployments inherit the production data policy;
 draft page data injection into framework workers is not implemented yet.
 
+Workers can opt into route-level SSR caching by returning
+`Cache-Control: public, s-maxage=<seconds>` (or `max-age`). Rust caches only
+cookie-free, authorization-free `GET` responses up to 2 MiB; admin/store
+mutations and deployment activation invalidate the store's cache. Responses
+report `x-fastcart-cache: HIT` or `MISS`. `stale-while-revalidate` and persistent
+cache storage are not implemented.
+
 The new artifact must pass `/__fastcart/health`; the old group drains for
 `ssr.drain_timeout_ms` while its assets remain available. With the default
 single-artifact mode, successful activation is written atomically to
