@@ -221,3 +221,10 @@ Credential storage is abstracted behind `fastcart-ssr-credentials`; the file
 backend supports CAS, read-only mode, startup policy and revision polling.
 `[ssr.credentials]` documents backend/mode/refresh/seeding. Kubernetes and Vault
 backends were intentionally excluded; backend metrics and encryption remain open.
+
+### Phase 25 status
+
+Credential backend load/save/refresh metrics and opt-in XChaCha20-Poly1305 file
+encryption are implemented. Keys come from an environment variable and are not
+logged; legacy plaintext remains readable. Key rotation, KMS integration and
+automatic plaintext migration remain open.

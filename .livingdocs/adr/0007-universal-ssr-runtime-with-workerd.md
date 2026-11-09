@@ -177,6 +177,10 @@ Cloudflare-specific bindings such as `ASSETS`, `IMAGES` and `SESSION` must be
 declared or rejected rather than assumed. The fixtures and commands are in
 `experiments/workerd` (gitignored binary; see `scripts/install-workerd.sh`).
 
+Phase 25 (2026-11-09) added credential backend metrics and opt-in
+XChaCha20-Poly1305 file encryption with an environment-provided key. Key
+rotation, KMS integration and automatic plaintext migration remain open.
+
 Phase 24 (2026-11-09) extracted credential storage into
 `fastcart-ssr-credentials`, added a `[ssr.credentials]` backend/mode/refresh
 configuration, persist-before-swap rotation, read-only mode, polling refresh and

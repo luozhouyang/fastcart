@@ -60,7 +60,8 @@ impl AppState {
             config.cache.max_capacity,
             Duration::from_secs(config.cache.ttl_seconds),
         );
-        let internal_ssr_credentials = internal_ssr_credentials(&config).await?;
+        let metrics = Arc::new(fastcart_http::Metrics::new());
+        let internal_ssr_credentials = internal_ssr_credentials(&config, metrics.clone()).await?;
         let api_config = ApiConfig {
             service_name: "fastcart".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -123,7 +124,6 @@ impl AppState {
             inquiry_retention_days: config.inquiries.retention_days,
             notification_retention_days: config.notifications.retention_days,
         };
-        let metrics = Arc::new(fastcart_http::Metrics::new());
         let universal_ssr = crate::universal::UniversalSsr::initialize(
             &config.ssr,
             metrics.clone(),
@@ -319,6 +319,7 @@ fn store_email_env(store_id: &StoreId, key: &str) -> Option<String> {
 /// otherwise the global token remains a single unscoped credential.
 async fn internal_ssr_credentials(
     config: &Config,
+    metrics: Arc<fastcart_http::Metrics>,
 ) -> anyhow::Result<fastcart_api::state::InternalSsrCredentials> {
     let global = config
         .ssr
@@ -385,11 +386,12 @@ async fn internal_ssr_credentials(
     } else {
         fastcart_api::state::CredentialMode::ReadWrite
     };
-    match fastcart_api::state::InternalSsrCredentials::load(
+    match fastcart_api::state::InternalSsrCredentials::load_with_metrics(
         std::sync::Arc::new(backend),
         tokens.clone(),
         config.ssr.credentials.seed_from_config,
         mode,
+        Some(metrics.clone()),
     )
     .await
     {
@@ -402,7 +404,9 @@ async fn internal_ssr_credentials(
         }
         Err(error) if !config.ssr.credentials.required => {
             tracing::warn!(error = %error, "SSR credential backend unavailable; using config fallback");
-            Ok(fastcart_api::state::InternalSsrCredentials::new(tokens))
+            let mut credentials = fastcart_api::state::InternalSsrCredentials::new(tokens);
+            credentials.set_metrics(metrics);
+            Ok(credentials)
         }
         Err(error) => Err(anyhow::Error::new(error).context("failed to load SSR credentials")),
     }

@@ -125,6 +125,12 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_SSR_ENABLED` — enable the universal workerd runtime (requires an artifact)
 - `FASTCART_SSR_BINARY`, `FASTCART_SSR_ARTIFACT`, `FASTCART_SSR_RUNTIME_DIR` — pinned workerd binary, source artifact directory and runtime data directory
 - `FASTCART_SSR_LISTEN`, `FASTCART_SSR_DEPLOYMENT_ID`, `FASTCART_SSR_INTERNAL_TOKEN` — loopback listener, deployment identity and optional internal token
+- `FASTCART_SSR_CREDENTIALS_BACKEND`, `FASTCART_SSR_CREDENTIALS_MODE`,
+  `FASTCART_SSR_CREDENTIALS_FILE`, `FASTCART_SSR_CREDENTIALS_REFRESH_SECONDS`,
+  `FASTCART_SSR_CREDENTIALS_REQUIRED`, `FASTCART_SSR_CREDENTIALS_SEED`,
+  `FASTCART_SSR_CREDENTIALS_ENCRYPTION`, `FASTCART_SSR_CREDENTIALS_KEY_ENV` —
+  credential backend policy; `FASTCART_SSR_CREDENTIALS_KEY` holds the base64
+  32-byte encryption key by default
 
 ### Storefront SSR (target architecture)
 
@@ -258,10 +264,33 @@ remain valid for `grace_seconds` so in-flight Worker calls can finish. Add
 `"preview": true` to rotate a preview-only credential. A scoped token can be
 revoked immediately with `POST .../revoke-token` and `{"token":"..."}`. Lifecycle
 activation, rollback, preview and credential changes write platform audit
-records (the token value is never included). Rotation state is persisted atomically to `ssr.credentials_path` (default
-`<runtime_dir>/internal-ssr-credentials.json`, mode `0600` on Unix) and reloaded
-on restart. Config tokens are merged into the persisted set when they are new.
-The file contains bearer secrets; keep the runtime directory operator-owned.
+records (the token value is never included).
+
+Credentials use a pluggable backend. This phase implements the atomic file
+backend (mode `0600` on Unix) with revision polling and optional encryption:
+
+```toml
+[ssr.credentials]
+backend = "file"
+mode = "read_write" # or "read_only"
+refresh_interval_seconds = 30
+required = true
+seed_from_config = true
+encryption = "none" # or "xchacha20poly1305"
+key_env = "FASTCART_SSR_CREDENTIALS_KEY"
+```
+
+`read_only` rejects rotate/revoke with `409`; external managers should use it and
+write the file themselves. `seed_from_config` seeds an empty backend once;
+existing backend state is authoritative. Enable `xchacha20poly1305` and provide a
+base64 32-byte key in `key_env` to encrypt at rest. Legacy plaintext files remain
+readable and are encrypted on the next write. The key is never logged. Keep the
+runtime directory operator-owned even with encryption.
+
+Credential backend metrics are exported on `/metrics`:
+`fastcart_ssr_credential_loads_total`, `_saves_total`, `_refreshes_total`,
+`_load_errors_total`, `_save_errors_total`, `_refresh_errors_total`,
+`_refresh_changes_total`, `_tokens`, and `_last_success_timestamp_seconds`.
 
 `/preview/{path}?token=...` verifies the existing signed preview token and, when
 the store has a preview deployment, forwards to it with

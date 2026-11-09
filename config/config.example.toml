@@ -107,6 +107,9 @@ mode = "read_write" # or read_only for externally managed secrets
 refresh_interval_seconds = 30
 required = true
 seed_from_config = true
+# Encrypt the credential file at rest. Requires a base64 32-byte key in key_env.
+encryption = "none" # or xchacha20poly1305
+key_env = "FASTCART_SSR_CREDENTIALS_KEY"
 
 # Multi-store deployments. Leave empty to serve every store from the single
 # artifact_path above. Each entry gets its own workerd group and listener.

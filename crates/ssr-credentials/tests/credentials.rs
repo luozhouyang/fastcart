@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use base64::Engine as _;
+
 use fastcart_ssr_credentials::{
     CredentialBackend, CredentialError, CredentialManager, CredentialMode, CredentialSnapshot,
     CredentialToken, FileCredentialBackend,
@@ -131,4 +133,96 @@ async fn read_only_manager_rejects_writes_and_refreshes() {
         Err(CredentialError::ReadOnly)
     ));
     assert!(!manager.refresh().await.expect("refresh"));
+}
+
+#[tokio::test]
+async fn records_backend_metrics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("credentials.json");
+    let metrics = std::sync::Arc::new(fastcart_http::Metrics::new());
+    let backend = std::sync::Arc::new(FileCredentialBackend::new(&path, false));
+    let manager = CredentialManager::load_with_metrics(
+        backend,
+        vec![token("metric-token-0123456789", None, false)],
+        true,
+        CredentialMode::ReadWrite,
+        Some(metrics.clone()),
+    )
+    .await
+    .expect("manager");
+    manager.refresh().await.expect("refresh");
+    manager
+        .rotate(
+            "store_a",
+            "rotated-metric-token-0123456789".to_owned(),
+            None,
+            0,
+            false,
+        )
+        .await
+        .expect("rotate");
+
+    let rendered = metrics.render();
+    assert!(rendered.contains("fastcart_ssr_credential_loads_total 2"));
+    assert!(rendered.contains("fastcart_ssr_credential_saves_total 2"));
+    assert!(rendered.contains("fastcart_ssr_credential_refreshes_total 1"));
+    assert!(rendered.contains("fastcart_ssr_credential_tokens 2"));
+    assert!(rendered.contains("fastcart_ssr_credential_last_success_timestamp_seconds"));
+}
+
+#[tokio::test]
+async fn encrypted_file_roundtrip_and_wrong_key_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("credentials.json");
+    let key = [7_u8; 32];
+    let backend = FileCredentialBackend::with_key(&path, false, key);
+    let snapshot = CredentialSnapshot {
+        revision: None,
+        tokens: vec![token("encrypted-token-0123456789", None, false)],
+    };
+    backend.save(&snapshot, None).await.expect("save");
+
+    let raw = std::fs::read_to_string(&path).expect("raw file");
+    assert!(!raw.contains("encrypted-token-0123456789"));
+    assert!(raw.contains("xchacha20poly1305"));
+
+    let loaded = backend.load().await.expect("load").expect("snapshot");
+    assert_eq!(loaded.tokens[0].token, "encrypted-token-0123456789");
+
+    let wrong = FileCredentialBackend::with_key(&path, false, [8_u8; 32]);
+    assert!(matches!(
+        wrong.load().await,
+        Err(fastcart_ssr_credentials::BackendError::Invalid(_))
+    ));
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+    assert_eq!(
+        FileCredentialBackend::key_from_base64(&encoded).expect("key"),
+        key
+    );
+}
+
+#[tokio::test]
+async fn encrypted_backend_reads_legacy_plaintext() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("credentials.json");
+    let plain = FileCredentialBackend::new(&path, false);
+    plain
+        .save(
+            &CredentialSnapshot {
+                revision: None,
+                tokens: vec![token("legacy-token-0123456789", None, false)],
+            },
+            None,
+        )
+        .await
+        .expect("plain save");
+
+    let encrypted = FileCredentialBackend::with_key(&path, false, [9_u8; 32]);
+    let loaded = encrypted
+        .load()
+        .await
+        .expect("legacy load")
+        .expect("snapshot");
+    assert_eq!(loaded.tokens[0].token, "legacy-token-0123456789");
 }

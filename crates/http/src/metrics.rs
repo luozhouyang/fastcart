@@ -38,6 +38,15 @@ pub struct Metrics {
     ssr_cache_hits_total: AtomicU64,
     ssr_cache_misses_total: AtomicU64,
     ssr_deployments: AtomicI64,
+    ssr_credential_loads_total: AtomicU64,
+    ssr_credential_load_errors_total: AtomicU64,
+    ssr_credential_saves_total: AtomicU64,
+    ssr_credential_save_errors_total: AtomicU64,
+    ssr_credential_refreshes_total: AtomicU64,
+    ssr_credential_refresh_errors_total: AtomicU64,
+    ssr_credential_refresh_changes_total: AtomicU64,
+    ssr_credential_tokens: AtomicI64,
+    ssr_credential_last_success: AtomicI64,
 }
 
 impl Default for Metrics {
@@ -66,6 +75,15 @@ impl Metrics {
             ssr_cache_hits_total: AtomicU64::new(0),
             ssr_cache_misses_total: AtomicU64::new(0),
             ssr_deployments: AtomicI64::new(0),
+            ssr_credential_loads_total: AtomicU64::new(0),
+            ssr_credential_load_errors_total: AtomicU64::new(0),
+            ssr_credential_saves_total: AtomicU64::new(0),
+            ssr_credential_save_errors_total: AtomicU64::new(0),
+            ssr_credential_refreshes_total: AtomicU64::new(0),
+            ssr_credential_refresh_errors_total: AtomicU64::new(0),
+            ssr_credential_refresh_changes_total: AtomicU64::new(0),
+            ssr_credential_tokens: AtomicI64::new(0),
+            ssr_credential_last_success: AtomicI64::new(0),
         }
     }
 
@@ -101,6 +119,57 @@ impl Metrics {
             i64::try_from(deployments).unwrap_or(i64::MAX),
             Ordering::Relaxed,
         );
+    }
+
+    /// Records a credential backend load.
+    pub fn record_ssr_credential_load(&self, success: bool) {
+        self.ssr_credential_loads_total
+            .fetch_add(1, Ordering::Relaxed);
+        if success {
+            self.mark_ssr_credential_success();
+        } else {
+            self.ssr_credential_load_errors_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Records a credential backend save.
+    pub fn record_ssr_credential_save(&self, success: bool) {
+        self.ssr_credential_saves_total
+            .fetch_add(1, Ordering::Relaxed);
+        if success {
+            self.mark_ssr_credential_success();
+        } else {
+            self.ssr_credential_save_errors_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Records a credential refresh attempt and whether it changed state.
+    pub fn record_ssr_credential_refresh(&self, success: bool, changed: bool) {
+        self.ssr_credential_refreshes_total
+            .fetch_add(1, Ordering::Relaxed);
+        if !success {
+            self.ssr_credential_refresh_errors_total
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.mark_ssr_credential_success();
+        if changed {
+            self.ssr_credential_refresh_changes_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Sets the number of credentials in the live snapshot.
+    pub fn set_ssr_credential_tokens(&self, tokens: usize) {
+        self.ssr_credential_tokens
+            .store(i64::try_from(tokens).unwrap_or(i64::MAX), Ordering::Relaxed);
+    }
+
+    fn mark_ssr_credential_success(&self) {
+        self.ssr_credential_last_success
+            .store(fastcart_kernel::now_timestamp(), Ordering::Relaxed);
     }
 
     /// Marks a request as started.
@@ -225,6 +294,120 @@ impl Metrics {
             output,
             "fastcart_ssr_deployments {}",
             self.ssr_deployments.load(Ordering::Relaxed).max(0)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_loads_total Credential backend loads."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_ssr_credential_loads_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_loads_total {}",
+            self.ssr_credential_loads_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_load_errors_total Credential backend load failures."
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE fastcart_ssr_credential_load_errors_total counter"
+        );
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_load_errors_total {}",
+            self.ssr_credential_load_errors_total
+                .load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_saves_total Credential backend saves."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_ssr_credential_saves_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_saves_total {}",
+            self.ssr_credential_saves_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_save_errors_total Credential backend save failures."
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE fastcart_ssr_credential_save_errors_total counter"
+        );
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_save_errors_total {}",
+            self.ssr_credential_save_errors_total
+                .load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_refreshes_total Credential refresh attempts."
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE fastcart_ssr_credential_refreshes_total counter"
+        );
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_refreshes_total {}",
+            self.ssr_credential_refreshes_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_refresh_errors_total Credential refresh failures."
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE fastcart_ssr_credential_refresh_errors_total counter"
+        );
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_refresh_errors_total {}",
+            self.ssr_credential_refresh_errors_total
+                .load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_refresh_changes_total Refreshes that changed the live credential set."
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE fastcart_ssr_credential_refresh_changes_total counter"
+        );
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_refresh_changes_total {}",
+            self.ssr_credential_refresh_changes_total
+                .load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_tokens Credentials in the live snapshot."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_ssr_credential_tokens gauge");
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_tokens {}",
+            self.ssr_credential_tokens.load(Ordering::Relaxed).max(0)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_ssr_credential_last_success_timestamp_seconds Last successful credential backend operation."
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE fastcart_ssr_credential_last_success_timestamp_seconds gauge"
+        );
+        let _ = writeln!(
+            output,
+            "fastcart_ssr_credential_last_success_timestamp_seconds {}",
+            self.ssr_credential_last_success
+                .load(Ordering::Relaxed)
+                .max(0)
         );
         let _ = writeln!(
             output,

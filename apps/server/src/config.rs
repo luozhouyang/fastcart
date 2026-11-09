@@ -301,6 +301,10 @@ pub struct SsrCredentialsConfig {
     pub required: bool,
     /// Seed an empty backend from configured deployment tokens.
     pub seed_from_config: bool,
+    /// File encryption: `none` or `xchacha20poly1305`.
+    pub encryption: String,
+    /// Environment variable holding the base64 encryption key.
+    pub key_env: String,
 }
 
 impl Default for SsrCredentialsConfig {
@@ -312,6 +316,8 @@ impl Default for SsrCredentialsConfig {
             refresh_interval_seconds: 30,
             required: true,
             seed_from_config: true,
+            encryption: "none".to_owned(),
+            key_env: "FASTCART_SSR_CREDENTIALS_KEY".to_owned(),
         }
     }
 }
@@ -671,6 +677,12 @@ impl Config {
                 .parse()
                 .context("FASTCART_SSR_CREDENTIALS_SEED must be true or false")?;
         }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_ENCRYPTION") {
+            self.ssr.credentials.encryption = value;
+        }
+        if let Ok(value) = env::var("FASTCART_SSR_CREDENTIALS_KEY_ENV") {
+            self.ssr.credentials.key_env = value;
+        }
         if let Ok(value) = env::var("FASTCART_PREVIEW_SECRET") {
             // An empty pass-through value from an orchestrator
             // disables preview rather than configuring a zero-byte secret.
@@ -863,6 +875,15 @@ impl Config {
                 "read_write" | "read_only"
             ) {
                 bail!("ssr.credentials.mode must be read_write or read_only");
+            }
+            if !matches!(
+                self.ssr.credentials.encryption.as_str(),
+                "none" | "xchacha20poly1305"
+            ) {
+                bail!("ssr.credentials.encryption must be none or xchacha20poly1305");
+            }
+            if self.ssr.credentials.key_env.trim().is_empty() {
+                bail!("ssr.credentials.key_env must not be empty");
             }
             if self
                 .ssr
@@ -1303,6 +1324,7 @@ mod tests {
         assert_eq!(config.ssr.startup_timeout_ms, 10_000);
         assert_eq!(config.ssr.credentials.backend, "file");
         assert_eq!(config.ssr.credentials.mode, "read_write");
+        assert_eq!(config.ssr.credentials.encryption, "none");
     }
 
     #[test]

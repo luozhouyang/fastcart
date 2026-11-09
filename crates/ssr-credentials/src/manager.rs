@@ -3,6 +3,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use fastcart_http::Metrics;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::time::MissedTickBehavior;
@@ -39,6 +40,7 @@ pub struct CredentialManager {
     snapshot: Arc<RwLock<Arc<CredentialSnapshot>>>,
     backend: Option<Arc<dyn CredentialBackend>>,
     mode: CredentialMode,
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl std::fmt::Debug for CredentialManager {
@@ -75,6 +77,7 @@ impl CredentialManager {
             }))),
             backend: None,
             mode: CredentialMode::ReadWrite,
+            metrics: None,
         }
     }
 
@@ -86,7 +89,31 @@ impl CredentialManager {
         seed_from_config: bool,
         mode: CredentialMode,
     ) -> Result<Self, CredentialError> {
-        let loaded = backend.load().await?;
+        Self::load_with_metrics(backend, configured, seed_from_config, mode, None).await
+    }
+
+    /// Loads a snapshot and records backend metrics.
+    pub async fn load_with_metrics(
+        backend: Arc<dyn CredentialBackend>,
+        configured: Vec<CredentialToken>,
+        seed_from_config: bool,
+        mode: CredentialMode,
+        metrics: Option<Arc<Metrics>>,
+    ) -> Result<Self, CredentialError> {
+        let loaded = match backend.load().await {
+            Ok(loaded) => {
+                if let Some(metrics) = &metrics {
+                    metrics.record_ssr_credential_load(true);
+                }
+                loaded
+            }
+            Err(error) => {
+                if let Some(metrics) = &metrics {
+                    metrics.record_ssr_credential_load(false);
+                }
+                return Err(error.into());
+            }
+        };
         let mut snapshot = match loaded {
             Some(snapshot) => snapshot,
             None => CredentialSnapshot {
@@ -103,14 +130,44 @@ impl CredentialManager {
             && !snapshot.tokens.is_empty()
             && mode == CredentialMode::ReadWrite
         {
-            let revision = backend.save(&snapshot, None).await?;
+            let revision = match backend.save(&snapshot, None).await {
+                Ok(revision) => {
+                    if let Some(metrics) = &metrics {
+                        metrics.record_ssr_credential_save(true);
+                    }
+                    revision
+                }
+                Err(error) => {
+                    if let Some(metrics) = &metrics {
+                        metrics.record_ssr_credential_save(false);
+                    }
+                    return Err(error.into());
+                }
+            };
             snapshot.revision = Some(revision);
         }
-        Ok(Self {
+        let manager = Self {
             snapshot: Arc::new(RwLock::new(Arc::new(snapshot))),
             backend: Some(backend),
             mode,
-        })
+            metrics,
+        };
+        manager.publish_metrics();
+        Ok(manager)
+    }
+
+    /// Attaches a metrics collector.
+    pub fn set_metrics(&mut self, metrics: Arc<Metrics>) {
+        self.metrics = Some(metrics);
+        self.publish_metrics();
+    }
+
+    fn publish_metrics(&self) {
+        if let Some(metrics) = &self.metrics
+            && let Ok(snapshot) = self.snapshot.read()
+        {
+            metrics.set_ssr_credential_tokens(snapshot.tokens.len());
+        }
     }
 
     /// Loads a file-backed manager.
@@ -218,13 +275,27 @@ impl CredentialManager {
             tokens,
         };
         if let Some(backend) = &self.backend {
-            let revision = backend.save(&next, current.revision.as_deref()).await?;
+            let revision = match backend.save(&next, current.revision.as_deref()).await {
+                Ok(revision) => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_ssr_credential_save(true);
+                    }
+                    revision
+                }
+                Err(error) => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_ssr_credential_save(false);
+                    }
+                    return Err(error.into());
+                }
+            };
             next.revision = Some(revision);
         }
         *self
             .snapshot
             .write()
             .map_err(|_| CredentialError::LockPoisoned)? = Arc::new(next);
+        self.publish_metrics();
         Ok(())
     }
 
@@ -254,13 +325,27 @@ impl CredentialManager {
             tokens,
         };
         if removed && let Some(backend) = &self.backend {
-            let revision = backend.save(&next, current.revision.as_deref()).await?;
+            let revision = match backend.save(&next, current.revision.as_deref()).await {
+                Ok(revision) => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_ssr_credential_save(true);
+                    }
+                    revision
+                }
+                Err(error) => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_ssr_credential_save(false);
+                    }
+                    return Err(error.into());
+                }
+            };
             next.revision = Some(revision);
         }
         *self
             .snapshot
             .write()
             .map_err(|_| CredentialError::LockPoisoned)? = Arc::new(next);
+        self.publish_metrics();
         Ok(removed)
     }
 
@@ -269,7 +354,21 @@ impl CredentialManager {
         let Some(backend) = &self.backend else {
             return Ok(false);
         };
-        let loaded = backend.load().await?;
+        let loaded = match backend.load().await {
+            Ok(loaded) => {
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_ssr_credential_load(true);
+                }
+                loaded
+            }
+            Err(error) => {
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_ssr_credential_load(false);
+                    metrics.record_ssr_credential_refresh(false, false);
+                }
+                return Err(error.into());
+            }
+        };
         let current = self
             .snapshot
             .read()
@@ -277,6 +376,9 @@ impl CredentialManager {
             .clone();
         let Some(loaded) = loaded else {
             if current.tokens.is_empty() {
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_ssr_credential_refresh(true, false);
+                }
                 return Ok(false);
             }
             *self
@@ -286,15 +388,26 @@ impl CredentialManager {
                 revision: None,
                 tokens: Vec::new(),
             });
+            self.publish_metrics();
+            if let Some(metrics) = &self.metrics {
+                metrics.record_ssr_credential_refresh(true, true);
+            }
             return Ok(true);
         };
         if loaded.revision == current.revision {
+            if let Some(metrics) = &self.metrics {
+                metrics.record_ssr_credential_refresh(true, false);
+            }
             return Ok(false);
         }
         *self
             .snapshot
             .write()
             .map_err(|_| CredentialError::LockPoisoned)? = Arc::new(loaded);
+        self.publish_metrics();
+        if let Some(metrics) = &self.metrics {
+            metrics.record_ssr_credential_refresh(true, true);
+        }
         Ok(true)
     }
 
