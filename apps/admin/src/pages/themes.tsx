@@ -68,26 +68,18 @@ interface RegisterForm {
   id: string;
   name: string;
   version: string;
-  runtime: string;
-  entry: string;
-  bundlePath: string;
   manifestJson: string;
   settingsSchema: string;
   settings: string;
-  editorManifest: string;
 }
 
 const EMPTY_FORM: RegisterForm = {
   id: "",
   name: "",
   version: "1.0.0",
-  runtime: "node",
-  entry: "dist/server/server.js",
-  bundlePath: "",
   manifestJson: "",
   settingsSchema: "",
   settings: "",
-  editorManifest: "",
 };
 
 function buildRegisterRequest(
@@ -96,8 +88,6 @@ function buildRegisterRequest(
 ): { ok: true; request: RegisterThemeRequest } | { ok: false; error: string } {
   const schema = parseOptionalJson(form.settingsSchema, "Settings schema");
   if (!schema.ok) return schema;
-  const editor = parseOptionalJson(form.editorManifest, "Editor manifest");
-  if (!editor.ok) return editor;
   const settings = parseOptionalJson(form.settings, "Initial settings");
   if (!settings.ok) return settings;
 
@@ -109,63 +99,30 @@ function buildRegisterRequest(
       return { ok: false, error: "Paste a JSON object for the theme manifest." };
     }
     const record = parsed.value;
-    for (const key of ["id", "name", "version", "runtime", "entry"] as const) {
+    for (const key of ["id", "name", "version"] as const) {
       if (typeof record[key] !== "string" || (record[key] as string).trim().length === 0) {
         return { ok: false, error: `Manifest field "${key}" is required.` };
       }
     }
-    manifest = record as unknown as ThemeManifest;
+    manifest = {
+      id: (record.id as string).trim(),
+      name: (record.name as string).trim(),
+      version: (record.version as string).trim(),
+    };
   } else {
     const id = form.id.trim();
     const name = form.name.trim();
+    const version = form.version.trim();
     if (id.length === 0) return { ok: false, error: "Theme id is required." };
     if (name.length === 0) return { ok: false, error: "Theme name is required." };
-    if (form.version.trim().length === 0) {
-      return { ok: false, error: "Theme version is required." };
-    }
-    if (form.runtime.trim().length === 0) {
-      return { ok: false, error: "Runtime is required." };
-    }
-    if (form.entry.trim().length === 0) {
-      return { ok: false, error: "Entry file is required." };
-    }
-    manifest = {
-      id,
-      name,
-      version: form.version.trim(),
-      runtime: form.runtime.trim(),
-      entry: form.entry.trim(),
-      settings_schema: null,
-      assets_manifest: null,
-    };
-  }
-
-  const bundlePath = form.bundlePath.trim() || manifest.id;
-
-  // The backend rejects an editor manifest unless the theme manifest also
-  // declares an editor reference. Infer a conventional reference so pasting an
-  // editor manifest alone is enough to register the theme.
-  if (editor.value !== undefined && (manifest.editor === undefined || manifest.editor === null)) {
-    const schemaVersion =
-      isJsonObject(editor.value) && typeof editor.value.schema_version === "number"
-        ? editor.value.schema_version
-        : 1;
-    manifest = {
-      ...manifest,
-      editor: {
-        entry: "dist/client/editor.js",
-        manifest: "editor.manifest.json",
-        schema_version: schemaVersion,
-      },
-    };
+    if (version.length === 0) return { ok: false, error: "Theme version is required." };
+    manifest = { id, name, version };
   }
 
   const request: RegisterThemeRequest = {
     manifest,
-    bundle_path: bundlePath,
     ...(schema.value !== undefined ? { settings_schema: schema.value } : {}),
     ...(settings.value !== undefined ? { settings: settings.value } : {}),
-    ...(editor.value !== undefined ? { editor_manifest: editor.value } : {}),
   };
   return { ok: true, request };
 }
@@ -298,7 +255,7 @@ export function ThemesPage() {
     <div className="space-y-6 animate-enter">
       <PageHeader
         title="Themes"
-        description="Register storefront themes, choose the active version, and open the editor to shape content."
+        description="Register deployed storefront themes, manage settings, and choose the active version."
         actions={
           <>
             <Button variant="outline" onClick={() => void rollback()} disabled={busy !== null}>
@@ -327,7 +284,7 @@ export function ThemesPage() {
         {themes.length === 0 ? (
           <EmptyState
             title="No themes registered"
-            description="Register a theme bundle to start authoring pages in the structured editor."
+            description="Register a deployed theme artifact to manage its settings and activation."
             action={
               <Button onClick={openRegister}>
                 <Plus className="size-4" aria-hidden="true" />
@@ -341,7 +298,6 @@ export function ThemesPage() {
               <TableRow className="hover:bg-transparent">
                 <TableHead className="pl-6">Theme</TableHead>
                 <TableHead className="w-[120px]">Status</TableHead>
-                <TableHead className="hidden w-[130px] sm:table-cell">Runtime</TableHead>
                 <TableHead className="hidden w-[140px] md:table-cell">Updated</TableHead>
                 <TableHead className="w-10 pr-5" aria-label="Actions" />
               </TableRow>
@@ -372,9 +328,6 @@ export function ThemesPage() {
                   </TableCell>
                   <TableCell>
                     <ThemeActivePill active={theme.is_active} />
-                  </TableCell>
-                  <TableCell className="hidden text-[11.5px] text-muted-foreground sm:table-cell">
-                    <span className="font-mono">{theme.manifest.runtime}</span>
                   </TableCell>
                   <TableCell className="hidden text-[11.5px] text-muted-foreground md:table-cell">
                     {shortDate(fromUnixSeconds(theme.updated_at))}
@@ -438,8 +391,8 @@ export function ThemesPage() {
           <DialogHeader>
             <DialogTitle>Register theme</DialogTitle>
             <DialogDescription>
-              Point Fastcart at a trusted theme bundle. The editor manifest describes the components
-              and props page authors can use.
+              Register a deployed theme artifact. The bundle is deployed separately; the registry
+              stores the manifest metadata, optional settings schema, and initial settings.
             </DialogDescription>
           </DialogHeader>
 
@@ -484,36 +437,6 @@ export function ThemesPage() {
                     className="h-9 font-mono text-[12px]"
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="theme-runtime">Runtime</Label>
-                  <Input
-                    id="theme-runtime"
-                    value={form.runtime}
-                    onChange={(event) => setForm({ ...form, runtime: event.target.value })}
-                    placeholder="v8"
-                    className="h-9 font-mono text-[12px]"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="theme-entry">Entry</Label>
-                  <Input
-                    id="theme-entry"
-                    value={form.entry}
-                    onChange={(event) => setForm({ ...form, entry: event.target.value })}
-                    placeholder="dist/server/server.js"
-                    className="h-9 font-mono text-[12px]"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="theme-bundle">Bundle path</Label>
-                  <Input
-                    id="theme-bundle"
-                    value={form.bundlePath}
-                    onChange={(event) => setForm({ ...form, bundlePath: event.target.value })}
-                    placeholder="atelier (relative to themes dir)"
-                    className="h-9 font-mono text-[12px]"
-                  />
-                </div>
               </div>
             </TabsContent>
 
@@ -525,7 +448,7 @@ export function ThemesPage() {
                   value={form.manifestJson}
                   onChange={(event) => setForm({ ...form, manifestJson: event.target.value })}
                   placeholder={
-                    '{\n  "id": "atelier",\n  "name": "Atelier",\n  "version": "1.0.0",\n  "runtime": "v8",\n  "entry": "dist/server.js"\n}'
+                    '{\n  "id": "atelier",\n  "name": "Atelier",\n  "version": "1.0.0"\n}'
                   }
                   spellCheck={false}
                   className={textareaClass}
@@ -534,7 +457,7 @@ export function ThemesPage() {
             </TabsContent>
           </Tabs>
 
-          <div className="grid gap-3 lg:grid-cols-3">
+          <div className="grid gap-3 lg:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="theme-settings-schema">Settings schema JSON</Label>
               <textarea
@@ -553,17 +476,6 @@ export function ThemesPage() {
                 value={form.settings}
                 onChange={(event) => setForm({ ...form, settings: event.target.value })}
                 placeholder={'{\n  "logo": "/logo.svg"\n}'}
-                spellCheck={false}
-                className={textareaClass}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="theme-editor-manifest">Editor manifest JSON</Label>
-              <textarea
-                id="theme-editor-manifest"
-                value={form.editorManifest}
-                onChange={(event) => setForm({ ...form, editorManifest: event.target.value })}
-                placeholder={'{\n  "schema_version": 1,\n  "components": {}\n}'}
                 spellCheck={false}
                 className={textareaClass}
               />

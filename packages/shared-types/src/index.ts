@@ -1840,71 +1840,33 @@ export interface WebhookDeliveriesQuery {
 // Themes
 // ---------------------------------------------------------------------------
 
-/** Bundle-relative references to a theme editor surface. */
-export interface ThemeEditorRef {
-  /** ESM entry that exports render and field components. */
-  entry: string;
-  /** JSON file describing categories, components and fields. */
-  manifest: string;
-  /** Editor manifest schema version. */
-  schema_version?: number;
-}
-
-/** One capability required by a theme. */
-export interface CapabilityRequirement {
-  /** Capability identifier. */
-  id: string;
-  /** Required capability version. */
-  version: number;
-  /** Whether activation may proceed when the capability is missing. */
-  optional?: boolean;
-}
-
-/** Platform contracts and capabilities a theme depends on. */
-export interface ThemeRequirements {
-  /** Required storefront data API version. */
-  data_api?: number;
-  /** Optional or required plugin capabilities. */
-  capabilities?: CapabilityRequirement[];
-}
-
+/**
+ * Public theme metadata.
+ *
+ * A theme is a deployed SSR artifact plus settings (ADR 0008); the registry
+ * only stores this metadata and never receives bundle contents.
+ */
 export interface ThemeManifest {
+  /** Stable theme identifier. */
   id: string;
+  /** Human-readable theme name. */
   name: string;
+  /** Theme version. */
   version: string;
-  /** Rendering runtime expected by the theme, for example `v8` or `node`. */
-  runtime: string;
-  /** Bundle-relative entry file. */
-  entry: string;
-  settings_schema?: string | null;
-  assets_manifest?: string | null;
-  /** Optional editor bundle and manifest references. */
-  editor?: ThemeEditorRef | null;
-  /** Optional platform contracts and capabilities the theme depends on. */
-  requires?: ThemeRequirements | null;
-  /**
-   * Dynamic routes keyed by template page type, for example
-   * `{ "product": "/products/{handle}", "collection": "/collections/{handle}" }`.
-   */
-  routes?: Record<string, string> | null;
 }
 
+/** A registered theme deployment as exposed to administrators. */
 export interface Theme {
   id: string;
   manifest: ThemeManifest;
-  bundle_path: string;
+  /** JSON Schema used to validate settings. */
   settings_schema: JsonValue | null;
+  /** Published theme settings. */
   settings: JsonValue;
-  /** Raw editor manifest, when the theme exposes an editor. */
-  editor_manifest?: JsonValue | null;
-  /** Editor manifest schema version. */
-  schema_version?: number;
-  /** Parsed asset manifest, when the backend exposes one. */
-  assets_manifest?: JsonValue | null;
   /** Working settings that have not been published yet. */
-  draft_settings?: JsonValue | null;
-  /** Optimistic concurrency token for theme settings. */
-  settings_revision?: number | null;
+  draft_settings: JsonValue | null;
+  /** Monotonic settings revision. */
+  settings_revision: number;
   is_active: boolean;
   created_at: Timestamp;
   updated_at: Timestamp;
@@ -1914,26 +1876,19 @@ export interface Theme {
 export interface StoreTheme {
   id: string;
   manifest: ThemeManifest;
-  /** Bundle-relative asset root; omitted by the storefront DTO. */
-  bundle_path?: string;
   settings: JsonValue;
 }
 
+/** Theme registration body; the theme bundle itself is deployed separately. */
 export interface RegisterThemeRequest {
   manifest: ThemeManifest;
-  bundle_path: string;
   settings_schema?: JsonValue | null;
   settings?: JsonValue | null;
-  /** Raw editor manifest; required when `manifest.editor` is present. */
-  editor_manifest?: JsonValue | null;
-  /** Parsed asset manifest, when the bundle publishes one. */
-  assets_manifest?: JsonValue | null;
 }
 
+/** Theme settings replacement body. */
 export interface UpdateThemeSettingsRequest {
   settings: JsonValue;
-  /** Revision the caller last observed, when supported by the backend. */
-  base_revision?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2033,7 +1988,7 @@ export interface ThemeEditorManifest {
 }
 
 // ---------------------------------------------------------------------------
-// Theme settings revisions, capabilities and validation
+// Theme settings revisions
 // ---------------------------------------------------------------------------
 
 export type ThemeSettingsRevisionStatus = "draft" | "published";
@@ -2083,41 +2038,6 @@ export interface PublishThemeSettingsRequest {
 export interface RestoreThemeSettingsRequest {
   /** Optional optimistic revision, when a backend accepts one. */
   base_revision?: number | null;
-}
-
-/** A runtime capability endpoint bound to a theme. */
-export interface ThemeCapabilityBinding {
-  id: string;
-  theme_id: string;
-  capability_id: string;
-  endpoint: string;
-  config: JsonValue;
-  is_active: boolean;
-  created_at: Timestamp;
-  updated_at: Timestamp;
-}
-
-export interface UpsertThemeCapabilityRequest {
-  capability_id: string;
-  endpoint: string;
-  config?: JsonValue;
-  is_active?: boolean;
-}
-
-export interface DeleteThemeCapabilityRequest {
-  capability_id: string;
-}
-
-/** One page that failed validation against a theme editor manifest. */
-export interface ThemePageValidationIssue {
-  page_id: string;
-  handle: string;
-  error: string;
-}
-
-export interface ThemePageValidationResult {
-  valid: boolean;
-  issues: ThemePageValidationIssue[];
 }
 
 // ---------------------------------------------------------------------------
@@ -2361,7 +2281,7 @@ export interface SettingsUpdateRequest {
 // ---------------------------------------------------------------------------
 // Storefront response envelopes (Medusa v2 compatible)
 //
-// Public `/api/v1/store` and `/internal/storefront` responses wrap resources and
+// Public `/api/v1/store` and `/internal/ssr/v1` responses wrap resources and
 // lists in named envelopes. Admin responses still use `PageResult<T>`.
 // ---------------------------------------------------------------------------
 

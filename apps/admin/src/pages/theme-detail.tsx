@@ -1,26 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "@tanstack/react-router";
-import {
-  ArrowLeft,
-  Check,
-  CheckCircle2,
-  AlertTriangle,
-  Code2,
-  History,
-  Loader2,
-  RotateCcw,
-  Save,
-  Send,
-  ShieldCheck,
-} from "lucide-react";
+import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { ArrowLeft, Check, History, Loader2, RotateCcw, Save, Send, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type {
   JsonValue,
   Theme,
   ThemeActivation,
-  ThemeCapabilityBinding,
-  ThemeEditorManifest,
-  ThemePageValidationResult,
   ThemeSettingsRevision,
 } from "@fastcart/shared-types";
 
@@ -31,6 +16,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -39,10 +32,10 @@ import {
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/lib/auth";
-import { API_BASE_URL, errorMessage } from "@/lib/api";
+import { errorMessage } from "@/lib/api";
 import {
   activateDemoTheme,
-  getDemoEditorManifest,
+  deleteDemoTheme,
   getDemoTheme,
   listDefaultThemeSettingsRevisions,
   rollbackDemoTheme,
@@ -57,22 +50,20 @@ const textareaClass =
 
 interface ThemeDetailData {
   theme: Theme;
-  editorManifest: ThemeEditorManifest | null;
-  capabilities: ThemeCapabilityBinding[] | null;
   revisions: ThemeSettingsRevision[];
   activations: ThemeActivation[];
-  assetsManifest: JsonValue | null;
 }
 
 export function ThemeDetailPage() {
   const { themeId } = useParams({ from: "/themes/$themeId" });
+  const navigate = useNavigate();
   const { mode, client, store, dataKey } = useAuth();
   const [settingsText, setSettingsText] = useState("");
   const [busy, setBusy] = useState<
-    "save" | "draft" | "publish" | "validate" | "activate" | "rollback" | "restore" | null
+    "save" | "draft" | "publish" | "activate" | "rollback" | "restore" | "delete" | null
   >(null);
-  const [validation, setValidation] = useState<ThemePageValidationResult | null>(null);
   const [revisionsOpen, setRevisionsOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const loader = useCallback(
     async (signal: AbortSignal): Promise<ThemeDetailData> => {
@@ -81,50 +72,22 @@ export function ThemeDetailPage() {
         if (!theme) throw new Error("This theme could not be found.");
         return {
           theme,
-          editorManifest: getDemoEditorManifest(themeId),
-          capabilities: [
-            {
-              id: "tcb_demo_data",
-              theme_id: themeId,
-              capability_id: "data_api",
-              endpoint: "https://example.com/capabilities/data",
-              config: {},
-              is_active: true,
-              created_at: theme.created_at,
-              updated_at: theme.updated_at,
-            },
-          ],
           revisions: listDefaultThemeSettingsRevisions(themeId),
           activations: [],
-          assetsManifest: theme.assets_manifest ?? null,
         };
       }
       if (!client) throw new Error("No store is selected.");
       const theme = await client.themes.get(themeId, { signal });
 
-      const editorManifest: ThemeEditorManifest | null = isJsonObject(theme.editor_manifest)
-        ? (theme.editor_manifest as unknown as ThemeEditorManifest)
-        : await client.themes.editorManifest(themeId, { signal }).catch(() => null);
-
-      const capabilitiesPromise: Promise<ThemeCapabilityBinding[] | null> = client.themes
-        .capabilities
-        ? client.themes.capabilities.list(themeId, { signal }).catch(() => null)
-        : Promise.resolve(null);
       const revisionsPromise: Promise<ThemeSettingsRevision[]> = client.themes.settingsRevisions
         ? client.themes.settingsRevisions(themeId, { signal }).catch(() => [])
         : Promise.resolve([]);
       const activationsPromise: Promise<ThemeActivation[]> = client.themes.activations
         ? client.themes.activations({ limit: 50 }, { signal }).catch(() => [])
         : Promise.resolve([]);
-      const [capabilities, revisions, activations] = await Promise.all([
-        capabilitiesPromise,
-        revisionsPromise,
-        activationsPromise,
-      ]);
+      const [revisions, activations] = await Promise.all([revisionsPromise, activationsPromise]);
 
-      const assetsManifest: JsonValue | null = theme.assets_manifest ?? null;
-
-      return { theme, editorManifest, capabilities, revisions, activations, assetsManifest };
+      return { theme, revisions, activations };
     },
     [mode, client, themeId],
   );
@@ -151,7 +114,6 @@ export function ThemeDetailPage() {
   const canDraft =
     mode === "demo" || Boolean(client?.themes.saveSettingsDraft ?? client?.themes.settingsDraft);
   const canPublish = mode === "demo" || Boolean(client?.themes.publishSettings);
-  const canValidate = mode === "demo" || Boolean(client?.themes.validatePages);
   const canRestore = mode === "demo" || Boolean(client?.themes.restoreSettings);
 
   const readSettings = (): JsonValue | null => {
@@ -273,35 +235,6 @@ export function ThemeDetailPage() {
     }
   };
 
-  const validatePages = async () => {
-    if (!data || busy) return;
-    setBusy("validate");
-    try {
-      if (mode === "demo") {
-        setValidation({ valid: true, issues: [] });
-        toast.success("All pages validate against this theme");
-      } else {
-        if (!client) throw new Error("No store is selected.");
-        const validate = client.themes.validatePages;
-        if (!validate) {
-          toast.error("This backend does not support page validation.");
-          return;
-        }
-        const result = await validate.call(client.themes, themeId);
-        setValidation(result);
-        if ((result.issues ?? []).length === 0) {
-          toast.success("All pages validate against this theme");
-        } else {
-          toast.error(`${result.issues?.length ?? 0} validation issue(s) found`);
-        }
-      }
-    } catch (cause) {
-      toast.error(errorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const activate = async () => {
     if (!data || busy) return;
     setBusy("activate");
@@ -333,6 +266,25 @@ export function ThemeDetailPage() {
       }
       reload();
       toast.success("Rolled back to the previous theme");
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async () => {
+    if (!data || busy) return;
+    setBusy("delete");
+    try {
+      if (mode === "demo") {
+        deleteDemoTheme(themeId);
+      } else {
+        if (!client) throw new Error("No store is selected.");
+        await client.themes.delete(themeId);
+      }
+      toast.success("Theme deleted");
+      void navigate({ to: "/themes" });
     } catch (cause) {
       toast.error(errorMessage(cause));
     } finally {
@@ -375,10 +327,6 @@ export function ThemeDetailPage() {
 
   const { theme } = data;
   const latestRevision = data.revisions[0] ?? null;
-  const issues = validation?.issues ?? [];
-  const editorScriptHref =
-    client?.themes.editorScriptUrl(themeId) ??
-    `${API_BASE_URL}/api/v1/admin/themes/${themeId}/editor.js`;
 
   return (
     <div className="space-y-6 animate-enter">
@@ -394,7 +342,7 @@ export function ThemeDetailPage() {
 
       <PageHeader
         title={theme.manifest.name}
-        description={`${theme.manifest.id} · v${theme.manifest.version} · ${theme.manifest.runtime} runtime`}
+        description={`${theme.manifest.id} · v${theme.manifest.version}`}
         actions={
           <>
             <div className="mr-1 hidden items-center gap-2 md:flex">
@@ -407,16 +355,12 @@ export function ThemeDetailPage() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => void validatePages()}
-              disabled={busy !== null || !canValidate}
-              title={canValidate ? undefined : "Page validation is not available on this backend"}
+              onClick={() => setDeleteOpen(true)}
+              disabled={busy !== null || theme.is_active}
+              title={theme.is_active ? "The active theme cannot be deleted" : undefined}
             >
-              {busy === "validate" ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <ShieldCheck className="size-4" aria-hidden="true" />
-              )}
-              Validate pages
+              <Trash2 className="size-4" aria-hidden="true" />
+              Delete
             </Button>
             <Button onClick={() => void activate()} disabled={busy !== null || theme.is_active}>
               <Check className="size-4" aria-hidden="true" />
@@ -425,34 +369,6 @@ export function ThemeDetailPage() {
           </>
         }
       />
-
-      {issues.length > 0 ? (
-        <Card className="border-warning/25 bg-warning-soft/40 p-4">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="size-4 text-warning" aria-hidden="true" />
-            <p className="text-[12.5px] font-medium text-foreground">
-              Page validation reported {issues.length} issue{issues.length === 1 ? "" : "s"}
-            </p>
-          </div>
-          <ul className="mt-2 space-y-1.5">
-            {issues.slice(0, 12).map((issue, index) => (
-              <li key={`${issue.page_id}-${index}`} className="text-[11.5px] text-ink-soft">
-                <span className="font-mono text-[10.5px] text-faint">
-                  {issue.handle.length > 0 ? `/${issue.handle}` : issue.page_id}
-                </span>
-                <span className="ml-1.5">{issue.error}</span>
-              </li>
-            ))}
-          </ul>
-        </Card>
-      ) : validation?.valid ? (
-        <Card className="border-brand/25 bg-brand-soft/40 p-4">
-          <div className="flex items-center gap-2 text-[12.5px] text-brand-ink">
-            <CheckCircle2 className="size-4" aria-hidden="true" />
-            Every page validates against this theme.
-          </div>
-        </Card>
-      ) : null}
 
       <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
         <Card className="p-5">
@@ -544,61 +460,6 @@ export function ThemeDetailPage() {
               </p>
             ) : null}
           </Card>
-
-          <Card className="p-5">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="size-3.5 text-faint" aria-hidden="true" />
-              <p className="text-[12.5px] font-medium text-foreground">Capabilities</p>
-            </div>
-            {data.capabilities ? (
-              <div className="mt-2 space-y-2">
-                {data.capabilities.length === 0 ? (
-                  <p className="text-[11px] text-muted-foreground">No capability bindings.</p>
-                ) : (
-                  data.capabilities.map((capability) => (
-                    <div
-                      key={capability.id}
-                      className="rounded-lg border border-border bg-background px-2.5 py-2"
-                    >
-                      <div className="flex items-center justify-between gap-2 text-[11px]">
-                        <span className="font-mono text-ink-soft">{capability.capability_id}</span>
-                        <Badge variant={capability.is_active ? "brand" : "secondary"}>
-                          {capability.is_active ? "Active" : "Inactive"}
-                        </Badge>
-                      </div>
-                      <p className="mt-1 truncate font-mono text-[9.5px] text-faint">
-                        {capability.endpoint}
-                      </p>
-                    </div>
-                  ))
-                )}
-              </div>
-            ) : (
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                Capability bindings are not available on this backend.
-              </p>
-            )}
-          </Card>
-
-          {theme.manifest.editor ? (
-            <Card className="p-5">
-              <div className="flex items-center gap-2">
-                <Code2 className="size-3.5 text-faint" aria-hidden="true" />
-                <p className="text-[12.5px] font-medium text-foreground">Editor bundle</p>
-              </div>
-              <p className="mt-1 font-mono text-[10.5px] text-faint">
-                {theme.manifest.editor.entry}
-              </p>
-              <a
-                href={editorScriptHref}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-2 inline-flex items-center gap-1 text-[11px] text-brand-ink hover:underline"
-              >
-                Open editor.js
-              </a>
-            </Card>
-          ) : null}
         </div>
       </div>
 
@@ -606,25 +467,12 @@ export function ThemeDetailPage() {
         <Tabs defaultValue="manifest">
           <TabsList>
             <TabsTrigger value="manifest">Manifest</TabsTrigger>
-            <TabsTrigger value="editor">Editor manifest</TabsTrigger>
-            <TabsTrigger value="assets">Assets manifest</TabsTrigger>
             <TabsTrigger value="history">Activation history</TabsTrigger>
           </TabsList>
           <TabsContent value="manifest" className="mt-3">
             <pre className="max-h-[440px] overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-ink-soft">
               {prettyJson(theme.manifest)}
             </pre>
-          </TabsContent>
-          <TabsContent value="editor" className="mt-3">
-            {data.editorManifest ? (
-              <pre className="max-h-[440px] overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-ink-soft">
-                {prettyJson(data.editorManifest)}
-              </pre>
-            ) : (
-              <p className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-[12px] text-muted-foreground">
-                This theme does not expose an editor manifest.
-              </p>
-            )}
           </TabsContent>
           <TabsContent value="history" className="mt-3">
             {data.activations.length === 0 ? (
@@ -656,17 +504,6 @@ export function ThemeDetailPage() {
                   </div>
                 ))}
               </div>
-            )}
-          </TabsContent>
-          <TabsContent value="assets" className="mt-3">
-            {data.assetsManifest !== null ? (
-              <pre className="max-h-[440px] overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-ink-soft">
-                {prettyJson(data.assetsManifest)}
-              </pre>
-            ) : (
-              <p className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-[12px] text-muted-foreground">
-                No assets manifest was published with this theme.
-              </p>
             )}
           </TabsContent>
         </Tabs>
@@ -725,6 +562,26 @@ export function ThemeDetailPage() {
           </div>
         </SheetContent>
       </Sheet>
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {theme.manifest.name}?</DialogTitle>
+            <DialogDescription>
+              This removes the theme registration. The active theme cannot be deleted, and pages
+              authored against it are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={busy !== null}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => void remove()} disabled={busy !== null}>
+              Delete theme
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

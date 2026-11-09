@@ -7,246 +7,16 @@ import type {
   PreviewTokenResponse,
   RegisterThemeRequest,
   Theme,
-  ThemeEditorManifest,
   ThemeSettingsRevision,
 } from "@fastcart/shared-types";
 
 const now = () => Math.floor(Date.now() / 1000);
 
-export const demoEditorManifest: ThemeEditorManifest = {
-  schema_version: 1,
-  categories: {
-    hero: { title: "Hero", components: ["Hero", "Announcement"] },
-    content: { title: "Content", components: ["RichText", "FeatureList"] },
-    commerce: { title: "Commerce", components: ["ProductGrid", "CollectionHeader"] },
-    layout: { title: "Layout", components: ["Columns", "Gallery"] },
-  },
-  components: {
-    Hero: {
-      title: "Hero banner",
-      description: "A full-width lead image with a headline and optional overlay.",
-      icon: "image",
-      category: "hero",
-      fields: {
-        heading: {
-          type: "text",
-          label: "Heading",
-          description: "The primary message shown over the image.",
-          required: true,
-          default: "Made for everyday rituals",
-        },
-        subheading: {
-          type: "textarea",
-          label: "Subheading",
-          default: "Thoughtful objects for a quieter home.",
-        },
-        image: {
-          type: "asset",
-          label: "Hero image",
-          description: "Pick from the media library.",
-          source: "asset",
-          picker: { source: "asset" },
-          required: true,
-        },
-        align: {
-          type: "select",
-          label: "Alignment",
-          options: [
-            { value: "left", label: "Left" },
-            { value: "center", label: "Center" },
-          ],
-          default: "left",
-        },
-        overlay: { type: "boolean", label: "Dark overlay", default: false },
-      },
-      defaultProps: {
-        heading: "Made for everyday rituals",
-        subheading: "Thoughtful objects for a quieter home.",
-        align: "left",
-        overlay: false,
-      },
-      slots: [],
-    },
-    Announcement: {
-      title: "Announcement bar",
-      category: "hero",
-      fields: {
-        message: { type: "text", required: true, default: "Free shipping over $75" },
-        tone: {
-          type: "select",
-          options: [
-            { value: "neutral", label: "Neutral" },
-            { value: "brand", label: "Brand" },
-          ],
-          default: "neutral",
-        },
-      },
-      defaultProps: { message: "Free shipping over $75", tone: "neutral" },
-      slots: [],
-    },
-    RichText: {
-      title: "Rich text",
-      category: "content",
-      fields: {
-        body: { type: "textarea", required: true, default: "" },
-        width: {
-          type: "select",
-          options: [
-            { value: "narrow", label: "Narrow" },
-            { value: "wide", label: "Wide" },
-          ],
-          default: "narrow",
-        },
-      },
-      defaultProps: { body: "<p>Tell your story.</p>", width: "narrow" },
-      slots: [],
-    },
-    FeatureList: {
-      title: "Feature list",
-      category: "content",
-      fields: {
-        title: { type: "text", default: "Why Fastcart" },
-        items: {
-          type: "array",
-          items: {
-            type: "object",
-            fields: {
-              title: { type: "text", required: true },
-              description: { type: "text" },
-            },
-          },
-          default: [],
-        },
-      },
-      defaultProps: { title: "Why Fastcart", items: [] },
-      slots: [],
-    },
-    ProductGrid: {
-      title: "Product grid",
-      description: "A responsive grid sourced from a catalog collection.",
-      icon: "grid",
-      category: "commerce",
-      fields: {
-        collection: {
-          type: "data_source",
-          label: "Collection",
-          description: "Products are resolved live from this collection.",
-          source: "collection",
-          picker: { source: "collection" },
-          required: true,
-        },
-        limit: {
-          type: "number",
-          label: "Products to show",
-          min: 1,
-          max: 24,
-          default: 4,
-        },
-        columns: {
-          type: "select",
-          label: "Columns",
-          options: [
-            { value: "2", label: "Two columns" },
-            { value: "3", label: "Three columns" },
-            { value: "4", label: "Four columns" },
-          ],
-          default: "3",
-        },
-      },
-      defaultProps: { limit: 4, columns: "3" },
-      slots: [],
-    },
-    CollectionHeader: {
-      title: "Collection header",
-      category: "commerce",
-      fields: {
-        collection: { type: "data_source", source: "collection", required: true },
-        show_description: { type: "boolean", default: true },
-      },
-      defaultProps: { show_description: true },
-      slots: [],
-    },
-    Columns: {
-      title: "Columns",
-      category: "layout",
-      fields: {
-        gap: {
-          type: "select",
-          options: [
-            { value: "sm", label: "Small" },
-            { value: "md", label: "Medium" },
-            { value: "lg", label: "Large" },
-          ],
-          default: "md",
-        },
-      },
-      defaultProps: { gap: "md" },
-      slots: [
-        { name: "left", title: "Left column", allowed_components: ["RichText", "FeatureList"] },
-        { name: "right", title: "Right column", allowed_components: ["RichText", "Gallery"] },
-      ],
-    },
-    Gallery: {
-      title: "Gallery",
-      category: "layout",
-      fields: {
-        heading: { type: "text", default: "" },
-      },
-      defaultProps: { heading: "" },
-      slots: [
-        {
-          name: "items",
-          title: "Gallery items",
-          allowed_components: ["GalleryImage", "RichText"],
-        },
-      ],
-    },
-    GalleryImage: {
-      title: "Gallery image",
-      category: "layout",
-      fields: {
-        image: { type: "asset", source: "asset", required: true },
-        caption: { type: "text", default: "" },
-      },
-      defaultProps: { caption: "" },
-      slots: [],
-    },
-  },
-  root: {
-    fields: {
-      page_title: { type: "text", label: "Page title" },
-    },
-  },
-  zones: {
-    header: { title: "Header", allowed_components: ["Announcement"] },
-    footer: { title: "Footer", allowed_components: ["RichText"] },
-  },
-};
-
-function seedTheme(
-  id: string,
-  name: string,
-  version: string,
-  isActive: boolean,
-  editorManifest: ThemeEditorManifest | null = demoEditorManifest,
-): Theme {
+function seedTheme(id: string, name: string, version: string, isActive: boolean): Theme {
   const created = now() - 86_400 * 14;
   return {
     id,
-    manifest: {
-      id,
-      name,
-      version,
-      runtime: "v8",
-      entry: "dist/server.js",
-      settings_schema: "settings.schema.json",
-      assets_manifest: "assets.json",
-      editor: editorManifest
-        ? { entry: "editor.js", manifest: "editor.manifest.json", schema_version: 1 }
-        : null,
-      requires: { data_api: 1, capabilities: [] },
-    },
-    bundle_path: `themes/${id}`,
+    manifest: { id, name, version },
     settings_schema: {
       type: "object",
       properties: {
@@ -266,9 +36,6 @@ function seedTheme(
       show_announcement: true,
     },
     settings_revision: 3,
-    editor_manifest: editorManifest as unknown as JsonValue,
-    schema_version: 1,
-    assets_manifest: { logo: "assets/logo.svg", favicon: "assets/favicon.svg" },
     is_active: isActive,
     created_at: created,
     updated_at: created + 90,
@@ -277,19 +44,7 @@ function seedTheme(
 
 let themes: Theme[] = [
   seedTheme("theme_atelier", "Atelier", "1.4.0", true),
-  seedTheme("theme_minimal", "Minimal", "0.9.1", false, {
-    schema_version: 1,
-    categories: { content: { title: "Content", components: ["RichText"] } },
-    components: {
-      RichText: {
-        title: "Rich text",
-        category: "content",
-        fields: { body: { type: "textarea", required: true } },
-        defaultProps: { body: "<p>Hello.</p>" },
-        slots: [],
-      },
-    },
-  }),
+  seedTheme("theme_minimal", "Minimal", "0.9.1", false),
 ];
 
 let themeSettingsRevisions: Record<string, ThemeSettingsRevision[]> = {
@@ -470,26 +225,17 @@ export function getDemoActiveTheme(): Theme | null {
   return theme ? clone(theme) : null;
 }
 
-export function getDemoEditorManifest(themeId: string): ThemeEditorManifest | null {
-  const theme = themes.find((entry) => entry.id === themeId);
-  if (!theme || !theme.editor_manifest) return null;
-  return clone(theme.editor_manifest) as unknown as ThemeEditorManifest;
-}
-
 export function registerDemoTheme(input: RegisterThemeRequest): Theme {
   const theme = seedTheme(
     `theme_${input.manifest.id}_${now()}`,
     input.manifest.name,
     input.manifest.version,
     false,
-    (input.editor_manifest as unknown as ThemeEditorManifest | null | undefined) ?? null,
   );
   theme.manifest = clone(input.manifest);
-  theme.bundle_path = input.bundle_path;
   theme.settings_schema = clone(input.settings_schema ?? theme.settings_schema);
   theme.settings = clone(input.settings ?? {});
   theme.draft_settings = clone(input.settings ?? {});
-  theme.assets_manifest = clone(input.assets_manifest ?? null);
   themes = [...themes, theme];
   return clone(theme);
 }

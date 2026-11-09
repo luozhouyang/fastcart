@@ -11,6 +11,222 @@ import type {
 
 export const CURRENT_PAGE_SCHEMA_VERSION = 1;
 
+/**
+ * Authoring metadata built into the admin.
+ *
+ * Themes are deployed SSR artifacts and no longer ship an editor manifest, so
+ * the page editor describes the generic block components it can author itself.
+ */
+export const DEFAULT_THEME_EDITOR_MANIFEST: ThemeEditorManifest = {
+  schema_version: 1,
+  categories: {
+    hero: { title: "Hero", components: ["Hero", "Announcement"] },
+    content: { title: "Content", components: ["RichText", "FeatureList"] },
+    commerce: { title: "Commerce", components: ["ProductGrid", "CollectionHeader"] },
+    layout: { title: "Layout", components: ["Columns", "Gallery"] },
+  },
+  components: {
+    Hero: {
+      title: "Hero banner",
+      description: "A full-width lead image with a headline and optional overlay.",
+      icon: "image",
+      category: "hero",
+      fields: {
+        heading: {
+          type: "text",
+          label: "Heading",
+          description: "The primary message shown over the image.",
+          required: true,
+          default: "Made for everyday rituals",
+        },
+        subheading: {
+          type: "textarea",
+          label: "Subheading",
+          default: "Thoughtful objects for a quieter home.",
+        },
+        image: {
+          type: "asset",
+          label: "Hero image",
+          description: "Pick from the media library.",
+          source: "asset",
+          picker: { source: "asset" },
+          required: true,
+        },
+        align: {
+          type: "select",
+          label: "Alignment",
+          options: [
+            { value: "left", label: "Left" },
+            { value: "center", label: "Center" },
+          ],
+          default: "left",
+        },
+        overlay: { type: "boolean", label: "Dark overlay", default: false },
+      },
+      defaultProps: {
+        heading: "Made for everyday rituals",
+        subheading: "Thoughtful objects for a quieter home.",
+        align: "left",
+        overlay: false,
+      },
+      slots: [],
+    },
+    Announcement: {
+      title: "Announcement bar",
+      category: "hero",
+      fields: {
+        message: { type: "text", required: true, default: "Free shipping over $75" },
+        tone: {
+          type: "select",
+          options: [
+            { value: "neutral", label: "Neutral" },
+            { value: "brand", label: "Brand" },
+          ],
+          default: "neutral",
+        },
+      },
+      defaultProps: { message: "Free shipping over $75", tone: "neutral" },
+      slots: [],
+    },
+    RichText: {
+      title: "Rich text",
+      category: "content",
+      fields: {
+        body: { type: "textarea", required: true, default: "" },
+        width: {
+          type: "select",
+          options: [
+            { value: "narrow", label: "Narrow" },
+            { value: "wide", label: "Wide" },
+          ],
+          default: "narrow",
+        },
+      },
+      defaultProps: { body: "<p>Tell your story.</p>", width: "narrow" },
+      slots: [],
+    },
+    FeatureList: {
+      title: "Feature list",
+      category: "content",
+      fields: {
+        title: { type: "text", default: "Why Fastcart" },
+        items: {
+          type: "array",
+          items: {
+            type: "object",
+            fields: {
+              title: { type: "text", required: true },
+              description: { type: "text" },
+            },
+          },
+          default: [],
+        },
+      },
+      defaultProps: { title: "Why Fastcart", items: [] },
+      slots: [],
+    },
+    ProductGrid: {
+      title: "Product grid",
+      description: "A responsive grid sourced from a catalog collection.",
+      icon: "grid",
+      category: "commerce",
+      fields: {
+        collection: {
+          type: "data_source",
+          label: "Collection",
+          description: "Products are resolved live from this collection.",
+          source: "collection",
+          picker: { source: "collection" },
+          required: true,
+        },
+        limit: {
+          type: "number",
+          label: "Products to show",
+          min: 1,
+          max: 24,
+          default: 4,
+        },
+        columns: {
+          type: "select",
+          label: "Columns",
+          options: [
+            { value: "2", label: "Two columns" },
+            { value: "3", label: "Three columns" },
+            { value: "4", label: "Four columns" },
+          ],
+          default: "3",
+        },
+      },
+      defaultProps: { limit: 4, columns: "3" },
+      slots: [],
+    },
+    CollectionHeader: {
+      title: "Collection header",
+      category: "commerce",
+      fields: {
+        collection: { type: "data_source", source: "collection", required: true },
+        show_description: { type: "boolean", default: true },
+      },
+      defaultProps: { show_description: true },
+      slots: [],
+    },
+    Columns: {
+      title: "Columns",
+      category: "layout",
+      fields: {
+        gap: {
+          type: "select",
+          options: [
+            { value: "sm", label: "Small" },
+            { value: "md", label: "Medium" },
+            { value: "lg", label: "Large" },
+          ],
+          default: "md",
+        },
+      },
+      defaultProps: { gap: "md" },
+      slots: [
+        { name: "left", title: "Left column", allowed_components: ["RichText", "FeatureList"] },
+        { name: "right", title: "Right column", allowed_components: ["RichText", "Gallery"] },
+      ],
+    },
+    Gallery: {
+      title: "Gallery",
+      category: "layout",
+      fields: {
+        heading: { type: "text", default: "" },
+      },
+      defaultProps: { heading: "" },
+      slots: [
+        {
+          name: "items",
+          title: "Gallery items",
+          allowed_components: ["GalleryImage", "RichText"],
+        },
+      ],
+    },
+    GalleryImage: {
+      title: "Gallery image",
+      category: "layout",
+      fields: {
+        image: { type: "asset", source: "asset", required: true },
+        caption: { type: "text", default: "" },
+      },
+      defaultProps: { caption: "" },
+      slots: [],
+    },
+  },
+  root: {
+    fields: {
+      page_title: { type: "text", label: "Page title" },
+    },
+  },
+  zones: {
+    header: { title: "Header", allowed_components: ["Announcement"] },
+    footer: { title: "Footer", allowed_components: ["RichText"] },
+  },
+};
+
 export interface PaletteEntry {
   type: string;
   title: string;

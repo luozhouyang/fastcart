@@ -22,7 +22,6 @@ import type {
   PageVersion,
   PreviewTokenResponse,
   Theme,
-  ThemeEditorManifest,
 } from "@fastcart/shared-types";
 
 import { PageHeader } from "@/components/page-header";
@@ -34,7 +33,6 @@ import { BlockFields } from "@/components/theme-editor/field-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -54,7 +52,6 @@ import { useAuth } from "@/lib/auth";
 import { API_BASE_URL, errorMessage } from "@/lib/api";
 import {
   getDemoActiveTheme,
-  getDemoEditorManifest,
   getDemoPage,
   issueDemoPreviewToken,
   listDefaultPageVersions,
@@ -72,8 +69,8 @@ import {
   buildBlock,
   collectBlockIds,
   componentTitle,
+  DEFAULT_THEME_EDITOR_MANIFEST,
   findBlock,
-  isJsonObject,
   moveBlock,
   normalizePageBody,
   pageThemeRef,
@@ -90,7 +87,6 @@ const pendingBodyClass =
 interface PageEditorData {
   page: Page;
   activeTheme: Theme | null;
-  editorManifest: ThemeEditorManifest | null;
   versions: PageVersion[];
 }
 
@@ -142,8 +138,6 @@ export function PageEditorPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewOrigin, setPreviewOrigin] = useState<string | null>(null);
   const [previewToken, setPreviewToken] = useState<PreviewTokenResponse | null>(null);
-  const [previewHandle, setPreviewHandle] = useState("");
-  const [previewHandleDraft, setPreviewHandleDraft] = useState("");
 
   const loader = useCallback(
     async (signal: AbortSignal): Promise<PageEditorData> => {
@@ -154,37 +148,25 @@ export function PageEditorPage() {
         return {
           page,
           activeTheme,
-          editorManifest: activeTheme ? getDemoEditorManifest(activeTheme.id) : null,
           versions: listDefaultPageVersions(pageId),
         };
       }
       if (!client) throw new Error("No store is selected.");
       const page = await client.content.pages.get(pageId, { signal });
       const activeTheme = await client.themes.active({ signal }).catch(() => null);
-      let editorManifest: ThemeEditorManifest | null = null;
-      if (activeTheme && isJsonObject(activeTheme.editor_manifest)) {
-        editorManifest = activeTheme.editor_manifest as unknown as ThemeEditorManifest;
-      } else if (activeTheme) {
-        try {
-          editorManifest = await client.themes.editorManifest(activeTheme.id, { signal });
-        } catch {
-          editorManifest = null;
-        }
-      }
       const versions = await client.content.pages
         .versions(pageId, { limit: 50 }, { signal })
         .then((page) => page.data)
         .catch(() => []);
-      return { page, activeTheme, editorManifest, versions };
+      return { page, activeTheme, versions };
     },
     [mode, client, pageId],
   );
 
   const { data, error, loading, reload } = useAsyncData(loader, [mode, store?.id, dataKey, pageId]);
 
-  const editorManifest = data?.editorManifest ?? null;
-  const structured =
-    editorManifest !== null && Object.keys(editorManifest.components ?? {}).length > 0;
+  const editorManifest = DEFAULT_THEME_EDITOR_MANIFEST;
+  const structured = Object.keys(editorManifest.components ?? {}).length > 0;
 
   useEffect(() => {
     if (!data) return;
@@ -214,10 +196,9 @@ export function PageEditorPage() {
   }, [dirty]);
 
   const page = data?.page ?? null;
-  const previewRoutePattern = data?.activeTheme?.manifest.routes?.[page?.page_type ?? ""] ?? null;
   const previewSrc =
     previewOrigin && previewToken && page
-      ? `${previewOrigin}/preview${previewPathFor(previewHandle, page.handle, previewRoutePattern)}?token=${encodeURIComponent(previewToken.token)}`
+      ? `${previewOrigin}/preview/${encodeURIComponent(page.handle)}?token=${encodeURIComponent(previewToken.token)}`
       : null;
 
   /** Replaces the block list of one owner (`content` or a zone name). */
@@ -416,7 +397,6 @@ export function PageEditorPage() {
       const origin = previewOriginFor(store?.primary_domain);
       setPreviewToken(token);
       setPreviewOrigin(origin);
-      setPreviewHandleDraft(previewHandle);
       setPreviewOpen(true);
     } catch (cause) {
       toast.error(
@@ -554,11 +534,11 @@ export function PageEditorPage() {
             <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden="true" />
             <div>
               <p className="text-[12.5px] font-medium text-foreground">
-                No active theme editor manifest
+                Structured editor unavailable
               </p>
               <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-                Activate a theme that ships an editor manifest to use the component palette. You can
-                still edit the raw JSON body below.
+                The built-in editor component registry is empty. You can still edit the raw JSON
+                body below.
               </p>
             </div>
           </div>
@@ -826,30 +806,6 @@ export function PageEditorPage() {
           </DialogHeader>
           {previewSrc ? (
             <div className="space-y-3">
-              {previewRoutePattern ? (
-                <form
-                  className="flex flex-wrap items-center gap-2"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    setPreviewHandle(previewHandleDraft.trim());
-                  }}
-                >
-                  <label htmlFor="preview-handle" className="text-[11.5px] text-muted-foreground">
-                    Preview handle
-                  </label>
-                  <Input
-                    id="preview-handle"
-                    value={previewHandleDraft}
-                    onChange={(event) => setPreviewHandleDraft(event.target.value)}
-                    placeholder="first published item"
-                    className="h-8 max-w-56"
-                  />
-                  <Button type="submit" variant="outline" size="sm">
-                    Apply
-                  </Button>
-                  <span className="font-mono text-[10px] text-faint">{previewRoutePattern}</span>
-                </form>
-              ) : null}
               <iframe
                 title={`Preview of ${page.title}`}
                 src={previewSrc}
@@ -885,21 +841,6 @@ export function PageEditorPage() {
       </Dialog>
     </div>
   );
-}
-
-/**
- * Builds the storefront path for a draft preview.
- *
- * Dynamic route templates use their declared pattern when a handle is
- * supplied; otherwise the server auto-selects the first published record and
- * the page handle is kept as a harmless fallback path.
- */
-function previewPathFor(handle: string, pageHandle: string, routePattern: string | null): string {
-  const trimmed = handle.trim();
-  if (routePattern && trimmed) {
-    return routePattern.replace("{handle}", encodeURIComponent(trimmed));
-  }
-  return `/${encodeURIComponent(pageHandle)}`;
 }
 
 /**

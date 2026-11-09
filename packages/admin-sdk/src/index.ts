@@ -124,9 +124,6 @@ import type {
   TaxRegion,
   Theme,
   ThemeActivation,
-  ThemeCapabilityBinding,
-  ThemeEditorManifest,
-  ThemePageValidationResult,
   ThemeSettingsRevision,
   ThemeSettingsState,
   CreatePaymentRefundRequest,
@@ -152,7 +149,6 @@ import type {
   UpdateVariantRequest,
   UpdateWebhookRequest,
   UploadAssetFields,
-  UpsertThemeCapabilityRequest,
   Variant,
   WebhookDeliveriesQuery,
   WebhookDelivery,
@@ -319,17 +315,11 @@ export interface AdminClient {
       body: UpdateThemeSettingsRequest,
       options?: AdminRequestOptions,
     ): Promise<Theme>;
-    /** Parsed editor manifest for a registered theme. */
-    editorManifest(id: string, options?: AdminRequestOptions): Promise<ThemeEditorManifest>;
-    /** URL of the theme editor bundle served by the API. */
-    editorScriptUrl(id: string): string;
     /** Lists recent theme activations, newest first. */
     activations?(
       query?: { limit?: number },
       options?: AdminRequestOptions,
     ): Promise<ThemeActivation[]>;
-    /** Validates every page against the theme's editor manifest. */
-    validatePages?(id: string, options?: AdminRequestOptions): Promise<ThemePageValidationResult>;
     /** Reads the current settings state, including the working draft. */
     getSettingsDraft?(id: string, options?: AdminRequestOptions): Promise<ThemeSettingsState>;
     /** Persists a working settings draft, when the backend supports drafts. */
@@ -359,16 +349,6 @@ export interface AdminClient {
       body?: RestoreThemeSettingsRequest,
       options?: AdminRequestOptions,
     ): Promise<ThemeSettingsState>;
-    /** Capability bindings for a theme. */
-    capabilities?: {
-      list(id: string, options?: AdminRequestOptions): Promise<ThemeCapabilityBinding[]>;
-      upsert(
-        id: string,
-        body: UpsertThemeCapabilityRequest,
-        options?: AdminRequestOptions,
-      ): Promise<ThemeCapabilityBinding>;
-      delete(id: string, capabilityId: string, options?: AdminRequestOptions): Promise<void>;
-    };
   };
 
   content: {
@@ -1066,7 +1046,6 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
   }
 
   const id = (value: string): string => encodeURIComponent(value);
-  const baseUrl = options.baseUrl?.replace(/\/$/, "") ?? "";
 
   const login = async (
     body: LoginRequest,
@@ -1224,21 +1203,10 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
           method: "PATCH",
           body,
         }),
-      editorManifest: (themeId, requestOptions) =>
-        request<ThemeEditorManifest>(
-          `/api/v1/admin/themes/${id(themeId)}/editor-manifest`,
-          requestOptions,
-        ),
       activations: (query, requestOptions) =>
         request<ThemeActivation[]>("/api/v1/admin/themes/activations", {
           ...requestOptions,
           query,
-        }),
-      editorScriptUrl: (themeId) => `${baseUrl}/api/v1/admin/themes/${id(themeId)}/editor.js`,
-      validatePages: (themeId, requestOptions) =>
-        request<ThemePageValidationResult>(`/api/v1/admin/themes/${id(themeId)}/validate-pages`, {
-          ...requestOptions,
-          method: "POST",
         }),
       getSettingsDraft: (themeId, requestOptions) =>
         request<ThemeSettingsState>(
@@ -1279,25 +1247,6 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
             body: body ?? {},
           },
         ),
-      capabilities: {
-        list: (themeId, requestOptions) =>
-          request<ThemeCapabilityBinding[]>(
-            `/api/v1/admin/themes/${id(themeId)}/capabilities`,
-            requestOptions,
-          ),
-        upsert: (themeId, body, requestOptions) =>
-          request<ThemeCapabilityBinding>(`/api/v1/admin/themes/${id(themeId)}/capabilities`, {
-            ...requestOptions,
-            method: "PUT",
-            body,
-          }),
-        delete: (themeId, capabilityId, requestOptions) =>
-          request<void>(`/api/v1/admin/themes/${id(themeId)}/capabilities`, {
-            ...requestOptions,
-            method: "DELETE",
-            body: { capability_id: capabilityId },
-          }),
-      },
     },
 
     content: {
