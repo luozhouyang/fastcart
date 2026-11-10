@@ -1,0 +1,40 @@
+{
+  "schema_version": "1",
+  "id": "__PLUGIN_ID__",
+  "name": "Admin Panel Plugin",
+  "version": "0.1.0",
+  "api_version": 2,
+  "runtime": {
+    "engine": "workerd",
+    "compatibility_date": "2026-11-01"
+  },
+  "entry": { "type": "worker", "path": "worker/index.js" },
+  "capabilities": {
+    "admin": ["admin.ui"]
+  },
+  "extensions": {
+    "admin": [
+      {
+        "target": "admin.nav.section",
+        "label": "Admin Panel",
+        "route": "/apps/__PLUGIN_ID__"
+      },
+      {
+        "target": "admin.page.settings.tabs",
+        "title": "Admin Panel",
+        "entry": "ui/settings.html",
+        "height": 420
+      }
+    ]
+  },
+  "settings": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "greeting": { "type": "string", "default": "Hello" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "rpc": ["panel.info"]
+}
