@@ -1,3 +1,4 @@
+import { PluginSlot } from "@/plugins/plugin-slot";
 import { useEffect, useState, type ReactNode } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Loader2, X } from "lucide-react";
@@ -269,6 +270,8 @@ export function OrderDrawer({
                   </p>
                 </section>
               ) : null}
+
+              <PluginSlot target="admin.page.orders.details.side" context={{ orderId: order.id }} />
             </div>
 
             <footer className="flex gap-2.5 border-t border-border bg-card px-6 py-4">

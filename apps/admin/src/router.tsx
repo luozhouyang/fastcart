@@ -15,6 +15,7 @@ import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { LoginPage, NoStorePage, SplashScreen } from "@/pages/login";
 import { OverviewPage } from "@/pages/overview";
+import { PluginExtensionsProvider } from "@/plugins/runtime";
 
 const CustomersPage = lazyRouteComponent(() =>
   import("@/pages/customers").then((module) => ({ default: module.CustomersPage })),
@@ -67,6 +68,12 @@ const ThemeDetailPage = lazyRouteComponent(() =>
 const ThemesPage = lazyRouteComponent(() =>
   import("@/pages/themes").then((module) => ({ default: module.ThemesPage })),
 );
+const PluginsPage = lazyRouteComponent(() =>
+  import("@/pages/plugins").then((module) => ({ default: module.PluginsPage })),
+);
+const PluginPage = lazyRouteComponent(() =>
+  import("@/pages/plugin-page").then((module) => ({ default: module.PluginPage })),
+);
 
 function PageLoading() {
   return (
@@ -101,7 +108,9 @@ function RootLayout() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <AppGate />
+        <PluginExtensionsProvider>
+          <AppGate />
+        </PluginExtensionsProvider>
       </AuthProvider>
     </ThemeProvider>
   );
@@ -220,6 +229,24 @@ const pageEditorRoute = createRoute({
   component: PageEditorPage,
 });
 
+const pluginsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/plugins",
+  component: guarded(PluginsPage, PERMISSIONS.plugins.read),
+});
+
+const pluginPageRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/apps/$pluginId",
+  component: PluginPage,
+});
+
+const pluginPageNestedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/apps/$pluginId/$",
+  component: PluginPage,
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -260,6 +287,9 @@ const routeTree = rootRoute.addChildren([
   pagesRoute,
   pageEditorRoute,
   settingsRoute,
+  pluginsRoute,
+  pluginPageRoute,
+  pluginPageNestedRoute,
   regionsRoute,
   shippingRoute,
   taxRoute,

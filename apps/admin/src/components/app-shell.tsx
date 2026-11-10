@@ -20,6 +20,7 @@ import {
   Package,
   Palette,
   Percent,
+  Puzzle,
   ReceiptText,
   Search,
   Settings as SettingsIcon,
@@ -46,6 +47,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { demoNotifications } from "@/lib/demo";
 import { demoUnreadInquiries } from "@/lib/demo-inquiries";
 import { useAuth } from "@/lib/auth";
+import { usePluginExtensions } from "@/plugins/runtime";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { initials } from "@/lib/format";
 import type { NotificationView } from "@/lib/models";
@@ -68,7 +70,8 @@ interface NavItem {
     | "/regions"
     | "/shipping"
     | "/tax"
-    | "/settings";
+    | "/settings"
+    | "/plugins";
   label: string;
   icon: typeof LayoutGrid;
   /** Read permission required to see this section. */
@@ -123,6 +126,12 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         label: "Settings",
         icon: SettingsIcon,
         permission: PERMISSIONS.settings.read,
+      },
+      {
+        to: "/plugins",
+        label: "Plugins",
+        icon: Puzzle,
+        permission: PERMISSIONS.plugins.read,
       },
     ],
   },
@@ -250,7 +259,12 @@ function SidebarBody({
   onNavigate?: () => void;
 }) {
   const { mode, stores, store, selectStore, can } = useAuth();
+  const { extensions } = usePluginExtensions();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pluginNav = extensions.filter(
+    (extension) =>
+      extension.target === "admin.nav.section" && extension.route && can(extension.permission),
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -367,6 +381,45 @@ function SidebarBody({
             </div>
           );
         })}
+        {pluginNav.length > 0 ? (
+          <div className="mb-5">
+            <p className="px-3 pb-1.5 text-[11.5px] font-medium text-muted-foreground">Plugins</p>
+            <ul className="space-y-0.5">
+              {pluginNav.map((extension) => {
+                const active = pathname.startsWith(`/apps/${extension.plugin_id}`);
+                return (
+                  <li key={`${extension.plugin_id}:nav`}>
+                    <Link
+                      to="/apps/$pluginId"
+                      params={{ pluginId: extension.plugin_id }}
+                      onClick={onNavigate}
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "relative flex h-9 items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors duration-150",
+                        "outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30",
+                        active
+                          ? "bg-accent font-medium text-foreground"
+                          : "text-ink-soft hover:bg-accent/70 hover:text-foreground",
+                      )}
+                    >
+                      <Puzzle
+                        className={cn(
+                          "size-[17px] shrink-0",
+                          active ? "text-foreground" : "text-faint",
+                        )}
+                        strokeWidth={1.8}
+                        aria-hidden="true"
+                      />
+                      <span className="flex-1">
+                        {extension.label ?? extension.title ?? extension.plugin_name}
+                      </span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ) : null}
       </nav>
 
       <div className="px-4 pb-3">

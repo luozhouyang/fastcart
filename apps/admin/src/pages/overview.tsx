@@ -5,6 +5,7 @@ import { ArrowDownRight, ArrowUpRight, Download, Plus } from "lucide-react";
 import { RevenueChart, StatusBreakdown } from "@/components/charts";
 import { MetricCard } from "@/components/metric-card";
 import { PageHeader } from "@/components/page-header";
+import { PluginSlot } from "@/plugins/plugin-slot";
 import { ProgressBar } from "@/components/progress-bar";
 import { ErrorState, PageSkeleton } from "@/components/states";
 import { StatusRail, OrderPill, orderRailTone } from "@/components/status-pill";
@@ -145,6 +146,8 @@ export function OverviewPage() {
           </>
         }
       />
+
+      <PluginSlot target="admin.page.overview.after-header" />
 
       <section aria-label="Key metrics" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {data.metrics.map((metric) => (

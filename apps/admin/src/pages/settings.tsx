@@ -3,6 +3,7 @@ import { Check, ChevronDown, Globe, Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
+import { PluginSlot } from "@/plugins/plugin-slot";
 import { ErrorState, PageSkeleton } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -447,6 +448,7 @@ export function SettingsPage() {
               />
             </div>
           </Card>
+          <PluginSlot target="admin.page.settings.tabs" />
         </div>
       </div>
     </div>

@@ -13,6 +13,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
+import { PluginSlot } from "@/plugins/plugin-slot";
 import { Pagination } from "@/components/pagination";
 import { CustomerStatusPill } from "@/components/status-pill";
 import { ErrorState, TableSkeleton } from "@/components/states";
@@ -27,6 +28,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import {
   Table,
   TableBody,
@@ -83,6 +91,7 @@ export function CustomersPage() {
   const [filter, setFilter] = useState<FilterValue>("all");
   const [sort, setSort] = useState<SortMode>("recent");
   const [page, setPage] = useState(1);
+  const [selected, setSelected] = useState<CustomerView | null>(null);
 
   useEffect(() => {
     setPage(1);
@@ -313,6 +322,7 @@ export function CustomersPage() {
                 customer={customer}
                 currency={currency}
                 onViewOrders={() => void navigate({ to: "/orders" })}
+                onSelect={() => setSelected(customer)}
               />
             ))}
             {rows.length === 0 ? (
@@ -339,6 +349,45 @@ export function CustomersPage() {
           <Pagination page={currentPage} pages={pages} onChange={setPage} />
         </div>
       </Card>
+
+      <Sheet open={selected !== null} onOpenChange={(open) => !open && setSelected(null)}>
+        <SheetContent side="right" className="w-full sm:max-w-lg">
+          {selected ? (
+            <>
+              <SheetHeader>
+                <SheetTitle>{selected.name}</SheetTitle>
+                <SheetDescription>{selected.email}</SheetDescription>
+              </SheetHeader>
+              <div className="flex-1 space-y-4 overflow-y-auto p-6">
+                <dl className="grid grid-cols-2 gap-3 text-[12.5px]">
+                  <div>
+                    <dt className="text-muted-foreground">Status</dt>
+                    <dd className="mt-1">
+                      <CustomerStatusPill status={selected.status} />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Orders</dt>
+                    <dd className="mt-1 font-mono tnum">{selected.orders}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Total spent</dt>
+                    <dd className="mt-1 font-mono tnum">{moneyShort(selected.spent, currency)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Joined</dt>
+                    <dd className="mt-1">{shortDate(selected.joined)}</dd>
+                  </div>
+                </dl>
+                <PluginSlot
+                  target="admin.page.customers.details.side"
+                  context={{ customerId: selected.id }}
+                />
+              </div>
+            </>
+          ) : null}
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }
@@ -347,10 +396,12 @@ function CustomerRow({
   customer,
   currency,
   onViewOrders,
+  onSelect,
 }: {
   customer: CustomerView;
   currency: string;
   onViewOrders: () => void;
+  onSelect: () => void;
 }) {
   const copyEmail = async () => {
     try {
@@ -405,6 +456,7 @@ function CustomerRow({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-[190px]">
             <DropdownMenuLabel>{customer.email}</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={onSelect}>View details</DropdownMenuItem>
             <DropdownMenuItem onSelect={onViewOrders}>
               <ReceiptText aria-hidden="true" />
               View orders

@@ -1,3 +1,4 @@
+import { PluginSlot } from "@/plugins/plugin-slot";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Archive,
@@ -268,6 +269,10 @@ function LiveProductSheet({
                 </div>
               ) : null}
               <VariantsPanel detail={data} defaultCurrency={currency} onChanged={refresh} />
+              <PluginSlot
+                target="admin.page.products.details.side"
+                context={{ productId: product.id }}
+              />
             </div>
           ) : null}
         </div>

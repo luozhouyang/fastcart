@@ -39,6 +39,11 @@ export const PERMISSIONS = {
     read: "payments.read",
     write: "payments.write",
   },
+  plugins: {
+    read: "plugins.read",
+    write: "plugins.write",
+    install: "plugins.install",
+  },
 } as const;
 
 type PermissionTree = typeof PERMISSIONS;
