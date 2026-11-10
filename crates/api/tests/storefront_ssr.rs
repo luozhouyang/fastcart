@@ -22,6 +22,7 @@ use tower::ServiceExt;
 struct RecordingUniversal {
     seen: Arc<Mutex<Vec<RecordedContext>>>,
     preview: bool,
+    html: Option<&'static str>,
 }
 
 struct RecordedContext {
@@ -44,7 +45,14 @@ impl UniversalStorefront for RecordingUniversal {
             request_id,
             scheme,
         });
-        (StatusCode::OK, "<h1>universal</h1>").into_response()
+        match self.html {
+            Some(html) => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/html; charset=utf-8")
+                .body(Body::from(html))
+                .unwrap(),
+            None => (StatusCode::OK, "<h1>universal</h1>").into_response(),
+        }
     }
 
     async fn serve_asset(
@@ -926,4 +934,61 @@ async fn preview_route_uses_the_universal_preview_deployment() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"<h1>universal-preview</h1>");
+}
+
+#[tokio::test]
+async fn storefront_injects_enabled_plugin_embeds() {
+    let html = "<!doctype html><html><head><title>x</title></head><body>hello</body></html>";
+    let fixture = fixture(Some(Arc::new(RecordingUniversal {
+        html: Some(html),
+        ..Default::default()
+    })))
+    .await;
+    let manifest = serde_json::json!({
+        "schema_version": "1",
+        "id": "chat",
+        "name": "Chat",
+        "version": "1.0.0",
+        "api_version": 2,
+        "runtime": { "engine": "workerd", "compatibility_date": "2026-11-01" },
+        "entry": { "type": "worker", "path": "index.js" },
+        "capabilities": { "storefront": ["store.read"] },
+        "extensions": {
+            "storefront": [{
+                "kind": "embed",
+                "placement": "body:end",
+                "entry": "storefront/boot.js",
+                "css": "storefront/boot.css",
+                "pages": ["*"]
+            }]
+        }
+    });
+    sqlx::query(
+        "INSERT INTO plugin_installations          (id, plugin_id, digest, version, manifest_json, enabled, settings_json,           settings_revision, granted_scopes, installed_at, updated_at)          VALUES ('pli_test', 'chat', ?, '1.0.0', ?, 1, '{}', 1, '[]', 0, 0)",
+    )
+    .bind("a".repeat(64))
+    .bind(manifest.to_string())
+    .execute(fixture.database.pool())
+    .await
+    .unwrap();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("host", "shop.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(body.contains("fastcart:extensions-injected"));
+    assert!(body.contains("/_fastcart/extensions/runtime.js"));
+    assert!(body.contains("/_fastcart/extensions/chat/"));
+    assert!(body.contains("boot.css"));
 }

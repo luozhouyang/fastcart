@@ -17,10 +17,12 @@ function RootDocument({ children }: { children: ReactNode }) {
     <html lang="en">
       <head>
         <HeadContent />
+        <script type="application/fastcart-extensions" data-slot="head" />
       </head>
       <body>
         {children}
         <Scripts />
+        <script type="application/fastcart-extensions" data-slot="body" />
       </body>
     </html>
   );

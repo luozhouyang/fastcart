@@ -10,11 +10,13 @@ const deployment = Astro.request.headers.get("x-fastcart-deployment-id");
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
     <title>FastCart Astro Storefront</title>
+    <!--fastcart:extensions-head-->
   </head>
   <body>
     <main>
       <h1>{message}</h1>
       <p data-testid="context">{store ?? "no-store"}:{deployment ?? "no-deployment"}</p>
     </main>
+    <!--fastcart:extensions-body-->
   </body>
 </html>

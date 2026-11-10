@@ -2,7 +2,7 @@ const encoder = new TextEncoder();
 
 function html(body, assetsPrefix) {
   return new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FastCart Generic Storefront</title></head><body>${body}<script type="module" src="${assetsPrefix}/app.js"></script></body></html>`,
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FastCart Generic Storefront</title><!--fastcart:extensions-head--></head><body>${body}<script type="module" src="${assetsPrefix}/app.js"></script><!--fastcart:extensions-body--></body></html>`,
     { headers: { "content-type": "text/html; charset=utf-8" } },
   );
 }
