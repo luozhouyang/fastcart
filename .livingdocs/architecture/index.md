@@ -2,6 +2,17 @@
 
 * [Fastcart Container View](fastcart-container-view.md) - container
 * [Universal SSR Runtime](universal-ssr-runtime.md) - architecture design and implementation plan
+* [Plugin System (workerd)](workerd-plugin-system.md) - plugin runtime, admin and storefront extension points, capability API
+* [Plugin Runtime P0 Validation](plugin-p0-validation.md) - validation checklist, harness and script design
+* [Plugin Runtime P0 Report](plugin-p0-report.md) - results, measurements and required design changes
+* [Plugin System P1 Plan](plugin-p1-plan.md) - manifest, artifacts, registry and admin API, file by file
+* [Plugin System P1 Report](plugin-p1-report.md) - what was built, verification and deviations
+* [Plugin System P2 Report](plugin-p2-report.md) - workerd host, bridge, tokens, KV and egress
+* [Plugin System P3 Report](plugin-p3-report.md) - admin extension points, iframe protocol and management UI
+* [Plugin System P4 Report](plugin-p4-report.md) - storefront markers, injection, assets and chat example
+* [Plugin System P5 Report](plugin-p5-report.md) - event subscriptions, deliveries, cron jobs and replay
+* [Plugin System P6 Report](plugin-p6-report.md) - logs, RPC permissions, health and observability
+* [Plugin System P7 Report](plugin-p7-report.md) - CLI, esbuild bundling, deterministic artifacts and templates
 * [Universal SSR Runtime Phase 0 Review](ssr-phase0-review.md) - phase 0 review
 * [Universal SSR Runtime Phase 1 Review](ssr-phase1-review.md) - phase 1 review
 * [Universal SSR Runtime Phase 2 Review](ssr-phase2-review.md) - phase 2 review
