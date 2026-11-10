@@ -23,3 +23,5 @@ templates/*/.svelte-kit
 
 # Email templates are hand-formatted for mail clients
 crates/notifications/templates/*.html
+experiments/workerd/plugins/report
+experiments/workerd/plugins/html
