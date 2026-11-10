@@ -21,6 +21,7 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/health/live", get(liveness))
         .route("/health/ready", get(readiness))
         .route("/metrics", get(metrics))
+        .route("/health/plugins", get(plugin_health))
 }
 
 /// Builds the documented health routes for OpenAPI generation.
@@ -138,5 +139,27 @@ async fn readiness(State(context): State<Arc<AppContext>>) -> (StatusCode, Json<
                 }),
             )
         }
+    }
+}
+
+async fn plugin_health(State(context): State<Arc<AppContext>>) -> Json<serde_json::Value> {
+    match &context.plugin_host {
+        Some(host) => {
+            let health = host.health().await;
+            Json(serde_json::json!({
+                "status": if health.running { "ok" } else { "unavailable" },
+                "running": health.running,
+                "generation": health.generation,
+                "port": health.port,
+                "restarts": health.restarts,
+                "uptime_seconds": health.uptime_seconds,
+                "last_error": health.last_error,
+            }))
+        }
+        None => Json(serde_json::json!({
+            "status": "disabled",
+            "running": false,
+            "restarts": 0,
+        })),
     }
 }

@@ -125,3 +125,14 @@ from = "orders@example.com"
 
 # [email.resend]
 # api_key = "re_..."
+
+[plugins]
+enabled = false
+root = "./data/plugins"
+max_archive_bytes = 20971520
+max_module_bytes = 4194304
+# runtime_token = "replace-with-a-random-secret" # generated when omitted
+# workerd_binary = "experiments/workerd/bin/workerd"
+# runtime_dir = "./data/plugins/runtime"
+# context_secret = "replace-with-a-random-secret"
+# self_address = "127.0.0.1:8080"

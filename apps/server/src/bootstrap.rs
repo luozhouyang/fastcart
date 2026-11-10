@@ -30,6 +30,9 @@ pub async fn run(config: Config) -> Result<()> {
     );
 
     let maintenance = tokio::spawn(crate::maintenance::maintenance_loop(state.context.clone()));
+    let plugin_dispatch = tokio::spawn(crate::maintenance::plugin_dispatch_loop(
+        state.context.clone(),
+    ));
 
     axum::serve(
         listener,
@@ -40,6 +43,10 @@ pub async fn run(config: Config) -> Result<()> {
     .context("server failed")?;
 
     maintenance.abort();
+    plugin_dispatch.abort();
+    if let Some(host) = &state.context.plugin_host {
+        host.shutdown().await;
+    }
     if let Some(runtime) = &state.ssr_service {
         runtime.shutdown().await;
     }

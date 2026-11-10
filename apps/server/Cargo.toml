@@ -31,6 +31,7 @@ fastcart-http.workspace = true
 fastcart-email.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-platform.workspace = true
+fastcart-plugin.workspace = true
 fastcart-ssr.workspace = true
 futures.workspace = true
 fastcart-workflows.workspace = true

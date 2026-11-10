@@ -35,6 +35,8 @@ pub struct Config {
     pub inquiries: InquiryConfig,
     /// Notification delivery retention settings.
     pub notifications: NotificationConfig,
+    /// Plugin runtime settings.
+    pub plugins: PluginsConfig,
 }
 
 /// HTTP listener settings.
@@ -283,6 +285,46 @@ impl Default for JobsConfig {
     }
 }
 
+/// Plugin runtime settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Whether plugin installations are accepted.
+    pub enabled: bool,
+    /// Directory holding content-addressed plugin artifacts.
+    pub root: PathBuf,
+    /// Hard cap for one plugin archive upload.
+    pub max_archive_bytes: usize,
+    /// Hard cap for one plugin JavaScript module.
+    pub max_module_bytes: u64,
+    /// Optional bearer token for the internal plugin runtime endpoint.
+    pub runtime_token: Option<String>,
+    /// Pinned workerd binary used by the plugin host.
+    pub workerd_binary: PathBuf,
+    /// Directory for generated runtime generations.
+    pub runtime_dir: PathBuf,
+    /// Secret used to sign plugin context tokens.
+    pub context_secret: Option<String>,
+    /// Address of this server as seen from workerd.
+    pub self_address: Option<std::net::SocketAddr>,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            root: PathBuf::from("./data/plugins"),
+            max_archive_bytes: 20 * 1024 * 1024,
+            max_module_bytes: 4 * 1024 * 1024,
+            runtime_token: None,
+            workerd_binary: PathBuf::from("experiments/workerd/bin/workerd"),
+            runtime_dir: PathBuf::new(),
+            context_secret: None,
+            self_address: None,
+        }
+    }
+}
+
 impl Config {
     /// Loads configuration from `FASTCART_CONFIG` or `config/config.toml`.
     pub fn load() -> Result<Self> {
@@ -340,6 +382,33 @@ impl Config {
         }
         if let Ok(value) = env::var("FASTCART_STRIPE_WEBHOOK_SECRET") {
             self.payments.stripe_webhook_secret = Some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_PLUGINS_ENABLED") {
+            self.plugins.enabled = value
+                .parse()
+                .context("FASTCART_PLUGINS_ENABLED must be true or false")?;
+        }
+        if let Ok(value) = env::var("FASTCART_PLUGINS_ROOT") {
+            self.plugins.root = PathBuf::from(value);
+        }
+        if let Ok(value) = env::var("FASTCART_PLUGIN_RUNTIME_TOKEN") {
+            self.plugins.runtime_token = (!value.trim().is_empty()).then_some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_PLUGIN_WORKERD_BINARY") {
+            self.plugins.workerd_binary = PathBuf::from(value);
+        }
+        if let Ok(value) = env::var("FASTCART_PLUGIN_RUNTIME_DIR") {
+            self.plugins.runtime_dir = PathBuf::from(value);
+        }
+        if let Ok(value) = env::var("FASTCART_PLUGIN_CONTEXT_SECRET") {
+            self.plugins.context_secret = (!value.trim().is_empty()).then_some(value);
+        }
+        if let Ok(value) = env::var("FASTCART_PLUGIN_SELF_ADDRESS") {
+            self.plugins.self_address = Some(
+                value
+                    .parse()
+                    .context("FASTCART_PLUGIN_SELF_ADDRESS must be a socket address")?,
+            );
         }
         if let Ok(value) = env::var("FASTCART_SSR_ENABLED") {
             self.ssr.enabled = value
@@ -547,6 +616,20 @@ impl Config {
 
     /// Validates configuration invariants.
     pub fn validate(&self) -> Result<()> {
+        if self.plugins.enabled {
+            if self.plugins.root.as_os_str().is_empty() {
+                bail!("plugins.root must not be empty");
+            }
+            if self.plugins.max_archive_bytes == 0 || self.plugins.max_module_bytes == 0 {
+                bail!("plugin upload limits must be greater than zero");
+            }
+            if !self.plugins.workerd_binary.is_file() {
+                bail!(
+                    "plugins.workerd_binary does not exist: {}",
+                    self.plugins.workerd_binary.display()
+                );
+            }
+        }
         if self.ssr.enabled {
             if self.ssr.binary.as_os_str().is_empty() {
                 bail!("ssr.binary must not be empty");

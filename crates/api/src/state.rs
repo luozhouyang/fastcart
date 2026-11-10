@@ -1,6 +1,7 @@
 //! API process state shared by all routes.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -13,6 +14,9 @@ use fastcart_infrastructure::{EventBus, LocalStorage, Storage, StoreCache, Store
 use fastcart_kernel::StoreId;
 use fastcart_module_payment::{ManualProvider, ProviderRegistry, StripeProvider};
 use fastcart_platform::{AuthService, PlatformStore, StoreProvisioningService, StoreResolver};
+use fastcart_plugin::{
+    ArchiveLimits, ArtifactStore, EgressLimiter, PluginHost, RuntimeConfig, TokenSigner,
+};
 
 pub use fastcart_ssr::UniversalStorefront;
 
@@ -81,6 +85,28 @@ pub struct ApiConfig {
     pub inquiry_retention_days: i64,
     /// Days terminal notification channel deliveries are retained.
     pub notification_retention_days: i64,
+    /// Root directory for content-addressed plugin artifacts.
+    pub plugins_root: PathBuf,
+    /// Hard cap for one plugin archive upload.
+    pub max_plugin_archive_bytes: usize,
+    /// Hard cap for one plugin JavaScript module.
+    pub max_plugin_module_bytes: u64,
+    /// Whether plugin installations and enabling are accepted.
+    pub plugins_enabled: bool,
+    /// Optional bearer token for the internal plugin runtime endpoint.
+    ///
+    /// When absent, `/internal/plugins/v1` is not mounted.
+    pub plugin_runtime_token: Option<String>,
+    /// Pinned workerd binary used by the plugin host.
+    pub plugin_workerd_binary: PathBuf,
+    /// Directory for generated runtime generations. Empty derives from the
+    /// artifact root.
+    pub plugin_runtime_dir: PathBuf,
+    /// Address of this server as seen from workerd.
+    pub plugin_commerce_addr: SocketAddr,
+    /// Secret used to sign plugin context tokens. Random per process when
+    /// absent.
+    pub plugin_context_secret: Option<Vec<u8>>,
 }
 
 impl Default for ApiConfig {
@@ -107,6 +133,15 @@ impl Default for ApiConfig {
             upload_ttl_seconds: 3_600,
             inquiry_retention_days: 365,
             notification_retention_days: 90,
+            plugins_root: PathBuf::from("./data/plugins"),
+            max_plugin_archive_bytes: 20 * 1024 * 1024,
+            max_plugin_module_bytes: 4 * 1024 * 1024,
+            plugins_enabled: false,
+            plugin_runtime_token: None,
+            plugin_workerd_binary: PathBuf::from("experiments/workerd/bin/workerd"),
+            plugin_runtime_dir: PathBuf::new(),
+            plugin_commerce_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            plugin_context_secret: None,
         }
     }
 }
@@ -167,6 +202,18 @@ pub struct AppContext {
     pub inquiry_limiter: RateLimiter,
     /// Attachment upload limiter, keyed by store and client address.
     pub upload_limiter: RateLimiter,
+    /// Content-addressed plugin artifact store shared by all stores.
+    pub plugin_artifacts: Arc<ArtifactStore>,
+    /// Bearer token shared by the gateway and the bundle endpoint.
+    pub plugin_runtime_token: Option<String>,
+    /// Lazy workerd host, absent when plugins are disabled or misconfigured.
+    pub plugin_host: Option<Arc<PluginHost>>,
+    /// Signer for short-lived plugin context tokens.
+    pub plugin_tokens: TokenSigner,
+    /// Allowlisted egress executor with daily quotas.
+    pub plugin_egress: Arc<EgressLimiter>,
+    /// Single-use `(jti, call id)` pairs for bridge calls.
+    pub plugin_call_replay: moka::future::Cache<String, ()>,
 }
 
 impl AppContext {
@@ -299,6 +346,55 @@ impl AppContext {
         register_stripe_provider(&payment_providers, &config);
         let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(config.storage_root.clone()));
         let client_ip = fastcart_http::ClientIpConfig::parse(&config.trusted_proxies);
+        let plugin_context_secret = config
+            .plugin_context_secret
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().simple().to_string().into_bytes());
+        let plugin_tokens = TokenSigner::new(&plugin_context_secret);
+        let plugin_runtime_token = config
+            .plugin_runtime_token
+            .clone()
+            .filter(|token| !token.is_empty())
+            .or_else(|| {
+                config.plugins_enabled.then(|| {
+                    format!(
+                        "fc_rt_{}{}",
+                        uuid::Uuid::now_v7().simple(),
+                        uuid::Uuid::now_v7().simple()
+                    )
+                })
+            });
+        let plugin_host = if config.plugins_enabled {
+            let runtime_dir = if config.plugin_runtime_dir.as_os_str().is_empty() {
+                config.plugins_root.join("runtime")
+            } else {
+                config.plugin_runtime_dir.clone()
+            };
+            let runtime = RuntimeConfig {
+                binary: config.plugin_workerd_binary.clone(),
+                runtime_dir,
+                commerce_addr: config.plugin_commerce_addr,
+                runtime_token: plugin_runtime_token.clone().unwrap_or_default(),
+                ..RuntimeConfig::default()
+            };
+            match PluginHost::new(runtime) {
+                Ok(host) => Some(Arc::new(host)),
+                Err(error) => {
+                    tracing::warn!(error = %error, "plugin host is unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let plugin_artifacts = Arc::new(ArtifactStore::new(
+            config.plugins_root.clone(),
+            ArchiveLimits {
+                max_archive_bytes: config.max_plugin_archive_bytes as u64,
+                ..ArchiveLimits::default()
+            },
+            config.max_plugin_module_bytes,
+        ));
         Self {
             config,
             platform,
@@ -331,6 +427,15 @@ impl AppContext {
             storage,
             inquiry_limiter: RateLimiter::new(5, Duration::from_secs(10 * 60)),
             upload_limiter: RateLimiter::new(10, Duration::from_secs(60 * 60)),
+            plugin_artifacts,
+            plugin_runtime_token,
+            plugin_host,
+            plugin_tokens,
+            plugin_egress: Arc::new(EgressLimiter::new()),
+            plugin_call_replay: moka::future::Cache::builder()
+                .max_capacity(100_000)
+                .time_to_live(Duration::from_secs(60))
+                .build(),
         }
     }
 

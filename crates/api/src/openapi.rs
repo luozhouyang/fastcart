@@ -555,6 +555,7 @@ fn generated_api() -> utoipa::openapi::OpenApi {
         .merge(crate::routes::admin_inventory::openapi_router())
         .merge(crate::routes::admin_orders::openapi_router())
         .merge(crate::routes::admin_payments::openapi_router())
+        .merge(crate::routes::admin_plugins::openapi_router())
         .merge(crate::routes::admin_pricing::openapi_router())
         .merge(crate::routes::admin_promotions::openapi_router())
         .merge(crate::routes::admin_regions::openapi_router())
@@ -946,11 +947,11 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 187);
+        assert_eq!(count("/api/v1/admin"), 193);
         assert_eq!(count("/api/v1/store"), 46);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 258);
+        assert_eq!(paths.len(), 264);
 
         for key in [
             "/api/v1/platform/stores",
@@ -1062,7 +1063,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 366);
+        assert_eq!(operation_count, 373);
     }
 
     #[test]

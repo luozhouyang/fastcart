@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
+use axum::middleware;
 use tokio::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -88,6 +89,27 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
         router = router.nest("/internal/ssr/v1/deployments", deployments);
     }
 
+    if let Some(token) = context.plugin_runtime_token.clone() {
+        let runtime =
+            routes::internal_plugin_runtime::router().layer(middleware::from_fn_with_state(
+                routes::internal_plugin_runtime::PluginRuntimeAuthState { token },
+                routes::internal_plugin_runtime::auth_middleware,
+            ));
+        router = router.nest("/internal/plugins/v1/stores/{store_id}", runtime);
+    }
+
+    if context.config.plugins_enabled {
+        let plugin_api = routes::plugin_api::router().layer(middleware::from_fn_with_state(
+            context.clone(),
+            routes::plugin_api::auth_middleware,
+        ));
+        router = router.nest("/internal/plugins/v1", plugin_api);
+    }
+    router = router
+        .merge(routes::store::apps_router(&context))
+        .merge(routes::store::extensions_router(&context))
+        .merge(routes::plugin_ui::router());
+
     let router = router
         .fallback(routes::storefront::render)
         .with_state(context.clone());
@@ -101,7 +123,10 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
     let asset_upload = with_common_layers(
         asset_upload,
         &context,
-        context.config.max_asset_upload_bytes,
+        context
+            .config
+            .max_asset_upload_bytes
+            .max(context.config.max_plugin_archive_bytes),
     );
     router.merge(upload).merge(asset_upload)
 }

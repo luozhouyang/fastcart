@@ -1,6 +1,7 @@
 //! Process-level state shared by bootstrap and the HTTP layer.
 
 use std::fs::OpenOptions;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -158,6 +159,31 @@ impl AppState {
             upload_ttl_seconds: config.inquiries.upload_ttl_seconds,
             inquiry_retention_days: config.inquiries.retention_days,
             notification_retention_days: config.notifications.retention_days,
+            plugins_root: config.plugins.root.clone(),
+            max_plugin_archive_bytes: config.plugins.max_archive_bytes,
+            max_plugin_module_bytes: config.plugins.max_module_bytes,
+            plugins_enabled: config.plugins.enabled,
+            plugin_runtime_token: config.plugins.runtime_token.clone(),
+            plugin_workerd_binary: config.plugins.workerd_binary.clone(),
+            plugin_runtime_dir: config.plugins.runtime_dir.clone(),
+            plugin_commerce_addr: config.plugins.self_address.unwrap_or_else(|| {
+                let ip = config
+                    .server
+                    .host
+                    .parse::<IpAddr>()
+                    .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+                let ip = if ip.is_unspecified() {
+                    IpAddr::V4(Ipv4Addr::LOCALHOST)
+                } else {
+                    ip
+                };
+                SocketAddr::new(ip, config.server.port)
+            }),
+            plugin_context_secret: config
+                .plugins
+                .context_secret
+                .clone()
+                .map(String::into_bytes),
         };
         let ssr_service = fastcart_ssr::SsrService::initialize(
             &config.ssr,
@@ -168,6 +194,14 @@ impl AppState {
         let universal_storefront = ssr_service
             .as_ref()
             .map(|runtime| Arc::clone(runtime) as Arc<dyn fastcart_ssr::UniversalStorefront>);
+        if config.plugins.enabled {
+            std::fs::create_dir_all(&config.plugins.root).with_context(|| {
+                format!(
+                    "failed to create plugin artifact directory {}",
+                    config.plugins.root.display()
+                )
+            })?;
+        }
         let email = build_email_service(&config.email)?;
         let context = Arc::new(
             AppContext::new(api_config, platform, databases.clone(), cache)
