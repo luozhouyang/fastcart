@@ -77,6 +77,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 | `apps/server`                    | Axum server bootstrap, configuration, graceful shutdown           |
 | `apps/admin`                     | React Admin application for the implemented store operations      |
 | `apps/storefront`                | TanStack Start reference harness (first universal-runtime target) |
+| `apps/docs`                      | Nimbus/Astro documentation site (`pnpm dev:docs`)                 |
 | `templates/storefront-tanstack`  | TanStack Start starter and artifact packager                      |
 | `templates/storefront-astro`     | Astro starter and Cloudflare adapter artifact packager            |
 | `templates/storefront-generic`   | Framework-free Fetch Handler artifact fixture                     |
@@ -461,6 +462,11 @@ The suite covers module rules, repository behaviour, platform auth/RBAC, cart an
 The living project docs — constitution, v1 PRD, decision records and architecture views — are in
 [`.livingdocs/`](.livingdocs/index.md). The design notes under `docs/` are local-only working
 material and are intentionally not versioned.
+
+The public documentation site is in [`apps/docs`](apps/docs/README.md). It uses
+[Cloudflare Nimbus](https://nimbus-docs.com) on Astro and is a pnpm workspace package, so it is
+installed and typechecked with the rest of the front end. Run it with `pnpm dev:docs`
+(<http://localhost:4321>); content lives in `apps/docs/src/content/docs/`.
 
 ## Roadmap
 

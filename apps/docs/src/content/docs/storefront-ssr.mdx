@@ -1,0 +1,376 @@
+---
+title: Storefront SSR
+description: How Fastcart turns a framework build into a supervised workerd runtime and renders storefront pages through it.
+sidebar:
+  order: 2
+---
+
+Fastcart does not embed React, Astro or TanStack in the Rust server, and it never hands storefront code a database connection. A storefront is built into a **Worker artifact** that runs in a separate `workerd` process. The Rust server owns the public HTTP surface, store resolution, caching, static assets and the store-scoped commerce API.
+
+<Aside type="note" title="Scope">
+  This page describes the universal SSR runtime in `crates/ssr` and `crates/ssr-workerd`, the
+  artifact contract in `packages/storefront-build`, and the reference build in
+  `templates/storefront-tanstack`. The `apps/storefront` app is a development harness; the legacy
+  theme bundles and the Node sidecar are transitional and are not part of this path.
+</Aside>
+
+## Two processes, one contract
+
+The deployment keeps a hard process boundary between commerce and rendering:
+
+- **`fastcart-serve`** is the only public listener. It resolves the store from the request `Host`, looks up the active deployment, serves cache hits, forwards misses to the runtime, streams the response back, and serves client assets from the artifact.
+- **`workerd`** executes the framework's Fetch handler. It speaks HTTP only on a loopback port, gets no database handle, and reaches commerce through the authenticated internal API.
+
+The contract between the two sides is deliberately small: a standard Worker entrypoint.
+
+```ts
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return new Response("Hello Fastcart");
+  },
+};
+```
+
+Any framework that can emit this entrypoint can be deployed to Fastcart. TanStack Start and Astro have reference packagers; SvelteKit and framework-free Fetch handlers have compatibility fixtures.
+
+<SsrTopology />
+
+| Concern          | `fastcart-serve`                       | `workerd`                                  |
+| ---------------- | -------------------------------------- | ------------------------------------------ |
+| Public HTTP      | Owns it                                | Never listens publicly                     |
+| Store resolution | `Host` → active store                  | Receives the resolved ids as headers       |
+| Commerce data    | Internal API + SQLite                  | Calls the internal API with a bearer token |
+| Rendering        | Streams the response                   | Runs the framework's Fetch handler         |
+| Cache            | Route cache in front of the gateway    | Framework-level caching only               |
+| Static assets    | Serves the artifact's client directory | May use the optional `ASSETS` binding      |
+| Lifecycle        | Imports artifacts, supervises groups   | One process per runtime group              |
+
+## Request lifecycle
+
+Only **unmatched** paths on a storefront host reach the SSR fallback. Routes under `/api`, `/internal`, `/health*` and `/metrics` are registered earlier and never rendered. Stored redirects, `/robots.txt` and `/sitemap.xml` are also answered by the Rust server before the runtime is consulted, so they keep working when SSR is disabled.
+
+<SsrRequestFlow />
+
+### 1. Resolve the store from the Host
+
+The fallback requires a `Host` header, then calls the platform store resolver. A host with no active store is a `404`; there is no client-supplied store selector on storefront routes. The resolved record supplies the store id, locale, currency and timezone used for trusted context.
+
+### 2. Find the active deployment
+
+`SsrService` keeps a deployment map keyed by store id. A store with no explicit deployment can fall back to the configured default deployment. If SSR is enabled but no deployment exists, the response is a `404` with `{"error":"SSR_DEPLOYMENT_NOT_FOUND"}`.
+
+The service then builds an `SsrRequestContext` containing:
+
+- the store id and active deployment id;
+- a request correlation id;
+- locale, currency and an optional market id;
+- the public scheme (`http` or `https`, after trusted-proxy handling);
+- a preview flag;
+- the per-store internal credential, when one is available.
+
+### 3. Check the route cache
+
+Cache lookup happens before any work is forwarded. It is intentionally conservative: only `GET` requests without `Authorization`, `Cookie` or `Cache-Control: no-cache` are eligible. The key is the store id, the path and query, and the raw `Accept-Language` header.
+
+A hit is returned without touching `workerd` and carries `x-fastcart-cache: HIT` plus an `Age` header. A miss that ends up stored is marked `x-fastcart-cache: MISS`.
+
+### 4. Cross the gateway
+
+The gateway forwards the request over loopback HTTP and rewrites the trust boundary. Every client-supplied `x-fastcart-*`, `Forwarded`, `X-Forwarded-*` and `X-Real-IP` header is removed first, then the trusted values are inserted. Hop-by-hop headers (`Connection`, `Transfer-Encoding`, `Upgrade`, and friends) are removed in both directions.
+
+| Injected header             | Value                                              |
+| --------------------------- | -------------------------------------------------- |
+| `x-fastcart-store-id`       | Resolved store id                                  |
+| `x-fastcart-deployment-id`  | Active deployment id                               |
+| `x-fastcart-request-id`     | Request id, or `ssr` when absent                   |
+| `x-fastcart-locale`         | Store locale, when configured                      |
+| `x-fastcart-currency`       | ISO 4217 code, when configured                     |
+| `x-fastcart-market-id`      | Optional market id                                 |
+| `x-fastcart-internal-token` | Short-lived per-store bearer token                 |
+| `x-fastcart-preview`        | `1` only for a preview deployment                  |
+| `x-fastcart-assets-prefix`  | `/_fastcart/assets` or `/_fastcart/preview-assets` |
+| `x-forwarded-host`          | The original public `Host`                         |
+| `x-forwarded-proto`         | The public scheme                                  |
+
+The original `Host` is not forwarded as `Host`; `workerd` listens on a loopback socket and the public host is carried in `x-forwarded-host`.
+
+### 5. Render inside the Worker
+
+`workerd` loads the artifact's JavaScript modules, with the manifest entry first, and invokes its default export with a standard Fetch `Request`. The Worker can stream a response, set cookies, redirect, or render with its framework's server entry.
+
+When it needs commerce data, it calls the server-only API. The gateway has already placed the store and token in request headers, so a handler can build a server client without trusting anything from the browser:
+
+```ts title="worker entry (illustrative)"
+import { createServerStorefrontClient } from "@fastcart/storefront-sdk/server";
+
+export default {
+  async fetch(request: Request): Promise<Response> {
+    const storeId = request.headers.get("x-fastcart-store-id");
+    const internalToken = request.headers.get("x-fastcart-internal-token");
+    if (!storeId || !internalToken) {
+      return new Response("missing Fastcart context", { status: 500 });
+    }
+
+    const storefront = createServerStorefrontClient({
+      // The server origin this Worker calls.
+      origin: "http://127.0.0.1:8080",
+      storeId,
+      internalToken,
+    });
+
+    const product = await storefront.products.getByHandle("hoodie");
+
+    // The framework renders the page; this example returns a minimal shell.
+    return new Response(`<h1>${product.product.title}</h1>`, {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  },
+};
+```
+
+The internal API takes the store from the **path**, not from `Host`:
+
+```text
+GET http://127.0.0.1:8080/internal/ssr/v1/stores/{store_id}/products/hoodie
+Authorization: Bearer <internal token>
+```
+
+That token is scoped to one store. A preview token is read-only and rejects methods other than `GET`, `HEAD` and `OPTIONS`. The API is only mounted when `internal_ssr_credentials` is configured.
+
+### 6. Stream the response back
+
+The runtime response keeps its status, headers and body. The gateway returns the body as a stream, so the first HTML bytes can reach the browser before the Worker has finished. Duplicate `Set-Cookie` headers are preserved. If the Worker did not set `Cache-Control`, the server adds `Cache-Control: no-store`.
+
+Eligible responses are buffered up to 2 MiB, stored in the route cache, and then streamed to the client. A response that is too large, sets a cookie, or is marked `private` or `no-store` is streamed without caching.
+
+<SsrRequestSequence />
+
+## What gets cached
+
+The cache is a per-process, in-memory map. It is not shared between replicas and does not survive a restart. That keeps invalidation simple and makes a cache hit cheap, but it is not a CDN.
+
+A response is cached only when **all** of these hold:
+
+- the request was an eligible `GET` and the key was computed;
+- the Worker returned `200 OK`;
+- there is no `Set-Cookie` header;
+- `Cache-Control` does not contain `no-store` or `private`;
+- `Cache-Control` contains a positive `s-maxage` or `max-age` (`s-maxage` wins when both are present);
+- the body is no larger than 2 MiB.
+
+The cache holds at most 1,000 entries; when it is full, it is cleared rather than evicted one entry at a time.
+
+Entries are invalidated for a store when:
+
+- a new deployment is activated or rolled back;
+- a successful non-`GET` request goes through the store API (the context-invalidation middleware clears the store's entries).
+
+The HTTP response tells you what happened:
+
+| Header                   | Meaning                                              |
+| ------------------------ | ---------------------------------------------------- |
+| `x-fastcart-cache: HIT`  | Served from the route cache; never reached `workerd` |
+| `x-fastcart-cache: MISS` | Reached `workerd` and the response was stored        |
+| (absent)                 | The request or response was not cacheable            |
+
+## Static assets
+
+The browser fetches client assets directly from the Rust server; they do not go through `workerd` on every request:
+
+```text
+/_fastcart/assets/<path>          production artifact
+/_fastcart/preview-assets/<path>  preview artifact, cookie-authorized
+/_app/<path>                      SvelteKit compatibility alias
+```
+
+Assets are served from the artifact's `assets.directory` after path-traversal checks. The response includes an `ETag` derived from size and modification time, supports `If-None-Match` (`304`) and a single byte `Range` (`206`, or `416` when unsatisfiable), and uses `Cache-Control: public, max-age=31536000, immutable`. Content-hashed filenames from the framework build are therefore safe to cache for a year.
+
+Old asset roots stay readable while a replaced deployment drains, so an HTML document served by the previous runtime can still load its assets.
+
+A preview build must be packaged with the preview prefix:
+
+```bash
+pnpm --filter @fastcart/storefront-tanstack build:artifact:preview
+```
+
+The gateway also exposes the current prefix in `x-fastcart-assets-prefix` for Workers that want to build asset URLs at request time.
+
+## The artifact contract
+
+Every framework build is packaged into the same directory shape:
+
+```text
+dist/artifacts/<digest>/
+├── fastcart-ssr.json     # manifest
+├── worker/index.js       # Fetch handler entry
+├── client/               # browser assets
+└── ...
+```
+
+The manifest is the boundary between the framework and the runtime:
+
+```json title="fastcart-ssr.json"
+{
+  "schema_version": "1",
+  "artifact_id": "tanstack-fixture",
+  "framework": { "name": "tanstack-start", "version": "1.169.5" },
+  "runtime": {
+    "engine": "workerd",
+    "compatibility_date": "2026-11-01",
+    "compatibility_flags": [],
+    "required_capabilities": ["fetch", "streams", "web-crypto"]
+  },
+  "entry": { "type": "worker", "path": "worker/index.js", "export": "default" },
+  "assets": { "directory": "client", "base_path": "/_fastcart/assets/" },
+  "rendering": { "mode": "hybrid", "streaming": true },
+  "build": { "build_id": "tanstack-fixture", "created_at": "2026-11-09T10:44:15.774Z" }
+}
+```
+
+| Field                           | Purpose                                                                                   |
+| ------------------------------- | ----------------------------------------------------------------------------------------- |
+| `schema_version`                | Contract version; the runtime currently accepts `1`                                       |
+| `artifact_id`                   | Stable identity, 1–128 safe characters                                                    |
+| `framework`                     | Framework name and version, recorded for diagnostics                                      |
+| `runtime.engine`                | Must be `workerd`                                                                         |
+| `runtime.compatibility_date`    | Workerd compatibility date from the framework build                                       |
+| `runtime.compatibility_flags`   | Workerd compatibility flags                                                               |
+| `runtime.required_capabilities` | Declared capabilities: `fetch`, `streams`, `web-crypto`, `timers`, `url`, `nodejs-compat` |
+| `entry`                         | Worker module path and export name (`default`)                                            |
+| `assets`                        | Client asset directory and public base path                                               |
+| `rendering`                     | `static`, `ssr` or `hybrid`, plus whether the body may stream                             |
+| `build`                         | Build id and creation timestamp                                                           |
+
+Packaging validates the manifest and the tree before copying anything. It rejects absolute paths, `..` traversal, symlinks, a missing entry or asset directory, unsupported capabilities, and the configured size limits (100 MiB and 5,000 files by default). The tree is hashed with SHA-256 and imported into the artifact store under `<store>/<digest>`, so importing identical content is idempotent.
+
+```bash
+pnpm --filter @fastcart/storefront-tanstack build:artifact
+# artifact=templates/storefront-tanstack/dist/artifacts/<digest>
+# digest=<sha256>
+```
+
+## Activation, rollback and previews
+
+Activation is a warm swap. The new artifact must be imported, configured and healthy before traffic moves.
+
+<SsrDeploySequence />
+
+The server-only endpoint accepts a deployment id and an absolute artifact path:
+
+```bash
+curl -sS -X POST \
+  "http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/activate" \
+  -H "authorization: Bearer $INTERNAL_TOKEN" \
+  -H "content-type: application/json" \
+  --data '{
+    "deployment_id": "deploy-2026-11-12",
+    "artifact_path": "/srv/fastcart/artifacts/ebbff9196790bcdd8d32ea9f06c3d5851261605a7af770050d95bbbdd89371c5"
+  }'
+```
+
+The handler authorizes the credential against the store, then `SsrService`:
+
+1. validates the ids and confines the path under `ssr.artifact_root` when one is configured;
+2. imports and validates the artifact, and copies it into the content-addressed store;
+3. reserves a free loopback port and creates a new runtime group;
+4. generates `config.capnp` for that group;
+5. spawns `workerd serve`, waits for `/__fastcart/health`, and creates the gateway;
+6. swaps the deployment map, clears the store's route cache, and persists `deployment-state.json`;
+7. schedules the previous runtime for drain after `drain_timeout_ms` (5 seconds by default).
+
+Rollback reactivates the previous deployment from a small in-memory history (the last three activations):
+
+```bash
+curl -sS -X POST \
+  "http://127.0.0.1:8080/internal/ssr/v1/deployments/$STORE_ID/rollback" \
+  -H "authorization: Bearer $INTERNAL_TOKEN"
+```
+
+Previews use their own map and never replace the live deployment:
+
+```text
+POST /internal/ssr/v1/deployments/{store_id}/preview/activate
+POST /internal/ssr/v1/deployments/{store_id}/preview/deactivate
+```
+
+A preview runtime receives `x-fastcart-preview: 1`, the preview asset prefix, and a read-only credential. Draft previews that arrive through `/preview` are served by the preview deployment and bypass the route cache. Preview asset requests require a signed preview cookie and are sent with `Vary: Cookie`.
+
+### Configuration
+
+A single default deployment is enough to run one storefront. Per-store deployments can be listed when stores need different artifacts or ports.
+
+```toml title="config/config.toml"
+[ssr]
+enabled = true
+binary = "./experiments/workerd/bin/workerd"
+artifact_path = "./templates/storefront-tanstack/dist/artifacts/<digest>"
+runtime_dir = "./data/ssr"
+listen = "127.0.0.1:18888"
+deployment_id = "tanstack-fixture"
+# Seeds the credential store; rotate it with the deployment endpoints.
+internal_token = "replace-with-a-long-random-token"
+
+[ssr.credentials]
+backend = "file"
+mode = "read_write"
+required = true
+```
+
+Useful environment overrides:
+
+```text
+FASTCART_SSR_ENABLED
+FASTCART_SSR_BINARY
+FASTCART_SSR_ARTIFACT
+FASTCART_SSR_RUNTIME_DIR
+FASTCART_SSR_LISTEN
+FASTCART_SSR_DEPLOYMENT_ID
+FASTCART_SSR_INTERNAL_TOKEN
+```
+
+Runtime state lives under `ssr.runtime_dir`:
+
+```text
+data/ssr/
+├── deployment-state.json          # persisted active deployments
+├── internal-ssr-credentials.json  # credential backend (encryptable)
+├── artifacts/<store>/<digest>/    # imported, content-addressed artifacts
+└── runtime/groups/<group>/config.capnp
+```
+
+## Isolation and failure modes
+
+- **Process isolation.** A JavaScript crash, memory spike or runaway render terminates the runtime group, not the Rust process or the database.
+- **No ambient authority.** The Worker has no SQLite handle and no platform credential. It gets a store-scoped internal token and a small set of Web APIs; required capabilities are declared in the manifest and validated on import.
+- **Trusted context only.** Client-supplied Fastcart headers are stripped before the trusted ones are written. The internal API resolves the store from its path and validates the credential's store scope.
+- **Loopback only.** The workerd listening address is selected from free loopback ports; it is never the public listener.
+
+| Condition                                              | Result                                                                |
+| ------------------------------------------------------ | --------------------------------------------------------------------- |
+| No active store for the `Host`                         | `404`                                                                 |
+| SSR disabled or not configured                         | `404` from the storefront fallback                                    |
+| No active deployment for the store                     | `404` with `SSR_DEPLOYMENT_NOT_FOUND`                                 |
+| Runtime not running, unhealthy or failed to start      | `503` with `SSR_RUNTIME_UNAVAILABLE`                                  |
+| Invalid runtime config, unknown group or restart limit | `502` with `SSR_RUNTIME_ERROR`                                        |
+| Transport or request failure                           | `502` with `SSR_REQUEST_FAILED`                                       |
+| Worker returns a non-2xx response                      | Passed through unchanged; it is not a gateway error                   |
+| Worker throws or the connection drops                  | Framework error handling, then a gateway error if no response arrives |
+
+## Current limits
+
+The universal runtime is deliberately narrower than a full Workers platform:
+
+- The artifact declares `static`, `ssr` or `hybrid`, but the runtime always invokes the Fetch handler; static output is still served as client assets by Rust.
+- There is no incremental static regeneration and no distributed cache.
+- The route cache is per process and memory-only; multiple replicas do not share entries.
+- Arbitrary Cloudflare bindings are not exposed. The contract lists the supported capabilities, and the generated config provides only the optional `ASSETS` disk binding and an isolated cache outbound.
+- `nodejs-compat` is a compatibility declaration, not a complete Node.js runtime. Check workerd's compatibility flags for the APIs a framework needs.
+- Restart supervision is in-process: `RuntimeManager` can restart a group with backoff and a `max_restarts` cap, but group state and counters are not persisted.
+
+## Related
+
+- [Quickstart](/quickstart/) — build the workspace and run the API and admin.
+- [ADR 0007: Universal SSR runtime with workerd](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md)
+- [Universal SSR runtime design](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/architecture/universal-ssr-runtime.md)
+- [Artifact manifest schema](https://github.com/luozhouyang/fastcart/blob/main/schemas/storefront-artifact/manifest.schema.json)
+- [TanStack Start reference template](https://github.com/luozhouyang/fastcart/tree/main/templates/storefront-tanstack)

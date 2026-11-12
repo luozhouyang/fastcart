@@ -25,3 +25,14 @@ templates/*/.svelte-kit
 crates/notifications/templates/*.html
 experiments/workerd/plugins/report
 experiments/workerd/plugins/html
+
+# Prettier's MDX printer collapses fenced code inside JSX components such as
+# <Step>, which breaks the MDX. Content is maintained by hand.
+apps/docs/src/content/**/*.mdx
+
+# Nimbus docs site (generated starter files are kept verbatim)
+apps/docs/AGENT.md
+apps/docs/CLAUDE.md
+apps/docs/.astro
+apps/docs/.wrangler
+apps/docs/.nimbus

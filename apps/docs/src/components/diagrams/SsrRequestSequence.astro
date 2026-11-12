@@ -1,0 +1,136 @@
+---
+/**
+ * Sequence diagram for one cache-miss storefront render, followed by a client
+ * asset request. Solid arrows are calls; dashed arrows are responses.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    class="fc-seq"
+    viewBox="0 0 920 780"
+    role="img"
+    aria-labelledby="fc-seq-title fc-seq-desc"
+  >
+    <title id="fc-seq-title">Sequence of a storefront SSR request</title>
+    <desc id="fc-seq-desc">
+      The router resolves the store and calls SsrService. SsrService misses its
+      route cache and forwards over the gateway to workerd. The Worker calls the
+      internal commerce API with a bearer token, receives JSON, renders HTML, and
+      streams it back. The browser then fetches a client asset, which the Rust
+      server serves from the artifact with an immutable cache policy.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-seq-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <!-- Participants -->
+    <rect class="fc-box-accent" x="0" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="60" y="46" text-anchor="middle">Browser</text>
+
+    <rect class="fc-box-accent" x="140" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="200" y="46" text-anchor="middle">Router</text>
+
+    <rect class="fc-box-brand" x="310" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="370" y="46" text-anchor="middle">SsrService</text>
+
+    <rect class="fc-box" x="460" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="520" y="46" text-anchor="middle">Gateway</text>
+
+    <rect class="fc-box" x="610" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="670" y="46" text-anchor="middle">workerd</text>
+
+    <rect class="fc-box-accent" x="765" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="825" y="46" text-anchor="middle">Internal API</text>
+
+    <!-- Lifelines -->
+    <path class="fc-lifeline" d="M 60 60 V 740"></path>
+    <path class="fc-lifeline" d="M 200 60 V 740"></path>
+    <path class="fc-lifeline" d="M 370 60 V 740"></path>
+    <path class="fc-lifeline" d="M 520 60 V 740"></path>
+    <path class="fc-lifeline" d="M 670 60 V 740"></path>
+    <path class="fc-lifeline" d="M 825 60 V 740"></path>
+
+    <!-- Resolve store -->
+    <path class="fc-line" d="M 60 100 H 198" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="66" y="94">GET /products/hoodie · Host</text>
+
+    <path class="fc-line" d="M 200 130 H 368" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="206" y="124">render(request, StoreContext)</text>
+
+    <path class="fc-line" d="M 370 160 h 30 v 12 h -30" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="406" y="154">lookup deployment</text>
+
+    <path class="fc-line" d="M 370 190 h 30 v 12 h -30" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="406" y="184">cache key → MISS</text>
+
+    <!-- Forward -->
+    <path class="fc-line" d="M 370 220 H 518" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="376" y="214">forward_streaming(request, context)</text>
+
+    <path class="fc-line" d="M 520 250 h 30 v 12 h -30" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-mono-muted" x="556" y="244">strip + inject headers</text>
+
+    <path class="fc-line-brand" d="M 520 280 H 668" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="526" y="274">HTTP 127.0.0.1:PORT</text>
+
+    <path class="fc-line" d="M 670 310 h 30 v 12 h -30" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="706" y="304">fetch(request, env, ctx)</text>
+
+    <!-- Commerce call -->
+    <path class="fc-line" d="M 670 340 H 823" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-mono-muted" x="676" y="334">internal products · Bearer</text>
+
+    <path class="fc-line" d="M 825 370 h 30 v 12 h -30" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="794" y="364" text-anchor="end">scope + store DB</text>
+
+    <path class="fc-line-dashed" d="M 825 400 H 672" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="818" y="394" text-anchor="end">200 JSON</text>
+
+    <path class="fc-line" d="M 670 430 h 30 v 12 h -30" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="706" y="424">render HTML stream</text>
+
+    <!-- Return -->
+    <path class="fc-line-dashed" d="M 670 460 H 522" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="664" y="454" text-anchor="end">200 text/html · stream</text>
+
+    <path class="fc-line-dashed" d="M 520 490 H 372" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="514" y="484" text-anchor="end">filtered headers + stream</text>
+
+    <path class="fc-line" d="M 370 520 h 30 v 12 h -30" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="406" y="514">cache if eligible (MISS)</text>
+
+    <path class="fc-line-dashed" d="M 370 550 H 202" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="364" y="544" text-anchor="end">streamed Response</text>
+
+    <path class="fc-line-dashed" d="M 200 580 H 62" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="194" y="574" text-anchor="end">HTML + hydration</text>
+
+    <!-- Assets -->
+    <path class="fc-line" d="M 60 625 H 198" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="66" y="619">GET /_fastcart/assets/app.js</text>
+
+    <path class="fc-line" d="M 200 655 H 368" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-mono-muted" x="206" y="649">serve_asset(path, headers)</text>
+
+    <path class="fc-line-dashed" d="M 370 690 H 62" marker-end="url(#fc-seq-arrow)"></path>
+    <text class="fc-sub" x="66" y="684">200 immutable · ETag · Range</text>
+  </svg>
+  <figcaption>
+    <strong>Figure 3.</strong> One cache-miss render and the client asset
+    request that follows it. The Worker talks to the commerce API over HTTP; it
+    never receives a SQLite handle. The asset response is served by the Rust
+    process, so it does not wake <code>workerd</code>.
+  </figcaption>
+</figure>

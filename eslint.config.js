@@ -9,6 +9,8 @@ export default tseslint.config(
       "**/dist/**",
       "**/.tanstack/**",
       "**/.astro/**",
+      "**/.wrangler/**",
+      "**/.nimbus/**",
       "**/.svelte-kit/**",
       "**/node_modules/**",
       "**/.cargo-home/**",

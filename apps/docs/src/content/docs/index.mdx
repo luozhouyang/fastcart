@@ -1,0 +1,70 @@
+---
+title: Introduction
+description: Fastcart is a lightweight, self-hosted, multi-store commerce platform built with Rust and React.
+sidebar:
+  order: 0
+---
+
+Fastcart is a lightweight, self-hosted, multi-store commerce platform built with Rust and React.
+It pairs a single Rust modular monolith with one SQLite database per store, an operational React
+admin, and a process-isolated universal SSR runtime.
+
+<Aside type="tip" title="New here?">
+  Start with the [quickstart](/quickstart/) to build the workspace, create your first store, and run
+  the API and admin locally.
+</Aside>
+
+## What you can do
+
+- **Run your own commerce stack.** One binary, SQLite storage, and no mandatory Docker, Redis,
+  PostgreSQL, or message broker.
+- **Operate multiple stores.** Every store owns an isolated database and is resolved from the
+  request `Host` header on storefront routes.
+- **Extend the platform.** Commerce modules are independent crates, and capabilities are exposed
+  through provider interfaces, plugins, workflows, and an auditable AI tool registry.
+
+## Get started
+
+<Steps>
+  <Step title="Build the workspace">
+    ```sh
+    cargo build --workspace
+    ```
+  </Step>
+  <Step title="Initialize the platform">
+    ```sh
+    cargo run -p fastcart-cli -- init --dir .
+    ```
+  </Step>
+  <Step title="Create an owner account">
+    ```sh
+    cargo run -p fastcart-cli -- user create \
+      --email owner@example.com --password 'change-me-please'
+    ```
+  </Step>
+  <Step title="Create a store">
+    ```sh
+    cargo run -p fastcart-cli -- store create \
+      --name "Demo Store" --slug demo --domain shop.example.com \
+      --owner-email owner@example.com
+    ```
+  </Step>
+  <Step title="Serve the API">
+    ```sh
+    cargo run -p fastcart-cli -- serve
+    ```
+  </Step>
+</Steps>
+
+The API listens on `http://localhost:8080` by default. In another terminal, run the admin with
+`pnpm dev:admin` and open `http://localhost:5174`.
+
+## Explore the platform
+
+- [Quickstart](/quickstart/) — install, bootstrap, and run Fastcart.
+- [Storefront SSR](/storefront-ssr/) — how a framework build becomes a supervised `workerd`
+  runtime and renders pages.
+- [Repository README](https://github.com/luozhouyang/fastcart#readme) — backend modules, APIs, and
+  configuration.
+- [Architecture decisions](https://github.com/luozhouyang/fastcart/tree/main/.livingdocs/adr) —
+  the records behind the platform design.
