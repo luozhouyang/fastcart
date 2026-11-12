@@ -77,6 +77,19 @@ Three scaffold sets live inside the CLI and in the repository:
 
 ## 5. Five-minute flow
 
+For a complete local demo without manual steps:
+
+```bash
+./scripts/plugin-demo.sh
+```
+
+It creates `.fastcart-demo/`, seeds a store and owner, packs and installs
+`chat-widget`, then starts the API and admin on free-by-default demo ports
+(18080 / 15174). Ctrl-C stops both. `--clean` resets the demo, `--no-plugin`
+runs the admin only, and `--no-build` skips the Rust build on repeat runs.
+
+Manual plugin flow:
+
 ```bash
 fastcart-plugin init chat-widget --template chat
 cd chat-widget

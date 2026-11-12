@@ -107,6 +107,18 @@ cargo run -p fastcart-cli -- store create \
 cargo run -p fastcart-cli -- serve
 ```
 
+### One-command plugin demo
+
+If you just want to see the admin UI and the plugin extension points:
+
+```bash
+./scripts/plugin-demo.sh
+```
+
+The script builds the CLI, creates an isolated demo store under `.fastcart-demo/`, packs the chat example, installs and enables it, then starts the API and admin. It prints the admin URL and demo credentials, and stops both processes on Ctrl-C. Re-running reuses the demo data; `--clean` starts from scratch.
+
+Useful options: `--api-port`, `--admin-port`, `--no-plugin` (admin UI without workerd), `--no-build`, `--no-open`. The chat plugin needs the pinned workerd binary; install it with `scripts/install-workerd.sh` or set `FASTCART_WORKERD`.
+
 Alternatively, start the server first and bootstrap through `POST /api/v1/platform/auth/setup`; it only succeeds while no users exist.
 
 ### Configuration
