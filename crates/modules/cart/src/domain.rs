@@ -565,42 +565,81 @@ pub fn recalculate_totals(cart: &mut Cart) {
 ///
 /// Each line's share is proportional to the value it still has left after its
 /// own adjustments, and the shares sum to exactly the cart-level portion of
-/// [`CartTotals::discount_total`].
+/// [`CartTotals::discount_total`]. See [`allocate_cart_level_discount`] for the
+/// split itself.
+///
+/// # Errors
+///
+/// Returns a validation error only if the shares cannot be distributed, which
+/// the clamping in [`allocate_cart_level_discount`] makes unreachable.
+pub fn allocate_cart_discounts(cart: &Cart) -> Result<Vec<i64>, AppError> {
+    let line_subtotals: Vec<i64> = cart
+        .items
+        .iter()
+        .map(|item| item.unit_price.max(0).saturating_mul(item.quantity.max(0)))
+        .collect();
+    let line_adjustments: Vec<i64> = cart
+        .items
+        .iter()
+        .map(|item| {
+            item.adjustments
+                .iter()
+                .map(|adjustment| adjustment.amount.max(0))
+                .fold(0_i64, i64::saturating_add)
+        })
+        .collect();
+    let requested = cart
+        .discounts
+        .iter()
+        .map(|discount| discount.amount.max(0))
+        .fold(0_i64, i64::saturating_add);
+    allocate_cart_level_discount(&line_subtotals, &line_adjustments, requested)
+}
+
+/// Spreads a cart-level discount over the lines that can still absorb it.
+///
+/// Each line's share is proportional to the value it has left after its own
+/// adjustments, and the shares sum to exactly the amount the lines can absorb —
+/// never more than `requested`.
+///
+/// A cart-level discount is money off the cart rather than off a line, but the
+/// line is where the money is: order placement rebuilds each line from its own
+/// adjustments, and tax is charged per line on what it actually sells for. Both
+/// need the same split, so both ask here.
 ///
 /// # Errors
 ///
 /// Returns a validation error only if the shares cannot be distributed, which
 /// the clamping above makes unreachable.
-pub fn allocate_cart_discounts(cart: &Cart) -> Result<Vec<i64>, AppError> {
+pub fn allocate_cart_level_discount(
+    line_subtotals: &[i64],
+    line_adjustments: &[i64],
+    requested: i64,
+) -> Result<Vec<i64>, AppError> {
     // The running sum is kept exactly representable: `allocate_proportionally`
     // requires its parts to sum to the total it is given, and a saturated total
     // does not satisfy that (two lines near `i64::MAX` overflow it again inside
     // the allocator). At these magnitudes the cart's own totals are saturated
     // anyway, so a line that cannot fit loses the excess rather than letting the
     // parts disagree with the total — which would over-allocate discounts.
-    let mut headroom: Vec<i64> = Vec::with_capacity(cart.items.len());
+    let mut headroom: Vec<i64> = Vec::with_capacity(line_subtotals.len());
     let mut total = 0_i64;
-    for item in &cart.items {
-        let line_subtotal = item.unit_price.max(0).saturating_mul(item.quantity.max(0));
-        let adjustments = item
-            .adjustments
-            .iter()
-            .map(|adjustment| adjustment.amount.max(0))
-            .fold(0_i64, i64::saturating_add);
+    for (index, line_subtotal) in line_subtotals.iter().enumerate() {
+        let line_subtotal = (*line_subtotal).max(0);
+        let adjustments = line_adjustments
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+            .max(0);
         let room = line_subtotal
             .saturating_sub(adjustments.min(line_subtotal))
             .min(i64::MAX - total);
         total += room;
         headroom.push(room);
     }
-    let requested = cart
-        .discounts
-        .iter()
-        .map(|discount| discount.amount.max(0))
-        .fold(0_i64, i64::saturating_add);
-    let amount = requested.min(total);
+    let amount = requested.max(0).min(total);
     if amount <= 0 {
-        return Ok(vec![0; cart.items.len()]);
+        return Ok(vec![0; line_subtotals.len()]);
     }
     fastcart_kernel::allocate_proportionally(&headroom, total, amount).map_err(AppError::from)
 }

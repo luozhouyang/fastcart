@@ -17,6 +17,6 @@ pub use domain::{
     CartItem, CartShippingMethod, CartStatus, CartTaxLine, CartTotals, CreateCartInput,
     DEFAULT_CART_TTL_SECONDS, DiscountInput, ItemPriceInput, MAX_ITEM_QUANTITY, RecalculationInput,
     SetShippingMethodInput, TaxLineInput, UpdateItemInput, allocate_cart_discounts,
-    calculate_totals, recalculate_totals,
+    allocate_cart_level_discount, calculate_totals, recalculate_totals,
 };
 pub use service::CartService;

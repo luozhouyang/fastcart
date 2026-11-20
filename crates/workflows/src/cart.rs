@@ -642,18 +642,50 @@ impl CartWorkflow {
                     .await?
             }
         };
+        // A cart-level discount is money off the cart, and a line's share of it
+        // comes off that line's price before it is taxed. Line adjustments have
+        // always reduced the taxable amount; leaving the cart-level part out
+        // charged the customer tax on money the promotion had taken off the
+        // bill.
+        let line_subtotals: Vec<i64> = cart
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                prices[index]
+                    .unit_price
+                    .max(0)
+                    .saturating_mul(item.quantity.max(0))
+            })
+            .collect();
+        let line_adjustment_totals: Vec<i64> = item_adjustments
+            .iter()
+            .map(|(_, adjustments)| {
+                adjustments
+                    .iter()
+                    .map(|entry| entry.amount.max(0))
+                    .fold(0_i64, i64::saturating_add)
+            })
+            .collect();
+        let cart_level_total = cart_discounts
+            .iter()
+            .map(|discount| discount.amount.max(0))
+            .fold(0_i64, i64::saturating_add);
+        let cart_level_shares = fastcart_module_cart::allocate_cart_level_discount(
+            &line_subtotals,
+            &line_adjustment_totals,
+            cart_level_total,
+        )?;
+
         let mut tax_lines = Vec::new();
         for (index, item) in cart.items.iter().enumerate() {
-            let line_subtotal = prices[index]
-                .unit_price
-                .max(0)
-                .saturating_mul(item.quantity.max(0));
+            let line_subtotal = line_subtotals[index];
             let discount: i64 = item_adjustments[index]
                 .1
                 .iter()
                 .map(|entry| entry.amount)
                 .sum();
-            let taxable = (line_subtotal - discount).max(0);
+            let taxable = (line_subtotal - discount - cart_level_shares[index]).max(0);
             let category = variants
                 .get(item.variant_id.as_str())
                 .and_then(|variant| variant.tax_category_id.clone())
