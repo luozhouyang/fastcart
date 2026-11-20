@@ -4,7 +4,7 @@
 //! place that turns catalog/pricing/promotion/tax data into those snapshots, so
 //! clients can never submit authoritative prices.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::ShippingOptionId;
@@ -307,16 +307,27 @@ impl CartWorkflow {
     ) -> Result<Cart, AppError> {
         let cart = self.cart.get_cart(cart_id).await?;
 
-        // 1. Refresh unit prices from the pricing module, in memory.
-        let mut prices = Vec::with_capacity(cart.items.len());
+        // 1. Refresh unit prices from the pricing module, in memory. Quantity
+        // is the only per-line input to price selection, so every line that
+        // shares a quantity is answered by one lookup covering all of its
+        // variants; a cart of `n` lines costs one lookup per distinct
+        // quantity, not one lookup per line.
+        let mut variants_by_quantity: BTreeMap<i64, Vec<String>> = BTreeMap::new();
         for item in &cart.items {
-            let price = self
+            variants_by_quantity
+                .entry(item.quantity)
+                .or_default()
+                .push(item.variant_id.to_string());
+        }
+        let mut selected_amounts: HashMap<(i64, String), i64> = HashMap::new();
+        for (quantity, variant_ids) in &variants_by_quantity {
+            let selected = self
                 .pricing
-                .calculate_price(
-                    item.variant_id.as_str(),
+                .calculate_prices(
+                    variant_ids,
                     &PriceContext {
                         currency: cart.currency_code.clone(),
-                        quantity: item.quantity,
+                        quantity: *quantity,
                         customer_group_id: context.customer_group_ids.first().cloned(),
                         sales_channel_id: cart
                             .sales_channel_id
@@ -325,7 +336,18 @@ impl CartWorkflow {
                         at: context.at,
                     },
                 )
-                .await?
+                .await?;
+            for (variant_id, price) in selected {
+                if let Some(price) = price {
+                    selected_amounts.insert((*quantity, variant_id), price.amount);
+                }
+            }
+        }
+        let mut prices = Vec::with_capacity(cart.items.len());
+        for item in &cart.items {
+            let unit_price = selected_amounts
+                .get(&(item.quantity, item.variant_id.to_string()))
+                .copied()
                 .ok_or_else(|| {
                     AppError::conflict(format!(
                         "no price is configured for variant {} in {}",
@@ -334,7 +356,7 @@ impl CartWorkflow {
                 })?;
             prices.push(ItemPriceInput {
                 item_id: item.id.clone(),
-                unit_price: price.amount,
+                unit_price,
             });
         }
 
