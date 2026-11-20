@@ -399,6 +399,8 @@ pub struct UpdatePromotionInput {
     pub ends_at: Option<Option<i64>>,
     /// New usage limit.
     pub usage_limit: Option<Option<i64>>,
+    /// New per-customer limit.
+    pub per_customer_limit: Option<Option<i64>>,
     /// Replacement metadata.
     pub metadata: Option<Metadata>,
     /// Replacement rules when present.

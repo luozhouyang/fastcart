@@ -599,3 +599,51 @@ async fn releasing_a_key_that_was_never_claimed_is_a_no_op() {
         0
     );
 }
+
+/// The per-customer limit is part of the promotion, so an update has to be able
+/// to set it and clear it again. Without this it could only ever be chosen when
+/// the promotion was created.
+#[tokio::test]
+async fn updating_a_promotion_changes_its_per_customer_limit() {
+    let (_directory, _db, service) = setup(2).await;
+    let promotion = service
+        .create_promotion(
+            CreatePromotionInput::new("Limited", PromotionType::Percentage, 1_000).active(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(promotion.per_customer_limit, None);
+
+    let updated = service
+        .update_promotion(
+            &promotion.id,
+            fastcart_module_promotion::UpdatePromotionInput {
+                per_customer_limit: Some(Some(2)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.per_customer_limit, Some(2));
+    assert_eq!(
+        service
+            .get_promotion(&promotion.id)
+            .await
+            .unwrap()
+            .per_customer_limit,
+        Some(2),
+        "the limit must be persisted, not just echoed back"
+    );
+
+    let cleared = service
+        .update_promotion(
+            &promotion.id,
+            fastcart_module_promotion::UpdatePromotionInput {
+                per_customer_limit: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.per_customer_limit, None);
+}

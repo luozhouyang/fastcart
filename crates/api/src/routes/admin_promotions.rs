@@ -415,6 +415,7 @@ pub struct UpdatePromotionRequest {
     ends_at: Option<Option<i64>>,
     #[serde(default, deserialize_with = "nullable")]
     usage_limit: Option<Option<i64>>,
+    per_customer_limit: Option<Option<i64>>,
     metadata: Option<Metadata>,
     rules: Option<Vec<PromotionRuleRequest>>,
 }
@@ -431,6 +432,7 @@ impl UpdatePromotionRequest {
             starts_at: self.starts_at,
             ends_at: self.ends_at,
             usage_limit: self.usage_limit,
+            per_customer_limit: self.per_customer_limit,
             metadata: self.metadata,
             rules: self
                 .rules

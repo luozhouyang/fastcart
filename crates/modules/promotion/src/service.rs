@@ -174,10 +174,11 @@ impl PromotionService {
         let ends_at = input.ends_at.unwrap_or(existing.ends_at);
         let usage_limit = input.usage_limit.unwrap_or(existing.usage_limit);
         let usage_count = existing.usage_count;
-        // `UpdatePromotionInput` has no field for it, so an update keeps the
-        // stored per-customer limit.
-        let per_customer_limit = existing.per_customer_limit;
+        let per_customer_limit = input
+            .per_customer_limit
+            .unwrap_or(existing.per_customer_limit);
         let metadata = input.metadata.unwrap_or(existing.metadata);
+        validate_per_customer_limit(per_customer_limit)?;
 
         validate_promotion_fields(
             &title,
@@ -200,7 +201,8 @@ impl PromotionService {
         let updated = sqlx::query(
             "UPDATE promotions
              SET code = ?, title = ?, type = ?, value = ?, status = ?, is_automatic = ?,
-                 starts_at = ?, ends_at = ?, usage_limit = ?, metadata = ?, updated_at = ?
+                 starts_at = ?, ends_at = ?, usage_limit = ?, per_customer_limit = ?,
+                 metadata = ?, updated_at = ?
              WHERE id = ? AND (? IS NULL OR ? >= usage_count)",
         )
         .bind(&code)
@@ -212,6 +214,7 @@ impl PromotionService {
         .bind(starts_at)
         .bind(ends_at)
         .bind(usage_limit)
+        .bind(per_customer_limit)
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(id)
