@@ -22,6 +22,7 @@ use fastcart_module_checkout::CheckoutService;
 use fastcart_module_inquiry::{InquiryFileService, InquiryService};
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::OrderService;
+use fastcart_module_promotion::PromotionService;
 use fastcart_module_webhook::WebhookService;
 use fastcart_notifications::{
     NotificationChannelService, NotificationOutcome, NotificationService, RenderContext,
@@ -54,6 +55,8 @@ pub struct MaintenanceReport {
     pub reservations_released: u64,
     /// Checkout sessions failed by expiry.
     pub checkouts_expired: u64,
+    /// Promotion usage claims given back by abandoned checkouts.
+    pub promotion_claims_released: u64,
     /// Order-refund rows backfilled from succeeded provider refunds.
     pub refunds_reconciled: u64,
     /// Outbox events dispatched.
@@ -239,6 +242,18 @@ impl StoreSweep<'_> {
             Ok(count) => report.checkouts_expired += count,
             Err(error) => {
                 tracing::warn!(store_id = %store.id, error = %error, "checkout expiry failed");
+                report.failures += 1;
+            }
+        }
+        // Runs after checkout expiry so a checkout that has just been swept to
+        // a terminal state gives its promotion claims back in the same pass.
+        match PromotionService::new(database.clone())
+            .release_abandoned_usage()
+            .await
+        {
+            Ok(count) => report.promotion_claims_released += count,
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "promotion claim release failed");
                 report.failures += 1;
             }
         }
@@ -472,6 +487,7 @@ impl MaintenanceReport {
         self.carts_expired += other.carts_expired;
         self.reservations_released += other.reservations_released;
         self.checkouts_expired += other.checkouts_expired;
+        self.promotion_claims_released += other.promotion_claims_released;
         self.refunds_reconciled += other.refunds_reconciled;
         self.outbox_dispatched += other.outbox_dispatched;
         self.audits_dispatched += other.audits_dispatched;

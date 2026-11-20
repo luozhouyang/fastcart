@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use fastcart_infrastructure::StoreDatabase;
-use fastcart_kernel::{AppError, CurrencyCode, StoreId};
+use fastcart_kernel::{AppError, CartId, CheckoutId, CurrencyCode, StoreId};
 use fastcart_module_promotion::{
     CampaignBudgetType, CreateCampaignInput, CreateCouponInput, CreatePromotionInput,
     PromotionService, PromotionType,
@@ -646,4 +646,105 @@ async fn updating_a_promotion_changes_its_per_customer_limit() {
         .await
         .unwrap();
     assert_eq!(cleared.per_customer_limit, None);
+}
+
+/// A claim is taken before the capture and moved onto the order once it is
+/// placed. A checkout that never gets that far — swept to `failed`, `canceled`
+/// or `expired` — would otherwise hold the redemption for good, so the
+/// promotion stays consumed for a discount nobody received.
+///
+/// The sweep deliberately keys off the checkout's *status* rather than its
+/// expiry timestamp: a checkout past its expiry can still be mid-completion,
+/// and releasing that claim would let a competing checkout take the last
+/// redemption while the first one is still placing its order.
+#[tokio::test]
+async fn usage_held_by_a_dead_checkout_is_released() {
+    let (_directory, db, service) = setup(2).await;
+    let promotion = service
+        .create_promotion(
+            CreatePromotionInput::new("Once", PromotionType::Percentage, 1_000)
+                .active()
+                .with_usage_limit(1),
+        )
+        .await
+        .unwrap();
+
+    let dead = CheckoutId::new();
+    let live = CheckoutId::new();
+    for checkout in [&dead, &live] {
+        sqlx::query(
+            "INSERT INTO checkout_sessions (id, cart_id, currency_code, status, created_at, updated_at)
+             VALUES (?, ?, 'USD', 'payment_pending', 0, 0)",
+        )
+        .bind(checkout.as_str())
+        .bind(CartId::new().as_str())
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+    service
+        .reserve_usage(&promotion.id, None, None, dead.as_str(), 0, Some("USD"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE checkout_sessions SET status = 'failed' WHERE id = ?")
+        .bind(dead.as_str())
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let released = service.release_abandoned_usage().await.unwrap();
+
+    assert_eq!(released, 1);
+    let reloaded = service.get_promotion(&promotion.id).await.unwrap();
+    assert_eq!(reloaded.usage_count, 0, "the redemption must be given back");
+    // And the promotion is redeemable again.
+    service
+        .reserve_usage(
+            &promotion.id,
+            None,
+            None,
+            CheckoutId::new().as_str(),
+            0,
+            Some("USD"),
+        )
+        .await
+        .unwrap();
+}
+
+/// A claim held by a checkout that is still in progress must be left alone.
+#[tokio::test]
+async fn usage_held_by_a_live_checkout_is_kept() {
+    let (_directory, db, service) = setup(2).await;
+    let promotion = service
+        .create_promotion(
+            CreatePromotionInput::new("Once", PromotionType::Percentage, 1_000)
+                .active()
+                .with_usage_limit(1),
+        )
+        .await
+        .unwrap();
+    let live = CheckoutId::new();
+    sqlx::query(
+        "INSERT INTO checkout_sessions (id, cart_id, currency_code, status, created_at, updated_at)
+         VALUES (?, ?, 'USD', 'payment_pending', 0, 0)",
+    )
+    .bind(live.as_str())
+    .bind(CartId::new().as_str())
+    .execute(db.pool())
+    .await
+    .unwrap();
+    service
+        .reserve_usage(&promotion.id, None, None, live.as_str(), 0, Some("USD"))
+        .await
+        .unwrap();
+
+    assert_eq!(service.release_abandoned_usage().await.unwrap(), 0);
+    assert_eq!(
+        service
+            .get_promotion(&promotion.id)
+            .await
+            .unwrap()
+            .usage_count,
+        1
+    );
 }

@@ -1032,6 +1032,34 @@ impl PromotionService {
         Ok(moved)
     }
 
+    /// Releases claims whose checkout never became an order.
+    ///
+    /// A claim is taken before the capture and moved onto the order once it is
+    /// placed. A checkout swept to `failed`, `canceled` or `expired` never
+    /// reaches that step, so nothing else would give the redemption back and the
+    /// promotion would stay consumed for a discount nobody received.
+    ///
+    /// The sweep keys off the checkout's status and not its expiry timestamp on
+    /// purpose: a checkout past its expiry can still be mid-completion, and
+    /// releasing that claim would let a competing checkout take the last
+    /// redemption while the first one is still placing its order.
+    pub async fn release_abandoned_usage(&self) -> Result<u64, AppError> {
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT pu.order_id FROM promotion_usage pu \
+             JOIN checkout_sessions cs ON pu.order_id = 'checkout:' || cs.id \
+             WHERE cs.status IN ('failed', 'canceled', 'expired')",
+        )
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+
+        let mut released = 0;
+        for key in keys {
+            released += self.release_usage(&key).await?;
+        }
+        Ok(released)
+    }
+
     /// Gives every usage a checkout claimed back, counters included.
     ///
     /// Deletes the `checkout:<checkout_id>` rows and reverses what the claim
