@@ -1,5 +1,9 @@
 //! Periodic maintenance over active store databases.
 
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use fastcart_email::{EmailService, SEND_EMAIL_JOB_TYPE};
@@ -23,10 +27,16 @@ use fastcart_notifications::{
     NotificationChannelService, NotificationOutcome, NotificationService, RenderContext,
     SEND_CHANNEL_NOTIFICATION_JOB_TYPE,
 };
-use fastcart_platform::{NewAudit, PlatformStore, StoreStatus};
+use fastcart_platform::{NewAudit, PlatformStore, Store, StoreStatus};
 
 /// How long a claimed job may go without a renewal before it is reaped.
 const JOB_LEASE_SECONDS: i64 = 300;
+
+/// How many store databases one maintenance sweep processes at once.
+///
+/// Store databases are independent, so stores are swept concurrently up to
+/// this bound; every step inside one store keeps its original order.
+const STORE_MAINTENANCE_CONCURRENCY: usize = 4;
 
 /// How often a running handler refreshes its job lease.
 const JOB_LEASE_RENEW_SECONDS: u64 = 60;
@@ -132,7 +142,17 @@ pub async fn run_maintenance_with_notifications(
         admin_base_url,
         locale: "zh-CN".to_owned(),
     };
-    let now = now_timestamp();
+    let sweep = StoreSweep {
+        platform,
+        databases,
+        events,
+        email,
+        notifications: &notifications,
+        channels: &channels,
+        render_context: &render_context,
+        allow_private_webhooks,
+        now: now_timestamp(),
+    };
     let mut offset = 0_i64;
     loop {
         let page = match platform
@@ -146,218 +166,18 @@ pub async fn run_maintenance_with_notifications(
                 break;
             }
         };
-        for store in &page.data {
-            if store.status != StoreStatus::Active {
-                continue;
-            }
-            let database = match databases.database(&store.id).await {
-                Ok(database) => database,
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "maintenance could not open store database");
-                    report.failures += 1;
-                    continue;
-                }
-            };
-            match CartService::new(database.clone()).expire_due(now).await {
-                Ok(count) => report.carts_expired += count,
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "cart expiry failed");
-                    report.failures += 1;
-                }
-            }
-            match InventoryService::new(database.clone())
-                .expire_due(now)
-                .await
-            {
-                Ok(count) => report.reservations_released += count,
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "reservation expiry failed");
-                    report.failures += 1;
-                }
-            }
-            match CheckoutService::new(database.clone()).expire_due(now).await {
-                Ok(count) => report.checkouts_expired += count,
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "checkout expiry failed");
-                    report.failures += 1;
-                }
-            }
-            match OrderService::new(database.clone())
-                .reconcile_provider_refunds()
-                .await
-            {
-                Ok(count) => {
-                    if count > 0 {
-                        tracing::warn!(
-                            store_id = %store.id,
-                            count,
-                            "backfilled order refunds from provider refunds"
-                        );
-                    }
-                    report.refunds_reconciled += count;
-                }
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "refund reconciliation failed");
-                    report.failures += 1;
-                }
-            }
-            let queue = JobQueue::new(database.pool().clone());
-            match queue.reap_expired(JOB_LEASE_SECONDS).await {
-                Ok(count) => report.jobs_reaped += count,
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "job lease reap failed");
-                    report.failures += 1;
-                }
-            }
-            match queue.claim("maintenance", 25).await {
-                Ok(jobs) => {
-                    run_claimed_jobs(
-                        "maintenance",
-                        &store.id,
-                        &database,
-                        &queue,
-                        jobs,
-                        email,
-                        &channels,
-                        now,
-                        &mut report,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "job claim failed");
-                    report.failures += 1;
-                }
-            }
-            match NotificationChannelService::recover_abandoned_claims(
-                &database,
-                now,
-                CHANNEL_CLAIM_LEASE_SECONDS,
-            )
-            .await
-            {
-                Ok(recovered) => {
-                    report.channel_claims_recovered += recovered;
-                    if recovered > 0 {
-                        tracing::warn!(
-                            store_id = %store.id,
-                            recovered,
-                            "recovered abandoned notification channel claims"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "channel claim recovery failed");
-                    report.failures += 1;
-                }
-            }
-            dispatch_outbox(
-                &store.id,
-                &database,
-                &queue,
-                events,
-                email,
-                &notifications,
-                &channels,
-                &render_context,
-                allow_private_webhooks,
-                &mut report,
-            )
-            .await;
-            // Audit rows are written by admin mutations before delivery. A
-            // failure here keeps the row pending for the next sweep and never
-            // aborts the rest of the maintenance pass.
-            match fetch_pending_audits(database.pool(), 100).await {
-                Ok(records) => {
-                    let mut dispatched = 0_u64;
-                    for record in records {
-                        let entry = NewAudit {
-                            actor_id: record.actor_id.clone(),
-                            store_id: record.store_id.clone(),
-                            action: record.action.clone(),
-                            resource_type: record.resource_type.clone(),
-                            resource_id: record.resource_id.clone(),
-                            data: serde_json::from_str(&record.data)
-                                .unwrap_or(serde_json::Value::Null),
-                            ip_address: None,
-                        };
-                        // The outbox id is the platform audit id, so a retry
-                        // after a failed "mark processed" cannot duplicate.
-                        match platform.record_audit_with_id(&record.id, &entry).await {
-                            Ok(()) => {
-                                match mark_audit_processed(database.pool(), &record.id).await {
-                                    Ok(()) => {
-                                        dispatched += 1;
-                                        report.audits_dispatched += 1;
-                                    }
-                                    Err(error) => {
-                                        // Delivery is idempotent by id, so this
-                                        // only causes a harmless redelivery
-                                        // attempt on the next sweep.
-                                        tracing::warn!(store_id = %store.id, audit_id = %record.id, error = %error, "audit processed marking failed");
-                                        report.failures += 1;
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                let attempt = record.attempts.saturating_add(1);
-                                tracing::warn!(
-                                    store_id = %store.id,
-                                    audit_id = %record.id,
-                                    action = %record.action,
-                                    attempt,
-                                    error = %error,
-                                    "audit delivery failed"
-                                );
-                                if let Err(mark_error) = mark_audit_failed(
-                                    database.pool(),
-                                    &record.id,
-                                    attempt,
-                                    &error.to_string(),
-                                )
-                                .await
-                                {
-                                    tracing::warn!(store_id = %store.id, audit_id = %record.id, error = %mark_error, "audit failure recording failed");
-                                }
-                                report.failures += 1;
-                            }
-                        }
-                    }
-                    if dispatched > 0 {
-                        tracing::debug!(
-                            store_id = %store.id,
-                            audits_dispatched = dispatched,
-                            "store audits dispatched"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "audit outbox read failed");
-                    report.failures += 1;
-                }
-            }
-            match WebhookService::new(database.clone())
-                .with_private_networks_allowed(allow_private_webhooks)
-                .deliver_due(now, 10)
-                .await
-            {
-                Ok(delivery) => {
-                    report.webhooks_delivered += delivery.delivered;
-                    report.webhooks_failed += delivery.failed;
-                    if delivery.retried > 0 || delivery.failed > 0 {
-                        tracing::warn!(
-                            store_id = %store.id,
-                            retried = delivery.retried,
-                            failed = delivery.failed,
-                            "webhook delivery sweep reported failures"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(store_id = %store.id, error = %error, "webhook delivery sweep failed");
-                    report.failures += 1;
-                }
-            }
+        // Stores own independent databases, so their sweeps overlap up to a
+        // fixed bound while each store's own steps stay strictly ordered.
+        let store_reports = join_limited(
+            page.data
+                .iter()
+                .filter(|store| store.status == StoreStatus::Active)
+                .map(|store| sweep.maintain_store(store)),
+            STORE_MAINTENANCE_CONCURRENCY,
+        )
+        .await;
+        for store_report in store_reports {
+            report.absorb(store_report);
         }
         offset += page.data.len() as i64;
         if offset >= page.count || page.data.is_empty() {
@@ -365,6 +185,311 @@ pub async fn run_maintenance_with_notifications(
         }
     }
     report
+}
+
+/// Shared inputs for one store's maintenance pass.
+struct StoreSweep<'a> {
+    platform: &'a PlatformStore,
+    databases: &'a StoreDatabaseManager,
+    events: &'a EventBus,
+    email: &'a EmailService,
+    notifications: &'a NotificationService,
+    channels: &'a NotificationChannelService,
+    render_context: &'a RenderContext,
+    allow_private_webhooks: bool,
+    now: i64,
+}
+
+impl StoreSweep<'_> {
+    /// Runs every maintenance step for one active store, in its original order.
+    async fn maintain_store(&self, store: &Store) -> MaintenanceReport {
+        let mut report = MaintenanceReport::default();
+        let database = match self.databases.database(&store.id).await {
+            Ok(database) => database,
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "maintenance could not open store database");
+                report.failures += 1;
+                return report;
+            }
+        };
+        match CartService::new(database.clone())
+            .expire_due(self.now)
+            .await
+        {
+            Ok(count) => report.carts_expired += count,
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "cart expiry failed");
+                report.failures += 1;
+            }
+        }
+        match InventoryService::new(database.clone())
+            .expire_due(self.now)
+            .await
+        {
+            Ok(count) => report.reservations_released += count,
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "reservation expiry failed");
+                report.failures += 1;
+            }
+        }
+        match CheckoutService::new(database.clone())
+            .expire_due(self.now)
+            .await
+        {
+            Ok(count) => report.checkouts_expired += count,
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "checkout expiry failed");
+                report.failures += 1;
+            }
+        }
+        match OrderService::new(database.clone())
+            .reconcile_provider_refunds()
+            .await
+        {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::warn!(
+                        store_id = %store.id,
+                        count,
+                        "backfilled order refunds from provider refunds"
+                    );
+                }
+                report.refunds_reconciled += count;
+            }
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "refund reconciliation failed");
+                report.failures += 1;
+            }
+        }
+        let queue = JobQueue::new(database.pool().clone());
+        match queue.reap_expired(JOB_LEASE_SECONDS).await {
+            Ok(count) => report.jobs_reaped += count,
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "job lease reap failed");
+                report.failures += 1;
+            }
+        }
+        match queue.claim("maintenance", 25).await {
+            Ok(jobs) => {
+                run_claimed_jobs(
+                    "maintenance",
+                    &store.id,
+                    &database,
+                    &queue,
+                    jobs,
+                    self.email,
+                    self.channels,
+                    self.now,
+                    &mut report,
+                )
+                .await;
+            }
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "job claim failed");
+                report.failures += 1;
+            }
+        }
+        match NotificationChannelService::recover_abandoned_claims(
+            &database,
+            self.now,
+            CHANNEL_CLAIM_LEASE_SECONDS,
+        )
+        .await
+        {
+            Ok(recovered) => {
+                report.channel_claims_recovered += recovered;
+                if recovered > 0 {
+                    tracing::warn!(
+                        store_id = %store.id,
+                        recovered,
+                        "recovered abandoned notification channel claims"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "channel claim recovery failed");
+                report.failures += 1;
+            }
+        }
+        dispatch_outbox(
+            &store.id,
+            &database,
+            &queue,
+            self.events,
+            self.email,
+            self.notifications,
+            self.channels,
+            self.render_context,
+            self.allow_private_webhooks,
+            &mut report,
+        )
+        .await;
+        // Audit rows are written by admin mutations before delivery. A
+        // failure here keeps the row pending for the next sweep and never
+        // aborts the rest of the maintenance pass.
+        match fetch_pending_audits(database.pool(), 100).await {
+            Ok(records) => {
+                let mut dispatched = 0_u64;
+                for record in records {
+                    let entry = NewAudit {
+                        actor_id: record.actor_id.clone(),
+                        store_id: record.store_id.clone(),
+                        action: record.action.clone(),
+                        resource_type: record.resource_type.clone(),
+                        resource_id: record.resource_id.clone(),
+                        data: serde_json::from_str(&record.data).unwrap_or(serde_json::Value::Null),
+                        ip_address: None,
+                    };
+                    // The outbox id is the platform audit id, so a retry
+                    // after a failed "mark processed" cannot duplicate.
+                    match self.platform.record_audit_with_id(&record.id, &entry).await {
+                        Ok(()) => {
+                            match mark_audit_processed(database.pool(), &record.id).await {
+                                Ok(()) => {
+                                    dispatched += 1;
+                                    report.audits_dispatched += 1;
+                                }
+                                Err(error) => {
+                                    // Delivery is idempotent by id, so this
+                                    // only causes a harmless redelivery
+                                    // attempt on the next sweep.
+                                    tracing::warn!(store_id = %store.id, audit_id = %record.id, error = %error, "audit processed marking failed");
+                                    report.failures += 1;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let attempt = record.attempts.saturating_add(1);
+                            tracing::warn!(
+                                store_id = %store.id,
+                                audit_id = %record.id,
+                                action = %record.action,
+                                attempt,
+                                error = %error,
+                                "audit delivery failed"
+                            );
+                            if let Err(mark_error) = mark_audit_failed(
+                                database.pool(),
+                                &record.id,
+                                attempt,
+                                &error.to_string(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(store_id = %store.id, audit_id = %record.id, error = %mark_error, "audit failure recording failed");
+                            }
+                            report.failures += 1;
+                        }
+                    }
+                }
+                if dispatched > 0 {
+                    tracing::debug!(
+                        store_id = %store.id,
+                        audits_dispatched = dispatched,
+                        "store audits dispatched"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "audit outbox read failed");
+                report.failures += 1;
+            }
+        }
+        match WebhookService::new(database.clone())
+            .with_private_networks_allowed(self.allow_private_webhooks)
+            .deliver_due(self.now, 10)
+            .await
+        {
+            Ok(delivery) => {
+                report.webhooks_delivered += delivery.delivered;
+                report.webhooks_failed += delivery.failed;
+                if delivery.retried > 0 || delivery.failed > 0 {
+                    tracing::warn!(
+                        store_id = %store.id,
+                        retried = delivery.retried,
+                        failed = delivery.failed,
+                        "webhook delivery sweep reported failures"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(store_id = %store.id, error = %error, "webhook delivery sweep failed");
+                report.failures += 1;
+            }
+        }
+        report
+    }
+}
+
+/// Runs every future concurrently, keeping at most `limit` in flight.
+///
+/// Results arrive in completion order. This is the part of
+/// `futures::stream::buffer_unordered` a sweep needs, rolled locally so store
+/// futures can borrow their inputs instead of spawning.
+async fn join_limited<F, T>(futures: impl IntoIterator<Item = F>, limit: usize) -> Vec<T>
+where
+    F: Future<Output = T>,
+{
+    let limit = limit.max(1);
+    let mut queued: VecDeque<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
+    let mut in_flight: Vec<Pin<Box<F>>> = Vec::new();
+    let mut finished: Vec<T> = Vec::new();
+    std::future::poll_fn(move |context| {
+        loop {
+            while in_flight.len() < limit && !queued.is_empty() {
+                if let Some(future) = queued.pop_front() {
+                    in_flight.push(future);
+                }
+            }
+            let mut progressed = false;
+            let mut index = 0;
+            while index < in_flight.len() {
+                match in_flight[index].as_mut().poll(context) {
+                    Poll::Ready(value) => {
+                        finished.push(value);
+                        in_flight.swap_remove(index);
+                        progressed = true;
+                    }
+                    Poll::Pending => index += 1,
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        if in_flight.is_empty() && queued.is_empty() {
+            Poll::Ready(std::mem::take(&mut finished))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
+}
+
+impl MaintenanceReport {
+    /// Adds one store's counts into this report.
+    fn absorb(&mut self, other: MaintenanceReport) {
+        self.carts_expired += other.carts_expired;
+        self.reservations_released += other.reservations_released;
+        self.checkouts_expired += other.checkouts_expired;
+        self.refunds_reconciled += other.refunds_reconciled;
+        self.outbox_dispatched += other.outbox_dispatched;
+        self.audits_dispatched += other.audits_dispatched;
+        self.jobs_reaped += other.jobs_reaped;
+        self.jobs_processed += other.jobs_processed;
+        self.webhooks_delivered += other.webhooks_delivered;
+        self.webhooks_failed += other.webhooks_failed;
+        self.notifications_sent += other.notifications_sent;
+        self.notifications_duplicates += other.notifications_duplicates;
+        self.notifications_skipped += other.notifications_skipped;
+        self.notifications_failed += other.notifications_failed;
+        self.channel_notifications_queued += other.channel_notifications_queued;
+        self.channel_notifications_duplicates += other.channel_notifications_duplicates;
+        self.channel_notifications_failed += other.channel_notifications_failed;
+        self.channel_claims_recovered += other.channel_claims_recovered;
+        self.inquiry_files_expired += other.inquiry_files_expired;
+        self.failures += other.failures;
+    }
 }
 
 /// Counts produced by retention cleanup.
@@ -1068,13 +1193,19 @@ pub async fn cleanup_asset_purges(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
-    use fastcart_email::{EmailService, SEND_EMAIL_JOB_TYPE, SendEmailJob};
+    use async_trait::async_trait;
+    use fastcart_email::{
+        EmailError, EmailMessage, EmailProvider, EmailProviderRegistry, EmailReceipt, EmailService,
+        SEND_EMAIL_JOB_TYPE, SendEmailJob,
+    };
     use fastcart_infrastructure::{
-        DatabaseOptions, EventBus, JobQueue, LocalStorage, NewAuditOutbox, Storage,
+        DatabaseOptions, EventBus, JobQueue, LocalStorage, NewAuditOutbox, NewJob, Storage,
         StoreDatabaseManager, append_audit_outbox, append_outbox_event, fetch_pending_audits,
     };
-    use fastcart_kernel::{DomainEventEnvelope, Pagination, PaymentId};
+    use fastcart_kernel::{DomainEventEnvelope, Pagination, PaymentId, now_timestamp};
     use fastcart_module_asset::{AssetService, CreateAssetInput, fetch_pending_asset_purges};
     use fastcart_module_order::{
         CreateOrderInput, CreateOrderItemInput, OrderService, PaymentStatus, RefundInput,
@@ -1082,6 +1213,102 @@ mod tests {
     use fastcart_platform::{CreateStoreInput, PlatformStore, StoreProvisioningService};
 
     use super::{cleanup_asset_purges, run_maintenance_with_options};
+
+    /// Stores are independent databases, so one store's slow work must not
+    /// serialize the sweep. The probe records how many email deliveries were
+    /// in flight at once; a serial sweep can never exceed one.
+    #[tokio::test]
+    async fn maintenance_sweeps_stores_concurrently() {
+        struct ConcurrencyProbe {
+            in_flight: AtomicUsize,
+            peak: AtomicUsize,
+        }
+
+        struct SlowEmailProvider {
+            probe: Arc<ConcurrencyProbe>,
+        }
+
+        #[async_trait]
+        impl EmailProvider for SlowEmailProvider {
+            fn id(&self) -> &str {
+                "slow-probe"
+            }
+
+            async fn send(&self, _message: EmailMessage) -> Result<EmailReceipt, EmailError> {
+                let in_flight = self.probe.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.probe.peak.fetch_max(in_flight, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                self.probe.in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(EmailReceipt {
+                    provider: self.id().to_owned(),
+                    message_id: "probe".to_owned(),
+                    accepted_at: now_timestamp(),
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let platform = PlatformStore::in_memory().await.unwrap();
+        let databases = Arc::new(StoreDatabaseManager::new(
+            dir.path().join("stores"),
+            DatabaseOptions::default().with_max_connections(2),
+        ));
+        for index in 0..3 {
+            let store = platform
+                .create_store(CreateStoreInput::new(
+                    format!("Concurrency Store {index}"),
+                    format!("concurrency-store-{index}"),
+                    format!("concurrency{index}.example.com"),
+                ))
+                .await
+                .unwrap();
+            StoreProvisioningService::new(platform.clone(), databases.clone())
+                .provision(&store.id, None)
+                .await
+                .unwrap();
+            let database = databases.database(&store.id).await.unwrap();
+            JobQueue::new(database.pool().clone())
+                .enqueue(NewJob::new(
+                    SEND_EMAIL_JOB_TYPE,
+                    serde_json::json!({
+                        "to": "buyer@example.com",
+                        "subject": "Maintenance",
+                        "text": "hello",
+                    }),
+                ))
+                .await
+                .unwrap();
+        }
+
+        let probe = Arc::new(ConcurrencyProbe {
+            in_flight: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        });
+        let registry = EmailProviderRegistry::new();
+        registry
+            .register(Arc::new(SlowEmailProvider {
+                probe: probe.clone(),
+            }))
+            .unwrap();
+        registry.set_default("slow-probe").unwrap();
+
+        let report = run_maintenance_with_options(
+            &platform,
+            &databases,
+            &EventBus::new(8),
+            &EmailService::new(registry),
+            true,
+        )
+        .await;
+
+        assert_eq!(report.jobs_processed, 3);
+        assert_eq!(report.failures, 0);
+        let peak = probe.peak.load(Ordering::SeqCst);
+        assert!(
+            peak >= 2,
+            "stores must be swept concurrently, but at most {peak} store(s) did work at once"
+        );
+    }
 
     #[tokio::test]
     async fn maintenance_enqueues_exactly_one_notification_email() {

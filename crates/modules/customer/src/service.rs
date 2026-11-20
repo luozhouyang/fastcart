@@ -848,7 +848,7 @@ impl CustomerService {
             ));
         }
 
-        let password_hash = hash_password(&input.password)?;
+        let password_hash = hash_password_offloaded(&input.password).await?;
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
 
@@ -979,7 +979,7 @@ impl CustomerService {
         let Some(row) = row else {
             return Err(AppError::Unauthorized);
         };
-        if !verify_password(&row.password_hash, password) {
+        if !verify_password_offloaded(&row.password_hash, password).await? {
             return Err(AppError::Unauthorized);
         }
         let customer = row.into_customer();
@@ -1142,11 +1142,11 @@ impl CustomerService {
         .map_err(database_error)?;
         let stored =
             stored.ok_or_else(|| AppError::not_found("customer credentials", customer_id))?;
-        if !verify_password(&stored, current_password) {
+        if !verify_password_offloaded(&stored, current_password).await? {
             return Err(AppError::Unauthorized);
         }
 
-        let password_hash = hash_password(new_password)?;
+        let password_hash = hash_password_offloaded(new_password).await?;
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
         let updated = sqlx::query(
@@ -1325,7 +1325,7 @@ impl CustomerService {
             return Err(invalid_auth_token());
         }
 
-        let password_hash = hash_password(new_password)?;
+        let password_hash = hash_password_offloaded(new_password).await?;
         let mut tx = self.db.begin().await?;
 
         let consumed = sqlx::query(
