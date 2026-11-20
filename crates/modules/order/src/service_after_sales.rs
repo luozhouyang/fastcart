@@ -13,18 +13,19 @@ use fastcart_infrastructure::{append_outbox_event, database_error};
 use fastcart_kernel::{
     AppError, ClaimId, DomainEventEnvelope, EventId, ExchangeId, FulfillmentId, LineItemId,
     OrderEditId, OrderId, ProductId, RefundId, ReturnId, StoreId, Timestamp, VariantId,
-    now_timestamp, validate_length, validate_metadata, validate_quantity,
+    now_timestamp, validate_length, validate_metadata, validate_non_negative_amount,
+    validate_quantity,
 };
 use fastcart_module_inventory::{InventoryService, ReverseWriteOffRequest};
 use sqlx::SqliteConnection;
 
 use crate::after_sales::{
-    AfterSalesFulfillment, AfterSalesFulfillmentItem, ClaimItemStatus, ClaimStatus,
+    AfterSalesFulfillment, AfterSalesFulfillmentItem, ClaimItemStatus, ClaimItemType, ClaimStatus,
     CreateAfterSalesFulfillmentInput, CreateClaimInput, CreateExchangeInput, CreateOrderEditInput,
     CreateReturnInput, ExchangeItemDirection, ExchangeItemStatus, ExchangeStatus, OrderClaim,
     OrderClaimItem, OrderEdit, OrderEditAction, OrderEditItem, OrderEditItemStatus,
     OrderEditStatus, OrderExchange, OrderExchangeItem, OrderReturn, OrderReturnItem,
-    ReceiveReturnInput, ReturnItemStatus, ReturnStatus, WriteOffReturnInput,
+    ReceiveReturnInput, ReplacementUnitPrice, ReturnItemStatus, ReturnStatus, WriteOffReturnInput,
 };
 use crate::domain::OrderStatus;
 use crate::service::OrderService;
@@ -87,6 +88,7 @@ struct ClaimRow {
     status: String,
     reason: Option<String>,
     refund_id: Option<String>,
+    difference_total: Option<i64>,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -131,6 +133,7 @@ struct ExchangeRow {
     order_id: String,
     status: String,
     reason: Option<String>,
+    difference_total: Option<i64>,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -1116,8 +1119,8 @@ impl OrderService {
     pub async fn list_claims(&self, order_id: &OrderId) -> Result<Vec<OrderClaim>, AppError> {
         self.get(order_id).await?;
         let rows = sqlx::query_as::<_, ClaimRow>(
-            "SELECT id, order_id, status, reason, refund_id, metadata, created_at, updated_at,
-                    accepted_at, canceled_at
+            "SELECT id, order_id, status, reason, refund_id, difference_total, metadata,
+                    created_at, updated_at, accepted_at, canceled_at
              FROM order_claims WHERE order_id = ?
              ORDER BY created_at ASC, rowid ASC",
         )
@@ -1132,11 +1135,22 @@ impl OrderService {
         Ok(claims)
     }
 
-    /// Accepts a requested claim.
+    /// Accepts a requested claim and settles the price difference of its
+    /// replacement lines.
+    ///
+    /// `replacement_prices` carries the caller-resolved unit price of each
+    /// replacement, keyed by the historical order line it replaces, because
+    /// the order module does not price catalog variants. The difference
+    /// `(replacement unit price - current line unit price) * quantity` is
+    /// summed over the claim's replace lines and recorded once as a signed
+    /// order adjustment; a line the caller could not price settles nothing.
+    /// Accepting an already accepted claim returns it unchanged, so a replay
+    /// never books the difference twice.
     pub async fn accept_claim(
         &self,
         order_id: &OrderId,
         claim_id: &ClaimId,
+        replacement_prices: &[ReplacementUnitPrice],
     ) -> Result<OrderClaim, AppError> {
         let current = self.load_claim(order_id, claim_id).await?;
         if current.status == ClaimStatus::Accepted {
@@ -1148,6 +1162,12 @@ impl OrderService {
                 current.status.as_str()
             )));
         }
+        let replacement_lines = current
+            .items
+            .iter()
+            .filter(|item| item.item_type == ClaimItemType::Replace)
+            .map(|item| (item.order_item_id.clone(), item.quantity))
+            .collect::<Vec<_>>();
         let now = now_timestamp();
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let updated = sqlx::query(
@@ -1176,12 +1196,25 @@ impl OrderService {
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        let difference_total = settle_price_difference(
+            &mut tx,
+            order_id,
+            DifferenceSource::Claim,
+            claim_id.as_str(),
+            &replacement_lines,
+            replacement_prices,
+            now,
+        )
+        .await?;
         self.append_audit(
             &mut tx,
             "order.claim_accepted",
             "order_claim",
             claim_id.as_str(),
-            serde_json::json!({"order_id": order_id.as_str()}),
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "difference_total": difference_total,
+            }),
         )
         .await?;
         append_after_sales_event(
@@ -1192,6 +1225,7 @@ impl OrderService {
                 "order_id": order_id.as_str(),
                 "claim_id": claim_id.as_str(),
                 "status": ClaimStatus::Accepted.as_str(),
+                "difference_total": difference_total,
             }),
         )
         .await?;
@@ -1272,8 +1306,8 @@ impl OrderService {
         claim_id: &ClaimId,
     ) -> Result<OrderClaim, AppError> {
         let row = sqlx::query_as::<_, ClaimRow>(
-            "SELECT id, order_id, status, reason, refund_id, metadata, created_at, updated_at,
-                    accepted_at, canceled_at
+            "SELECT id, order_id, status, reason, refund_id, difference_total, metadata,
+                    created_at, updated_at, accepted_at, canceled_at
              FROM order_claims WHERE id = ? AND order_id = ?",
         )
         .bind(claim_id.as_str())
@@ -1305,6 +1339,7 @@ impl OrderService {
             status: ClaimStatus::from_stored(&row.status)?,
             reason: row.reason,
             refund_id: row.refund_id.map(RefundId::from_string),
+            difference_total: row.difference_total,
             metadata: fastcart_kernel::Metadata::from_json_str(&row.metadata),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -1447,8 +1482,8 @@ impl OrderService {
     pub async fn list_exchanges(&self, order_id: &OrderId) -> Result<Vec<OrderExchange>, AppError> {
         self.get(order_id).await?;
         let rows = sqlx::query_as::<_, ExchangeRow>(
-            "SELECT id, order_id, status, reason, metadata, created_at, updated_at,
-                    accepted_at, canceled_at
+            "SELECT id, order_id, status, reason, difference_total, metadata, created_at,
+                    updated_at, accepted_at, canceled_at
              FROM order_exchanges WHERE order_id = ?
              ORDER BY created_at ASC, rowid ASC",
         )
@@ -1463,11 +1498,22 @@ impl OrderService {
         Ok(exchanges)
     }
 
-    /// Accepts a requested exchange.
+    /// Accepts a requested exchange and settles the price difference of its
+    /// outbound (replacement) lines.
+    ///
+    /// `replacement_prices` carries the caller-resolved unit price of each
+    /// replacement, keyed by the historical order line it replaces, because
+    /// the order module does not price catalog variants. The difference
+    /// `(replacement unit price - current line unit price) * quantity` is
+    /// summed over the outbound lines and recorded once as a signed order
+    /// adjustment; a line the caller could not price settles nothing.
+    /// Accepting an already accepted exchange returns it unchanged, so a
+    /// replay never books the difference twice.
     pub async fn accept_exchange(
         &self,
         order_id: &OrderId,
         exchange_id: &ExchangeId,
+        replacement_prices: &[ReplacementUnitPrice],
     ) -> Result<OrderExchange, AppError> {
         let current = self.load_exchange(order_id, exchange_id).await?;
         if current.status == ExchangeStatus::Accepted {
@@ -1479,6 +1525,11 @@ impl OrderService {
                 current.status.as_str()
             )));
         }
+        let replacement_lines = current
+            .outbound_items
+            .iter()
+            .map(|item| (item.order_item_id.clone(), item.quantity))
+            .collect::<Vec<_>>();
         let now = now_timestamp();
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let updated = sqlx::query(
@@ -1509,6 +1560,16 @@ impl OrderService {
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+        let difference_total = settle_price_difference(
+            &mut tx,
+            order_id,
+            DifferenceSource::Exchange,
+            exchange_id.as_str(),
+            &replacement_lines,
+            replacement_prices,
+            now,
+        )
+        .await?;
         append_after_sales_event(
             &mut tx,
             self.database().store_id(),
@@ -1517,6 +1578,7 @@ impl OrderService {
                 "order_id": order_id.as_str(),
                 "exchange_id": exchange_id.as_str(),
                 "status": ExchangeStatus::Accepted.as_str(),
+                "difference_total": difference_total,
             }),
         )
         .await?;
@@ -1599,8 +1661,8 @@ impl OrderService {
         exchange_id: &ExchangeId,
     ) -> Result<OrderExchange, AppError> {
         let row = sqlx::query_as::<_, ExchangeRow>(
-            "SELECT id, order_id, status, reason, metadata, created_at, updated_at,
-                    accepted_at, canceled_at
+            "SELECT id, order_id, status, reason, difference_total, metadata, created_at,
+                    updated_at, accepted_at, canceled_at
              FROM order_exchanges WHERE id = ? AND order_id = ?",
         )
         .bind(exchange_id.as_str())
@@ -1636,6 +1698,7 @@ impl OrderService {
             order_id: OrderId::from_string(row.order_id),
             status: ExchangeStatus::from_stored(&row.status)?,
             reason: row.reason,
+            difference_total: row.difference_total,
             metadata: fastcart_kernel::Metadata::from_json_str(&row.metadata),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -2623,6 +2686,166 @@ async fn fetch_order_item(
     .ok_or_else(|| AppError::not_found("order item", order_item_id))
 }
 
+/// The after-sales record a settled price difference belongs to.
+///
+/// It names the adjustment code and the deterministic adjustment id, so the
+/// difference of one record can never be booked twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DifferenceSource {
+    Exchange,
+    Claim,
+}
+
+impl DifferenceSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Exchange => "exchange",
+            Self::Claim => "claim",
+        }
+    }
+}
+
+/// Settles the price difference of one accepted after-sales record.
+///
+/// `replacement_lines` are the record's `(replaced order line, quantity)`
+/// pairs. The difference is summed over the lines the caller priced as
+/// `(replacement unit price - replaced unit price) * quantity`, where the
+/// replaced unit price is the *current* `order_items` row: a confirmed order
+/// edit rewrites the line an after-sales record points at, so the row is read
+/// here rather than snapshotted when the record was created.
+///
+/// The total is stored on the record, and when it is not zero it is booked as
+/// a single signed order-level adjustment, which keeps
+/// `orders.total == sum(order_items.total) + shipping_total + adjustments`.
+/// Both writes are guarded, so replaying an acceptance can never settle the
+/// same difference twice.
+async fn settle_price_difference(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    order_id: &OrderId,
+    source: DifferenceSource,
+    source_id: &str,
+    replacement_lines: &[(LineItemId, i64)],
+    replacement_prices: &[ReplacementUnitPrice],
+    now: Timestamp,
+) -> Result<i64, AppError> {
+    let mut priced: HashMap<&str, i64> = HashMap::with_capacity(replacement_prices.len());
+    for price in replacement_prices {
+        validate_non_negative_amount(price.unit_price, "replacement unit price")?;
+        if priced
+            .insert(price.order_item_id.as_str(), price.unit_price)
+            .is_some()
+        {
+            return Err(AppError::validation(
+                "replacement prices must not contain duplicate order items",
+            ));
+        }
+        if !replacement_lines
+            .iter()
+            .any(|(line, _)| line == &price.order_item_id)
+        {
+            return Err(AppError::validation(format!(
+                "{} {source_id} does not replace order item {}",
+                source.as_str(),
+                price.order_item_id
+            )));
+        }
+    }
+
+    let mut difference_total = 0_i64;
+    for (order_item_id, quantity) in replacement_lines {
+        let Some(replacement_price) = priced.get(order_item_id.as_str()) else {
+            // The caller resolved no price for this replacement, so there is no
+            // known difference to settle for it.
+            continue;
+        };
+        let replaced = fetch_order_item(&mut *tx, order_id, order_item_id).await?;
+        let difference = replacement_price
+            .checked_sub(replaced.unit_price)
+            .and_then(|value| value.checked_mul(*quantity))
+            .ok_or_else(|| AppError::validation("price difference overflow"))?;
+        difference_total = difference_total
+            .checked_add(difference)
+            .ok_or_else(|| AppError::validation("price difference overflow"))?;
+    }
+
+    // The conditional write claims the settlement for this record. The
+    // deterministic adjustment id below is the second guard: even a call that
+    // reached the insert twice could not book a second row.
+    let source_label = source.as_str();
+    let claimed = match source {
+        DifferenceSource::Exchange => sqlx::query(
+            "UPDATE order_exchanges SET difference_total = ?
+             WHERE id = ? AND order_id = ? AND difference_total IS NULL",
+        ),
+        DifferenceSource::Claim => sqlx::query(
+            "UPDATE order_claims SET difference_total = ?
+             WHERE id = ? AND order_id = ? AND difference_total IS NULL",
+        ),
+    }
+    .bind(difference_total)
+    .bind(source_id)
+    .bind(order_id.as_str())
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    if claimed.rows_affected() == 0 {
+        return Err(AppError::conflict(format!(
+            "{source_label} {source_id} already settled a price difference"
+        )));
+    }
+    if difference_total == 0 {
+        // The replacement and the replaced line are priced alike: the
+        // difference is settled, but an adjustment that moves nothing would
+        // only be noise in the order's books.
+        return Ok(0);
+    }
+
+    let (status, current_total) =
+        sqlx::query_as::<_, (String, i64)>("SELECT status, total FROM orders WHERE id = ?")
+            .bind(order_id.as_str())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| AppError::not_found("order", order_id))?;
+    let next_total = current_total
+        .checked_add(difference_total)
+        .ok_or_else(|| AppError::validation("order total overflow"))?;
+    if next_total < 0 {
+        return Err(AppError::conflict(format!(
+            "a price difference of {difference_total} would make the order total negative"
+        )));
+    }
+    let updated =
+        sqlx::query("UPDATE orders SET total = ?, updated_at = ? WHERE id = ? AND status = ?")
+            .bind(next_total)
+            .bind(now)
+            .bind(order_id.as_str())
+            .bind(&status)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::conflict("order status changed concurrently"));
+    }
+    sqlx::query(
+        "INSERT INTO order_adjustments (id, order_id, code, amount, description, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(format!("{source_label}-difference:{source_id}"))
+    .bind(order_id.as_str())
+    .bind(format!("{source_label}_difference"))
+    .bind(difference_total)
+    .bind(format!(
+        "replacement price difference of {source_label} {source_id}"
+    ))
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+
+    Ok(difference_total)
+}
+
 async fn sum_active_returns(
     executor: &mut SqliteConnection,
     order_item_id: &LineItemId,
@@ -3380,9 +3603,15 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
 
-        let accepted = service.accept_claim(&order.id, &claim.id).await.unwrap();
+        let accepted = service
+            .accept_claim(&order.id, &claim.id, &[])
+            .await
+            .unwrap();
         assert_eq!(accepted.status, ClaimStatus::Accepted);
-        let again = service.accept_claim(&order.id, &claim.id).await.unwrap();
+        let again = service
+            .accept_claim(&order.id, &claim.id, &[])
+            .await
+            .unwrap();
         assert_eq!(again.status, ClaimStatus::Accepted);
 
         let error = service
@@ -3453,7 +3682,7 @@ mod tests {
         assert!(matches!(error, fastcart_kernel::AppError::Conflict(_)));
 
         let accepted = service
-            .accept_exchange(&order.id, &exchange.id)
+            .accept_exchange(&order.id, &exchange.id, &[])
             .await
             .unwrap();
         assert_eq!(accepted.status, ExchangeStatus::Accepted);

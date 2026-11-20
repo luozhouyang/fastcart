@@ -1176,12 +1176,12 @@ async fn create_claim(
     post,
     path = "/orders/{id}/claims/{claim_id}/accept",
     tag = "Admin",
-    summary = "Accept an order claim",
+    summary = "Accept an order claim and settle its replacement price difference",
     security(("adminSession" = []), ("apiToken" = [])),
     responses((status = 200, body = OrderClaim))
 )]
 async fn accept_claim(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path((id, claim_id)): Path<(String, String)>,
@@ -1191,10 +1191,11 @@ async fn accept_claim(
         .map_err(ApiError::new)?;
     let id = OrderId::from_string(id);
     let claim_id = ClaimId::from_string(claim_id);
-    let claim = OrderService::new(db)
-        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
-        .accept_claim(&id, &claim_id)
-        .await?;
+    // The workflow is the layer that can price the replacement lines, so the
+    // price difference of a `replace` claim is settled here.
+    let workflow = AfterSalesWorkflow::new(db.clone(), payment_service(&context, &actor, &db)?)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let claim = workflow.accept_claim(&id, &claim_id).await?;
     Ok(Json(claim))
 }
 
@@ -1342,7 +1343,7 @@ async fn create_exchange(
     post,
     path = "/orders/{id}/exchanges/{exchange_id}/accept",
     tag = "Admin",
-    summary = "Accept an order exchange",
+    summary = "Accept an order exchange and settle its replacement price difference",
     security(("adminSession" = []), ("apiToken" = [])),
     responses((status = 200, body = OrderExchange))
 )]

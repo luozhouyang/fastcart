@@ -8,7 +8,8 @@
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{
-    AppError, ClaimId, ExchangeId, LineItemId, Metadata, OrderId, Pagination, ReturnId,
+    AppError, ClaimId, CurrencyCode, ExchangeId, LineItemId, Metadata, OrderId, Pagination,
+    ReturnId, VariantId, now_timestamp,
 };
 use fastcart_module_inventory::{
     ExchangeRestockLine, InventoryService, RestockAudit, ReturnRestockLine, StockConsumption,
@@ -17,9 +18,10 @@ use fastcart_module_order::{
     AfterSalesFulfillment, AfterSalesFulfillmentItemInput, ClaimItemType, ClaimStatus,
     CreateAfterSalesFulfillmentInput, ExchangeItemDirection, ExchangeItemStatus, ExchangeStatus,
     Order, OrderClaim, OrderExchange, OrderRefund, OrderReturn, OrderService, ReceiveReturnInput,
-    RefundInput, ReturnStatus,
+    RefundInput, ReplacementUnitPrice, ReturnStatus,
 };
 use fastcart_module_payment::{ListPaymentsFilter, Payment, PaymentService, PaymentStatus, Refund};
+use fastcart_module_pricing::{PriceContext, PricingService};
 use fastcart_module_shipping::{
     CreateFulfillmentRequest, FulfillmentItemRequest, FulfillmentProviderRegistry,
 };
@@ -101,10 +103,12 @@ pub struct ExchangeFulfillmentResult {
     pub consumed_units: i64,
 }
 
-/// Orchestrates order, payment and inventory services for after-sales flows.
+/// Orchestrates order, payment, pricing and inventory services for after-sales
+/// flows.
 pub struct AfterSalesWorkflow {
     order: OrderService,
     payment: PaymentService,
+    pricing: PricingService,
     inventory: InventoryService,
     shipping: FulfillmentProviderRegistry,
 }
@@ -130,6 +134,7 @@ impl AfterSalesWorkflow {
         Self {
             order: OrderService::new(db.clone()),
             payment,
+            pricing: PricingService::new(db.clone()),
             inventory: InventoryService::new(db),
             shipping,
         }
@@ -278,19 +283,45 @@ impl AfterSalesWorkflow {
         })
     }
 
+    /// Accepts a requested claim, settling the price difference of its
+    /// replacement lines.
+    ///
+    /// The order module prices no catalog variants, so the workflow resolves
+    /// the unit price of every replacement line from the pricing module and
+    /// passes it into [`OrderService::accept_claim`], which books the
+    /// difference on the order. A replacement variant with no eligible price
+    /// settles nothing; accepting an already accepted claim changes nothing.
+    pub async fn accept_claim(
+        &self,
+        order_id: &OrderId,
+        claim_id: &ClaimId,
+    ) -> Result<OrderClaim, AppError> {
+        let order = self.order.get(order_id).await?;
+        let claim = self.order.get_claim(order_id, claim_id).await?;
+        // Only a requested claim settles a difference; any other state is
+        // handled by the order service below, exactly as before.
+        let prices = if claim.status == ClaimStatus::Requested {
+            self.replacement_prices(&order, &claim_replacements(&claim))
+                .await?
+        } else {
+            Vec::new()
+        };
+        self.order.accept_claim(order_id, claim_id, &prices).await
+    }
+
     /// Accepts a claim when needed and refunds its refund-type lines.
     ///
     /// Claims without refund-type lines are left accepted with no refund.
     /// Replacement lines are intentionally not fulfilled here: a later flow
     /// should create outbound fulfillments for [`ClaimItemType::Replace`]
-    /// lines after the refund settles.
+    /// lines after the refund settles. Accepting the claim is an implied step
+    /// of the refund, so it is not audited separately.
     pub async fn refund_claim(
         &self,
         order_id: &OrderId,
         claim_id: &ClaimId,
         reason: Option<String>,
     ) -> Result<ClaimRefundResult, AppError> {
-        let order = self.order.get(order_id).await?;
         let mut claim = self.order.get_claim(order_id, claim_id).await?;
         if claim.status == ClaimStatus::Canceled {
             return Err(AppError::conflict(
@@ -298,13 +329,21 @@ impl AfterSalesWorkflow {
             ));
         }
         if claim.status == ClaimStatus::Requested {
+            let order = self.order.get(order_id).await?;
+            let prices = self
+                .replacement_prices(&order, &claim_replacements(&claim))
+                .await?;
             claim = self
                 .order
                 .clone()
                 .without_audit()
-                .accept_claim(order_id, claim_id)
+                .accept_claim(order_id, claim_id, &prices)
                 .await?;
         }
+        // Accepting the claim may have settled its price difference on the
+        // order, so every amount below is measured against the order as it now
+        // stands.
+        let order = self.order.get(order_id).await?;
         let key = format!("{CLAIM_REFUND_PREFIX}:{}", claim_id.as_str());
 
         if let Some(existing) = claim.refund_id.clone() {
@@ -514,11 +553,15 @@ impl AfterSalesWorkflow {
             ));
         }
         if claim.status == ClaimStatus::Requested {
+            let order = self.order.get(order_id).await?;
+            let prices = self
+                .replacement_prices(&order, &claim_replacements(&claim))
+                .await?;
             claim = self
                 .order
                 .clone()
                 .without_audit()
-                .accept_claim(order_id, claim_id)
+                .accept_claim(order_id, claim_id, &prices)
                 .await?;
         }
 
@@ -669,7 +712,13 @@ impl AfterSalesWorkflow {
         }
         let was_requested = exchange.status == ExchangeStatus::Requested;
         if was_requested {
-            exchange = self.order.accept_exchange(order_id, exchange_id).await?;
+            let prices = self
+                .replacement_prices(&order, &exchange_replacements(&exchange))
+                .await?;
+            exchange = self
+                .order
+                .accept_exchange(order_id, exchange_id, &prices)
+                .await?;
         }
 
         let mut lines = Vec::new();
@@ -866,6 +915,50 @@ impl AfterSalesWorkflow {
         })
     }
 
+    /// Resolves the replacement unit prices of one after-sales record.
+    ///
+    /// The order module owns no catalog prices, so it cannot price a
+    /// replacement by itself: the workflow resolves the price in the order's
+    /// currency and hands it to `OrderService::accept_*`, which settles the
+    /// difference against the line being replaced. A replacement variant with
+    /// no eligible price is left out, because there is no known difference to
+    /// settle for it.
+    async fn replacement_prices(
+        &self,
+        order: &Order,
+        replacements: &[(&LineItemId, Option<&VariantId>, i64)],
+    ) -> Result<Vec<ReplacementUnitPrice>, AppError> {
+        let currency = CurrencyCode::new(order.currency_code.clone())?;
+        let at = now_timestamp();
+        let mut prices = Vec::with_capacity(replacements.len());
+        for (order_item_id, variant_id, quantity) in replacements {
+            let Some(variant_id) = variant_id else {
+                continue;
+            };
+            let context = PriceContext {
+                currency: currency.clone(),
+                quantity: *quantity,
+                // The order carries the channel it was placed in; the customer
+                // group behind `customer_id` is not readable from this module's
+                // aggregate, so group-scoped prices are not applied.
+                customer_group_id: None,
+                sales_channel_id: order.sales_channel_id.clone(),
+                at,
+            };
+            if let Some(selected) = self
+                .pricing
+                .calculate_price(variant_id.as_str(), &context)
+                .await?
+            {
+                prices.push(ReplacementUnitPrice {
+                    order_item_id: (*order_item_id).clone(),
+                    unit_price: selected.amount,
+                });
+            }
+        }
+        Ok(prices)
+    }
+
     async fn create_provider_fulfillment(
         &self,
         order_id: &OrderId,
@@ -938,6 +1031,38 @@ impl AfterSalesWorkflow {
 /// Local key stored in `idempotency_keys`, namespaced away from provider keys.
 fn local_key(key: &str) -> String {
     format!("after-sales:{key}")
+}
+
+/// A claim's replacement lines as `(replaced line, replacement variant,
+/// quantity)` triples.
+fn claim_replacements(claim: &OrderClaim) -> Vec<(&LineItemId, Option<&VariantId>, i64)> {
+    claim
+        .items
+        .iter()
+        .filter(|item| item.item_type == ClaimItemType::Replace)
+        .map(|item| {
+            (
+                &item.order_item_id,
+                item.replacement_variant_id.as_ref(),
+                item.quantity,
+            )
+        })
+        .collect()
+}
+
+/// An exchange's outbound (replacement) lines in the same shape.
+fn exchange_replacements(exchange: &OrderExchange) -> Vec<(&LineItemId, Option<&VariantId>, i64)> {
+    exchange
+        .outbound_items
+        .iter()
+        .map(|item| {
+            (
+                &item.order_item_id,
+                item.replacement_variant_id.as_ref(),
+                item.quantity,
+            )
+        })
+        .collect()
 }
 
 /// Sums the proportional share of immutable line totals for returned units.

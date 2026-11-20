@@ -280,6 +280,11 @@ pub struct OrderClaim {
     /// Refund created for this claim, when linked.
     #[serde(default)]
     pub refund_id: Option<RefundId>,
+    /// Price difference of the claim's replacement lines, settled on
+    /// acceptance: positive is owed by the customer, negative is owed to them.
+    /// `None` until the claim is accepted.
+    #[serde(default)]
+    pub difference_total: Option<i64>,
     /// Free-form metadata.
     pub metadata: Metadata,
     /// Creation timestamp in Unix seconds.
@@ -330,6 +335,11 @@ pub struct OrderExchange {
     pub status: ExchangeStatus,
     /// Optional reason for the exchange.
     pub reason: Option<String>,
+    /// Price difference of the exchange's outbound lines, settled on
+    /// acceptance: positive is owed by the customer, negative is owed to them.
+    /// `None` until the exchange is accepted.
+    #[serde(default)]
+    pub difference_total: Option<i64>,
     /// Free-form metadata.
     pub metadata: Metadata,
     /// Creation timestamp in Unix seconds.
@@ -631,6 +641,21 @@ pub struct CreateExchangeInput {
     pub inbound_items: Vec<ExchangeItemInput>,
     /// Replacement items shipped to the customer.
     pub outbound_items: Vec<ExchangeItemInput>,
+}
+
+/// The unit price the caller resolved for one replacement line.
+///
+/// The order module does not price catalog variants, so the caller that
+/// confirms an exchange or claim resolves the replacement's unit price and
+/// supplies it through [`crate::OrderService::accept_exchange`] and
+/// [`crate::OrderService::accept_claim`]. The line is named by the historical
+/// order line it replaces, which is unique within one after-sales record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacementUnitPrice {
+    /// Historical order line the replacement stands in for.
+    pub order_item_id: LineItemId,
+    /// Unit price of the replacement in minor units.
+    pub unit_price: i64,
 }
 
 /// Input for one order edit line.

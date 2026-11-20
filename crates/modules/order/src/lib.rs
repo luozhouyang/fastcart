@@ -16,8 +16,8 @@ pub use after_sales::{
     ExchangeItemDirection, ExchangeItemInput, ExchangeItemStatus, ExchangeStatus, OrderClaim,
     OrderClaimItem, OrderEdit, OrderEditAction, OrderEditItem, OrderEditItemInput,
     OrderEditItemStatus, OrderEditStatus, OrderExchange, OrderExchangeItem, OrderReturn,
-    OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput, ReturnItemInput, ReturnItemStatus,
-    ReturnStatus, WriteOffReturnInput, WriteOffReturnItemInput,
+    OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput, ReplacementUnitPrice,
+    ReturnItemInput, ReturnItemStatus, ReturnStatus, WriteOffReturnInput, WriteOffReturnItemInput,
 };
 pub use domain::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput,
