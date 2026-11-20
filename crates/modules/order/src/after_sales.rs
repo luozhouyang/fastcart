@@ -316,6 +316,13 @@ pub struct OrderClaimItem {
     pub replacement_variant_id: Option<VariantId>,
     /// Optional line-level reason.
     pub reason: Option<String>,
+    /// Price difference this replacement settled on acceptance, when it settled
+    /// one: `(replacement unit price - replaced unit price) * quantity`.
+    /// Positive is owed by the customer, negative is owed to them. `None` for
+    /// refund lines, for records that are not accepted yet, and for
+    /// replacements the caller resolved no price for.
+    #[serde(default)]
+    pub difference: Option<i64>,
     /// Line state.
     pub status: ClaimItemStatus,
     /// Creation timestamp in Unix seconds.
@@ -373,6 +380,13 @@ pub struct OrderExchangeItem {
     pub replacement_variant_id: Option<VariantId>,
     /// Optional line-level reason.
     pub reason: Option<String>,
+    /// Price difference this line settled on acceptance, when it settled one:
+    /// `(replacement unit price - replaced unit price) * quantity`. Positive is
+    /// owed by the customer, negative is owed to them. `None` for inbound
+    /// lines, for records that are not accepted yet, and for replacements the
+    /// caller resolved no price for.
+    #[serde(default)]
+    pub difference: Option<i64>,
     /// Line state.
     pub status: ExchangeItemStatus,
     /// Creation timestamp in Unix seconds.

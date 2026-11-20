@@ -51,11 +51,7 @@ async fn a_group_price_prices_the_replacement_of_a_group_member() {
     // The list price the replacement would cost anybody, and the group price
     // the member is entitled to.
     pricing
-        .create_price(CreatePriceInput::new(
-            replacement.as_str(),
-            usd(),
-            1_500,
-        ))
+        .create_price(CreatePriceInput::new(replacement.as_str(), usd(), 1_500))
         .await
         .unwrap();
     pricing
@@ -126,7 +122,11 @@ async fn a_group_price_prices_the_replacement_of_a_group_member() {
     let order: Order = orders.get(&order.id).await.unwrap();
     // 800 (group price) - 1 000 (the line it replaces), not 1 500 - 1 000.
     assert_eq!(
-        order.adjustments.iter().map(|entry| entry.amount).sum::<i64>(),
+        order
+            .adjustments
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i64>(),
         -200,
         "the difference settles at the price the member is entitled to"
     );

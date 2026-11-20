@@ -105,6 +105,7 @@ struct ClaimItemRow {
     item_type: String,
     replacement_variant_id: Option<String>,
     reason: Option<String>,
+    difference: Option<i64>,
     status: String,
     created_at: i64,
     updated_at: i64,
@@ -120,6 +121,7 @@ impl ClaimItemRow {
             item_type: crate::after_sales::ClaimItemType::from_stored(&self.item_type)?,
             replacement_variant_id: self.replacement_variant_id.map(VariantId::from_string),
             reason: self.reason,
+            difference: self.difference,
             status: ClaimItemStatus::from_stored(&self.status)?,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -150,6 +152,7 @@ struct ExchangeItemRow {
     quantity: i64,
     replacement_variant_id: Option<String>,
     reason: Option<String>,
+    difference: Option<i64>,
     status: String,
     created_at: i64,
     updated_at: i64,
@@ -165,6 +168,7 @@ impl ExchangeItemRow {
             quantity: self.quantity,
             replacement_variant_id: self.replacement_variant_id.map(VariantId::from_string),
             reason: self.reason,
+            difference: self.difference,
             status: ExchangeItemStatus::from_stored(&self.status)?,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -1322,7 +1326,7 @@ impl OrderService {
     async fn claim_from_row(&self, row: ClaimRow) -> Result<OrderClaim, AppError> {
         let item_rows = sqlx::query_as::<_, ClaimItemRow>(
             "SELECT id, claim_id, order_item_id, quantity, item_type,
-                    replacement_variant_id, reason, status, created_at, updated_at
+                    replacement_variant_id, reason, difference, status, created_at, updated_at
              FROM order_claim_items WHERE claim_id = ? ORDER BY rowid ASC",
         )
         .bind(&row.id)
@@ -1695,7 +1699,7 @@ impl OrderService {
     async fn exchange_from_row(&self, row: ExchangeRow) -> Result<OrderExchange, AppError> {
         let item_rows = sqlx::query_as::<_, ExchangeItemRow>(
             "SELECT id, exchange_id, order_item_id, direction, quantity,
-                    replacement_variant_id, reason, status, created_at, updated_at
+                    replacement_variant_id, reason, difference, status, created_at, updated_at
              FROM order_exchange_items WHERE exchange_id = ? ORDER BY rowid ASC",
         )
         .bind(&row.id)
@@ -2781,6 +2785,31 @@ async fn settle_price_difference(
             .checked_sub(replaced.unit_price)
             .and_then(|value| value.checked_mul(*quantity))
             .ok_or_else(|| AppError::validation("price difference overflow"))?;
+        // The replacement line carries its own share next to the total it adds
+        // up to, so the money can be traced back to the line that moved it. The
+        // write is as replay-proof as the total's: the same line settles the
+        // same difference, and only the first acceptance gets this far.
+        match source {
+            DifferenceSource::Exchange => sqlx::query(
+                "UPDATE order_exchange_items SET difference = ?, updated_at = ?
+                 WHERE exchange_id = ? AND direction = 'outbound' AND order_item_id = ?",
+            )
+            .bind(difference)
+            .bind(now)
+            .bind(source_id)
+            .bind(order_item_id.as_str()),
+            DifferenceSource::Claim => sqlx::query(
+                "UPDATE order_claim_items SET difference = ?, updated_at = ?
+                 WHERE claim_id = ? AND order_item_id = ?",
+            )
+            .bind(difference)
+            .bind(now)
+            .bind(source_id)
+            .bind(order_item_id.as_str()),
+        }
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
         difference_total = difference_total
             .checked_add(difference)
             .ok_or_else(|| AppError::validation("price difference overflow"))?;
