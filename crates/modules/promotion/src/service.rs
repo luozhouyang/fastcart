@@ -1032,30 +1032,40 @@ impl PromotionService {
         Ok(moved)
     }
 
-    /// Releases claims whose checkout never became an order.
+    /// Checkouts that still hold a usage claim, without the `checkout:` prefix.
     ///
-    /// A claim is taken before the capture and moved onto the order once it is
-    /// placed. A checkout swept to `failed`, `canceled` or `expired` never
-    /// reaches that step, so nothing else would give the redemption back and the
-    /// promotion would stay consumed for a discount nobody received.
-    ///
-    /// The sweep keys off the checkout's status and not its expiry timestamp on
-    /// purpose: a checkout past its expiry can still be mid-completion, and
-    /// releasing that claim would let a competing checkout take the last
-    /// redemption while the first one is still placing its order.
-    pub async fn release_abandoned_usage(&self) -> Result<u64, AppError> {
+    /// Reads only this module's own table, so the caller — the maintenance
+    /// workflow, which is allowed to see several modules at once — can decide
+    /// which of those checkouts never became an order.
+    pub async fn claimed_checkout_ids(&self) -> Result<Vec<String>, AppError> {
         let keys: Vec<String> = sqlx::query_scalar(
-            "SELECT pu.order_id FROM promotion_usage pu \
-             JOIN checkout_sessions cs ON pu.order_id = 'checkout:' || cs.id \
-             WHERE cs.status IN ('failed', 'canceled', 'expired')",
+            "SELECT DISTINCT order_id FROM promotion_usage WHERE order_id LIKE 'checkout:%'",
         )
         .fetch_all(self.db.pool())
         .await
         .map_err(database_error)?;
+        Ok(keys
+            .into_iter()
+            .map(|key| checkout_usage_key_strip(&key).to_owned())
+            .collect())
+    }
 
+    /// Releases the claims of checkouts the caller has established are dead.
+    ///
+    /// A claim is taken before the capture and moved onto the order once it is
+    /// placed. A checkout that never gets that far keeps the redemption for
+    /// good, so the promotion stays consumed for a discount nobody received.
+    ///
+    /// Which checkouts are dead is the caller's judgement, not this module's:
+    /// that knowledge lives in the checkout table, which this module must not
+    /// read.
+    pub async fn release_abandoned_usage(
+        &self,
+        abandoned_checkout_ids: &[String],
+    ) -> Result<u64, AppError> {
         let mut released = 0;
-        for key in keys {
-            released += self.release_usage(&key).await?;
+        for checkout_id in abandoned_checkout_ids {
+            released += self.release_usage(&checkout_usage_key(checkout_id)).await?;
         }
         Ok(released)
     }
@@ -1670,6 +1680,11 @@ const CHECKOUT_USAGE_KEY_PREFIX: &str = "checkout:";
 #[must_use]
 pub fn checkout_usage_key(checkout_id: &str) -> String {
     format!("{CHECKOUT_USAGE_KEY_PREFIX}{}", checkout_id.trim())
+}
+
+/// Recovers the checkout id a usage key was built from.
+fn checkout_usage_key_strip(key: &str) -> &str {
+    key.strip_prefix(CHECKOUT_USAGE_KEY_PREFIX).unwrap_or(key)
 }
 
 /// Loads the campaigns a promotion belongs to, with their budget state.

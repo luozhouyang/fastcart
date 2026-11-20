@@ -693,6 +693,36 @@ impl CheckoutService {
         self.get(id).await
     }
 
+    /// Narrows a set of checkout ids to those that can never complete.
+    ///
+    /// Used by maintenance to decide which promotion claims to give back: a
+    /// checkout in a terminal state will never place its order, so the
+    /// redemption it took before the capture would otherwise stay consumed.
+    ///
+    /// Only the ids passed in are considered, so the caller keeps the set
+    /// bounded by the outstanding claims rather than by checkout history.
+    pub async fn abandoned_ids(&self, candidates: &[String]) -> Result<Vec<String>, AppError> {
+        let mut abandoned = Vec::new();
+        for chunk in candidates.chunks(900) {
+            let sql = format!(
+                "SELECT id FROM checkout_sessions WHERE id IN ({}) \
+                 AND status IN ('failed', 'canceled', 'expired')",
+                vec!["?"; chunk.len()].join(", ")
+            );
+            let mut query = sqlx::query_scalar::<_, String>(&sql);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            abandoned.extend(
+                query
+                    .fetch_all(self.db.pool())
+                    .await
+                    .map_err(database_error)?,
+            );
+        }
+        Ok(abandoned)
+    }
+
     /// Marks every expirable session whose expiry is at or before `now` as failed.
     ///
     /// Returns the number of sessions expired.

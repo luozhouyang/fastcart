@@ -205,6 +205,34 @@ struct StoreSweep<'a> {
 
 impl StoreSweep<'_> {
     /// Runs every maintenance step for one active store, in its original order.
+    /// Gives back promotion claims held by checkouts that can never complete.
+    ///
+    /// The promotion module owns usage rows and must not read the checkout
+    /// table; the checkout module owns sessions and must not read usage rows.
+    /// This is the layer allowed to see both, so it does the join — and it keeps
+    /// the work bounded by the outstanding claims rather than by checkout
+    /// history, since only checkouts that still hold a claim are considered.
+    async fn release_abandoned_promotion_usage(
+        &self,
+        database: &StoreDatabase,
+    ) -> Result<u64, AppError> {
+        let claimed = PromotionService::new(database.clone())
+            .claimed_checkout_ids()
+            .await?;
+        if claimed.is_empty() {
+            return Ok(0);
+        }
+        let abandoned = CheckoutService::new(database.clone())
+            .abandoned_ids(&claimed)
+            .await?;
+        if abandoned.is_empty() {
+            return Ok(0);
+        }
+        PromotionService::new(database.clone())
+            .release_abandoned_usage(&abandoned)
+            .await
+    }
+
     async fn maintain_store(&self, store: &Store) -> MaintenanceReport {
         let mut report = MaintenanceReport::default();
         let database = match self.databases.database(&store.id).await {
@@ -245,12 +273,11 @@ impl StoreSweep<'_> {
                 report.failures += 1;
             }
         }
-        // Runs after checkout expiry so a checkout that has just been swept to
-        // a terminal state gives its promotion claims back in the same pass.
-        match PromotionService::new(database.clone())
-            .release_abandoned_usage()
-            .await
-        {
+        // Runs after checkout expiry so a checkout swept to a terminal state
+        // this pass gives its promotion claims back in the same pass. The
+        // promotion module cannot see the checkout table and the checkout module
+        // cannot see usage rows, so the two reads are joined here.
+        match self.release_abandoned_promotion_usage(&database).await {
             Ok(count) => report.promotion_claims_released += count,
             Err(error) => {
                 tracing::warn!(store_id = %store.id, error = %error, "promotion claim release failed");
