@@ -1,0 +1,124 @@
+---
+/**
+ * Asynchronous plugin work: outbox fan-out, event delivery retries and
+ * scheduled jobs.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    class="fc-seq"
+    viewBox="0 0 920 720"
+    role="img"
+    aria-labelledby="fc-plugin-async-title fc-plugin-async-desc"
+  >
+    <title id="fc-plugin-async-title">Plugin events and jobs sequence</title>
+    <desc id="fc-plugin-async-desc">
+      A commerce transaction appends an outbox event. After the response, the
+      dispatcher claims due rows, fans them out to subscribed plugins, and posts
+      the event to the plugin host. Failures retry with exponential backoff and
+      move to the dead letter after five attempts. Scheduled jobs follow the
+      same host path through the jobs handler.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-plugin-async-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <rect class="fc-box" x="7" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="65" y="46" text-anchor="middle">Commerce tx</text>
+
+    <rect class="fc-box" x="167" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="225" y="46" text-anchor="middle">Outbox + jobs</text>
+
+    <rect class="fc-box-accent" x="332" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="390" y="46" text-anchor="middle">Dispatcher</text>
+
+    <rect class="fc-box" x="497" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="555" y="46" text-anchor="middle">Plugin host</text>
+
+    <rect class="fc-box-brand" x="647" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="705" y="46" text-anchor="middle">Plugin worker</text>
+
+    <rect class="fc-box-info" x="792" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="850" y="46" text-anchor="middle">Host API</text>
+
+    <path class="fc-lifeline" d="M 65 60 V 650"></path>
+    <path class="fc-lifeline" d="M 225 60 V 650"></path>
+    <path class="fc-lifeline" d="M 390 60 V 650"></path>
+    <path class="fc-lifeline" d="M 555 60 V 650"></path>
+    <path class="fc-lifeline" d="M 705 60 V 650"></path>
+    <path class="fc-lifeline" d="M 850 60 V 650"></path>
+
+    <path class="fc-line" d="M 65 100 H 223" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="71" y="94">append event (same tx)</text>
+
+    <path class="fc-line-dashed" d="M 20 135 H 900"></path>
+    <text class="fc-sub" x="460" y="152" text-anchor="middle">HTTP response already sent · at-least-once delivery</text>
+
+    <path class="fc-line" d="M 390 185 H 227" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="384" y="179" text-anchor="end">claim due (2 s tick)</text>
+
+    <path class="fc-line" d="M 390 215 h 30 v 12 h -30" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="426" y="209">fan out per subscription</text>
+
+    <path class="fc-line" d="M 390 245 H 553" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="396" y="239">POST /events (actor=event)</text>
+
+    <path class="fc-line" d="M 555 275 H 703" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="561" y="269">events handler</text>
+
+    <path class="fc-line" d="M 705 305 H 848" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="711" y="299">live data (optional)</text>
+
+    <path class="fc-line-dashed" d="M 850 335 H 707" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="844" y="329" text-anchor="end">JSON</text>
+
+    <path class="fc-line-dashed" d="M 705 365 H 557" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="699" y="359" text-anchor="end">2xx / 5xx</text>
+
+    <path class="fc-line-dashed" d="M 555 395 H 392" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="549" y="389" text-anchor="end">status</text>
+
+    <path class="fc-line" d="M 390 425 H 227" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="384" y="419" text-anchor="end">done · backoff · dead</text>
+
+    <path class="fc-line-dashed" d="M 20 455 H 900"></path>
+    <text class="fc-sub" x="460" y="472" text-anchor="middle">scheduled cron or manually enqueued job</text>
+
+    <path class="fc-line" d="M 390 505 H 227" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="384" y="499" text-anchor="end">cron due → job row</text>
+
+    <path class="fc-line" d="M 390 535 H 553" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="396" y="529">POST /jobs/name</text>
+
+    <path class="fc-line" d="M 555 565 H 703" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="561" y="559">jobs handler</text>
+
+    <path class="fc-line-dashed" d="M 705 595 H 557" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="699" y="589" text-anchor="end">result</text>
+
+    <path class="fc-line-dashed" d="M 555 625 H 392" marker-end="url(#fc-plugin-async-arrow)"></path>
+    <text class="fc-sub" x="549" y="619" text-anchor="end">completed / failed</text>
+
+    <rect class="fc-tag" x="40" y="665" width="840" height="38" rx="7"></rect>
+    <text class="fc-sub" x="54" y="689">
+      Retries use exponential backoff (5 × 2^n seconds). Events dead-letter after five attempts; jobs keep their own attempt count.
+    </text>
+  </svg>
+  <figcaption>
+    <strong>Figure 6.</strong> Plugin work is never on the merchant's request
+    path. Outbox events and job rows are durable and claimed with leases, so a
+    restart resumes delivery instead of losing it.
+  </figcaption>
+</figure>

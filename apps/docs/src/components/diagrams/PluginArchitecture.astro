@@ -1,0 +1,159 @@
+---
+/**
+ * Plugin architecture: package, control plane, workerd execution plane and
+ * the two UI surfaces. Numbered paths map to the lifecycle prose.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    viewBox="0 0 920 680"
+    role="img"
+    aria-labelledby="fc-plugin-arch-title fc-plugin-arch-desc"
+  >
+    <title id="fc-plugin-arch-title">Fastcart plugin architecture</title>
+    <desc id="fc-plugin-arch-desc">
+      A plugin package is uploaded and validated into a content-addressed
+      artifact. Installation state, settings, KV, delivery state and jobs live in
+      the store database. The control plane forwards requests to a shared
+      workerd plugin host, which loads the artifact by id and digest in a V8
+      isolate. The isolate can only reach the host API through the shared bridge;
+      outbound internet access goes through the host egress proxy. Admin UI
+      iframes and storefront embeds are served as digest-scoped assets by Rust.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-plugin-arch-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <!-- Package -->
+    <rect class="fc-box-muted" x="20" y="70" width="190" height="400" rx="10"></rect>
+    <text class="fc-label-strong" x="36" y="94">Plugin package</text>
+    <text class="fc-sub" x="36" y="112">operator-uploaded tar.gz</text>
+
+    <rect class="fc-box" x="36" y="130" width="158" height="42" rx="7"></rect>
+    <text class="fc-mono" x="115" y="156" text-anchor="middle">plugin.json</text>
+
+    <rect class="fc-box" x="36" y="184" width="158" height="42" rx="7"></rect>
+    <text class="fc-mono" x="115" y="210" text-anchor="middle">worker/</text>
+
+    <rect class="fc-box" x="36" y="238" width="158" height="42" rx="7"></rect>
+    <text class="fc-mono" x="115" y="264" text-anchor="middle">ui/</text>
+
+    <rect class="fc-box" x="36" y="292" width="158" height="42" rx="7"></rect>
+    <text class="fc-mono" x="115" y="318" text-anchor="middle">storefront/</text>
+
+    <text class="fc-sub" x="36" y="370">SHA-256 digest</text>
+    <text class="fc-sub" x="36" y="388">immutable identity</text>
+    <text class="fc-sub" x="36" y="406">same bytes → same digest</text>
+
+    <!-- Control plane -->
+    <rect class="fc-box-muted" x="240" y="40" width="330" height="580" rx="10"></rect>
+    <text class="fc-label-strong" x="256" y="64">fastcart-serve</text>
+    <text class="fc-sub" x="388" y="64">control plane</text>
+
+    <rect class="fc-box-brand" x="256" y="80" width="298" height="60" rx="8"></rect>
+    <text class="fc-label-strong" x="272" y="104">Admin API + PluginService</text>
+    <text class="fc-sub" x="272" y="122">install · enable · settings · RPC</text>
+
+    <rect class="fc-box" x="256" y="158" width="298" height="50" rx="8"></rect>
+    <text class="fc-label-strong" x="272" y="180">Artifact store</text>
+    <text class="fc-mono-muted" x="272" y="198">&lt;digest&gt;/plugin.json · modules · UI</text>
+
+    <rect class="fc-box" x="256" y="226" width="298" height="70" rx="8"></rect>
+    <text class="fc-label-strong" x="272" y="248">Store SQLite</text>
+    <text class="fc-sub" x="272" y="266">installations · settings · KV</text>
+    <text class="fc-sub" x="272" y="284">events · jobs · logs</text>
+
+    <rect class="fc-box-info" x="256" y="314" width="298" height="70" rx="8"></rect>
+    <text class="fc-label-strong" x="272" y="336">Host API</text>
+    <text class="fc-sub" x="272" y="354">/internal/plugins/v1 · scopes</text>
+    <text class="fc-sub" x="272" y="372">HMAC context token · store-scoped</text>
+
+    <rect class="fc-box" x="256" y="402" width="298" height="50" rx="8"></rect>
+    <text class="fc-label-strong" x="272" y="424">Egress proxy</text>
+    <text class="fc-sub" x="272" y="442">HTTPS · allowlist · private-IP blocking</text>
+
+    <rect class="fc-box" x="256" y="470" width="298" height="56" rx="8"></rect>
+    <text class="fc-label-strong" x="272" y="492">UI mount + injector</text>
+    <text class="fc-sub" x="272" y="510">sandboxed iframe · storefront embed</text>
+
+    <!-- Execution plane -->
+    <rect class="fc-box-muted" x="610" y="80" width="290" height="400" rx="10"></rect>
+    <text class="fc-label-strong" x="626" y="104">workerd plugin host</text>
+    <text class="fc-sub" x="626" y="122">one shared process</text>
+
+    <rect class="fc-box" x="626" y="138" width="258" height="52" rx="8"></rect>
+    <text class="fc-label-strong" x="642" y="160">Gateway</text>
+    <text class="fc-sub" x="642" y="178">one socket · runtime token</text>
+
+    <rect class="fc-box" x="626" y="204" width="258" height="58" rx="8"></rect>
+    <text class="fc-label-strong" x="642" y="226">Worker Loader</text>
+    <text class="fc-mono-muted" x="642" y="244">get(id@digest) · globalOutbound null</text>
+
+    <rect class="fc-box-brand" x="626" y="276" width="258" height="90" rx="8"></rect>
+    <text class="fc-label-strong" x="642" y="298">Plugin isolates</text>
+    <text class="fc-sub" x="642" y="317">fetch · admin · events · jobs</text>
+    <text class="fc-sub" x="642" y="335">one V8 isolate per plugin</text>
+    <text class="fc-sub" x="642" y="353">env: FASTCART_API · plugin id</text>
+
+    <rect class="fc-box" x="626" y="390" width="258" height="52" rx="8"></rect>
+    <text class="fc-label-strong" x="642" y="412">Shared bridge</text>
+    <text class="fc-sub" x="642" y="430">only egress to the Host API</text>
+
+    <!-- Surfaces -->
+    <rect class="fc-box-accent" x="610" y="520" width="280" height="48" rx="8"></rect>
+    <text class="fc-label-strong" x="626" y="542">Admin iframe · storefront embed</text>
+    <text class="fc-sub" x="626" y="560">assets served by Rust, digest-scoped</text>
+
+    <rect class="fc-box-muted" x="610" y="590" width="280" height="50" rx="8"></rect>
+    <text class="fc-label-strong" x="626" y="612">External hosts</text>
+    <text class="fc-sub" x="626" y="630">reachable only through the egress proxy</text>
+
+    <!-- Arrows -->
+    <path class="fc-line" d="M 210 200 H 254" marker-end="url(#fc-plugin-arch-arrow)"></path>
+    <text class="fc-sub" x="216" y="192">upload</text>
+
+    <path class="fc-line" d="M 554 110 H 590 V 164 H 624" marker-end="url(#fc-plugin-arch-arrow)"></path>
+
+    <path class="fc-line-dashed" d="M 554 183 H 590 V 233 H 624" marker-end="url(#fc-plugin-arch-arrow)"></path>
+    <text class="fc-sub" x="560" y="175">bundle</text>
+
+    <path class="fc-line" d="M 755 190 V 202" marker-end="url(#fc-plugin-arch-arrow)"></path>
+    <path class="fc-line" d="M 755 262 V 274" marker-end="url(#fc-plugin-arch-arrow)"></path>
+    <path class="fc-line" d="M 755 366 V 388" marker-end="url(#fc-plugin-arch-arrow)"></path>
+
+    <path class="fc-line" d="M 626 416 H 590 V 349 H 556" marker-end="url(#fc-plugin-arch-arrow)"></path>
+    <text class="fc-sub" x="600" y="400" text-anchor="end">token</text>
+
+    <path class="fc-line-dashed" d="M 530 384 V 400" marker-end="url(#fc-plugin-arch-arrow)"></path>
+
+    <path class="fc-line" d="M 405 314 V 298" marker-end="url(#fc-plugin-arch-arrow)"></path>
+    <text class="fc-sub" x="413" y="306">scopes</text>
+
+    <path class="fc-line" d="M 256 110 H 246 V 260 H 254" marker-end="url(#fc-plugin-arch-arrow)"></path>
+
+    <path class="fc-line" d="M 554 498 H 590 V 544 H 608" marker-end="url(#fc-plugin-arch-arrow)"></path>
+    <text class="fc-sub" x="560" y="490">mount</text>
+
+    <path class="fc-line" d="M 405 452 H 590 V 614 H 608" marker-end="url(#fc-plugin-arch-arrow)"></path>
+    <text class="fc-sub" x="600" y="580" text-anchor="end">HTTPS</text>
+  </svg>
+  <figcaption>
+    <strong>Figure 3.</strong> The manifest is the authorization declaration;
+    the digest is the immutable identity. Plugin code runs in a V8 isolate, but
+    a workerd isolate is not an OS security boundary: v1 trusts the operator to
+    install reviewed plugins. The isolate has no database handle, no admin
+    cookie and no direct internet access.
+  </figcaption>
+</figure>

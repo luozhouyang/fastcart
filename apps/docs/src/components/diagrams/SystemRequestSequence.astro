@@ -1,0 +1,122 @@
+---
+/**
+ * Synchronous request path and the asynchronous outbox hand-off. Shows why a
+ * commerce write answers before webhooks, email and plugin deliveries run.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    class="fc-seq"
+    viewBox="0 0 920 650"
+    role="img"
+    aria-labelledby="fc-sync-title fc-sync-desc"
+  >
+    <title id="fc-sync-title">Fastcart request and asynchronous outbox flow</title>
+    <desc id="fc-sync-desc">
+      An admin request enters the HTTP edge, resolves the store, runs the
+      workflow, writes the module transaction and appends an outbox event in the
+      same transaction, then returns 200. After the response, the dispatcher
+      claims the event, fans it out per subscription, and delivers it to
+      webhooks, email or plugins with retries.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-sync-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <rect class="fc-box-accent" x="5" y="24" width="110" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="60" y="46" text-anchor="middle">Admin SPA</text>
+
+    <rect class="fc-box-accent" x="145" y="24" width="110" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="200" y="46" text-anchor="middle">HTTP edge</text>
+
+    <rect class="fc-box" x="295" y="24" width="110" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="350" y="46" text-anchor="middle">Store DB</text>
+
+    <rect class="fc-box-brand" x="435" y="24" width="110" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="490" y="46" text-anchor="middle">Workflows</text>
+
+    <rect class="fc-box" x="565" y="24" width="110" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="620" y="46" text-anchor="middle">Outbox + jobs</text>
+
+    <rect class="fc-box" x="690" y="24" width="110" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="745" y="46" text-anchor="middle">Dispatcher</text>
+
+    <rect class="fc-box" x="805" y="24" width="110" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="860" y="46" text-anchor="middle">Integrations</text>
+
+    <path class="fc-lifeline" d="M 60 60 V 560"></path>
+    <path class="fc-lifeline" d="M 200 60 V 560"></path>
+    <path class="fc-lifeline" d="M 350 60 V 560"></path>
+    <path class="fc-lifeline" d="M 490 60 V 560"></path>
+    <path class="fc-lifeline" d="M 620 60 V 560"></path>
+    <path class="fc-lifeline" d="M 745 60 V 560"></path>
+    <path class="fc-lifeline" d="M 860 60 V 560"></path>
+
+    <!-- Synchronous request -->
+    <path class="fc-line" d="M 60 105 H 198" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-mono-muted" x="66" y="99">PATCH /api/v1/admin/products</text>
+
+    <path class="fc-line" d="M 200 135 h 30 v 12 h -30" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="236" y="129">request id · auth · CSRF</text>
+
+    <path class="fc-line" d="M 200 165 H 348" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="206" y="159">open store pool</text>
+
+    <path class="fc-line" d="M 200 195 H 488" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="206" y="189">mutate(product)</text>
+
+    <path class="fc-line" d="M 490 225 H 352" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="484" y="219" text-anchor="end">transaction</text>
+
+    <path class="fc-line-dashed" d="M 350 255 H 488" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="356" y="249">committed</text>
+
+    <path class="fc-line" d="M 490 285 H 618" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="496" y="279">append event (same tx)</text>
+
+    <path class="fc-line-dashed" d="M 200 315 H 62" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="194" y="309" text-anchor="end">200 OK</text>
+
+    <!-- Async boundary -->
+    <path class="fc-line-dashed" d="M 20 355 H 900"></path>
+    <text class="fc-sub" x="460" y="372" text-anchor="middle">after the HTTP response · at-least-once</text>
+
+    <path class="fc-line" d="M 745 405 H 622" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="739" y="399" text-anchor="end">claim due rows (2 s tick)</text>
+
+    <path class="fc-line" d="M 745 435 h 30 v 12 h -30" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="781" y="429">fan out per subscription</text>
+
+    <path class="fc-line" d="M 745 465 H 858" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="751" y="459">webhook · email · plugin</text>
+
+    <path class="fc-line-dashed" d="M 860 495 H 747" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="854" y="489" text-anchor="end">2xx / retry</text>
+
+    <path class="fc-line" d="M 745 525 H 622" marker-end="url(#fc-sync-arrow)"></path>
+    <text class="fc-sub" x="739" y="519" text-anchor="end">done · backoff</text>
+
+    <rect class="fc-tag" x="60" y="590" width="800" height="40" rx="7"></rect>
+    <text class="fc-sub" x="74" y="610">
+      The outbox row commits with the business write. Delivery happens after the response; five failed
+      attempts move an event to the dead letter.
+    </text>
+  </svg>
+  <figcaption>
+    <strong>Figure 2.</strong> The synchronous request path ends at the store
+    transaction. Since webhooks, email and plugin deliveries run after commit,
+    the merchant gets a fast response and integrations get durable retries.
+  </figcaption>
+</figure>

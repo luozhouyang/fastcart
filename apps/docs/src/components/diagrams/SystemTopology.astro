@@ -1,0 +1,164 @@
+---
+/**
+ * Overall system topology: public edge, modular monolith, local storage and
+ * the two optional workerd processes.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    viewBox="0 0 920 720"
+    role="img"
+    aria-labelledby="fc-system-title fc-system-desc"
+  >
+    <title id="fc-system-title">Fastcart system topology</title>
+    <desc id="fc-system-desc">
+      Browsers reach the single Rust fastcart-serve process, which contains the
+      HTTP edge, authentication and store resolution, commerce modules,
+      workflows and durable jobs, the SSR gateway and the plugin host manager.
+      It reads the platform database and one SQLite database per store. Two
+      separate workerd processes run storefront artifacts and plugins; plugins
+      reach the host API through a bridge and reach external hosts only through
+      an egress proxy.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-system-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <!-- Actors -->
+    <rect class="fc-box-accent" x="20" y="70" width="150" height="64" rx="8"></rect>
+    <text class="fc-label-strong" x="95" y="94" text-anchor="middle">Admin SPA</text>
+    <text class="fc-sub" x="95" y="114" text-anchor="middle">React · cookie + CSRF</text>
+
+    <rect class="fc-box-accent" x="20" y="180" width="150" height="64" rx="8"></rect>
+    <text class="fc-label-strong" x="95" y="204" text-anchor="middle">Storefront</text>
+    <text class="fc-sub" x="95" y="224" text-anchor="middle">HTML + hydration</text>
+
+    <!-- Public server -->
+    <rect class="fc-box-muted" x="200" y="30" width="470" height="600" rx="10"></rect>
+    <text class="fc-label-strong" x="216" y="54">fastcart-serve</text>
+    <text class="fc-sub" x="322" y="54">Rust process · public entry point</text>
+
+    <rect class="fc-box" x="220" y="70" width="430" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="236" y="94">HTTP edge</text>
+    <text class="fc-sub" x="236" y="112">request id · metrics · CORS · body limits</text>
+
+    <rect class="fc-box" x="220" y="146" width="430" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="236" y="170">Auth + store context</text>
+    <text class="fc-sub" x="236" y="188">platform session · Host → active store</text>
+
+    <rect class="fc-box-brand" x="220" y="222" width="430" height="86" rx="8"></rect>
+    <text class="fc-label-strong" x="236" y="246">Commerce modules</text>
+    <text class="fc-sub" x="236" y="266">catalog · pricing · cart · checkout · order</text>
+    <text class="fc-sub" x="236" y="284">payment · inventory · content · customers</text>
+
+    <rect class="fc-box" x="220" y="330" width="430" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="236" y="354">Workflows + outbox + jobs</text>
+    <text class="fc-sub" x="236" y="372">compose modules · durable events · leases</text>
+
+    <rect class="fc-box" x="220" y="414" width="200" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="236" y="438">Plugin host manager</text>
+    <text class="fc-sub" x="236" y="456">bundles · dispatcher</text>
+
+    <rect class="fc-box" x="450" y="414" width="200" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="466" y="438">SSR gateway</text>
+    <text class="fc-sub" x="466" y="456">trusted context · streams</text>
+
+    <rect class="fc-box-info" x="220" y="500" width="430" height="56" rx="8"></rect>
+    <text class="fc-label-strong" x="236" y="524">Internal APIs + assets</text>
+    <text class="fc-sub" x="236" y="542">/internal/* · /_fastcart/assets/* · token checks</text>
+
+    <!-- Data -->
+    <path class="fc-box" d="M 220 674 v 20 a 80 11 0 0 0 160 0 v-20"></path>
+    <ellipse class="fc-box" cx="300" cy="674" rx="80" ry="11"></ellipse>
+    <text class="fc-label-strong" x="300" y="700" text-anchor="middle">Platform SQLite</text>
+    <text class="fc-sub" x="300" y="714" text-anchor="middle">registry · auth</text>
+
+    <path class="fc-box" d="M 410 674 v 20 a 80 11 0 0 0 160 0 v-20"></path>
+    <ellipse class="fc-box" cx="490" cy="674" rx="80" ry="11"></ellipse>
+    <text class="fc-label-strong" x="490" y="700" text-anchor="middle">Store SQLite</text>
+    <text class="fc-sub" x="490" y="714" text-anchor="middle">one database per store</text>
+
+    <rect class="fc-box" x="560" y="664" width="150" height="50" rx="8"></rect>
+    <text class="fc-label-strong" x="635" y="686" text-anchor="middle">Object storage</text>
+    <text class="fc-sub" x="635" y="704" text-anchor="middle">assets · backups</text>
+
+    <!-- Runtimes -->
+    <rect class="fc-box-muted" x="730" y="160" width="170" height="140" rx="9"></rect>
+    <text class="fc-label-strong" x="746" y="184">workerd · SSR</text>
+    <text class="fc-sub" x="746" y="202">framework artifact</text>
+    <rect class="fc-box" x="746" y="216" width="138" height="30" rx="6"></rect>
+    <text class="fc-sub" x="815" y="235" text-anchor="middle">fetch → HTML / stream</text>
+    <text class="fc-sub" x="815" y="270" text-anchor="middle">one process per</text>
+    <text class="fc-sub" x="815" y="286" text-anchor="middle">active deployment</text>
+
+    <rect class="fc-box-muted" x="730" y="360" width="170" height="170" rx="9"></rect>
+    <text class="fc-label-strong" x="746" y="384">workerd · plugins</text>
+    <text class="fc-sub" x="746" y="402">shared process</text>
+    <rect class="fc-box" x="746" y="416" width="138" height="30" rx="6"></rect>
+    <text class="fc-sub" x="815" y="435" text-anchor="middle">gateway + loader</text>
+    <rect class="fc-box" x="746" y="456" width="138" height="46" rx="6"></rect>
+    <text class="fc-sub" x="815" y="474" text-anchor="middle">plugin isolates</text>
+    <text class="fc-mono-muted" x="815" y="492" text-anchor="middle">bridge</text>
+
+    <rect class="fc-box-muted" x="730" y="590" width="170" height="70" rx="9"></rect>
+    <text class="fc-label-strong" x="746" y="614">External providers</text>
+    <text class="fc-sub" x="746" y="632">payments · email</text>
+    <text class="fc-sub" x="746" y="648">allowlisted APIs</text>
+
+    <!-- Arrows -->
+    <path class="fc-line" d="M 170 102 H 218" marker-end="url(#fc-system-arrow)"></path>
+    <text class="fc-sub" x="183" y="94">HTTPS</text>
+
+    <path class="fc-line" d="M 170 212 H 190 V 110 H 218" marker-end="url(#fc-system-arrow)"></path>
+
+    <path class="fc-line" d="M 435 124 V 144" marker-end="url(#fc-system-arrow)"></path>
+    <path class="fc-line" d="M 435 200 V 220" marker-end="url(#fc-system-arrow)"></path>
+    <path class="fc-line" d="M 435 308 V 328" marker-end="url(#fc-system-arrow)"></path>
+    <path class="fc-line" d="M 320 384 V 412" marker-end="url(#fc-system-arrow)"></path>
+    <text class="fc-sub" x="328" y="400">events</text>
+
+    <!-- Edge to runtime managers -->
+    <path class="fc-line" d="M 220 97 H 210 V 441 H 218" marker-end="url(#fc-system-arrow)"></path>
+    <text class="fc-sub" x="206" y="300" transform="rotate(-90 206 300)" text-anchor="middle">admin API</text>
+    <path class="fc-line" d="M 670 97 H 680 V 441 H 672" marker-end="url(#fc-system-arrow)"></path>
+    <text class="fc-sub" x="691" y="300" transform="rotate(-90 691 300)" text-anchor="middle">SSR routing</text>
+
+    <!-- Managers to runtimes -->
+    <path class="fc-line-brand" d="M 650 441 H 700 V 230 H 728" marker-end="url(#fc-system-arrow)"></path>
+
+    <path class="fc-line-brand" d="M 320 468 V 480 H 710 V 450 H 728" marker-end="url(#fc-system-arrow)"></path>
+
+    <!-- Bridge and egress -->
+    <path class="fc-line" d="M 730 500 H 700 V 528 H 652" marker-end="url(#fc-system-arrow)"></path>
+
+    <path class="fc-line" d="M 815 530 V 588" marker-end="url(#fc-system-arrow)"></path>
+    <text class="fc-sub" x="823" y="566">egress proxy</text>
+
+    <!-- Data links -->
+    <path class="fc-line" d="M 300 630 V 662" marker-end="url(#fc-system-arrow)"></path>
+    <path class="fc-line" d="M 490 630 V 662" marker-end="url(#fc-system-arrow)"></path>
+    <path class="fc-line" d="M 635 630 V 662" marker-end="url(#fc-system-arrow)"></path>
+    <text class="fc-sub" x="308" y="650">platform data</text>
+    <text class="fc-sub" x="498" y="650">store data</text>
+    <text class="fc-sub" x="643" y="650">blobs</text>
+  </svg>
+  <figcaption>
+    <strong>Figure 1.</strong> One public Rust process, two optional
+    <code>workerd</code> processes. SSR deployments and plugins never share a
+    process: their lifetime, configuration and trust domains differ. Storage is
+    local: a platform database, one SQLite database per store, and a filesystem
+    object store.
+  </figcaption>
+</figure>

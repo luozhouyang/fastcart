@@ -1,0 +1,125 @@
+---
+/**
+ * One storefront (or admin RPC) plugin invocation: the host mints a context
+ * token, the worker calls the host API only through the shared bridge.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    class="fc-seq"
+    viewBox="0 0 920 700"
+    role="img"
+    aria-labelledby="fc-plugin-inv-title fc-plugin-inv-desc"
+  >
+    <title id="fc-plugin-inv-title">Sequence of a plugin invocation</title>
+    <desc id="fc-plugin-inv-desc">
+      A storefront or admin request reaches the Fastcart API, which resolves the
+      store, checks that the plugin is enabled, and mints a thirty-second context
+      token. The plugin host loads the artifact by digest and calls the worker.
+      Worker calls to the host API go through the shared bridge, which strips
+      browser credentials; Rust verifies the token, store, digest and scopes
+      before querying the scoped store database.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-plugin-inv-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <rect class="fc-box-accent" x="7" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="65" y="46" text-anchor="middle">Client</text>
+
+    <rect class="fc-box-accent" x="157" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="215" y="46" text-anchor="middle">Fastcart API</text>
+
+    <rect class="fc-box" x="332" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="390" y="46" text-anchor="middle">Plugin host</text>
+
+    <rect class="fc-box-brand" x="497" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="555" y="46" text-anchor="middle">Plugin worker</text>
+
+    <rect class="fc-box" x="632" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="690" y="46" text-anchor="middle">Bridge</text>
+
+    <rect class="fc-box-info" x="772" y="24" width="116" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="830" y="46" text-anchor="middle">Host API</text>
+
+    <path class="fc-lifeline" d="M 65 60 V 650"></path>
+    <path class="fc-lifeline" d="M 215 60 V 650"></path>
+    <path class="fc-lifeline" d="M 390 60 V 650"></path>
+    <path class="fc-lifeline" d="M 555 60 V 650"></path>
+    <path class="fc-lifeline" d="M 690 60 V 650"></path>
+    <path class="fc-lifeline" d="M 830 60 V 650"></path>
+
+    <path class="fc-line" d="M 65 105 H 213" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-mono-muted" x="71" y="99">GET /apps/chat/...</text>
+
+    <path class="fc-line" d="M 215 135 h 30 v 12 h -30" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="251" y="129">resolve store · enabled · token</text>
+
+    <path class="fc-line" d="M 215 165 H 388" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="221" y="159">forward /__plugin/id@digest</text>
+
+    <path class="fc-line" d="M 390 195 h 30 v 12 h -30" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="426" y="189">LOADER.get(id@digest)</text>
+
+    <path class="fc-line" d="M 390 225 H 553" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="396" y="219">fetch(request)</text>
+
+    <path class="fc-line" d="M 555 255 h 30 v 12 h -30" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="591" y="249">handler</text>
+
+    <path class="fc-line" d="M 555 285 H 688" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="561" y="279">ctx.api(...)</text>
+
+    <path class="fc-line" d="M 690 315 h 30 v 12 h -30" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="726" y="309">strip cookie/auth</text>
+
+    <path class="fc-line" d="M 690 345 H 828" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="696" y="339">internal API + token</text>
+
+    <path class="fc-line" d="M 830 375 h 30 v 12 h -30" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="796" y="369" text-anchor="end">HMAC · store · scope</text>
+
+    <path class="fc-line" d="M 830 405 h 30 v 12 h -30" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="796" y="399" text-anchor="end">scoped store query</text>
+
+    <path class="fc-line-dashed" d="M 830 435 H 692" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="824" y="429" text-anchor="end">200 JSON</text>
+
+    <path class="fc-line-dashed" d="M 690 465 H 557" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="684" y="459" text-anchor="end">200 JSON</text>
+
+    <path class="fc-line-dashed" d="M 555 495 H 392" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="549" y="489" text-anchor="end">body / stream</text>
+
+    <path class="fc-line-dashed" d="M 390 525 H 217" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="384" y="519" text-anchor="end">response</text>
+
+    <path class="fc-line-dashed" d="M 215 555 H 67" marker-end="url(#fc-plugin-inv-arrow)"></path>
+    <text class="fc-sub" x="209" y="549" text-anchor="end">200</text>
+
+    <rect class="fc-tag" x="40" y="600" width="840" height="48" rx="7"></rect>
+    <text class="fc-sub" x="54" y="620">
+      Admin RPC uses the same pipeline with /admin/&lt;method&gt; and the acting user's permissions.
+    </text>
+    <text class="fc-sub" x="54" y="638">
+      Event and job deliveries use /events and /jobs/&lt;name&gt; with dedicated actors; all paths share the bridge.
+    </text>
+  </svg>
+  <figcaption>
+    <strong>Figure 5.</strong> The Worker never chooses the store and never sees
+    an admin cookie. The context token binds the plugin, store, digest, actor
+    and scopes; the Host API re-checks all of them on every call.
+  </figcaption>
+</figure>

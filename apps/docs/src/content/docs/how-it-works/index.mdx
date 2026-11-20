@@ -1,0 +1,178 @@
+---
+title: System architecture
+description: How Fastcart combines one Rust modular monolith, per-store SQLite and optional workerd runtimes for storefronts and plugins.
+sidebar:
+  order: 2
+  group:
+    label: How it works
+---
+
+Fastcart is built as **one Rust process** with a platform database, **one SQLite database per store**, an in-process outbox and job queue, and two optional process-isolated runtimes: one for storefront SSR artifacts and one for plugins. There is no mandatory PostgreSQL, Redis, message broker or container orchestrator.
+
+That shape is a product decision, not a shortcut. This page explains the forces behind it, how a request reaches data, where the process and storage boundaries sit, and what the design deliberately gives up.
+
+## Why this shape
+
+Fastcart targets self-hosted independent stores: merchants who want Medusa-class commerce capabilities without becoming a platform operator. For that audience, *how many services must be running before the first order* is a feature.
+
+| Force | Choice | Cost accepted |
+| --- | --- | --- |
+| Operate on one machine | One `fastcart-serve` binary, local storage, optional runtimes | Vertical scaling first; no built-in HA |
+| Make tenant leaks hard | One SQLite database and pool per store; platform DB holds registry/auth only | Per-store migrations, pools and backups |
+| Keep commerce transactions consistent | Business write and outbox row commit in the same SQLite transaction | In-process delivery instead of a broker |
+| Extend without forking the core | Capability-scoped plugins and artifacts, separate workerd process | A runtime to supervise and a capability API to maintain |
+| Render any frontend framework | Standard Fetch-handler artifacts in `workerd` | Process boundary, artifact packaging and a gateway |
+| Keep the failure domain small | A JS crash cannot take down the commerce server | Two runtimes have their own lifecycle |
+
+The rejected alternatives are recorded in [ADR 0001](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/adr/0001-single-node-modular-monolith-with-sqlite.md): microservices per domain, mandatory PostgreSQL, mandatory Redis, an external broker, and embedding JavaScript in the Rust process. Each would have increased the minimum deployment or made the first release depend on a distributed system.
+
+## Runtime topology
+
+<SystemTopology />
+
+The public entry point is always the Rust process. The two `workerd` processes are companions: the SSR process starts with its configured deployment, the plugin host starts lazily on the first request, both listen on loopback, and neither receives a database handle.
+
+| Component | Owns | Must not |
+| --- | --- | --- |
+| `fastcart-serve` | Public HTTP, auth, store resolution, commerce modules, workflows, outbox/jobs, assets, runtime supervision | Execute untrusted storefront or plugin JavaScript |
+| Platform SQLite | Store registry, domains, users, sessions, memberships, provisioning | Store catalog, cart, order or payment rows |
+| Store SQLite | Commerce data, plugin installations, outbox, jobs, KV, logs | Contain another store's rows |
+| `workerd` · SSR | Framework-built storefront handler, HTML and streams | Open a database or hold admin credentials |
+| `workerd` · plugins | Shared plugin host, loader, plugin isolates, bridge | Reach the internet directly or read host files |
+| External providers | Payments, email, allowlisted plugin egress | Bypass host configuration or quotas |
+
+## A request end to end
+
+<SystemRequestSequence />
+
+### 1. The HTTP edge
+
+Every request enters through the Axum router, which applies a request id, metrics, tracing, body limits, CORS and security headers. The request id follows the work into logs and plugin calls.
+
+### 2. Authentication and store resolution
+
+There are three entry paths, and each resolves a store differently:
+
+- **Admin** requests use an HttpOnly session cookie or bearer API token. The user's membership and permissions are checked, and the store is selected with `x-store-id`. Cookie-authenticated mutations also require the CSRF header.
+- **Storefront** requests resolve the store from the trusted `Host` header. A client cannot choose a store with a query parameter or custom header.
+- **Internal** namespaces (`/internal/*`) are server-only and require a scoped token. The SSR and plugin APIs resolve the store from the path and verify the credential against that store.
+
+Storefront and admin failures use the same error envelope, so clients get a stable shape for validation, auth, not-found and conflict cases.
+
+### 3. Workflows and modules
+
+Routes are thin. A commerce operation is either a module service or a workflow that composes several modules. Module services own their tables; cross-module writes go through the owning service or an orchestrator, and cross-module foreign keys are not allowed.
+
+Store-scoped services receive a `StoreDatabase`, never a global connection. Prices, discounts, tax and shipping totals are computed server-side; client-submitted totals are not trusted.
+
+### 4. The store transaction
+
+Catalog, cart, checkout, order, payment and inventory changes run against the store's SQLite database. SQLite's single-writer model bounds one store's write throughput, but it makes local transactions and file-level backup/restore simple.
+
+### 5. The outbox in the same transaction
+
+A business write that other systems must observe also inserts an outbox event **inside the same transaction**. The HTTP response does not wait for webhooks, email or plugin deliveries. This turns "write then publish" into "write and publish are one commit".
+
+### 6. The response
+
+The response leaves as soon as the transaction commits. Read paths may use the store-scoped Moka cache; successful admin and store mutations invalidate the relevant cache generation.
+
+### 7. The asynchronous hand-off
+
+A maintenance loop claims outbox rows, fans them out to webhook endpoints, email jobs and plugin subscribers, and runs due jobs. Claims use leases, so a restart resumes work instead of losing it. Delivery is **at-least-once**; consumers must be idempotent.
+
+## Modules and data ownership
+
+Fastcart is a modular monolith: every commerce domain is a crate, but they share one store database. Cargo dependencies cannot enforce table ownership, so the reviewed contract is documented and a CI guard rejects new cross-module reads or writes.
+
+| Area | Crates and responsibilities |
+| --- | --- |
+| Foundations | `kernel` (IDs, money, contexts, errors), `platform` (stores, users, auth, RBAC), `infrastructure` (SQLite pools, migrations, cache, outbox, jobs, storage) |
+| Commerce | `crates/modules/*`: store, catalog, pricing, inventory, cart, checkout, order, payment, shipping, tax, customer, promotion, content, theme, webhook, inquiry, notifications, asset |
+| Orchestration | `workflows`: cart pricing, checkout, returns, maintenance |
+| Presentation | `http` (middleware and error envelope), `api` (routes, DTOs, OpenAPI), `server` (config, bootstrap, maintenance) |
+| Runtime planes | `ssr` + `ssr-workerd` + `ssr-credentials`, and `plugin`; both are optional workerd supervisors |
+| Tooling | `cli`, `apps/admin`, `apps/storefront`, `apps/docs` |
+
+The rules in short:
+
+- A module may read and write the tables it owns.
+- Cross-module **writes** go through the owning service or a workflow.
+- Cross-module **reads** go through the owning service unless an exception is recorded with a reason.
+- No foreign keys between modules; store the identifier and validate it in the owning service.
+
+The full map and current exceptions live in [module data ownership](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/architecture/module-data-ownership.md).
+
+## Multi-store isolation
+
+Tenancy is enforced by the database boundary, not by a `store_id` predicate:
+
+- The platform database holds the registry and auth data; it never holds commerce rows.
+- One SQLite database and connection pool per store is created and migrated on demand.
+- Every request resolves exactly one store before a commerce service is called.
+- Cache keys, outbox rows, jobs, plugin state and SSR credentials are store-scoped.
+- Backups, restore and deletion operate on a single store database.
+
+A plugin installed on two stores has two installations, two settings rows and two KV namespaces. The same plugin code can read two stores only because the operator installed it twice. See [ADR 0006](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/adr/0006-per-store-sqlite-database-for-tenant-isolation.md).
+
+## Storage, jobs and cache
+
+| Store | Contents | Durability |
+| --- | --- | --- |
+| Platform SQLite | Store registry, domains, users, sessions, memberships | Backed up as part of the platform database |
+| Store SQLite (one per store) | Commerce rows, outbox, jobs, plugin installations/settings/KV/deliveries/logs | Per-store backup and restore |
+| Filesystem object store | Uploaded assets and backups | Path-traversal protected |
+| Runtime data directories | SSR/plugin artifacts and generated runtime configs | Content-addressed and generation-scoped |
+| Moka cache | Store-scoped read cache | Process memory only; lost on restart |
+| In-memory SSR response cache | Cacheable storefront responses | Per process; lost on restart |
+
+The local cache choice follows from the single-node target. It keeps invalidation simple and avoids a mandatory Redis, at the cost of not sharing entries across replicas.
+
+## Two extension planes
+
+Fastcart has two optional JavaScript surfaces, deliberately kept apart:
+
+- [Storefront SSR](/how-it-works/storefront-ssr/) runs framework-built Fetch handlers in a process per active deployment. It is the rendering plane.
+- [Plugin system](/how-it-works/plugin-system/) runs operator-installed extensions in one shared plugin host with a Worker Loader. It is the extension plane.
+
+They do not share a `workerd` process. Their lifecycle, configuration, trust level and failure handling differ: an SSR deployment is a storefront build, while a plugin is capability-scoped code that runs alongside the admin and storefront.
+
+## Trade-offs
+
+### What the architecture buys
+
+- **Installation is a binary and a data directory.** No service discovery, broker or container orchestrator is required.
+- **Commerce writes are locally transactional.** The outbox commits with the business row, so there is no dual-write window.
+- **Tenant isolation is structural.** A missing SQL predicate cannot read another store's rows.
+- **Module boundaries stay testable.** Modules can run against in-memory SQLite databases, and the ownership guard catches drift.
+- **JavaScript failures are contained by process boundaries.** An SSR or plugin crash does not terminate the commerce server.
+- **Backups are file operations.** Each store can be backed up, verified and restored independently.
+
+### What it costs
+
+- **Vertical scaling first.** SQLite write concurrency bounds a store; a multi-node deployment is not supported.
+- **Cross-store reporting fans out.** There is no single SQL query across stores.
+- **Per-store overhead.** Every store carries migrations, a connection pool and a backup unit.
+- **Two supervisors to operate.** SSR and plugin runtimes have their own binaries, ports, health checks and logs.
+- **Local caches are local.** Moka and the SSR response cache are per process and disappear on restart.
+- **A workerd isolate is not an OS sandbox.** It contains crashes and capability mistakes, not hostile native code.
+
+## Limits
+
+| Limit | Consequence |
+| --- | --- |
+| Single-node deployment | No built-in HA, failover or horizontal request scaling |
+| SQLite write concurrency | One writer at a time per store; write-heavy stores scale vertically first |
+| No distributed cache | Cache hits are per process; restarts start cold |
+| No cross-store SQL | Reporting must fan out and aggregate outside the database |
+| PostgreSQL adapter is future work | The store-scoped service contracts are designed to allow it, but it is not implemented |
+| No plugin marketplace or signing | Plugins are operator-installed and reviewed; see the [plugin limits](/how-it-works/plugin-system/#limits-and-non-goals) |
+| Optional runtimes are still operational surface | If SSR or plugins are enabled, their workerd binary, checks and logs become part of the deployment |
+
+The single-node scope is recorded in [ADR 0001](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/adr/0001-single-node-modular-monolith-with-sqlite.md). The container view and current migration away from legacy theme bundles are in [the container view](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/architecture/fastcart-container-view.md).
+
+## Next
+
+- [Storefront SSR](/how-it-works/storefront-ssr/) — artifacts, the gateway, streaming, caching and deployment.
+- [Plugin system](/how-it-works/plugin-system/) — manifests, capabilities, the plugin host and its limits.
+- [Quickstart](/quickstart/) — run the API and admin locally.

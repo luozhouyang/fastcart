@@ -11,16 +11,26 @@ import { CardGrid } from "./components/ui/card-grid";
 import { PackageManagers } from "./components/ui/package-managers";
 import { Step, Steps } from "./components/ui/steps";
 import { Tabs, TabItem } from "./components/ui/tabs";
+import PluginArchitecture from "./components/diagrams/PluginArchitecture.astro";
+import PluginAsyncSequence from "./components/diagrams/PluginAsyncSequence.astro";
+import PluginInvocationSequence from "./components/diagrams/PluginInvocationSequence.astro";
+import PluginLifecycle from "./components/diagrams/PluginLifecycle.astro";
 import SsrDeploySequence from "./components/diagrams/SsrDeploySequence.astro";
 import SsrRequestFlow from "./components/diagrams/SsrRequestFlow.astro";
 import SsrRequestSequence from "./components/diagrams/SsrRequestSequence.astro";
 import SsrTopology from "./components/diagrams/SsrTopology.astro";
+import SystemRequestSequence from "./components/diagrams/SystemRequestSequence.astro";
+import SystemTopology from "./components/diagrams/SystemTopology.astro";
 
 export const components = {
   Aside,
   Card,
   CardGrid,
   PackageManagers,
+  PluginArchitecture,
+  PluginAsyncSequence,
+  PluginInvocationSequence,
+  PluginLifecycle,
   Render,
   Step,
   Steps,
@@ -28,6 +38,8 @@ export const components = {
   SsrRequestFlow,
   SsrRequestSequence,
   SsrTopology,
+  SystemRequestSequence,
+  SystemTopology,
   TabItem,
   Tabs,
 };

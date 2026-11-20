@@ -2,7 +2,7 @@
 title: Storefront SSR
 description: How Fastcart turns a framework build into a supervised workerd runtime and renders storefront pages through it.
 sidebar:
-  order: 2
+  order: 1
 ---
 
 Fastcart does not embed React, Astro or TanStack in the Rust server, and it never hands storefront code a database connection. A storefront is built into a **Worker artifact** that runs in a separate `workerd` process. The Rust server owns the public HTTP surface, store resolution, caching, static assets and the store-scoped commerce API.
@@ -369,6 +369,8 @@ The universal runtime is deliberately narrower than a full Workers platform:
 
 ## Related
 
+- [System architecture](/how-it-works/) — processes, storage and module boundaries.
+- [Plugin system](/how-it-works/plugin-system/) — the separate extension runtime.
 - [Quickstart](/quickstart/) — build the workspace and run the API and admin.
 - [ADR 0007: Universal SSR runtime with workerd](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/adr/0007-universal-ssr-runtime-with-workerd.md)
 - [Universal SSR runtime design](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/architecture/universal-ssr-runtime.md)

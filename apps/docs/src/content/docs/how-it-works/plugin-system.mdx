@@ -1,0 +1,397 @@
+---
+title: Plugin system
+description: How Fastcart packages, installs and executes capability-scoped plugins in a shared workerd host.
+sidebar:
+  order: 2
+---
+
+Plugins let a merchant add a capability without forking Fastcart or rebuilding the Rust server. A plugin is an **operator-installed JavaScript artifact** with a declared capability set, a content-addressed digest and one or more UI surfaces. It runs in a shared `workerd` process, reaches business data only through a host API, and cannot open the database or the internet directly.
+
+This page covers the design: why the boundary looks like this, the manifest and artifact contract, the lifecycle, the four execution paths, the UI runtimes, the security model, and the limits and trade-offs of the v1 implementation.
+
+## Why a plugin system
+
+Without a plugin boundary, every merchant-specific change becomes a change to the core: a new payment widget, a chat bubble or an order sidebar is compiled into the admin bundle and redeployed with the server. That couples release cadence to every merchant and makes third-party code part of the trusted core.
+
+Fastcart chooses the **app-platform shape** instead of the in-process plugin shape:
+
+- Plugins are separate artifacts, installed per store and upgraded independently.
+- The core exposes a small, versioned capability API instead of its internal services.
+- Plugin code executes outside the core process and receives no database handle.
+- Admin extensions run in sandboxed iframes; storefront extensions mount client-side from a boot script.
+- Installs, upgrades and rollbacks are database state changes, not server restarts.
+
+The v1 decisions are deliberately conservative: operator-installed and reviewed plugins, read-only business data, no plugin-owned tables, no marketplace, and no per-plugin OS process. See [limits and non-goals](#limits-and-non-goals) for the exact line.
+
+## Design at a glance
+
+<PluginArchitecture />
+
+The system has four planes:
+
+| Plane | Where it lives | What it decides |
+| --- | --- | --- |
+| Declaration | `plugin.json` in the package | What the plugin requests: scopes, targets, jobs, settings schema |
+| Distribution | Content-addressed artifact store | What code is installed; the digest is the immutable identity |
+| Installation | Store SQLite | Whether it is enabled for this store, its settings, KV, events and jobs |
+| Execution | Shared `workerd` plugin host + host API | What the code can actually do at runtime |
+
+The manifest is the authorization declaration; Rust is the enforcement point. A plugin cannot widen its own scopes by sending a different header, because every host call is checked against the installation and a signed token that names the store, plugin, digest, actor and granted scopes.
+
+## Package and manifest
+
+A plugin is a `tar.gz` with `plugin.json` at its root:
+
+```text
+chat-widget/
+├── plugin.json
+├── worker/index.js        # fetch / admin / events / jobs handlers
+├── ui/settings.html       # admin iframe pages
+├── storefront/boot.js     # custom element / mount logic
+└── storefront/boot.css
+```
+
+The host validates the archive before writing anything:
+
+- total archive ≤ 20 MB, ≤ 2,000 files, each file ≤ 5 MB, ≤ 40 MB uncompressed;
+- no symlinks, absolute paths, `..`, duplicate entries or unusual entry types;
+- every referenced entry, UI file, storefront file and settings UI exists;
+- every JavaScript module is ≤ 4 MB by default;
+- `plugin.json` is valid against the manifest schema.
+
+The digest is computed over the canonical file tree. Artifact storage is idempotent by digest: identical bytes are stored once. Installing a plugin id that is already installed is rejected as a duplicate. The default limits are configurable through the plugin configuration.
+
+### `plugin.json`
+
+```json title="plugin.json"
+{
+  "schema_version": "1",
+  "id": "chat-widget",
+  "name": "Live Chat",
+  "version": "1.0.0",
+  "api_version": 2,
+  "runtime": {
+    "engine": "workerd",
+    "compatibility_date": "2026-11-01",
+    "compatibility_flags": ["nodejs_compat"]
+  },
+  "entry": { "type": "worker", "path": "worker/index.js" },
+  "capabilities": {
+    "data": ["catalog.read", "orders.read"],
+    "storage": ["kv.read", "kv.write"],
+    "events": ["order.placed"],
+    "network": ["api.example.com"],
+    "admin": ["admin.ui"],
+    "storefront": ["store.read"]
+  },
+  "extensions": {
+    "admin": [
+      { "target": "admin.nav.section", "label": "Live Chat", "route": "/apps/chat-widget" },
+      {
+        "target": "admin.page.settings.tabs",
+        "title": "Live Chat",
+        "entry": "ui/settings.html",
+        "height": 420
+      }
+    ],
+    "storefront": [
+      {
+        "kind": "embed",
+        "placement": "body:end",
+        "entry": "storefront/boot.js",
+        "css": "storefront/boot.css",
+        "pages": ["*"],
+        "exclude_paths": ["/checkout/*"]
+      }
+    ]
+  },
+  "settings": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "greeting": { "type": "string", "default": "Hi! How can we help?" },
+        "accent": { "type": "string", "default": "#2563eb" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "rpc": ["conversations.list", "conversations.reply"],
+  "jobs": [{ "name": "sync-conversations", "schedule": "*/5 * * * *" }]
+}
+```
+
+`api_version` must match the host plugin API (currently `2`). `schema_version` is `1`. The compatibility date must fall inside the host's supported range, and `nodejs_compat` is the only accepted compatibility flag.
+
+### Capabilities
+
+Capabilities are grouped by area, and the group constrains which scope is valid.
+
+| Group | Allowed values | Effect |
+| --- | --- | --- |
+| `data` | `catalog.read`, `orders.read`, `customers.read`, `content.read`, `carts.read` | Read scoped business data through the host API |
+| `storage` | `kv.read`, `kv.write` | Per-plugin, per-store key-value storage |
+| `storefront` | `store.read`, `customer.read` | Storefront context; the storefront token is restricted to a small read-only scope set |
+| `events` | Event names such as `order.placed` | Subscribe to outbox events; at most 20 |
+| `network` | Lowercase hostnames (at most 10) | Call allowlisted HTTPS hosts through the egress proxy |
+| `network_auth` | Hosts already in `network` | Forward the plugin's `Authorization` header to those hosts |
+| `admin` | `admin.ui`, `plugins.settings` | Render admin UI and read published settings |
+| `extensions.admin` | Admin targets | Grants `admin.ui` implicitly |
+| `extensions.storefront` | Storefront embeds | Grants `storefront.ui` implicitly |
+| `jobs` | Declared jobs (at most 10) | Grants `jobs.enqueue` implicitly |
+
+`core.context` is always granted. Write scopes such as `catalog.write`, `orders.write`, `inventory.write`, `settings.write` and `payments.write` are reserved for a later host API version and are rejected at install time.
+
+### Admin targets
+
+v1 enables six targets:
+
+| Target | Placement | Required permission |
+| --- | --- | --- |
+| `admin.nav.section` | Navigation, append entries | `plugins.read` |
+| `admin.page.overview.after-header` | Overview, after the header | `plugins.read` |
+| `admin.page.orders.details.side` | Order details, right column | `orders.read` |
+| `admin.page.products.details.side` | Product details, right column | `products.read` |
+| `admin.page.customers.details.side` | Customer details, right column | `customers.read` |
+| `admin.page.settings.tabs` | Settings, new tab | `settings.read` |
+
+Known but reserved targets (for example `admin.global.banner`) are rejected rather than silently ignored. At most ten admin extensions are declared per plugin, and the admin renders **at most three** extensions per slot, sorted by `priority`.
+
+### Storefront embeds
+
+v1 supports one storefront kind: `embed`, with `head:start`, `head:end`, `body:start` or `body:end` placement. `pages` and `exclude_paths` decide where the boot script loads. At most five storefront extensions are declared per plugin.
+
+Server-rendered slots and theme-block positions are deferred. The current model mounts client-side custom elements after the page loads.
+
+## Lifecycle
+
+<PluginLifecycle />
+
+### Install
+
+1. The author runs `fastcart-plugin init`, implements the worker and surfaces, then `fastcart-plugin pack` writes a deterministic archive and prints its digest.
+2. An operator uploads the archive from **Admin → Plugins**. The route requires `plugins.install`.
+3. The host validates the archive and manifest, stores the artifact by digest, and writes an installation row with `enabled = 0`.
+4. Installation is per store. The same plugin installed on three stores has three independent rows, settings, KV namespaces and quotas.
+
+### Enable
+
+Enabling validates the current settings against the manifest's JSON Schema, then sets `enabled = 1`. The plugin host is **not** started yet; it starts lazily on the first request. If `plugins.enabled` is false in the server configuration, install, upgrade and enable return `409`, while listing, settings, disable, rollback and delete remain available so operators can prepare or clean up.
+
+### Load and invoke
+
+1. The first request calls the plugin host manager.
+2. If the shared host is not running, it starts one `workerd` process, generates a static Cap'n Proto configuration and waits for `/__fastcart/health`.
+3. The gateway resolves the request to `{plugin}@{digest}` and calls `LOADER.get(...)`.
+4. The loader fetches the bundle JSON from the internal runtime endpoint with the runtime token, compiles the module graph lazily and caches it by loader id.
+5. The plugin receives only `env.FASTCART_API` (the shared bridge) and `env.FASTCART_PLUGIN_ID`; its `globalOutbound` is `null`.
+
+### Upgrade
+
+- The archive must contain the same plugin id; the same digest is rejected as a duplicate.
+- If the new version adds a scope, the upgrade fails unless `accept_new_scopes` is passed. The admin UI shows the capability diff before consenting.
+- The old digest is stored as `previous_digest`; event subscriptions are rebuilt from the new manifest.
+- The new digest gets a new loader id, so the next request compiles the new version. No process restart and no configuration regeneration.
+
+### Rollback and remove
+
+- Rollback swaps the active and previous digests and revalidates settings against the older manifest. With no previous digest, the call fails.
+- Disable stops routing immediately. Remove requires the plugin to be disabled first; it deletes installation, subscriptions, deliveries and jobs rows. Artifacts stay in the content-addressed store until garbage collection finds no references.
+
+## Execution paths
+
+| Path | Entry and worker route | Token actor | Limit |
+| --- | --- | --- | --- |
+| Admin RPC | `POST /api/v1/admin/plugins/{id}/rpc` → `/admin/{method}` | Acting admin + permissions | 10 s · 512 KB |
+| Storefront | `/apps/{id}/*` → `fetch(request)` | Storefront visitor | 30 s · 8 MB |
+| Event | Dispatcher → `/events` | Event id | 30 s · 8 MB |
+| Job | Dispatcher or manual run → `/jobs/{name}` | Job id | 60 s · 8 MB |
+
+Storefront routes also support a WebSocket upgrade; the host tunnels it to the plugin gateway. Admin UI assets are **not** proxied through the worker: Rust serves the digest-scoped files and opens a sandboxed iframe.
+
+A storefront invocation receives a **reduced scope set**: only `catalog.read`, `store.read`, `customer.read` and `carts.read` survive the filter. KV writes, egress and event/job scopes are available to admin RPC and background deliveries, not to a browser-facing storefront request.
+
+### A storefront or RPC call
+
+<PluginInvocationSequence />
+
+The host API is the only business surface. It currently exposes:
+
+```text
+GET  /internal/plugins/v1/context
+GET  /internal/plugins/v1/products
+GET  /internal/plugins/v1/products/{id}
+GET  /internal/plugins/v1/orders
+GET  /internal/plugins/v1/orders/{id}
+GET  /internal/plugins/v1/customers/{id}
+GET  /internal/plugins/v1/pages/{handle}
+GET  /internal/plugins/v1/kv/{namespace}/{key}
+PUT  /internal/plugins/v1/kv/{namespace}/{key}
+DELETE /internal/plugins/v1/kv/{namespace}/{key}
+POST /internal/plugins/v1/egress
+POST /internal/plugins/v1/log
+```
+
+Business endpoints check the required scope on the context token; `/context` only requires a valid token. The token is an HMAC-SHA256 value with a 30-second expiry, bound to the plugin, store, digest, actor and scopes, and carries a `jti`. Calls may include a `x-fastcart-call-id`; the host records it to reject a replay of the same call.
+
+### Events and jobs
+
+<PluginAsyncSequence />
+
+**Events.** A business write commits an outbox row. The dispatcher claims due events, creates one delivery row per enabled subscriber (unique on `plugin_id + event_id`), and posts `{ event, attempt }` to `/events`. A 2xx marks the delivery done. A non-2xx response below 500 marks it dead. A 5xx, timeout or transport error retries with exponential backoff (`5 × 2^n` seconds); after five attempts the delivery moves to the dead letter. Delivery is at-least-once, so plugins must be idempotent and use `event.id`.
+
+**Jobs.** A manifest can declare up to ten jobs. A five-field UTC cron schedule enqueues a job row at most once per minute; a plugin can also declare jobs without a schedule and have the host run them manually. The default is five attempts, and the jobs handler receives the job payload and attempt.
+
+## Admin UI runtime
+
+Admin extensions are iframe pages, not React components compiled into the admin bundle:
+
+1. The admin fetches `/api/v1/admin/plugins/extensions`, which flattens every enabled plugin's admin targets and adds a signed `src` for HTML entries.
+2. `<PluginSlot target="...">` filters by target and by the current user's permission, sorts by priority, and renders at most three frames. An empty slot renders nothing, so there is no layout shift.
+3. The iframe uses `sandbox="allow-scripts allow-forms"` **without** `allow-same-origin`, so it has an opaque origin and cannot read admin cookies or `localStorage`.
+4. HTML responses carry `connect-src 'none'`; the plugin cannot call the network directly. Assets are digest-scoped and cached immutably.
+5. The host and frame exchange `postMessage` envelopes with a per-mount channel. The frame sends `ready`, `resize`, `navigate`, `toast`, `open:external` and `rpc`; the host replies with `init`, `rpc:result` and context/theme updates.
+6. An `rpc` call is proxied to `POST /api/v1/admin/plugins/{id}/rpc`, which checks the admin session, CSRF, the acting user's permissions and the declared method list. The plugin never receives the session cookie.
+
+`admin.nav.section` adds a full-page plugin route under `/apps/{pluginId}`; no dynamic route registration is needed.
+
+## Storefront injection
+
+Storefront embeds are injected into the SSR response after it is rendered:
+
+1. The host selects enabled plugins with a storefront extension whose `pages` match and whose `exclude_paths` do not.
+2. It injects one stylesheet link per `css` file and one versioned boot script, with the extension manifest inlined into the page.
+3. Themes can declare explicit markers:
+
+   ```html
+   <!--fastcart:extensions-head-->
+   <!--fastcart:extensions-body-->
+   ```
+
+   React-based templates use the JSX-safe equivalent:
+
+   ```html
+   <script type="application/fastcart-extensions" data-slot="head"></script>
+   ```
+
+4. If a marker is absent, the injector falls back to `</head>` / `</body>`, holding back a 32 KB tail for the body. Marker detection is constant-memory and streaming-friendly.
+5. An idempotency sentinel (`<!--fastcart:extensions-injected-->`) makes a second pass a no-op. Injection only runs on full `200 text/html` documents without an unsupported content encoding.
+6. The boot runtime imports each entry once; plugins register custom elements and mount into Shadow DOM. The injected tags are generated by the host from validated manifest fields, never from plugin-supplied HTML.
+7. Injection happens **after** the SSR cache lookup, so enabling or disabling a plugin never poisons the page cache.
+
+This model is additive and client-side. A plugin can add a chat bubble, analytics or a cookie banner; it cannot replace a core component or inject server-rendered HTML.
+
+## Security and trust boundaries
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| Read another store's data | Tokens bind the store; the host API resolves the store from the token and path; no database handle | A plugin installed on several stores can read each of them, as with any app platform |
+| Steal an admin cookie | Opaque-origin iframe, no cookie forwarding, host-proxied RPC | None for the default targets |
+| Call arbitrary internal APIs | The bridge hard-codes `/internal/plugins/v1/`, and Rust checks scopes per endpoint | None; the prefix cannot be repointed by the plugin |
+| Exfiltrate data | `globalOutbound: null`, egress allowlist, private-address blocking, quotas | An allowlisted host can still be abused; review is required |
+| DoS the host | Per-plugin concurrency, deadlines, response caps, watchdog restart | No hard CPU kill; a synchronous loop can stall other plugins and trigger a whole-host restart |
+| XSS the admin | iframe sandbox, CSP, channel validation, no `allow-same-origin` | Full-screen/overlay targets are intentionally not offered |
+| Inject malicious storefront script | Same-origin hosting, CSP, operator review | Client embeds share the page's privileges; this is inherent to the app-embed model |
+| Forge identity | HMAC token, store/digest/actor binding, single-use call ids | A plugin that holds its own token can replay within 30 s unless it sends a call id |
+| Supply-chain compromise | Immutable digest, install consent, review | No publisher signature or revocation feed in v1 |
+| Read host files | `node:fs` is a virtual filesystem; no host disk binding | `/tmp` is per-isolate scratch, not durable |
+| Escape the isolate | workerd is maintained upstream; treated as a non-OS boundary | No per-plugin process isolation in v1 |
+
+Two rules follow from the table:
+
+- A workerd isolate is a **reliability and capability boundary**, not an operating-system security boundary. v1 is for operator-installed, reviewed plugins.
+- Plugin UI is sandboxed, but storefront embeds are ordinary same-origin scripts. Review them like theme code.
+
+## Limits and resource controls
+
+| Control | Default |
+| --- | --- |
+| Request deadlines | Admin 10 s · storefront 30 s · event 30 s · job 60 s |
+| Concurrency | 8 in-flight requests per plugin; 30 s queue deadline |
+| Response size | 512 KB admin · 8 MB storefront/event/job |
+| Watchdog | 5 s grace after a timeout, then restart the whole plugin host |
+| Restarts | At most 5 consecutive start failures |
+| Archive | 20 MB compressed · 2,000 files · 5 MB/file · 40 MB uncompressed |
+| Module | 4 MB per JavaScript module by default |
+| Egress | 1,000 requests/day · 100 MB/day · 5 MB response · 1 MB request · 10 hosts |
+| Egress URL rules | HTTPS only, port 443, no IP literals, no userinfo, redirects disabled |
+| KV | 256 KB per value · 10 MB per plugin/store · 100,000 keys |
+| Events | 20 subscriptions · 5 delivery attempts · exponential backoff |
+| Jobs | 10 jobs · 5 attempts · five-field UTC cron, one-minute resolution |
+| Logs | 4 KB message · retained 7 days |
+| Admin UI | 10 extensions · 3 rendered per slot · height 80–1,200 px |
+
+Every runtime value above is enforced by Rust. The loader's own `limits` field is not relied on; the pinned build accepts it but does not enforce CPU or subrequest limits, which is why the watchdog restarts the process.
+
+## Limits and non-goals
+
+v1 deliberately does not include:
+
+- **Per-plugin OS process isolation.** All plugins share one `workerd` process and one Worker Loader, with one V8 isolate per plugin. A synchronous loop can stall healthy plugins; the host deadline and watchdog are the only stop.
+- **Plugin signing, a marketplace or publisher accounts.** `signatures[]` is reserved and ignored. Installation consent and operator review are the provenance controls.
+- **Business-data writes.** Scopes such as `catalog.write` and `orders.write` are reserved and rejected.
+- **Plugin-owned SQL tables or migrations.** State lives in KV, settings, rows owned by the host, and logs.
+- **Direct plugin-to-plugin calls.** There are no bindings between plugins.
+- **Server-rendered storefront slots or block positions.** v1 mounts client-side embeds only.
+- **A public plugin API beyond the listed host endpoints.** The capability surface grows with the host API version.
+- **Multi-node coordination.** Installation and quotas are per store and per process, consistent with the single-node architecture.
+
+## Trade-offs
+
+### What it buys
+
+- **No restart to install or upgrade.** The loader resolves `{id}@{digest}` lazily; the old instance becomes unreachable.
+- **A visible authorization surface.** Every capability and target is declared at install time and shown to the merchant.
+- **No database or ambient network authority.** The bridge and `globalOutbound: null` remove whole classes of accidental access.
+- **Efficient density.** A shared process measured roughly 1.75–2 MB per loaded plugin and a cold start around 62 ms in the design spike.
+- **Multiple surfaces, one package.** Admin RPC and UI, storefront HTTP and embeds, events and jobs share one artifact and one token model.
+- **Durable integration.** Outbox-backed events and leased jobs survive restarts and retry with backoff.
+
+### What it costs
+
+- **Shared fate.** A runaway plugin can delay others; stopping it restarts the host and fails every in-flight plugin request.
+- **Weaker isolation than a container.** A V8 isolate is not an OS boundary, so v1 trusts the operator.
+- **No marketplace-grade provenance.** There is no signature, revocation list or publisher identity yet.
+- **A deliberately small API.** Read-only scopes, six admin targets and client-side embeds will not cover every extension idea.
+- **More runtime surface to operate.** The plugin host needs a workerd binary, a generated config, a loopback port, health checks and log retention.
+- **Experimental loader dependency.** The plugin host runs `workerd serve --experimental`; upgrades must re-run the compatibility suite.
+
+## Developer workflow
+
+```bash
+# Scaffold one of minimal, admin or chat
+fastcart-plugin init my-plugin --template chat
+cd my-plugin
+
+# Rebuild while developing
+fastcart-plugin dev .
+
+# Produce dist/my-plugin-<version>.tar.gz and print its digest
+fastcart-plugin pack .
+
+# Validate manifest and referenced files without packaging
+fastcart-plugin doctor .
+```
+
+Then upload the archive in **Admin → Plugins**. The plugin is installed disabled; review the capability list and enable it. The demo script `./scripts/plugin-demo.sh` builds the chat example, creates an isolated store, installs and enables the plugin, and starts the API and admin.
+
+Relevant server configuration:
+
+```toml title="config/config.toml"
+[plugins]
+enabled = true
+root = "./data/plugins"
+workerd_binary = "./experiments/workerd/bin/workerd"
+runtime_dir = "./data/plugins/runtime"
+max_archive_bytes = 20971520
+max_module_bytes = 4194304
+```
+
+Environment overrides include `FASTCART_PLUGINS_ENABLED`, `FASTCART_PLUGINS_ROOT`, `FASTCART_PLUGIN_WORKERD_BINARY`, `FASTCART_PLUGIN_RUNTIME_DIR`, `FASTCART_PLUGIN_RUNTIME_TOKEN` and `FASTCART_PLUGIN_CONTEXT_SECRET`.
+
+## Related
+
+- [System architecture](/how-it-works/) — the process, storage and module boundaries this runtime plugs into.
+- [Storefront SSR](/how-it-works/storefront-ssr/) — the separate rendering runtime.
+- [Plugin system design](https://github.com/luozhouyang/fastcart/blob/main/.livingdocs/architecture/workerd-plugin-system.md)
+- [Plugin manifest schema](https://github.com/luozhouyang/fastcart/blob/main/schemas/plugin-manifest/manifest.schema.json)
+- [Chat plugin template](https://github.com/luozhouyang/fastcart/tree/main/templates/plugin-chat)

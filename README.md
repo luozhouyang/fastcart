@@ -479,7 +479,8 @@ material and are intentionally not versioned.
 The public documentation site is in [`apps/docs`](apps/docs/README.md). It uses
 [Cloudflare Nimbus](https://nimbus-docs.com) on Astro and is a pnpm workspace package, so it is
 installed and typechecked with the rest of the front end. Run it with `pnpm dev:docs`
-(<http://localhost:4321>); content lives in `apps/docs/src/content/docs/`.
+(<http://localhost:4321>); content lives in `apps/docs/src/content/docs/`. The **How it works**
+section covers the system architecture, the storefront SSR runtime and the plugin system.
 
 ## Roadmap
 
