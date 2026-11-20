@@ -9,7 +9,10 @@ use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::{
     CheckoutService, CheckoutSession, CheckoutStatus, CreateCheckoutInput,
 };
-use fastcart_module_inventory::{InventoryService, ReservationLine, ReservationReference};
+use fastcart_module_inventory::{
+    InventoryService, ReservationLine, ReservationLinePolicy, ReservationRebinding,
+    ReservationReference,
+};
 use fastcart_module_order::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput, Order,
     OrderService, OrderShippingMethod, OrderStatus, PaymentStatus as OrderPaymentStatus,
@@ -226,18 +229,27 @@ impl CheckoutWorkflow {
             let variant = variants
                 .remove(item.variant_id.as_str())
                 .ok_or_else(|| AppError::not_found("variant", &item.variant_id))?;
-            if variant.manage_inventory && !variant.allow_backorder {
-                reservation_lines.push(ReservationLine {
-                    variant_id: item.variant_id.clone(),
-                    quantity: item.quantity,
-                    line_item_id: Some(item.id.clone()),
+            if variant.manage_inventory {
+                // A variant that allows backorders is reserved like any other;
+                // the flag only decides whether the shortfall fails the
+                // checkout or is recorded as stock the store owes. A variant
+                // with no inventory item has no ledger to record against, and
+                // `reserve_lines` skips its line rather than failing the
+                // checkout.
+                reservation_lines.push(ReservationLinePolicy {
+                    line: ReservationLine {
+                        variant_id: item.variant_id.clone(),
+                        quantity: item.quantity,
+                        line_item_id: Some(item.id.clone()),
+                    },
+                    allow_backorder: variant.allow_backorder,
                 });
             }
         }
         if !reservation_lines.is_empty()
             && let Err(error) = self
                 .inventory
-                .reserve(
+                .reserve_lines(
                     reservation_lines,
                     ReservationReference::new(checkout.id.clone()),
                     RESERVATION_TTL_SECONDS,
@@ -808,6 +820,17 @@ impl CheckoutWorkflow {
                 }
             }
         }
+        // The reservations were recorded for the cart lines, but the order
+        // assigned fresh identifiers to those lines. Binding every reservation
+        // to the order line it was placed as — before the commit, so a retry
+        // after a crash converges on the same mapping — is what keeps the stock
+        // a line consumed, and the location it came from, traceable from the
+        // order.
+        let bindings = reservation_rebindings(cart, &order)?;
+        self.inventory
+            .rebind_reservations(&checkout.id, &order.id, &bindings)
+            .await?;
+
         // Commit inventory before confirming the order. `confirm` moves the
         // order into a state that compensation must not cancel, so a later
         // `commit` failure (for example because reservations expired while the
@@ -1214,6 +1237,43 @@ impl CheckoutWorkflow {
             ),
         }
     }
+}
+
+/// Pairs every cart line with the order line it was placed as.
+///
+/// The pairing is positional: the order is created from the items built out of
+/// `cart.items` in order, `OrderService::create_order` writes them in that order
+/// and reads them back by rowid, so `order.items[i]` is the line
+/// `cart.items[i]` became. The variant of each pair is compared so a mismatch
+/// fails loudly instead of binding a reservation to the wrong line.
+fn reservation_rebindings(
+    cart: &fastcart_module_cart::Cart,
+    order: &Order,
+) -> Result<Vec<ReservationRebinding>, AppError> {
+    if cart.items.len() != order.items.len() {
+        return Err(AppError::internal(format!(
+            "order {} has {} lines but its cart has {}",
+            order.id,
+            order.items.len(),
+            cart.items.len()
+        )));
+    }
+    cart.items
+        .iter()
+        .zip(order.items.iter())
+        .map(|(cart_item, order_item)| {
+            if order_item.variant_id.as_ref() != Some(&cart_item.variant_id) {
+                return Err(AppError::internal(format!(
+                    "order line {} does not match the cart line {} it was placed from",
+                    order_item.id, cart_item.id
+                )));
+            }
+            Ok(ReservationRebinding::new(
+                cart_item.id.clone(),
+                order_item.id.clone(),
+            ))
+        })
+        .collect()
 }
 
 /// Returns true when an order has been accepted into fulfillment.

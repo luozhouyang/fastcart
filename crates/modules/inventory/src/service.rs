@@ -15,10 +15,10 @@ use uuid::Uuid;
 use crate::domain::{
     CreateInventoryItemInput, CreateLocationInput, ExchangeRestockLine, InventoryItem,
     InventoryLevel, InventoryLocation, InventoryMovement, InventoryReservation, ReservationLine,
-    ReservationReference, ReservationStatus, ReturnRestockLine, StockConsumption,
-    UpdateLocationInput, available_quantity_from, exchange_restock_reference,
-    return_restock_reference, validate_name, validate_positive_quantity, validate_reason,
-    validate_ttl,
+    ReservationLinePolicy, ReservationRebinding, ReservationReference, ReservationStatus,
+    ReturnRestockLine, StockConsumption, UpdateLocationInput, available_quantity_from,
+    exchange_restock_reference, return_restock_reference, validate_name,
+    validate_positive_quantity, validate_reason, validate_ttl,
 };
 
 const DEFAULT_LOCATION_ID: &str = "loc_default";
@@ -438,6 +438,42 @@ async fn apply_level_allocations(
                     .unwrap_or(item_id);
                 return Err(insufficient_stock_for_variant(variant_id));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Applies the backorder allocations of a batch.
+///
+/// Every allocation is recorded on the default location, at most one per item.
+/// Unlike [`apply_level_allocations`] there is no availability guard: the
+/// shortfall being recorded is exactly the quantity that no location could
+/// cover, so the level's reserved quantity is allowed to pass its stocked
+/// quantity. The level row is expected to exist — the caller ensures it — and a
+/// missing one fails loudly so the batch rolls back instead of silently losing
+/// the backorder.
+async fn apply_backorder_allocations(
+    tx: &mut Transaction<'_, Sqlite>,
+    allocations: &[LevelAllocation],
+    now: Timestamp,
+) -> Result<(), AppError> {
+    for allocation in allocations {
+        let affected = sqlx::query(
+            "UPDATE inventory_levels \
+             SET reserved_quantity = reserved_quantity + ?, updated_at = ? \
+             WHERE inventory_item_id = ? AND location_id = ?",
+        )
+        .bind(allocation.quantity)
+        .bind(now)
+        .bind(allocation.item_id.as_str())
+        .bind(allocation.location_id.as_str())
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        if affected.rows_affected() != 1 {
+            return Err(AppError::conflict(
+                "inventory level no longer matches the backorder reservation",
+            ));
         }
     }
     Ok(())
@@ -1066,20 +1102,39 @@ impl InventoryService {
         ensure_item_in_tx(&mut tx, item_id).await?;
         ensure_location_in_tx(&mut tx, location_id).await?;
         ensure_level_in_tx(&mut tx, item_id, location_id, now).await?;
-        let affected = sqlx::query(
-            "UPDATE inventory_levels SET stocked_quantity = stocked_quantity + ?, updated_at = ? \
-             WHERE inventory_item_id = ? AND location_id = ? \
-               AND stocked_quantity + ? >= reserved_quantity AND stocked_quantity + ? >= 0",
-        )
-        .bind(delta)
-        .bind(now)
-        .bind(item_id.as_str())
-        .bind(location_id.as_str())
-        .bind(delta)
-        .bind(delta)
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        // An increase only adds stock, so it may always be applied: receiving
+        // goods against a pending backorder, or restocking the negative level
+        // left behind by a committed one, must not be rejected for being
+        // partial. A decrease must not consume reserved stock and must never
+        // drive the level below zero.
+        let affected = if delta > 0 {
+            sqlx::query(
+                "UPDATE inventory_levels SET stocked_quantity = stocked_quantity + ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ?",
+            )
+            .bind(delta)
+            .bind(now)
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?
+        } else {
+            sqlx::query(
+                "UPDATE inventory_levels SET stocked_quantity = stocked_quantity + ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ? \
+                   AND stocked_quantity + ? >= reserved_quantity AND stocked_quantity + ? >= 0",
+            )
+            .bind(delta)
+            .bind(now)
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .bind(delta)
+            .bind(delta)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?
+        };
         if affected.rows_affected() != 1 {
             return Err(AppError::conflict(
                 "stock adjustment would leave stock negative or below reserved",
@@ -1197,9 +1252,40 @@ impl InventoryService {
     /// rolls back the entire batch with a conflict naming the variant. The
     /// items, levels and writes of the whole batch are read and written
     /// together, so the query count does not grow with the number of lines.
+    ///
+    /// Every line is strict. Use [`Self::reserve_lines`] to let a line go to
+    /// backorder instead of failing.
     pub async fn reserve(
         &self,
         lines: Vec<ReservationLine>,
+        reference: ReservationReference,
+        ttl_seconds: i64,
+    ) -> Result<Vec<InventoryReservation>, AppError> {
+        self.reserve_lines(
+            lines.into_iter().map(ReservationLinePolicy::from).collect(),
+            reference,
+            ttl_seconds,
+        )
+        .await
+    }
+
+    /// Atomically reserves stock for every line, honoring each line's policy.
+    ///
+    /// Strict lines behave exactly like [`Self::reserve`]: a shortage fails the
+    /// whole batch. A line that allows backorder is allocated from on-hand
+    /// stock in the same deterministic order while stock lasts, and the
+    /// quantity no location can cover is recorded on the default location — so
+    /// that level's reserved quantity may exceed its stocked quantity until the
+    /// goods arrive. Committing such a reservation drives the stocked quantity
+    /// negative, which is what keeps units sold on backorder visible.
+    ///
+    /// A line that may backorder whose variant has no inventory item is skipped
+    /// instead of reserved or rejected: there is no level to record the
+    /// shortfall on, so the batch neither reserves it nor fails for it. A
+    /// strict line for such a variant still conflicts.
+    pub async fn reserve_lines(
+        &self,
+        lines: Vec<ReservationLinePolicy>,
         reference: ReservationReference,
         ttl_seconds: i64,
     ) -> Result<Vec<InventoryReservation>, AppError> {
@@ -1209,8 +1295,8 @@ impl InventoryService {
             ));
         }
         validate_ttl(ttl_seconds)?;
-        for line in &lines {
-            validate_positive_quantity(line.quantity, "line quantity")?;
+        for policy in &lines {
+            validate_positive_quantity(policy.line.quantity, "line quantity")?;
         }
 
         let now = now_timestamp();
@@ -1221,7 +1307,7 @@ impl InventoryService {
         // read here cannot change while the batch is allocated in memory.
         let variants = lines
             .iter()
-            .map(|line| line.variant_id.clone())
+            .map(|policy| policy.line.variant_id.clone())
             .collect::<Vec<_>>();
         let items = load_items_by_variant_tx(&mut tx, &variants).await?;
         let item_ids = items.values().cloned().collect::<Vec<_>>();
@@ -1233,8 +1319,18 @@ impl InventoryService {
 
         let mut reservations = Vec::new();
         let mut allocations: Vec<LevelAllocation> = Vec::new();
-        for line in &lines {
+        // At most one entry per item: every backorder goes to the same level.
+        let mut backorder_allocations: Vec<LevelAllocation> = Vec::new();
+        for policy in &lines {
+            let line = &policy.line;
             let Some(item_id) = items.get(line.variant_id.as_str()) else {
+                // No inventory item means there is no level to record the line
+                // against. A line that may backorder is skipped — nothing can
+                // be owed on a ledger that does not exist — while a strict line
+                // can never be satisfied and fails the batch.
+                if policy.allow_backorder {
+                    continue;
+                }
                 return Err(insufficient_stock_for_variant(line.variant_id.as_str()));
             };
 
@@ -1274,12 +1370,70 @@ impl InventoryService {
                 });
             }
 
+            if remaining > 0 && policy.allow_backorder {
+                // The caller explicitly allows this line to be owed. The
+                // quantity no location can cover is recorded on the default
+                // location; the location and its level are only created when a
+                // shortfall actually happens.
+                let backorder_location = InventoryLocationId::from_string(DEFAULT_LOCATION_ID);
+                ensure_default_location_in_tx(&mut tx, now).await?;
+                ensure_level_in_tx(
+                    &mut tx,
+                    &InventoryItemId::from_string(item_id.clone()),
+                    &backorder_location,
+                    now,
+                )
+                .await?;
+                // Lines of the same variant later in the batch must see the
+                // backorder, exactly as they see the earlier allocations.
+                if let Some(candidates) = levels.get_mut(item_id) {
+                    match candidates
+                        .iter_mut()
+                        .find(|candidate| candidate.location_id == DEFAULT_LOCATION_ID)
+                    {
+                        Some(candidate) => candidate.reserved_quantity += remaining,
+                        None => candidates.push(LevelCandidate {
+                            location_id: DEFAULT_LOCATION_ID.to_owned(),
+                            stocked_quantity: 0,
+                            reserved_quantity: remaining,
+                        }),
+                    }
+                }
+                reservations.push(InventoryReservation {
+                    id: ReservationId::new(),
+                    inventory_item_id: InventoryItemId::from_string(item_id.clone()),
+                    location_id: backorder_location,
+                    quantity: remaining,
+                    status: ReservationStatus::Reserved,
+                    line_item_id: line.line_item_id.clone(),
+                    checkout_id: Some(reference.checkout_id.clone()),
+                    order_id: None,
+                    expires_at: Some(expires_at),
+                    metadata: Metadata::empty(),
+                    created_at: now,
+                    updated_at: now,
+                });
+                match backorder_allocations
+                    .iter_mut()
+                    .find(|allocation| allocation.item_id == *item_id)
+                {
+                    Some(allocation) => allocation.quantity += remaining,
+                    None => backorder_allocations.push(LevelAllocation {
+                        item_id: item_id.clone(),
+                        location_id: DEFAULT_LOCATION_ID.to_owned(),
+                        quantity: remaining,
+                    }),
+                }
+                remaining = 0;
+            }
+
             if remaining > 0 {
                 return Err(insufficient_stock_for_variant(line.variant_id.as_str()));
             }
         }
 
         apply_level_allocations(&mut tx, &allocations, now, &variants_by_item).await?;
+        apply_backorder_allocations(&mut tx, &backorder_allocations, now).await?;
         insert_reservations(&mut tx, &reservations, now).await?;
 
         tx.commit().await.map_err(database_error)?;
@@ -1330,6 +1484,68 @@ impl InventoryService {
         let count = release_rows_in_tx(&mut tx, &rows, now).await?;
         tx.commit().await.map_err(database_error)?;
         Ok(count)
+    }
+
+    /// Rebinds a checkout's reservations to the order lines they became.
+    ///
+    /// Reservations are recorded while a cart still owns the lines, so they
+    /// point at cart line identifiers; placing the order assigns fresh line
+    /// identifiers to those lines. Rewriting `line_item_id` keeps a reservation
+    /// traceable to the order line — and to the location — that consumed it.
+    ///
+    /// The checkout's committed reservations for `order_id` are rewritten too,
+    /// so a runner that committed before it could rebind still converges on
+    /// replay. Reservations that were released, that belong to another
+    /// checkout, or whose line is not part of `bindings` are left alone, which
+    /// makes replaying the same mapping a no-op.
+    pub async fn rebind_reservations(
+        &self,
+        checkout_id: &CheckoutId,
+        order_id: &OrderId,
+        bindings: &[ReservationRebinding],
+    ) -> Result<u64, AppError> {
+        if bindings.is_empty() {
+            return Ok(0);
+        }
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
+        let mut rebound = 0_u64;
+        // Three bound parameters per binding plus three for the update itself.
+        for chunk in bindings.chunks(SQLITE_PARAMETER_LIMIT / 4) {
+            let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
+                "UPDATE inventory_reservations SET line_item_id = CASE line_item_id",
+            );
+            for binding in chunk {
+                builder
+                    .push(" WHEN ")
+                    .push_bind(binding.cart_line_id.as_str())
+                    .push(" THEN ")
+                    .push_bind(binding.order_item_id.as_str());
+            }
+            builder
+                .push(" ELSE line_item_id END, updated_at = ")
+                .push_bind(now)
+                .push(" WHERE checkout_id = ")
+                .push_bind(checkout_id.as_str())
+                .push(" AND (status = 'reserved' OR (status = 'committed' AND order_id = ")
+                .push_bind(order_id.as_str())
+                .push(")) AND line_item_id IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for binding in chunk {
+                    separated.push_bind(binding.cart_line_id.as_str());
+                }
+            }
+            builder.push(")");
+            let affected = builder
+                .build()
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+            rebound += affected.rows_affected();
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(rebound)
     }
 
     /// Releases every active reservation owned by a checkout.
@@ -1408,19 +1624,26 @@ impl InventoryService {
         }
 
         for row in &rows {
+            // `reserved_quantity >= ?` is the guard that keeps a committed
+            // reservation from dangling. The stocked quantity is deliberately
+            // not guarded: a backorder reservation exceeds the stock on hand,
+            // and committing it must drive the level negative so the units owed
+            // stay visible until they are restocked. For a reservation that was
+            // fully covered by stock, the level cannot pass below zero anyway,
+            // because every writer keeps the stocked quantity at or above the
+            // reserved quantity.
             let affected = sqlx::query(
                 "UPDATE inventory_levels \
                  SET stocked_quantity = stocked_quantity - ?, \
                      reserved_quantity = reserved_quantity - ?, updated_at = ? \
                  WHERE inventory_item_id = ? AND location_id = ? \
-                   AND stocked_quantity >= ? AND reserved_quantity >= ?",
+                   AND reserved_quantity >= ?",
             )
             .bind(row.quantity)
             .bind(row.quantity)
             .bind(now)
             .bind(row.inventory_item_id.as_str())
             .bind(row.location_id.as_str())
-            .bind(row.quantity)
             .bind(row.quantity)
             .execute(&mut *tx)
             .await

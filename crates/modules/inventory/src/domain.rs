@@ -195,6 +195,70 @@ impl ReservationLine {
     }
 }
 
+/// A reservation line together with the shortage policy that applies to it.
+///
+/// The inventory module does not know which catalog variants allow backorders;
+/// the caller states it per line. A strict line keeps the all-or-nothing
+/// behavior of [`crate::InventoryService::reserve`]. A line that may backorder
+/// is allocated the same way while stock lasts, and the quantity that no
+/// location can cover is recorded as a reservation on the default location, so
+/// the level's reserved quantity may exceed its stocked quantity until goods
+/// arrive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReservationLinePolicy {
+    /// Requested variant quantity.
+    pub line: ReservationLine,
+    /// Whether the quantity no location can cover may be backordered.
+    pub allow_backorder: bool,
+}
+
+impl ReservationLinePolicy {
+    /// Creates a line that must be covered by on-hand stock.
+    #[must_use]
+    pub fn strict(line: ReservationLine) -> Self {
+        Self {
+            line,
+            allow_backorder: false,
+        }
+    }
+
+    /// Creates a line whose shortfall is recorded as backorder.
+    #[must_use]
+    pub fn may_backorder(line: ReservationLine) -> Self {
+        Self {
+            line,
+            allow_backorder: true,
+        }
+    }
+}
+
+impl From<ReservationLine> for ReservationLinePolicy {
+    fn from(line: ReservationLine) -> Self {
+        Self::strict(line)
+    }
+}
+
+/// Rewrites one reservation's line reference from a cart line to the order
+/// line the cart line was placed as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReservationRebinding {
+    /// Cart line the reservation was recorded for.
+    pub cart_line_id: LineItemId,
+    /// Order line the cart line became.
+    pub order_item_id: LineItemId,
+}
+
+impl ReservationRebinding {
+    /// Creates a rebinding for one placed line.
+    #[must_use]
+    pub fn new(cart_line_id: LineItemId, order_item_id: LineItemId) -> Self {
+        Self {
+            cart_line_id,
+            order_item_id,
+        }
+    }
+}
+
 /// The checkout that owns a group of reservations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReservationReference {
