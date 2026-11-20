@@ -1382,6 +1382,7 @@ impl OrderService {
 
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let mut seen = HashSet::new();
+        let mut inbound_by_line: HashMap<&str, i64> = HashMap::new();
         for item in &input.inbound_items {
             validate_quantity(item.quantity, false)?;
             if !seen.insert(item.order_item_id.as_str().to_owned()) {
@@ -1389,6 +1390,9 @@ impl OrderService {
                     "an exchange must not contain duplicate inbound order items",
                 ));
             }
+            *inbound_by_line
+                .entry(item.order_item_id.as_str())
+                .or_default() += item.quantity;
             let existing = fetch_order_item(&mut tx, order_id, &item.order_item_id).await?;
             let returned = sum_active_returns(&mut tx, &item.order_item_id).await?;
             let claimed = sum_active_claims(&mut tx, &item.order_item_id).await?;
@@ -1413,6 +1417,20 @@ impl OrderService {
                 return Err(AppError::validation(
                     "outbound exchange items require a replacement_variant_id",
                 ));
+            }
+            // A replacement stands in for the units that come back, and the
+            // difference settlement charges it at the replaced line's price.
+            // Shipping more than came back would hand the extra units over at
+            // that difference rather than at their own price.
+            let inbound = inbound_by_line
+                .get(item.order_item_id.as_str())
+                .copied()
+                .unwrap_or_default();
+            if item.quantity > inbound {
+                return Err(AppError::conflict(format!(
+                    "cannot ship {} replacement units for item {}: the exchange takes back {}",
+                    item.quantity, item.order_item_id, inbound
+                )));
             }
             fetch_order_item(&mut tx, order_id, &item.order_item_id).await?;
         }

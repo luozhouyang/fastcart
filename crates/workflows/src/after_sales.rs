@@ -11,6 +11,7 @@ use fastcart_kernel::{
     AppError, ClaimId, CurrencyCode, ExchangeId, LineItemId, Metadata, OrderId, Pagination,
     ReturnId, VariantId, now_timestamp,
 };
+use fastcart_module_customer::CustomerService;
 use fastcart_module_inventory::{
     ExchangeRestockLine, InventoryService, RestockAudit, ReturnRestockLine, StockConsumption,
 };
@@ -110,6 +111,7 @@ pub struct AfterSalesWorkflow {
     payment: PaymentService,
     pricing: PricingService,
     inventory: InventoryService,
+    customer: CustomerService,
     shipping: FulfillmentProviderRegistry,
 }
 
@@ -135,7 +137,8 @@ impl AfterSalesWorkflow {
             order: OrderService::new(db.clone()),
             payment,
             pricing: PricingService::new(db.clone()),
-            inventory: InventoryService::new(db),
+            inventory: InventoryService::new(db.clone()),
+            customer: CustomerService::new(db),
             shipping,
         }
     }
@@ -930,6 +933,20 @@ impl AfterSalesWorkflow {
     ) -> Result<Vec<ReplacementUnitPrice>, AppError> {
         let currency = CurrencyCode::new(order.currency_code.clone())?;
         let at = now_timestamp();
+        // The replacement belongs to the customer who is exchanging, so it is
+        // priced for them: the order itself cannot carry this (the customer's
+        // groups are not part of its aggregate), so the workflow looks them up.
+        // Groups come back ordered by name, and the first one scopes the price,
+        // matching how cart pricing selects a group.
+        let customer_group_id = match order.customer_id.as_ref() {
+            Some(customer_id) => self
+                .customer
+                .list_customer_groups(customer_id)
+                .await?
+                .first()
+                .map(|group| group.id.clone()),
+            None => None,
+        };
         let mut prices = Vec::with_capacity(replacements.len());
         for (order_item_id, variant_id, quantity) in replacements {
             let Some(variant_id) = variant_id else {
@@ -938,10 +955,7 @@ impl AfterSalesWorkflow {
             let context = PriceContext {
                 currency: currency.clone(),
                 quantity: *quantity,
-                // The order carries the channel it was placed in; the customer
-                // group behind `customer_id` is not readable from this module's
-                // aggregate, so group-scoped prices are not applied.
-                customer_group_id: None,
+                customer_group_id: customer_group_id.clone(),
                 sales_channel_id: order.sales_channel_id.clone(),
                 at,
             };

@@ -76,18 +76,6 @@ async fn exchange(
     replacement: VariantId,
     quantity: i64,
 ) -> OrderExchange {
-    exchange_with(service, order, replacement, quantity, quantity).await
-}
-
-/// Exchanges `inbound_quantity` units for `outbound_quantity` replacement
-/// units; the outbound side is not capped by the inbound one.
-async fn exchange_with(
-    service: &OrderService,
-    order: &Order,
-    replacement: VariantId,
-    inbound_quantity: i64,
-    outbound_quantity: i64,
-) -> OrderExchange {
     service
         .create_exchange(
             &order.id,
@@ -96,13 +84,13 @@ async fn exchange_with(
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
-                    quantity: inbound_quantity,
+                    quantity,
                     replacement_variant_id: None,
                     reason: None,
                 }],
                 outbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
-                    quantity: outbound_quantity,
+                    quantity,
                     replacement_variant_id: Some(replacement),
                     reason: None,
                 }],
@@ -336,11 +324,19 @@ async fn prices_for_lines_the_record_does_not_replace_are_rejected() {
 
 #[tokio::test]
 async fn a_difference_that_would_leave_a_negative_total_is_rejected() {
-    let (_db, service) = service().await;
-    let order = order(&service, 1, 1_000).await;
-    // The outbound line is not capped by the inbound quantity, so the credit
-    // can exceed everything the customer was charged.
-    let exchange = exchange_with(&service, &order, VariantId::new(), 1, 2).await;
+    let (db, service) = service().await;
+    let order = order(&service, 2, 1_000).await;
+    // An exchange cannot ship more replacements than it takes back, so a credit
+    // can no longer outgrow the order through this API. The guard still has to
+    // hold when the stored total disagrees with the lines it is meant to cover
+    // — a corrupted row, or a bug in a path that recomputes totals — so drive
+    // that state directly.
+    sqlx::query("UPDATE orders SET total = 100 WHERE id = ?")
+        .bind(order.id.as_str())
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let exchange = exchange(&service, &order, VariantId::new(), 2).await;
 
     let error = service
         .accept_exchange(&order.id, &exchange.id, &[price(&order.items[0].id, 100)])
@@ -353,9 +349,10 @@ async fn a_difference_that_would_leave_a_negative_total_is_rejected() {
     );
     let exchange = service.get_exchange(&order.id, &exchange.id).await.unwrap();
     assert_eq!(exchange.status, ExchangeStatus::Requested);
+    assert_eq!(exchange.difference_total, None);
     let order = service.get(&order.id).await.unwrap();
-    assert_eq!(order.total, 1_000);
-    assert_order_identity(&order);
+    assert_eq!(order.total, 100);
+    assert_eq!(order.adjustments.len(), 0, "no adjustment is written");
 }
 
 #[tokio::test]
