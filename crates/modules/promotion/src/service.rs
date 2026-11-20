@@ -20,7 +20,7 @@ use crate::domain::{
 
 const PROMOTION_COLUMNS: &str = "id, code, title, type AS promotion_type, value, status, \
      is_automatic, starts_at, ends_at, usage_limit, usage_count, per_customer_limit, priority, \
-     is_stackable, metadata, created_at, updated_at";
+     is_stackable, target, metadata, created_at, updated_at";
 const PROMOTION_RULE_COLUMNS: &str = "id, promotion_id, attribute, operator, value, created_at";
 const COUPON_COLUMNS: &str = "id, code, promotion_id, usage_limit, usage_count, starts_at, \
      ends_at, metadata, created_at, updated_at";
@@ -36,13 +36,32 @@ const SQLITE_PARAMETER_LIMIT: usize = 900;
 pub struct PromotionService {
     db: StoreDatabase,
     audit: Option<AuditActor>,
+    /// Number of `promotion_rules` reads this service has issued.
+    ///
+    /// Test-only instrumentation, compiled out of production builds. It exists
+    /// so the batching guarantees can be asserted without a global tracing
+    /// subscriber or thread bookkeeping: the counter lives on the instance
+    /// under test and is incremented exactly where a rule query is executed.
+    #[cfg(test)]
+    rule_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PromotionService {
     /// Creates a service over an already-migrated store database.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db, audit: None }
+        Self {
+            db,
+            audit: None,
+            #[cfg(test)]
+            rule_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Number of `promotion_rules` reads this service has issued so far.
+    #[cfg(test)]
+    fn rule_reads(&self) -> usize {
+        self.rule_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Records campaign mutations in the store audit outbox.
@@ -81,6 +100,7 @@ impl PromotionService {
         validate_promotion_fields(
             &input.title,
             input.promotion_type,
+            input.target,
             input.value,
             input.usage_limit,
             input.starts_at,
@@ -99,9 +119,9 @@ impl PromotionService {
         sqlx::query(
             "INSERT INTO promotions
              (id, code, title, type, value, status, is_automatic, starts_at, ends_at, usage_limit,
-              usage_count, per_customer_limit, priority, is_stackable, metadata, created_at,
+              usage_count, per_customer_limit, priority, is_stackable, target, metadata, created_at,
               updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&code)
@@ -116,6 +136,7 @@ impl PromotionService {
         .bind(input.per_customer_limit)
         .bind(input.priority)
         .bind(if input.is_stackable { 1_i64 } else { 0_i64 })
+        .bind(input.target.as_str())
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
@@ -131,6 +152,7 @@ impl PromotionService {
             code,
             title: input.title,
             promotion_type: input.promotion_type,
+            target: input.target,
             value: input.value,
             status: input.status,
             is_automatic: input.is_automatic,
@@ -172,6 +194,7 @@ impl PromotionService {
         let code = raw_code.as_deref().map(normalize_code).transpose()?;
         let title = input.title.unwrap_or(existing.title);
         let promotion_type = input.promotion_type.unwrap_or(existing.promotion_type);
+        let target = input.target.unwrap_or(existing.target);
         let value = input.value.unwrap_or(existing.value);
         let status = input.status.unwrap_or(existing.status);
         let is_automatic = input.is_automatic.unwrap_or(existing.is_automatic);
@@ -190,6 +213,7 @@ impl PromotionService {
         validate_promotion_fields(
             &title,
             promotion_type,
+            target,
             value,
             usage_limit,
             starts_at,
@@ -209,7 +233,7 @@ impl PromotionService {
             "UPDATE promotions
              SET code = ?, title = ?, type = ?, value = ?, status = ?, is_automatic = ?,
                  starts_at = ?, ends_at = ?, usage_limit = ?, per_customer_limit = ?,
-                 priority = ?, is_stackable = ?, metadata = ?, updated_at = ?
+                 priority = ?, is_stackable = ?, target = ?, metadata = ?, updated_at = ?
              WHERE id = ? AND (? IS NULL OR ? >= usage_count)",
         )
         .bind(&code)
@@ -224,6 +248,7 @@ impl PromotionService {
         .bind(per_customer_limit)
         .bind(priority)
         .bind(if is_stackable { 1_i64 } else { 0_i64 })
+        .bind(target.as_str())
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(id)
@@ -264,6 +289,7 @@ impl PromotionService {
             code,
             title,
             promotion_type,
+            target,
             value,
             status,
             is_automatic,
@@ -1479,6 +1505,9 @@ impl PromotionService {
             for promotion_id in chunk {
                 query = query.bind(promotion_id);
             }
+            #[cfg(test)]
+            self.rule_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let rows = query
                 .fetch_all(self.db.pool())
                 .await
@@ -1859,6 +1888,7 @@ struct PromotionRow {
     per_customer_limit: Option<i64>,
     priority: i64,
     is_stackable: i64,
+    target: String,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -1871,6 +1901,7 @@ impl PromotionRow {
             code: self.code,
             title: self.title,
             promotion_type: self.promotion_type.parse()?,
+            target: self.target.parse()?,
             value: self.value,
             status: self.status.parse()?,
             is_automatic: self.is_automatic != 0,
@@ -1945,9 +1976,6 @@ impl CouponRow {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex, OnceLock};
-    use std::thread::ThreadId;
-
     use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
     use fastcart_kernel::{AppError, CurrencyCode, Metadata, Pagination, StoreId};
 
@@ -1956,7 +1984,8 @@ mod tests {
         CampaignBudgetType, CreateCampaignInput, CreateCouponInput, CreatePromotionInput,
         Promotion, PromotionCart, PromotionContext, PromotionFilter, PromotionLine, PromotionRule,
         PromotionRuleAttribute, PromotionRuleInput, PromotionRuleOperator, PromotionStatus,
-        PromotionType, UpdateCampaignInput, UpdatePromotionInput, calculate_promotions,
+        PromotionTarget, PromotionType, UpdateCampaignInput, UpdatePromotionInput,
+        calculate_promotions,
     };
 
     async fn service() -> PromotionService {
@@ -2014,6 +2043,7 @@ mod tests {
             code: Some(id.to_ascii_uppercase()),
             title: id.to_owned(),
             promotion_type,
+            target: PromotionTarget::Items,
             value,
             status: PromotionStatus::Active,
             is_automatic: false,
@@ -2993,133 +3023,14 @@ mod tests {
         );
     }
 
-    /// Records the SQL text of every statement sqlx executes, tagged with the
-    /// thread that executed it.
-    ///
-    /// sqlx logs one `tracing` event per statement from the worker thread that
-    /// owns the connection, and `tracing` only emits those events while a global
-    /// subscriber is installed, so the recorder installs itself process-wide the
-    /// first time it is used. Tests running in parallel in this binary are told
-    /// apart by the worker thread of their own pool, which the recorder
-    /// discovers through a marker query.
-    #[derive(Clone, Default)]
-    struct StatementRecorder {
-        records: Arc<Mutex<Vec<Statement>>>,
-    }
-
-    struct Statement {
-        thread: ThreadId,
-        sql: String,
-    }
-
-    impl StatementRecorder {
-        /// Returns the process-wide recorder, installing it on first use.
-        fn global() -> Self {
-            static RECORDER: OnceLock<StatementRecorder> = OnceLock::new();
-            RECORDER
-                .get_or_init(|| {
-                    let recorder = StatementRecorder::default();
-                    tracing::subscriber::set_global_default(recorder.clone())
-                        .expect("the statement recorder must be the global subscriber");
-                    recorder
-                })
-                .clone()
-        }
-
-        /// Runs a marker query and returns the worker thread that executed it.
-        ///
-        /// The marker is unique to this test, so the thread logged for it is the
-        /// thread that runs every later statement of this test's pool.
-        async fn worker_thread(db: &StoreDatabase) -> ThreadId {
-            let recorder = Self::global();
-            let before = recorder.records.lock().unwrap().len();
-            sqlx::query("SELECT 'promotion_marker' AS marker FROM promotions LIMIT 1")
-                .fetch_all(db.pool())
-                .await
-                .unwrap();
-            let records = recorder.records.lock().unwrap();
-            records[before..]
-                .iter()
-                .find(|record| record.sql.contains("promotion_marker"))
-                .map(|record| record.thread)
-                .expect("the marker statement must be logged")
-        }
-
-        /// Returns a snapshot length usable with [`Self::statements_since`].
-        fn checkpoint(&self) -> usize {
-            self.records.lock().unwrap().len()
-        }
-
-        /// Returns the statements recorded after `checkpoint` that ran on
-        /// `thread` and contain `needle`.
-        fn statements_since(
-            &self,
-            checkpoint: usize,
-            thread: ThreadId,
-            needle: &str,
-        ) -> Vec<String> {
-            self.records.lock().unwrap()[checkpoint..]
-                .iter()
-                .filter(|record| record.thread == thread && record.sql.contains(needle))
-                .map(|record| record.sql.clone())
-                .collect()
-        }
-    }
-
-    impl tracing::Subscriber for StatementRecorder {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            if event.metadata().target() != "sqlx::query" {
-                return;
-            }
-            let mut visitor = StatementVisitor::default();
-            event.record(&mut visitor);
-            if let Some(sql) = visitor.statement {
-                self.records.lock().unwrap().push(Statement {
-                    thread: std::thread::current().id(),
-                    sql,
-                });
-            }
-        }
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    #[derive(Default)]
-    struct StatementVisitor {
-        statement: Option<String>,
-    }
-
-    impl tracing::field::Visit for StatementVisitor {
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            if field.name() == "db.statement" {
-                self.statement = Some(value.to_owned());
-            }
-        }
-
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "db.statement" {
-                self.statement = Some(format!("{value:?}"));
-            }
-        }
-    }
-
     /// Creates a store with `count` automatic promotions that each carry two
-    /// rules and returns the service with its connection worker thread.
-    async fn automatic_promotions(count: usize) -> (StoreDatabase, PromotionService, ThreadId) {
+    /// rules and returns the service over it.
+    ///
+    /// Rule reads are counted on the service instance itself
+    /// ([`PromotionService::rule_reads`]), so a test that asserts on them
+    /// cannot be disturbed by the other tests running in this binary: no
+    /// process-global subscriber, no thread attribution, no shared state.
+    async fn automatic_promotions(count: usize) -> (StoreDatabase, PromotionService) {
         let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
         let service = PromotionService::new(db.clone());
         for index in 0..count {
@@ -3146,13 +3057,22 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let thread = StatementRecorder::worker_thread(&db).await;
-        (db, service, thread)
+        (db, service)
+    }
+
+    /// Lists `count` automatic promotions and returns how many rule reads the
+    /// listing issued.
+    async fn automatic_listing_rule_reads(count: usize) -> usize {
+        let (_db, service) = automatic_promotions(count).await;
+        let before = service.rule_reads();
+        let listed = service.list_automatic_promotions(100).await.unwrap();
+        assert_eq!(listed.len(), count);
+        service.rule_reads() - before
     }
 
     #[tokio::test]
     async fn listing_automatic_promotions_keeps_rules_grouped_and_ordered() {
-        let (_db, service, _thread) = automatic_promotions(5).await;
+        let (_db, service) = automatic_promotions(5).await;
 
         let listed = service.list_automatic_promotions(100).await.unwrap();
         assert_eq!(listed.len(), 5);
@@ -3175,7 +3095,7 @@ mod tests {
 
     #[tokio::test]
     async fn listing_promotions_keeps_rules_grouped_and_ordered() {
-        let (_db, service, _thread) = automatic_promotions(5).await;
+        let (_db, service) = automatic_promotions(5).await;
         let manual = service
             .create_promotion(
                 CreatePromotionInput::new("Manual", PromotionType::FixedAmount, 100)
@@ -3211,23 +3131,10 @@ mod tests {
         }
     }
 
-    /// Counts the `promotion_rules` statements issued while listing `count`
-    /// automatic promotions.
-    async fn automatic_listing_rule_queries(recorder: &StatementRecorder, count: usize) -> usize {
-        let (_db, service, thread) = automatic_promotions(count).await;
-        let checkpoint = recorder.checkpoint();
-        let listed = service.list_automatic_promotions(100).await.unwrap();
-        assert_eq!(listed.len(), count);
-        recorder
-            .statements_since(checkpoint, thread, "FROM promotion_rules")
-            .len()
-    }
-
     #[tokio::test]
     async fn listing_automatic_promotions_issues_constant_rule_queries() {
-        let recorder = StatementRecorder::global();
-        let small = automatic_listing_rule_queries(&recorder, 2).await;
-        let large = automatic_listing_rule_queries(&recorder, 12).await;
+        let small = automatic_listing_rule_reads(2).await;
+        let large = automatic_listing_rule_reads(12).await;
         assert_eq!(
             large, small,
             "the rule query count must not grow with the number of promotions"
@@ -3237,10 +3144,9 @@ mod tests {
 
     #[tokio::test]
     async fn listing_promotions_issues_constant_rule_queries() {
-        let recorder = StatementRecorder::global();
         let small = async {
-            let (_db, service, thread) = automatic_promotions(3).await;
-            let checkpoint = recorder.checkpoint();
+            let (_db, service) = automatic_promotions(3).await;
+            let before = service.rule_reads();
             let page = service
                 .list_promotions(
                     PromotionFilter::default(),
@@ -3252,14 +3158,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(page.data.len(), 3);
-            recorder
-                .statements_since(checkpoint, thread, "FROM promotion_rules")
-                .len()
+            service.rule_reads() - before
         }
         .await;
         let large = async {
-            let (_db, service, thread) = automatic_promotions(15).await;
-            let checkpoint = recorder.checkpoint();
+            let (_db, service) = automatic_promotions(15).await;
+            let before = service.rule_reads();
             let page = service
                 .list_promotions(
                     PromotionFilter::default(),
@@ -3271,9 +3175,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(page.data.len(), 15);
-            recorder
-                .statements_since(checkpoint, thread, "FROM promotion_rules")
-                .len()
+            service.rule_reads() - before
         }
         .await;
 
@@ -3282,5 +3184,23 @@ mod tests {
             "the rule query count must not grow with the number of promotions"
         );
         assert_eq!(large, 1, "all rules must be loaded in a single query");
+    }
+
+    /// More promotion ids than one statement may bind: the batched loader then
+    /// chunks, and the count grows with the chunks rather than with the ids.
+    #[tokio::test]
+    async fn rule_reads_chunk_under_the_parameter_limit() {
+        let count = crate::service::SQLITE_PARAMETER_LIMIT + 5;
+        let (_db, service) = automatic_promotions(count).await;
+        let before = service.rule_reads();
+
+        let listed = service.list_automatic_promotions(100).await.unwrap();
+
+        assert_eq!(listed.len(), count);
+        assert_eq!(
+            service.rule_reads() - before,
+            2,
+            "905 ids must be read in two chunks, not one statement per promotion"
+        );
     }
 }

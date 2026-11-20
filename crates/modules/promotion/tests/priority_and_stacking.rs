@@ -15,8 +15,8 @@ use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{CurrencyCode, Metadata, StoreId};
 use fastcart_module_promotion::{
     CreatePromotionInput, Promotion, PromotionCart, PromotionContext, PromotionLine,
-    PromotionResult, PromotionService, PromotionStatus, PromotionType, UpdatePromotionInput,
-    calculate_promotions,
+    PromotionResult, PromotionService, PromotionStatus, PromotionTarget, PromotionType,
+    UpdatePromotionInput, calculate_promotions,
 };
 
 fn usd() -> CurrencyCode {
@@ -58,6 +58,7 @@ fn promotion(id: &str, created_at: i64, value: i64) -> Promotion {
         code: None,
         title: id.to_owned(),
         promotion_type: PromotionType::FixedAmount,
+        target: PromotionTarget::Items,
         value,
         status: PromotionStatus::Active,
         is_automatic: true,

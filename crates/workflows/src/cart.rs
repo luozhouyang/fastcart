@@ -300,6 +300,12 @@ impl CartWorkflow {
     /// transaction. Deriving first also means a pricing, promotion or tax
     /// failure leaves the cart exactly as it was, instead of a cart whose
     /// discounts were already cleared when the failing step ran.
+    ///
+    /// Cart-level discounts — the applications that name no line, which is how
+    /// an order-target promotion discounts the whole order — are written in a
+    /// second transaction, and only when they differ from the rows already
+    /// stored. A cart whose promotions produce no such application is written
+    /// exactly once, as it always was.
     pub async fn recalculate(
         &self,
         cart_id: &CartId,
@@ -446,8 +452,16 @@ impl CartWorkflow {
 
         // 3. Group the applications per line, keeping cart order so the write
         // below is deterministic.
+        //
+        // An application that names no line and is not a shipping discount is a
+        // cart-level one: an order-target promotion discounts the whole order,
+        // which the cart records as a `cart_discounts` row. Those rows are the
+        // cart's own way of carrying a discount that belongs to no single line,
+        // and `allocate_cart_discounts` spreads them over the lines again when
+        // the cart is placed as an order.
         let mut line_adjustments: HashMap<&str, Vec<AdjustmentInput>> = HashMap::new();
         let mut shipping_adjustments = Vec::new();
+        let mut cart_level_discounts: Vec<(String, DiscountInput)> = Vec::new();
         for result in &results {
             for application in &result.applications {
                 let adjustment = AdjustmentInput {
@@ -463,6 +477,37 @@ impl CartWorkflow {
                         .entry(line_id)
                         .or_default()
                         .push(adjustment);
+                } else {
+                    // An order-target promotion books its amount on two legs:
+                    // what the item value absorbs and what is left over for
+                    // shipping. The cart clamps a cart-level row at the item
+                    // subtotal, so the shipping leg is recorded as the shipping
+                    // adjustment it is — otherwise the part of the discount that
+                    // outgrew the items was silently dropped from the totals.
+                    let shipping_leg = result.shipping_discount.clamp(0, application.amount);
+                    if shipping_leg > 0 {
+                        shipping_adjustments.push(AdjustmentInput {
+                            amount: shipping_leg,
+                            ..adjustment.clone()
+                        });
+                    }
+                    let item_leg = application.amount - shipping_leg;
+                    if item_leg > 0 {
+                        cart_level_discounts.push((
+                            result.promotion_id.clone(),
+                            DiscountInput {
+                                promotion_id: Some(PromotionId::from_string(
+                                    result.promotion_id.clone(),
+                                )),
+                                // The row keeps the promotion's code so the coupon
+                                // flows can still tell which discount is which.
+                                code: result.code.clone(),
+                                amount: item_leg,
+                                is_automatic: true,
+                                metadata: Metadata::empty(),
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -483,6 +528,95 @@ impl CartWorkflow {
             .map(|adjustment| adjustment.amount.max(0))
             .fold(0_i64, i64::saturating_add)
             .min(shipping_subtotal);
+
+        // 3b. The replacement set for the cart-level discounts. Replacing them
+        // is all-or-nothing, so the rows the cart must keep are carried over
+        // and the applications above are merged into them.
+        let mut wanted_by_promotion: HashMap<String, DiscountInput> = HashMap::new();
+        for (promotion_id, discount) in cart_level_discounts {
+            wanted_by_promotion
+                .entry(promotion_id)
+                .and_modify(|existing| {
+                    existing.amount = existing.amount.saturating_add(discount.amount)
+                })
+                .or_insert(discount);
+        }
+        let mut cart_discounts: Vec<DiscountInput> = Vec::new();
+        let mut row_of_promotion: HashMap<String, usize> = HashMap::new();
+        for discount in &cart.discounts {
+            let promotion_id = discount.promotion_id.as_ref().map(ToString::to_string);
+            // A coupon that was applied earlier is a marker row — amount 0,
+            // with its discount living in the line adjustments — and dropping
+            // it would silently detach the coupon from the cart, so a row that
+            // carries a code always survives. A row without a code is only the
+            // discount some pass wrote: it is re-derived here, and dropped when
+            // no promotion claims it any more.
+            let claimed = promotion_id
+                .as_ref()
+                .is_some_and(|id| wanted_by_promotion.contains_key(id));
+            if !claimed && discount.code.is_none() {
+                continue;
+            }
+            if let Some(promotion_id) = promotion_id {
+                row_of_promotion.insert(promotion_id, cart_discounts.len());
+            }
+            cart_discounts.push(DiscountInput {
+                promotion_id: discount.promotion_id.clone(),
+                code: discount.code.clone(),
+                // A row tied to a promotion is derived from this pass; a row
+                // without one predates it and keeps its amount.
+                amount: if discount.promotion_id.is_some() {
+                    0
+                } else {
+                    discount.amount
+                },
+                is_automatic: discount.is_automatic,
+                metadata: discount.metadata.clone(),
+            });
+        }
+        for (promotion_id, discount) in wanted_by_promotion {
+            match row_of_promotion.get(&promotion_id) {
+                // The promotion already owns a row — a coupon marker, or the
+                // discount a previous pass wrote. Its amount is refreshed and
+                // its own code and flags are kept.
+                Some(index) => cart_discounts[*index].amount = discount.amount,
+                None => {
+                    row_of_promotion.insert(promotion_id, cart_discounts.len());
+                    cart_discounts.push(discount);
+                }
+            }
+        }
+        // A recalculation that would write exactly what is stored does not
+        // write at all: a store whose promotions discount no cart-level value
+        // keeps the read-only path it always had.
+        let discounts_unchanged = {
+            let mut stored: Vec<_> = cart
+                .discounts
+                .iter()
+                .map(|discount| {
+                    discount_key(
+                        discount.promotion_id.as_ref(),
+                        discount.code.as_deref(),
+                        discount.amount,
+                        discount.is_automatic,
+                    )
+                })
+                .collect();
+            let mut wanted: Vec<_> = cart_discounts
+                .iter()
+                .map(|discount| {
+                    discount_key(
+                        discount.promotion_id.as_ref(),
+                        discount.code.as_deref(),
+                        discount.amount,
+                        discount.is_automatic,
+                    )
+                })
+                .collect();
+            stored.sort();
+            wanted.sort();
+            stored == wanted
+        };
 
         // 4. Calculate tax on the discounted line and shipping amounts.
         let variant_ids: Vec<String> = cart
@@ -620,7 +754,8 @@ impl CartWorkflow {
         }
 
         // 5. Apply the whole snapshot in one transaction.
-        self.cart
+        let cart = self
+            .cart
             .apply_recalculation(
                 cart_id,
                 RecalculationInput {
@@ -632,13 +767,36 @@ impl CartWorkflow {
                     tax_inclusive: Some(context.prices_include_tax),
                 },
             )
-            .await
+            .await?;
+        if discounts_unchanged {
+            return Ok(cart);
+        }
+        self.cart.replace_discounts(cart_id, cart_discounts).await
     }
 
     /// Completes a cart after an order was placed.
     pub async fn complete_cart(&self, cart_id: &CartId) -> Result<Cart, AppError> {
         self.cart.complete_cart(cart_id).await
     }
+}
+
+/// The fields on which a stored cart discount and a wanted one must agree.
+///
+/// The two are different types (a stored row and a write input), and stored rows
+/// come back ordered by their row id rather than by the order they were written
+/// in, so the two are compared as a multiset of these keys.
+fn discount_key(
+    promotion_id: Option<&PromotionId>,
+    code: Option<&str>,
+    amount: i64,
+    is_automatic: bool,
+) -> (Option<String>, Option<String>, i64, bool) {
+    (
+        promotion_id.map(ToString::to_string),
+        code.map(str::to_owned),
+        amount,
+        is_automatic,
+    )
 }
 
 /// Names the tax line recorded when a region governs a destination but no rate

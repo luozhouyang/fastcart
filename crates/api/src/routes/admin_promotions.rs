@@ -12,7 +12,7 @@ use fastcart_kernel::{ActorContext, Metadata, now_timestamp};
 use fastcart_module_promotion::{
     Coupon, CouponFilter, CreateCouponInput, CreatePromotionInput, Promotion, PromotionFilter,
     PromotionRuleAttribute, PromotionRuleInput, PromotionRuleOperator, PromotionService,
-    PromotionStatus, PromotionType, UpdateCouponInput, UpdatePromotionInput,
+    PromotionStatus, PromotionTarget, PromotionType, UpdateCouponInput, UpdatePromotionInput,
 };
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
@@ -374,6 +374,7 @@ pub struct CreatePromotionRequest {
     code: Option<String>,
     title: String,
     promotion_type: PromotionType,
+    target: Option<PromotionTarget>,
     value: i64,
     status: Option<PromotionStatus>,
     is_automatic: Option<bool>,
@@ -392,6 +393,7 @@ impl CreatePromotionRequest {
     fn into_input(self) -> CreatePromotionInput {
         let mut input = CreatePromotionInput::new(self.title, self.promotion_type, self.value);
         input.code = self.code;
+        input.target = self.target.unwrap_or_default();
         input.status = self.status.unwrap_or(PromotionStatus::Draft);
         input.is_automatic = self.is_automatic.unwrap_or(false);
         input.starts_at = self.starts_at;
@@ -412,6 +414,7 @@ pub struct UpdatePromotionRequest {
     code: Option<Option<String>>,
     title: Option<String>,
     promotion_type: Option<PromotionType>,
+    target: Option<PromotionTarget>,
     value: Option<i64>,
     status: Option<PromotionStatus>,
     is_automatic: Option<bool>,
@@ -434,6 +437,7 @@ impl UpdatePromotionRequest {
             code: self.code,
             title: self.title,
             promotion_type: self.promotion_type,
+            target: self.target,
             value: self.value,
             status: self.status,
             is_automatic: self.is_automatic,

@@ -52,6 +52,59 @@ impl FromStr for PromotionType {
     }
 }
 
+/// The part of the cart a percentage or fixed amount discount applies to.
+///
+/// `items` is the historic behaviour and the default: the discount is computed
+/// per eligible line and recorded as a line adjustment. `order` computes
+/// against the item subtotal plus shipping and `shipping` against the shipping
+/// total; both produce a single application that consumes the cart's remaining
+/// value, so they cannot discount the cart below zero.
+///
+/// Line-level rules (`product_id`, `variant_id`, `category_id`) still gate
+/// eligibility on every target, but the `order` and `shipping` amounts are
+/// computed from the cart totals rather than from the eligible lines.
+///
+/// `FreeShipping` is a shipping discount by definition and only accepts the
+/// default target.
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionTarget {
+    /// The eligible line items.
+    #[default]
+    Items,
+    /// The whole order: the item subtotal plus shipping.
+    Order,
+    /// Shipping alone.
+    Shipping,
+}
+
+impl PromotionTarget {
+    /// Database representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Items => "items",
+            Self::Order => "order",
+            Self::Shipping => "shipping",
+        }
+    }
+}
+
+impl FromStr for PromotionTarget {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "items" => Ok(Self::Items),
+            "order" => Ok(Self::Order),
+            "shipping" => Ok(Self::Shipping),
+            other => Err(AppError::validation(format!(
+                "invalid promotion target: {other}"
+            ))),
+        }
+    }
+}
+
 /// Lifecycle state of a promotion.
 #[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -248,6 +301,8 @@ pub struct Promotion {
     pub title: String,
     /// Discount type.
     pub promotion_type: PromotionType,
+    /// Where the discount applies.
+    pub target: PromotionTarget,
     /// Basis points for percentages, minor units for fixed amounts, zero for
     /// free shipping.
     pub value: i64,
@@ -291,6 +346,8 @@ pub struct CreatePromotionInput {
     pub title: String,
     /// Discount type.
     pub promotion_type: PromotionType,
+    /// Where the discount applies; defaults to the eligible line items.
+    pub target: PromotionTarget,
     /// Basis points for percentages, minor units for fixed amounts.
     pub value: i64,
     /// Lifecycle state.
@@ -323,6 +380,7 @@ impl CreatePromotionInput {
             code: None,
             title: title.into(),
             promotion_type,
+            target: PromotionTarget::Items,
             value,
             status: PromotionStatus::Draft,
             is_automatic: false,
@@ -341,6 +399,13 @@ impl CreatePromotionInput {
     #[must_use]
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         self.code = Some(code.into());
+        self
+    }
+
+    /// Sets where the discount applies.
+    #[must_use]
+    pub fn with_target(mut self, target: PromotionTarget) -> Self {
+        self.target = target;
         self
     }
 
@@ -415,6 +480,8 @@ pub struct UpdatePromotionInput {
     pub title: Option<String>,
     /// New discount type.
     pub promotion_type: Option<PromotionType>,
+    /// New target; `None` keeps the stored one.
+    pub target: Option<PromotionTarget>,
     /// New discount value.
     pub value: Option<i64>,
     /// New lifecycle state.
@@ -735,9 +802,27 @@ fn apply_promotion_with_remaining(
     let remaining_subtotal = remaining_subtotal.max(0);
     let remaining_shipping = remaining_shipping.max(0);
     match context.promotion.promotion_type {
-        PromotionType::Percentage => percentage_result(context, cart, &lines, remaining_subtotal),
-        PromotionType::FixedAmount => fixed_amount_result(context, &lines, remaining_subtotal),
+        // Free shipping is inherently a shipping discount and its target is
+        // validated to the default, so it keeps its own path.
         PromotionType::FreeShipping => free_shipping_result(context, cart, remaining_shipping),
+        PromotionType::Percentage => match context.promotion.target {
+            PromotionTarget::Items => percentage_result(context, cart, &lines, remaining_subtotal),
+            PromotionTarget::Order => {
+                order_percentage_result(context, cart, remaining_subtotal, remaining_shipping)
+            }
+            PromotionTarget::Shipping => {
+                shipping_percentage_result(context, cart, remaining_shipping)
+            }
+        },
+        PromotionType::FixedAmount => match context.promotion.target {
+            PromotionTarget::Items => fixed_amount_result(context, &lines, remaining_subtotal),
+            PromotionTarget::Order => {
+                order_fixed_amount_result(context, cart, remaining_subtotal, remaining_shipping)
+            }
+            PromotionTarget::Shipping => {
+                shipping_fixed_amount_result(context, cart, remaining_shipping)
+            }
+        },
     }
 }
 
@@ -867,6 +952,179 @@ fn free_shipping_result(
         discount,
         true,
         "Free shipping".to_owned(),
+    )];
+    Ok(Some(result(context, applications, 0, discount)))
+}
+
+fn order_percentage_result(
+    context: &PromotionContext,
+    cart: &PromotionCart,
+    remaining_subtotal: i64,
+    remaining_shipping: i64,
+) -> Result<Option<PromotionResult>, AppError> {
+    // The whole order is one base: the item subtotal plus shipping. The
+    // discount is capped at what previous promotions left of both, so the
+    // sequence still cannot discount the cart below zero.
+    let base = cart
+        .subtotal
+        .max(0)
+        .saturating_add(cart.shipping_total.max(0));
+    let budget = remaining_subtotal
+        .max(0)
+        .saturating_add(remaining_shipping.max(0));
+    let Some(amount) = whole_target_percentage_amount(context, cart, base, budget)? else {
+        return Ok(None);
+    };
+    let applications = vec![application(
+        context,
+        None,
+        amount,
+        false,
+        format!(
+            "Order percentage discount ({})",
+            percentage_label(context.promotion.value)
+        ),
+    )];
+    let (item_discount, shipping_discount) =
+        order_discount_split(amount, remaining_subtotal, remaining_shipping);
+    Ok(Some(result(
+        context,
+        applications,
+        item_discount,
+        shipping_discount,
+    )))
+}
+
+/// Splits an order-target amount across the two legs of the cart it consumes.
+///
+/// An order discount is recorded as one cart-level application, but it consumes
+/// the remaining order value as a whole: the item leg first, because that is the
+/// leg the cart charges a cart-level discount against, then shipping. Booking
+/// both legs also keeps the sequence honest — a later promotion only sees what
+/// this one really left.
+fn order_discount_split(
+    amount: i64,
+    remaining_subtotal: i64,
+    remaining_shipping: i64,
+) -> (i64, i64) {
+    debug_assert!(amount <= remaining_subtotal.saturating_add(remaining_shipping));
+    let item_discount = amount.min(remaining_subtotal);
+    (item_discount, amount - item_discount)
+}
+
+fn shipping_percentage_result(
+    context: &PromotionContext,
+    cart: &PromotionCart,
+    remaining_shipping: i64,
+) -> Result<Option<PromotionResult>, AppError> {
+    let base = cart.shipping_total.max(0);
+    let budget = remaining_shipping.max(0);
+    let Some(amount) = whole_target_percentage_amount(context, cart, base, budget)? else {
+        return Ok(None);
+    };
+    let applications = vec![application(
+        context,
+        None,
+        amount,
+        true,
+        format!(
+            "Shipping percentage discount ({})",
+            percentage_label(context.promotion.value)
+        ),
+    )];
+    Ok(Some(result(context, applications, 0, amount)))
+}
+
+/// Validates a percentage and rounds it against `base`, capped at the value the
+/// previous promotions left.
+fn whole_target_percentage_amount(
+    context: &PromotionContext,
+    cart: &PromotionCart,
+    base: i64,
+    budget: i64,
+) -> Result<Option<i64>, AppError> {
+    let basis_points = context.promotion.value;
+    if !(0..=10_000).contains(&basis_points) {
+        return Err(AppError::validation(format!(
+            "percentage promotion value must be between 0 and 10000 basis points: {basis_points}"
+        )));
+    }
+    if basis_points == 0 || base <= 0 || budget <= 0 {
+        return Ok(None);
+    }
+    let discount = Money::new(base, cart.currency.clone())
+        .apply_basis_points(basis_points, Rounding::HalfAwayFromZero)?
+        .amount_minor();
+    let amount = discount.min(budget);
+    if amount <= 0 {
+        return Ok(None);
+    }
+    Ok(Some(amount))
+}
+
+fn order_fixed_amount_result(
+    context: &PromotionContext,
+    cart: &PromotionCart,
+    remaining_subtotal: i64,
+    remaining_shipping: i64,
+) -> Result<Option<PromotionResult>, AppError> {
+    let value = context.promotion.value;
+    if value < 0 {
+        return Err(AppError::validation(
+            "fixed amount promotion value must not be negative",
+        ));
+    }
+    let base = cart
+        .subtotal
+        .max(0)
+        .saturating_add(cart.shipping_total.max(0));
+    let budget = remaining_subtotal
+        .max(0)
+        .saturating_add(remaining_shipping.max(0));
+    let discount = value.min(base).min(budget);
+    if discount <= 0 {
+        return Ok(None);
+    }
+    let applications = vec![application(
+        context,
+        None,
+        discount,
+        false,
+        "Order fixed amount discount".to_owned(),
+    )];
+    let (item_discount, shipping_discount) =
+        order_discount_split(discount, remaining_subtotal, remaining_shipping);
+    Ok(Some(result(
+        context,
+        applications,
+        item_discount,
+        shipping_discount,
+    )))
+}
+
+fn shipping_fixed_amount_result(
+    context: &PromotionContext,
+    cart: &PromotionCart,
+    remaining_shipping: i64,
+) -> Result<Option<PromotionResult>, AppError> {
+    let value = context.promotion.value;
+    if value < 0 {
+        return Err(AppError::validation(
+            "fixed amount promotion value must not be negative",
+        ));
+    }
+    let discount = value
+        .min(cart.shipping_total.max(0))
+        .min(remaining_shipping.max(0));
+    if discount <= 0 {
+        return Ok(None);
+    }
+    let applications = vec![application(
+        context,
+        None,
+        discount,
+        true,
+        "Shipping fixed amount discount".to_owned(),
     )];
     Ok(Some(result(context, applications, 0, discount)))
 }
@@ -1093,9 +1351,13 @@ pub(crate) fn validate_per_customer_limit(per_customer_limit: Option<i64>) -> Re
     Ok(())
 }
 
+// The arguments are the promotion fields the service has already resolved, one
+// per column; bundling them into a struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_promotion_fields(
     title: &str,
     promotion_type: PromotionType,
+    target: PromotionTarget,
     value: i64,
     usage_limit: Option<i64>,
     starts_at: Option<i64>,
@@ -1119,6 +1381,12 @@ pub(crate) fn validate_promotion_fields(
         PromotionType::FreeShipping if value != 0 => {
             return Err(AppError::validation(
                 "free shipping promotion value must be zero",
+            ));
+        }
+        PromotionType::FreeShipping if target != PromotionTarget::Items => {
+            return Err(AppError::validation(
+                "free shipping promotions already discount shipping and cannot carry another \
+                 target",
             ));
         }
         _ => {}
@@ -1287,8 +1555,8 @@ mod tests {
     use fastcart_kernel::{CurrencyCode, Metadata};
 
     use super::{
-        Promotion, PromotionCart, PromotionContext, PromotionLine, PromotionStatus, PromotionType,
-        calculate_promotions,
+        Promotion, PromotionCart, PromotionContext, PromotionLine, PromotionStatus,
+        PromotionTarget, PromotionType, calculate_promotions,
     };
 
     fn line(id: &str, unit_price: i64) -> PromotionLine {
@@ -1323,6 +1591,7 @@ mod tests {
                 code: None,
                 title: "Ten off".to_owned(),
                 promotion_type: PromotionType::FixedAmount,
+                target: PromotionTarget::Items,
                 value,
                 status: PromotionStatus::Active,
                 is_automatic: true,
