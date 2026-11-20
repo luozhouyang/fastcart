@@ -9,17 +9,20 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 
 use crate::domain::{
-    CreateTaxCategoryInput, CreateTaxRateInput, CreateTaxRegionInput, TaxBreakdown, TaxCategory,
-    TaxLine, TaxRate, TaxRegion, UpdateTaxCategoryInput, UpdateTaxRateInput, UpdateTaxRegionInput,
-    calculate_tax, normalize_province, validate_category_code, validate_rate_bps,
-    validate_tax_name,
+    CreateTaxCategoryInput, CreateTaxRateInput, CreateTaxRegionInput, TaxCategory, TaxLine,
+    TaxRate, TaxRegion, UpdateTaxCategoryInput, UpdateTaxRateInput, UpdateTaxRegionInput,
+    normalize_province, validate_category_code, validate_rate_bps, validate_tax_name,
+};
+use crate::provider::{
+    TaxCalculationRequest, TaxDestination, TaxProviderRegistry, fetch_region,
+    region_for_destination, resolve_rate,
 };
 
 const CATEGORY_COLUMNS: &str = "id, name, code, description, created_at, updated_at";
-const REGION_COLUMNS: &str =
+pub(crate) const REGION_COLUMNS: &str =
     "id, name, country_code, province_code, metadata, created_at, updated_at";
-const RATE_COLUMNS: &str = "id, tax_region_id, tax_category_id, name, rate_bps, is_inclusive, \
-     is_default, metadata, created_at, updated_at";
+pub(crate) const RATE_COLUMNS: &str = "id, tax_region_id, tax_category_id, name, rate_bps, \
+     is_inclusive, is_default, metadata, created_at, updated_at";
 
 fn metadata_string(metadata: Option<Metadata>) -> String {
     metadata.unwrap_or_default().to_json_string()
@@ -43,7 +46,7 @@ fn row_to_category(row: &SqliteRow) -> Result<TaxCategory, AppError> {
     })
 }
 
-fn row_to_region(row: &SqliteRow) -> Result<TaxRegion, AppError> {
+pub(crate) fn row_to_region(row: &SqliteRow) -> Result<TaxRegion, AppError> {
     let country_code: String = row.try_get("country_code").map_err(database_error)?;
     Ok(TaxRegion {
         id: TaxRegionId::from_string(row.try_get::<String, _>("id").map_err(database_error)?),
@@ -59,7 +62,7 @@ fn row_to_region(row: &SqliteRow) -> Result<TaxRegion, AppError> {
     })
 }
 
-fn row_to_rate(row: &SqliteRow) -> Result<TaxRate, AppError> {
+pub(crate) fn row_to_rate(row: &SqliteRow) -> Result<TaxRate, AppError> {
     let category_id = row
         .try_get::<Option<String>, _>("tax_category_id")
         .map_err(database_error)?
@@ -97,30 +100,6 @@ fn unique_or_database(error: sqlx::Error, conflict_message: &str) -> AppError {
         }
         _ => database_error(error),
     }
-}
-
-/// Picks the most recently created rate, using the identifier as a stable
-/// tie-break for rates created within the same second.
-fn newest_rate<'a>(rates: impl Iterator<Item = &'a TaxRate>) -> Option<&'a TaxRate> {
-    rates.max_by(|left, right| {
-        (left.created_at, left.id.as_str()).cmp(&(right.created_at, right.id.as_str()))
-    })
-}
-
-fn pick_rate(rates: &[TaxRate], category_id: Option<&TaxCategoryId>) -> Option<TaxRate> {
-    if let Some(category_id) = category_id
-        && let Some(rate) = newest_rate(
-            rates
-                .iter()
-                .filter(|rate| rate.tax_category_id.as_ref() == Some(category_id)),
-        )
-    {
-        return Some(rate.clone());
-    }
-    if let Some(rate) = newest_rate(rates.iter().filter(|rate| rate.is_default)) {
-        return Some(rate.clone());
-    }
-    newest_rate(rates.iter().filter(|rate| rate.tax_category_id.is_none())).cloned()
 }
 
 async fn get_region_in_tx(
@@ -211,16 +190,46 @@ async fn ensure_category_in_tx(
 }
 
 /// Application service for tax categories, regions and rates.
+///
+/// Tax calculations run through the active [`TaxProviderRegistry`] entry.
+/// [`Self::new`] installs the built-in
+/// [`RegionRateTaxProvider`](crate::provider::RegionRateTaxProvider), which
+/// applies the regions and rates stored in this database; use
+/// [`Self::with_registry`] to serve calculations from another provider.
 #[derive(Clone, Debug)]
 pub struct TaxService {
     db: StoreDatabase,
+    providers: TaxProviderRegistry,
 }
 
 impl TaxService {
     /// Creates a service over a migrated store database.
+    ///
+    /// Calculations use the built-in region/rate provider, which reads the
+    /// regions and rates stored in `db`.
     #[must_use]
     pub fn new(db: StoreDatabase) -> Self {
-        Self { db }
+        let providers = TaxProviderRegistry::with_defaults(db.clone());
+        Self::with_registry(db, providers)
+    }
+
+    /// Creates a service that calculates through the given provider registry.
+    ///
+    /// The registry determines which provider serves
+    /// [`Self::calculate_for_line`] and [`Self::calculate_for_line_in_region`];
+    /// it must have an active provider, otherwise calculations fail with
+    /// [`AppError::Internal`]. Only the calculation paths are provider-backed:
+    /// region and rate administration always operates on the service's own
+    /// database.
+    #[must_use]
+    pub fn with_registry(db: StoreDatabase, providers: TaxProviderRegistry) -> Self {
+        Self { db, providers }
+    }
+
+    /// Returns the registry that serves tax calculations.
+    #[must_use]
+    pub fn providers(&self) -> &TaxProviderRegistry {
+        &self.providers
     }
 
     // Categories
@@ -444,17 +453,7 @@ impl TaxService {
 
     /// Fetches a tax region.
     pub async fn get_region(&self, id: &TaxRegionId) -> Result<TaxRegion, AppError> {
-        let row = sqlx::query(&format!(
-            "SELECT {REGION_COLUMNS} FROM tax_regions WHERE id = ?"
-        ))
-        .bind(id.as_str())
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(database_error)?;
-        match row {
-            Some(row) => row_to_region(&row),
-            None => Err(AppError::not_found("tax region", id)),
-        }
+        fetch_region(&self.db, id).await
     }
 
     /// Lists tax regions.
@@ -721,38 +720,7 @@ impl TaxService {
         category_id: Option<&TaxCategoryId>,
         at: Option<Timestamp>,
     ) -> Result<Option<(TaxRate, TaxRegion)>, AppError> {
-        let province_code = normalize_province(province_code);
-        let rows = sqlx::query(&format!(
-            "SELECT {REGION_COLUMNS} FROM tax_regions WHERE country_code = ?"
-        ))
-        .bind(country_code.as_str())
-        .fetch_all(self.db.pool())
-        .await
-        .map_err(database_error)?;
-        let regions = rows
-            .iter()
-            .map(row_to_region)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut ordered = Vec::new();
-        if province_code.is_some()
-            && let Some(region) = regions
-                .iter()
-                .find(|region| region.province_code == province_code)
-        {
-            ordered.push(region.clone());
-        }
-        if let Some(region) = regions.iter().find(|region| region.province_code.is_none()) {
-            ordered.push(region.clone());
-        }
-
-        for region in ordered {
-            let rates = self.rates_for_region(&region.id, at).await?;
-            if let Some(rate) = pick_rate(&rates, category_id) {
-                return Ok(Some((rate, region)));
-            }
-        }
-        Ok(None)
+        resolve_rate(&self.db, country_code, province_code, category_id, at).await
     }
 
     /// Finds the tax region that governs a destination, whether or not any of
@@ -771,35 +739,17 @@ impl TaxService {
         country_code: &CountryCode,
         province_code: Option<&str>,
     ) -> Result<Option<TaxRegion>, AppError> {
-        let province_code = normalize_province(province_code);
-        let rows = sqlx::query(&format!(
-            "SELECT {REGION_COLUMNS} FROM tax_regions WHERE country_code = ?"
-        ))
-        .bind(country_code.as_str())
-        .fetch_all(self.db.pool())
-        .await
-        .map_err(database_error)?;
-        let regions = rows
-            .iter()
-            .map(row_to_region)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if province_code.is_some()
-            && let Some(region) = regions
-                .iter()
-                .find(|region| region.province_code == province_code)
-        {
-            return Ok(Some(region.clone()));
-        }
-        Ok(regions
-            .into_iter()
-            .find(|region| region.province_code.is_none()))
+        region_for_destination(&self.db, country_code, province_code).await
     }
 
     /// Calculates tax for one line using a store-configured tax region.
     ///
     /// Region-scoped pricing must use the region's tax region even when the
     /// destination country or province would resolve to a different tax region.
+    ///
+    /// The calculation runs through the active provider; the built-in provider
+    /// reads the region from this service's database and reports a missing one
+    /// as [`AppError::NotFound`].
     pub async fn calculate_for_line_in_region(
         &self,
         region_id: &str,
@@ -810,42 +760,20 @@ impl TaxService {
         if amount_minor < 0 {
             return Err(AppError::validation("amount_minor must not be negative"));
         }
-        let region = self
-            .get_region(&TaxRegionId::from_string(region_id.to_owned()))
-            .await?;
-        let rates = self.rates_for_region(&region.id, None).await?;
-        let rate = pick_rate(&rates, category_id);
-        let (rate, rate_bps, is_inclusive, breakdown) = match rate {
-            Some(rate) => {
-                let is_inclusive = inclusive_override.unwrap_or(rate.is_inclusive);
-                let breakdown = calculate_tax(amount_minor, rate.rate_bps, is_inclusive);
-                (Some(rate.clone()), rate.rate_bps, is_inclusive, breakdown)
-            }
-            None => (
-                None,
-                0,
-                false,
-                TaxBreakdown {
-                    tax_amount: 0,
-                    net_amount: amount_minor,
-                    gross_amount: amount_minor,
-                },
-            ),
-        };
-        Ok(TaxLine {
-            country_code: region.country_code.clone(),
-            province_code: region.province_code.clone(),
-            category_id: category_id.cloned(),
-            rate,
-            region: Some(region),
-            amount_minor,
-            rate_bps,
-            is_inclusive,
-            breakdown,
-        })
+        self.providers
+            .active()?
+            .calculate(TaxCalculationRequest {
+                destination: TaxDestination::Region { region_id },
+                category_id,
+                amount_minor,
+                inclusive_override,
+            })
+            .await
     }
 
     /// Calculates tax for one line, optionally overriding inclusive pricing.
+    ///
+    /// The calculation runs through the active provider.
     pub async fn calculate_for_line(
         &self,
         country_code: &CountryCode,
@@ -857,70 +785,18 @@ impl TaxService {
         if amount_minor < 0 {
             return Err(AppError::validation("amount_minor must not be negative"));
         }
-        let resolved = self
-            .resolve_rate(country_code, province_code, category_id, None)
-            .await?;
-        let (rate, region, rate_bps, is_inclusive, breakdown) = match resolved {
-            Some((rate, region)) => {
-                let is_inclusive = inclusive_override.unwrap_or(rate.is_inclusive);
-                let breakdown = calculate_tax(amount_minor, rate.rate_bps, is_inclusive);
-                (
-                    Some(rate.clone()),
-                    Some(region),
-                    rate.rate_bps,
-                    is_inclusive,
-                    breakdown,
-                )
-            }
-            None => {
-                let breakdown = TaxBreakdown {
-                    tax_amount: 0,
-                    net_amount: amount_minor,
-                    gross_amount: amount_minor,
-                };
-                (None, None, 0, false, breakdown)
-            }
-        };
-        Ok(TaxLine {
-            country_code: country_code.clone(),
-            province_code: normalize_province(province_code),
-            category_id: category_id.cloned(),
-            rate,
-            region,
-            amount_minor,
-            rate_bps,
-            is_inclusive,
-            breakdown,
-        })
-    }
-
-    async fn rates_for_region(
-        &self,
-        region_id: &TaxRegionId,
-        at: Option<Timestamp>,
-    ) -> Result<Vec<TaxRate>, AppError> {
-        let rows = match at {
-            Some(at) => {
-                sqlx::query(&format!(
-                    "SELECT {RATE_COLUMNS} FROM tax_rates \
-                     WHERE tax_region_id = ? AND created_at <= ? ORDER BY id"
-                ))
-                .bind(region_id.as_str())
-                .bind(at)
-                .fetch_all(self.db.pool())
-                .await
-            }
-            None => {
-                sqlx::query(&format!(
-                    "SELECT {RATE_COLUMNS} FROM tax_rates WHERE tax_region_id = ? ORDER BY id"
-                ))
-                .bind(region_id.as_str())
-                .fetch_all(self.db.pool())
-                .await
-            }
-        }
-        .map_err(database_error)?;
-        rows.iter().map(row_to_rate).collect()
+        self.providers
+            .active()?
+            .calculate(TaxCalculationRequest {
+                destination: TaxDestination::Address {
+                    country_code,
+                    province_code,
+                },
+                category_id,
+                amount_minor,
+                inclusive_override,
+            })
+            .await
     }
 
     async fn ensure_region_exists(&self, id: &TaxRegionId) -> Result<(), AppError> {

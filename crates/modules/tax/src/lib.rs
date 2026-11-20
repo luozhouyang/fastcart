@@ -5,9 +5,11 @@
 //! `fastcart-workflows`.
 
 pub mod domain;
+pub mod provider;
 pub mod service;
 
 pub use domain::*;
+pub use provider::*;
 pub use service::*;
 
 #[cfg(test)]
