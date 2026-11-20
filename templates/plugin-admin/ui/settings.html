@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin Panel</title>
+    <style>
+      body { font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 16px; }
+      button { margin-top: 12px; padding: 8px 12px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
+      pre { margin-top: 12px; padding: 10px; border-radius: 8px; background: rgba(127,127,127,.12); }
+    </style>
+  </head>
+  <body>
+    <h1>Admin Panel</h1>
+    <p>This page is sandboxed and talks to the host over postMessage.</p>
+    <button id="ping" type="button">Call panel.info</button>
+    <pre id="result" hidden></pre>
+    <script>
+      let channel = "";
+      window.addEventListener("message", (event) => {
+        const message = event.data;
+        if (!message || message.v !== 1 || message.channel !== channel) return;
+        if (message.type === "init") channel = message.channel;
+        if (message.type === "rpc:result") {
+          const result = document.getElementById("result");
+          result.hidden = false;
+          result.textContent = JSON.stringify(message, null, 2);
+        }
+      });
+      document.getElementById("ping").addEventListener("click", () => {
+        window.parent.postMessage(
+          { v: 1, type: "rpc", channel, id: crypto.randomUUID(), method: "panel.info", params: {} },
+          "*",
+        );
+      });
+    </script>
+  </body>
+</html>

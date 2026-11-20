@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Live Chat settings</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font:
+          13px/1.5 system-ui,
+          sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0 0 4px;
+      }
+      p {
+        color: #6b7280;
+        margin: 0 0 16px;
+      }
+      label {
+        display: block;
+        margin: 12px 0 4px;
+        font-weight: 500;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: transparent;
+        color: inherit;
+      }
+      button {
+        margin-top: 16px;
+        padding: 8px 12px;
+        border: 0;
+        border-radius: 8px;
+        background: #2563eb;
+        color: #fff;
+        cursor: pointer;
+      }
+      pre {
+        margin-top: 16px;
+        padding: 10px;
+        border-radius: 8px;
+        background: rgba(127, 127, 127, 0.12);
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Live Chat</h1>
+    <p>Configure the bubble shown on the storefront.</p>
+    <label for="greeting">Greeting</label>
+    <input id="greeting" value="Hi! How can we help?" />
+    <label for="accent">Accent</label>
+    <input id="accent" value="#2563eb" />
+    <button id="save" type="button">Save</button>
+    <pre id="result" hidden></pre>
+    <script>
+      let channel = "";
+      let settings = {};
+      const result = document.getElementById("result");
+      window.addEventListener("message", (event) => {
+        const message = event.data;
+        if (!message || message.v !== 1 || message.channel !== channel) return;
+        if (message.type === "init") {
+          channel = message.channel;
+          settings = message.payload.capabilities || {};
+          document.getElementById("greeting").value = settings.greeting ?? "Hi! How can we help?";
+          document.getElementById("accent").value = settings.accent ?? "#2563eb";
+        }
+        if (message.type === "rpc:result") {
+          result.hidden = false;
+          result.textContent = JSON.stringify(message, null, 2);
+        }
+      });
+      document.getElementById("save").addEventListener("click", () => {
+        window.parent.postMessage(
+          {
+            v: 1,
+            type: "rpc",
+            channel,
+            id: crypto.randomUUID(),
+            method: "conversations.list",
+            params: {
+              greeting: document.getElementById("greeting").value,
+              accent: document.getElementById("accent").value,
+            },
+          },
+          "*",
+        );
+      });
+    </script>
+  </body>
+</html>

@@ -11,12 +11,14 @@
     "prepare": "git config core.hooksPath .githooks || true",
     "dev:admin": "pnpm --filter @fastcart/admin dev",
     "dev:storefront": "pnpm --filter @fastcart/storefront dev",
+    "dev:docs": "pnpm --filter @fastcart/docs dev",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint . && prettier --check .",
     "test": "pnpm -r --if-present test",
     "e2e:browser": "bash scripts/browser-smoke.sh",
-    "clean": "pnpm -r --if-present clean"
+    "clean": "pnpm -r --if-present clean",
+    "deploy:docs": "pnpm --filter @fastcart/docs deploy"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

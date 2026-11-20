@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fastcart.dev/schemas/plugin-manifest/manifest.schema.json",
+  "title": "FastCart Plugin Manifest",
+  "description": "Versioned contract between a plugin bundle and the FastCart plugin host.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "name",
+    "version",
+    "api_version",
+    "runtime",
+    "entry"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,118}[a-z0-9])?$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "api_version": {
+      "const": 2
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "compatibility_date"
+      ],
+      "properties": {
+        "engine": {
+          "const": "workerd"
+        },
+        "compatibility_date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "compatibility_flags": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "nodejs_compat"
+            ]
+          },
+          "uniqueItems": true,
+          "default": []
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "path"
+      ],
+      "properties": {
+        "type": {
+          "const": "worker"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\\.(?:js|mjs)$"
+        },
+        "export": {
+          "type": "string",
+          "pattern": "^[A-Za-z_$][A-Za-z0-9_$]*$"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "catalog.read",
+              "orders.read",
+              "customers.read",
+              "content.read",
+              "carts.read"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "storage": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "kv.read",
+              "kv.write"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*){1,2}$"
+          },
+          "uniqueItems": true
+        },
+        "network": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "uniqueItems": true
+        },
+        "admin": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "admin.ui",
+              "plugins.settings"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "storefront": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "store.read",
+              "customer.read"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "network_auth": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "admin": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "target"
+            ],
+            "properties": {
+              "target": {
+                "enum": [
+                  "admin.nav.section",
+                  "admin.page.overview.after-header",
+                  "admin.page.orders.details.side",
+                  "admin.page.products.details.side",
+                  "admin.page.customers.details.side",
+                  "admin.page.settings.tabs"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "icon": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "route": {
+                "type": "string",
+                "pattern": "^/(?!.*\\.\\.)"
+              },
+              "entry": {
+                "type": "string",
+                "pattern": "\\.html?$"
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 80,
+                "maximum": 1200
+              },
+              "priority": {
+                "type": "integer",
+                "minimum": -100,
+                "maximum": 100
+              }
+            }
+          }
+        },
+        "storefront": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "placement",
+              "entry"
+            ],
+            "properties": {
+              "kind": {
+                "const": "embed"
+              },
+              "placement": {
+                "enum": [
+                  "head:start",
+                  "head:end",
+                  "body:start",
+                  "body:end"
+                ]
+              },
+              "entry": {
+                "type": "string",
+                "pattern": "\\.(js|mjs)$"
+              },
+              "css": {
+                "type": "string",
+                "pattern": "\\.css$"
+              },
+              "pages": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "exclude_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "height_hint": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2000
+              }
+            }
+          }
+        }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema"
+      ],
+      "properties": {
+        "schema": {
+          "type": "object"
+        },
+        "ui": {
+          "type": "string",
+          "pattern": "\\.html?$"
+        }
+      }
+    },
+    "rpc": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      },
+      "uniqueItems": true
+    },
+    "jobs": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,118}[a-z0-9])?$"
+          },
+          "schedule": {
+            "type": "string",
+            "pattern": "^\\s*[0-9*/,-]+\\s+[0-9*/,-]+\\s+[0-9*/,-]+\\s+[0-9*/,-]+\\s+[0-9*/,-]+\\s*$"
+          }
+        }
+      }
+    },
+    "signatures": {
+      "type": "array"
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build_id"
+      ],
+      "properties": {
+        "build_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "created_at": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

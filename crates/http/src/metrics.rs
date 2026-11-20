@@ -47,6 +47,11 @@ pub struct Metrics {
     ssr_credential_refresh_changes_total: AtomicU64,
     ssr_credential_tokens: AtomicI64,
     ssr_credential_last_success: AtomicI64,
+    plugin_requests_total: AtomicU64,
+    plugin_timeouts_total: AtomicU64,
+    plugin_restarts: AtomicI64,
+    plugin_egress_bytes_total: AtomicU64,
+    plugin_kv_bytes: AtomicI64,
 }
 
 impl Default for Metrics {
@@ -84,6 +89,11 @@ impl Metrics {
             ssr_credential_refresh_changes_total: AtomicU64::new(0),
             ssr_credential_tokens: AtomicI64::new(0),
             ssr_credential_last_success: AtomicI64::new(0),
+            plugin_requests_total: AtomicU64::new(0),
+            plugin_timeouts_total: AtomicU64::new(0),
+            plugin_restarts: AtomicI64::new(0),
+            plugin_egress_bytes_total: AtomicU64::new(0),
+            plugin_kv_bytes: AtomicI64::new(0),
         }
     }
 
@@ -203,6 +213,36 @@ impl Metrics {
             u64::try_from(duration.as_micros()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
+    }
+
+    /// Records one plugin request forwarded to the host.
+    pub fn record_plugin_request(&self) {
+        self.plugin_requests_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one plugin request timeout.
+    pub fn record_plugin_timeout(&self) {
+        self.plugin_timeouts_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Sets the number of plugin host restarts.
+    pub fn set_plugin_restarts(&self, restarts: u64) {
+        self.plugin_restarts.store(
+            i64::try_from(restarts).unwrap_or(i64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Adds bytes returned by the egress proxy.
+    pub fn add_plugin_egress_bytes(&self, bytes: u64) {
+        self.plugin_egress_bytes_total
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Sets the current plugin KV footprint.
+    pub fn set_plugin_kv_bytes(&self, bytes: u64) {
+        self.plugin_kv_bytes
+            .store(i64::try_from(bytes).unwrap_or(i64::MAX), Ordering::Relaxed);
     }
 
     /// Renders metrics in Prometheus text exposition format.
@@ -454,6 +494,56 @@ impl Metrics {
         let _ = writeln!(
             output,
             "fastcart_http_request_duration_seconds_count {requests}"
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_plugin_requests_total Plugin requests forwarded to workerd."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_plugin_requests_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_plugin_requests_total {}",
+            self.plugin_requests_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_plugin_timeouts_total Plugin requests that exceeded their deadline."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_plugin_timeouts_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_plugin_timeouts_total {}",
+            self.plugin_timeouts_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_plugin_host_restarts_total Plugin host restarts."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_plugin_host_restarts_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_plugin_host_restarts_total {}",
+            self.plugin_restarts.load(Ordering::Relaxed).max(0)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_plugin_egress_bytes_total Bytes returned by the egress proxy."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_plugin_egress_bytes_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_plugin_egress_bytes_total {}",
+            self.plugin_egress_bytes_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_plugin_kv_bytes Current plugin KV footprint."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_plugin_kv_bytes gauge");
+        let _ = writeln!(
+            output,
+            "fastcart_plugin_kv_bytes {}",
+            self.plugin_kv_bytes.load(Ordering::Relaxed).max(0)
         );
         output
     }

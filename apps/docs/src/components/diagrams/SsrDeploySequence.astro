@@ -1,0 +1,134 @@
+---
+/**
+ * Sequence diagram for building, activating and draining an SSR artifact.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    class="fc-seq"
+    viewBox="0 0 920 720"
+    role="img"
+    aria-labelledby="fc-deploy-title fc-deploy-desc"
+  >
+    <title id="fc-deploy-title">Sequence of an SSR deployment activation</title>
+    <desc id="fc-deploy-desc">
+      CI builds a Worker bundle and packages it as a Fastcart artifact. The
+      server-only activation endpoint authorizes the request and asks SsrService
+      to import the artifact, start a new runtime group, generate config.capnp,
+      spawn workerd, and wait for health. SsrService then swaps the active
+      deployment, clears the route cache and persists state. The replaced
+      runtime is stopped after the drain timeout.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-deploy-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <!-- Participants -->
+    <rect class="fc-box-accent" x="0" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="60" y="46" text-anchor="middle">CI / operator</text>
+
+    <rect class="fc-box" x="140" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="200" y="46" text-anchor="middle">Builder</text>
+
+    <rect class="fc-box-accent" x="310" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="370" y="46" text-anchor="middle">Serve API</text>
+
+    <rect class="fc-box-brand" x="470" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="530" y="46" text-anchor="middle">SsrService</text>
+
+    <rect class="fc-box" x="630" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="690" y="46" text-anchor="middle">Runtime mgr</text>
+
+    <rect class="fc-box" x="780" y="24" width="120" height="36" rx="7"></rect>
+    <text class="fc-label-strong" x="840" y="46" text-anchor="middle">workerd</text>
+
+    <!-- Lifelines -->
+    <path class="fc-lifeline" d="M 60 60 V 660"></path>
+    <path class="fc-lifeline" d="M 200 60 V 660"></path>
+    <path class="fc-lifeline" d="M 370 60 V 660"></path>
+    <path class="fc-lifeline" d="M 530 60 V 660"></path>
+    <path class="fc-lifeline" d="M 690 60 V 660"></path>
+    <path class="fc-lifeline" d="M 840 60 V 660"></path>
+
+    <!-- Build -->
+    <path class="fc-line" d="M 60 100 H 198" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="66" y="94">vite build (SSR Worker + client)</text>
+
+    <path class="fc-line" d="M 200 130 h 30 v 12 h -30" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="236" y="124">packageArtifact()</text>
+
+    <path class="fc-line-dashed" d="M 200 160 H 62" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="194" y="154" text-anchor="end">artifacts/&lt;digest&gt;/</text>
+
+    <!-- Activate -->
+    <path class="fc-line" d="M 60 190 H 368" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-mono-muted" x="66" y="184">{"POST /internal/ssr/v1/deployments/{store}/activate"}</text>
+
+    <path class="fc-line" d="M 370 220 h 30 v 12 h -30" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="406" y="214">auth scope + active store</text>
+
+    <path class="fc-line" d="M 370 250 H 528" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="376" y="244">activate(id, artifact_path)</text>
+
+    <path class="fc-line" d="M 530 280 h 30 v 12 h -30" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="566" y="274">import + validate · free port</text>
+
+    <path class="fc-line" d="M 530 310 H 688" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="536" y="304">start_group(artifact)</text>
+
+    <path class="fc-line" d="M 690 340 h 30 v 12 h -30" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="726" y="334">config.capnp</text>
+
+    <path class="fc-line" d="M 690 370 H 838" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="696" y="364">spawn workerd serve</text>
+
+    <path class="fc-line-dashed" d="M 840 400 H 692" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-mono-muted" x="834" y="394" text-anchor="end">200 /__fastcart/health</text>
+
+    <path class="fc-line-dashed" d="M 690 430 H 532" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="684" y="424" text-anchor="end">healthy + gateway</text>
+
+    <path class="fc-line" d="M 530 460 h 30 v 12 h -30" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="566" y="454">swap · clear cache · persist</text>
+
+    <path class="fc-line" d="M 530 490 H 372" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="536" y="484">Ok</text>
+
+    <path class="fc-line-dashed" d="M 370 520 H 62" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="364" y="514" text-anchor="end">204 No Content</text>
+
+    <!-- Drain -->
+    <path class="fc-line-dashed" d="M 690 560 H 838" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="696" y="554">stop old group after drain</text>
+
+    <path class="fc-line" d="M 690 590 h 30 v 12 h -30" marker-end="url(#fc-deploy-arrow)"></path>
+    <text class="fc-sub" x="726" y="584">release artifact</text>
+
+    <!-- Note -->
+    <rect class="fc-tag" x="60" y="608" width="800" height="48" rx="7"></rect>
+    <text class="fc-sub" x="74" y="628">
+      The replaced deployment keeps serving in-flight requests for drain_timeout_ms (default 5 s).
+    </text>
+    <text class="fc-sub" x="74" y="646">
+      Its content-addressed artifact is deleted when the last reference is released.
+    </text>
+  </svg>
+  <figcaption>
+    <strong>Figure 4.</strong> Activation is a warm swap, not an in-place
+    restart: the new runtime must pass <code>/__fastcart/health</code> before
+    the deployment map changes. The previous process drains in-flight requests
+    and is then stopped; rollback activates the previous deployment again.
+  </figcaption>
+</figure>

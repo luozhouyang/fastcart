@@ -1,0 +1,62 @@
+{
+  "schema_version": "1",
+  "id": "chat-widget",
+  "name": "Live Chat",
+  "version": "1.0.0",
+  "description": "Storefront chat bubble with an admin configuration panel.",
+  "author": { "name": "FastCart" },
+  "api_version": 2,
+  "runtime": {
+    "engine": "workerd",
+    "compatibility_date": "2026-11-01",
+    "compatibility_flags": ["nodejs_compat"]
+  },
+  "entry": { "type": "worker", "path": "worker/index.js" },
+  "capabilities": {
+    "data": ["catalog.read", "orders.read"],
+    "storage": ["kv.read", "kv.write"],
+    "network": ["api.example.com"],
+    "admin": ["admin.ui"],
+    "storefront": ["store.read"]
+  },
+  "extensions": {
+    "admin": [
+      { "target": "admin.nav.section", "label": "Live Chat", "route": "/apps/chat-widget" },
+      {
+        "target": "admin.page.settings.tabs",
+        "title": "Live Chat",
+        "entry": "ui/settings.html",
+        "height": 420
+      },
+      {
+        "target": "admin.page.orders.details.side",
+        "title": "Conversations",
+        "entry": "ui/settings.html",
+        "height": 300
+      }
+    ],
+    "storefront": [
+      {
+        "kind": "embed",
+        "placement": "body:end",
+        "entry": "storefront/boot.js",
+        "css": "storefront/boot.css",
+        "pages": ["*"],
+        "exclude_paths": ["/checkout/*"],
+        "height_hint": 96
+      }
+    ]
+  },
+  "settings": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "greeting": { "type": "string", "default": "Hi! How can we help?" },
+        "accent": { "type": "string", "default": "#2563eb" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "rpc": ["conversations.list", "conversations.reply"],
+  "jobs": []
+}

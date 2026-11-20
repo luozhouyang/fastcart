@@ -1,0 +1,89 @@
+import { API_BASE_URL } from "@/lib/api";
+import type { AdminExtension, AdminExtensionsResponse } from "@/plugins/types";
+
+export interface InstalledPlugin {
+  id: string;
+  name: string;
+  version: string;
+  digest: string;
+  previous_digest: string | null;
+  enabled: boolean;
+  settings: Record<string, unknown>;
+  settings_revision: number;
+  granted_scopes: string[];
+  installed_at: number;
+  updated_at: number;
+}
+
+export interface PluginListResponse {
+  plugins: InstalledPlugin[];
+  artifacts: Array<{ digest: string; id: string; name: string; version: string }>;
+}
+
+function csrfToken(): string | null {
+  const match = document.cookie.match(/(?:^|; )fc_csrf=([^;]*)/);
+  return match ? decodeURIComponent(match[1] ?? "") : null;
+}
+
+async function pluginRequest<T>(storeId: string, path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set("x-store-id", storeId);
+  const csrf = csrfToken();
+  if (csrf) headers.set("x-csrf-token", csrf);
+  const response = await fetch(`${API_BASE_URL}/api/v1/admin/plugins${path}`, {
+    ...init,
+    credentials: "include",
+    headers,
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `Plugin request failed (${response.status})`);
+  }
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+export async function fetchPluginExtensions(
+  storeId: string,
+  signal?: AbortSignal,
+): Promise<AdminExtension[]> {
+  const body = await pluginRequest<AdminExtensionsResponse>(
+    storeId,
+    "/extensions",
+    signal ? { signal } : {},
+  );
+  return body.extensions;
+}
+
+export function listPlugins(storeId: string, signal?: AbortSignal) {
+  return pluginRequest<PluginListResponse>(storeId, "", signal ? { signal } : {});
+}
+
+export function installPlugin(storeId: string, archive: File) {
+  const body = new FormData();
+  body.append("archive", archive);
+  return pluginRequest<InstalledPlugin>(storeId, "/install", {
+    method: "POST",
+    body,
+  });
+}
+
+export function enablePlugin(storeId: string, pluginId: string) {
+  return pluginRequest<InstalledPlugin>(storeId, `/${pluginId}/enable`, { method: "POST" });
+}
+
+export function disablePlugin(storeId: string, pluginId: string) {
+  return pluginRequest<InstalledPlugin>(storeId, `/${pluginId}/disable`, { method: "POST" });
+}
+
+export function deletePlugin(storeId: string, pluginId: string) {
+  return pluginRequest<void>(storeId, `/${pluginId}`, { method: "DELETE" });
+}
+
+export function updatePluginSettings(storeId: string, pluginId: string, settings: unknown) {
+  return pluginRequest<InstalledPlugin>(storeId, `/${pluginId}/settings`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ settings }),
+  });
+}

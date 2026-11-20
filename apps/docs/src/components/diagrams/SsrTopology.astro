@@ -1,0 +1,158 @@
+---
+/**
+ * Runtime topology: the public Rust server and the loopback workerd process.
+ * Inline SVG so the figure follows the Nimbus light/dark tokens.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    viewBox="0 0 900 600"
+    role="img"
+    aria-labelledby="fc-topo-title fc-topo-desc"
+  >
+    <title id="fc-topo-title">Fastcart storefront SSR runtime topology</title>
+    <desc id="fc-topo-desc">
+      The browser talks HTTPS to fastcart-serve. The Rust server resolves the
+      store, consults its response cache, and forwards the request over loopback
+      HTTP to a workerd process running the storefront Worker. The Worker calls
+      the server-only internal commerce API with a bearer token, and the API
+      reads the store's SQLite database. Client assets are served directly from
+      the imported artifact.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-topo-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+      <marker
+        id="fc-topo-arrow-dashed"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <!-- Browser -->
+    <rect class="fc-box" x="20" y="240" width="125" height="90" rx="8"></rect>
+    <text class="fc-label-strong" x="82.5" y="272" text-anchor="middle">Browser</text>
+    <text class="fc-sub" x="82.5" y="292" text-anchor="middle">HTML + hydration</text>
+    <text class="fc-sub" x="82.5" y="310" text-anchor="middle">asset requests</text>
+
+    <!-- Public server -->
+    <rect class="fc-box-muted" x="185" y="30" width="470" height="440" rx="10"></rect>
+    <text class="fc-label-strong" x="200" y="54">fastcart-serve</text>
+    <text class="fc-sub" x="320" y="54">Rust process · public entry point</text>
+
+    <!-- Router -->
+    <rect class="fc-box-accent" x="200" y="70" width="80" height="380" rx="8"></rect>
+    <text class="fc-label-strong" x="240" y="245" text-anchor="middle">Router</text>
+    <text class="fc-sub" x="240" y="263" text-anchor="middle">fallback</text>
+
+    <!-- Resolver -->
+    <rect class="fc-box" x="300" y="118" width="335" height="58" rx="8"></rect>
+    <text class="fc-label-strong" x="316" y="141">Store resolver</text>
+    <text class="fc-sub" x="316" y="160">Host → active store · locale · currency</text>
+
+    <!-- SSR service -->
+    <rect class="fc-box-brand" x="300" y="205" width="335" height="74" rx="8"></rect>
+    <text class="fc-label-strong" x="316" y="229">SsrService</text>
+    <text class="fc-sub" x="316" y="248">deployment lookup · response cache · drain</text>
+    <text class="fc-sub" x="316" y="265">builds the trusted request context</text>
+
+    <!-- Assets -->
+    <rect class="fc-box" x="300" y="305" width="335" height="56" rx="8"></rect>
+    <text class="fc-label-strong" x="316" y="328">Static assets</text>
+    <text class="fc-sub" x="316" y="347">artifact client files · ETag · Range · immutable</text>
+
+    <!-- Internal API -->
+    <rect class="fc-box-info" x="300" y="390" width="335" height="60" rx="8"></rect>
+    <text class="fc-label-strong" x="316" y="413">Internal SSR API</text>
+    <text class="fc-mono" x="316" y="432">{"/internal/ssr/v1/stores/{store_id}"}</text>
+
+    <!-- SQLite -->
+    <path
+      class="fc-box"
+      d="M 380 522 v28 a 87.5 12 0 0 0 175 0 v-28"
+    ></path>
+    <ellipse class="fc-box" cx="467.5" cy="522" rx="87.5" ry="12"></ellipse>
+    <text class="fc-label-strong" x="467.5" y="546" text-anchor="middle">SQLite</text>
+    <text class="fc-sub" x="467.5" y="563" text-anchor="middle">one database per store</text>
+
+    <!-- workerd -->
+    <rect class="fc-box-muted" x="690" y="180" width="190" height="300" rx="10"></rect>
+    <text class="fc-label-strong" x="706" y="205">workerd process</text>
+    <text class="fc-sub" x="706" y="223">V8 · Web Platform APIs</text>
+
+    <rect class="fc-box" x="706" y="244" width="158" height="90" rx="8"></rect>
+    <text class="fc-label-strong" x="785" y="269" text-anchor="middle">Worker</text>
+    <text class="fc-mono" x="785" y="290" text-anchor="middle">fetch(req, env, ctx)</text>
+    <text class="fc-sub" x="785" y="310" text-anchor="middle">HTML · streams</text>
+
+    <rect class="fc-box" x="706" y="352" width="158" height="46" rx="8"></rect>
+    <text class="fc-label-strong" x="785" y="371" text-anchor="middle">ASSETS</text>
+    <text class="fc-sub" x="785" y="388" text-anchor="middle">optional disk binding</text>
+
+    <text class="fc-sub" x="785" y="428" text-anchor="middle">loopback only</text>
+    <text class="fc-sub" x="785" y="446" text-anchor="middle">one group per deployment</text>
+
+    <!-- Artifact store -->
+    <rect class="fc-box-muted" x="690" y="40" width="190" height="112" rx="10"></rect>
+    <text class="fc-label-strong" x="706" y="64">Artifact store</text>
+    <text class="fc-mono-muted" x="706" y="86">&lt;store&gt;/&lt;digest&gt;</text>
+    <text class="fc-sub" x="706" y="104">fastcart-ssr.json</text>
+    <text class="fc-sub" x="706" y="122">validated on import</text>
+
+    <!-- Browser to router -->
+    <path class="fc-line" d="M 145 285 H 198" marker-end="url(#fc-topo-arrow)"></path>
+    <text class="fc-sub" x="171" y="276" text-anchor="middle">HTTPS</text>
+
+    <!-- Router fan-out -->
+    <path class="fc-line" d="M 280 147 H 298" marker-end="url(#fc-topo-arrow)"></path>
+    <path class="fc-line" d="M 280 242 H 298" marker-end="url(#fc-topo-arrow)"></path>
+    <path class="fc-line" d="M 280 333 H 298" marker-end="url(#fc-topo-arrow)"></path>
+
+    <!-- Resolver to SSR -->
+    <path class="fc-line" d="M 467 176 V 203" marker-end="url(#fc-topo-arrow)"></path>
+    <text class="fc-sub" x="475" y="194">StoreContext</text>
+
+    <!-- SSR to workerd -->
+    <path class="fc-line-brand" d="M 635 242 H 688" marker-end="url(#fc-topo-arrow)"></path>
+    <text class="fc-sub" x="661" y="232" text-anchor="middle">gateway</text>
+
+    <!-- workerd to internal API -->
+    <path class="fc-line" d="M 690 420 H 637" marker-end="url(#fc-topo-arrow)"></path>
+    <text class="fc-sub" x="662" y="410" text-anchor="middle">bearer</text>
+
+    <!-- Internal API to SQLite -->
+    <path class="fc-line" d="M 467 450 V 520" marker-end="url(#fc-topo-arrow)"></path>
+    <text class="fc-sub" x="475" y="480">store DB</text>
+
+    <!-- Artifact to workerd -->
+    <path
+      class="fc-line-dashed"
+      d="M 785 152 V 178"
+      marker-end="url(#fc-topo-arrow-dashed)"
+    ></path>
+    <text class="fc-sub" x="793" y="169">config.capnp</text>
+  </svg>
+  <figcaption>
+    <strong>Figure 1.</strong> One public Rust process, one or more loopback
+    <code>workerd</code> processes. The Worker never receives a database
+    connection: it calls the internal commerce API with a store-scoped token
+    injected by the gateway.
+  </figcaption>
+</figure>

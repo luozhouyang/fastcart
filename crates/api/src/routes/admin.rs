@@ -45,6 +45,7 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
             .merge(super::admin_inquiry::router())
             .merge(super::admin_notifications::router())
             .merge(super::admin_orders::router())
+            .merge(super::admin_plugins::router())
             .merge(super::admin_payments::router())
             .merge(super::admin_pricing::router())
             .merge(super::admin_promotions::router())
@@ -64,15 +65,16 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
 /// The route carries its full path because it is merged into the root router
 /// after the common JSON body limit has been applied.
 pub fn upload_router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
-    scoped_layers(
-        context,
-        super::admin_assets::upload_router()
-            // `Multipart` uses Axum's extractor limit (2 MiB by default), which
-            // is separate from the outer `RequestBodyLimitLayer`.
-            .layer(axum::extract::DefaultBodyLimit::max(
-                context.config.max_asset_upload_bytes,
-            )),
-    )
+    let assets = super::admin_assets::upload_router()
+        // `Multipart` uses Axum's extractor limit (2 MiB by default), which is
+        // separate from the outer `RequestBodyLimitLayer`.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            context.config.max_asset_upload_bytes,
+        ));
+    let plugins = super::admin_plugins::upload_router().layer(
+        axum::extract::DefaultBodyLimit::max(context.config.max_plugin_archive_bytes),
+    );
+    scoped_layers(context, assets.merge(plugins))
 }
 
 fn scoped_layers(

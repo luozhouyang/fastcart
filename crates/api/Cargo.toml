@@ -9,13 +9,17 @@ rust-version.workspace = true
 axum.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+bytes.workspace = true
 form_urlencoded.workspace = true
 futures.workspace = true
 hex.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 hmac.workspace = true
 http-body-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 subtle.workspace = true
@@ -49,6 +53,7 @@ fastcart-module-webhook.workspace = true
 fastcart-notifications.workspace = true
 fastcart-storefront.workspace = true
 fastcart-platform.workspace = true
+fastcart-plugin.workspace = true
 fastcart-ssr.workspace = true
 fastcart-ssr-credentials.workspace = true
 fastcart-workflows.workspace = true
@@ -57,6 +62,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+flate2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 

@@ -1,0 +1,174 @@
+---
+/**
+ * Request-path flowchart for the storefront fallback. The main spine is the
+ * happy path; the right column is every early exit or cached path.
+ */
+---
+
+<figure class="fc-diagram">
+  <svg
+    viewBox="0 0 900 1030"
+    role="img"
+    aria-labelledby="fc-flow-title fc-flow-desc"
+  >
+    <title id="fc-flow-title">Storefront SSR request flowchart</title>
+    <desc id="fc-flow-desc">
+      The storefront router checks the Host, redirects and discovery files, SSR
+      enablement, the active deployment, and the route cache before forwarding
+      the request to workerd. Successful responses are cached only when they are
+      cacheable, then streamed to the browser. Failures return 404, 503 or 502.
+    </desc>
+
+    <defs>
+      <marker
+        id="fc-flow-arrow"
+        viewBox="0 0 10 10"
+        refX="9"
+        refY="5"
+        markerWidth="7"
+        markerHeight="7"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 10 5 L 0 10 z" class="fc-arrow"></path>
+      </marker>
+    </defs>
+
+    <!-- Route-cache legend -->
+    <rect class="fc-box-muted" x="580" y="20" width="290" height="124" rx="8"></rect>
+    <text class="fc-label-strong" x="596" y="44">Route cache</text>
+    <text class="fc-sub" x="596" y="64">GET only; bypassed by Authorization,</text>
+    <text class="fc-sub" x="596" y="80">Cookie or Cache-Control: no-cache.</text>
+    <text class="fc-sub" x="596" y="100">Key: store + path + query +</text>
+    <text class="fc-sub" x="596" y="116">Accept-Language. Max 2 MiB, 1,000 entries.</text>
+
+    <!-- 1 -->
+    <rect class="fc-step-brand" x="150" y="20" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="42" text-anchor="middle">GET /products/hoodie</text>
+    <text class="fc-sub" x="320" y="60" text-anchor="middle">Host: shop.example.com</text>
+
+    <!-- 2 -->
+    <rect class="fc-step" x="150" y="98" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="120" text-anchor="middle">Router fallback</text>
+    <text class="fc-sub" x="320" y="138" text-anchor="middle">API, /internal, /health and /metrics handled first</text>
+
+    <!-- 3 -->
+    <rect class="fc-step" x="150" y="176" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="198" text-anchor="middle">Resolve Host → active store</text>
+    <text class="fc-sub" x="320" y="216" text-anchor="middle">store id · locale · currency · timezone</text>
+    <path class="fc-line" d="M 490 203 H 578" marker-end="url(#fc-flow-arrow)"></path>
+    <text class="fc-sub" x="534" y="194" text-anchor="middle">No</text>
+    <rect class="fc-box" x="580" y="176" width="290" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="596" y="198">404 not found</text>
+    <text class="fc-sub" x="596" y="216">no active store for this Host</text>
+
+    <!-- 4 -->
+    <rect class="fc-step" x="150" y="254" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="276" text-anchor="middle">Redirect or discovery route?</text>
+    <text class="fc-sub" x="320" y="294" text-anchor="middle">stored redirect · /robots.txt · /sitemap.xml</text>
+    <path class="fc-line" d="M 490 281 H 578" marker-end="url(#fc-flow-arrow)"></path>
+    <text class="fc-sub" x="534" y="272" text-anchor="middle">Yes</text>
+    <rect class="fc-box" x="580" y="254" width="290" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="596" y="276">Redirect or generated file</text>
+    <text class="fc-sub" x="596" y="294">stored status + Location</text>
+
+    <!-- 5 -->
+    <rect class="fc-step" x="150" y="332" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="354" text-anchor="middle">Universal SSR enabled?</text>
+    <text class="fc-sub" x="320" y="372" text-anchor="middle">SsrService configured and started</text>
+    <path class="fc-line" d="M 490 359 H 578" marker-end="url(#fc-flow-arrow)"></path>
+    <text class="fc-sub" x="534" y="350" text-anchor="middle">No</text>
+    <rect class="fc-box" x="580" y="332" width="290" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="596" y="354">404 not found</text>
+    <text class="fc-sub" x="596" y="372">no universal runtime configured</text>
+
+    <!-- 6 -->
+    <rect class="fc-step" x="150" y="410" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="432" text-anchor="middle">Active deployment for this store?</text>
+    <text class="fc-sub" x="320" y="450" text-anchor="middle">artifact · runtime group · gateway</text>
+    <path class="fc-line" d="M 490 437 H 578" marker-end="url(#fc-flow-arrow)"></path>
+    <text class="fc-sub" x="534" y="428" text-anchor="middle">No</text>
+    <rect class="fc-box" x="580" y="410" width="290" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="596" y="432">404 SSR_DEPLOYMENT_NOT_FOUND</text>
+    <text class="fc-sub" x="596" y="450">store has no active deployment</text>
+
+    <!-- 7 -->
+    <rect class="fc-step" x="150" y="488" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="510" text-anchor="middle">Build SsrRequestContext</text>
+    <text class="fc-sub" x="320" y="528" text-anchor="middle">store · deployment · request id · scheme · token</text>
+
+    <!-- 8 -->
+    <rect class="fc-step" x="150" y="566" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="588" text-anchor="middle">Cacheable GET and cache hit?</text>
+    <text class="fc-sub" x="320" y="606" text-anchor="middle">see route-cache rules above</text>
+    <path class="fc-line" d="M 490 593 H 578" marker-end="url(#fc-flow-arrow)"></path>
+    <text class="fc-sub" x="534" y="584" text-anchor="middle">Yes</text>
+    <rect class="fc-box" x="580" y="566" width="290" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="596" y="588">200 from cache</text>
+    <text class="fc-sub" x="596" y="606">x-fastcart-cache: HIT · Age</text>
+
+    <!-- 9 -->
+    <rect class="fc-step" x="150" y="644" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="666" text-anchor="middle">Gateway forwards over loopback</text>
+    <text class="fc-sub" x="320" y="684" text-anchor="middle">strip client x-fastcart-* · inject trusted values</text>
+
+    <!-- 10 -->
+    <rect class="fc-step-brand" x="150" y="722" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="744" text-anchor="middle">workerd executes the Worker</text>
+    <text class="fc-sub" x="320" y="762" text-anchor="middle">render HTML · stream · call the internal API</text>
+
+    <!-- 11 -->
+    <rect class="fc-step" x="150" y="800" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="822" text-anchor="middle">Runtime error?</text>
+    <text class="fc-sub" x="320" y="840" text-anchor="middle">gateway or transport failure</text>
+    <path class="fc-line" d="M 490 827 H 578" marker-end="url(#fc-flow-arrow)"></path>
+    <text class="fc-sub" x="534" y="818" text-anchor="middle">Yes</text>
+    <rect class="fc-box" x="580" y="800" width="290" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="596" y="822">503 or 502 JSON</text>
+    <text class="fc-sub" x="596" y="840">runtime unavailable · request failed</text>
+
+    <!-- 12 -->
+    <rect class="fc-step" x="150" y="878" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="900" text-anchor="middle">Cacheable response?</text>
+    <text class="fc-sub" x="320" y="918" text-anchor="middle">200 · no Set-Cookie · positive max-age/s-maxage</text>
+    <path class="fc-line" d="M 490 905 H 578" marker-end="url(#fc-flow-arrow)"></path>
+    <text class="fc-sub" x="534" y="896" text-anchor="middle">No</text>
+    <rect class="fc-box" x="580" y="878" width="290" height="54" rx="8"></rect>
+    <text class="fc-label-strong" x="596" y="900">Stream uncached</text>
+    <text class="fc-sub" x="596" y="918">no-store when the Worker omitted it</text>
+
+    <!-- 13 -->
+    <rect class="fc-step-brand" x="150" y="956" width="340" height="54" rx="9"></rect>
+    <text class="fc-label-strong" x="320" y="978" text-anchor="middle">Buffer, cache, then stream to browser</text>
+    <text class="fc-sub" x="320" y="996" text-anchor="middle">x-fastcart-cache: MISS only when stored</text>
+
+    <!-- Main spine -->
+    <path class="fc-line" d="M 320 74 V 96" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 152 V 174" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 230 V 252" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 308 V 330" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 386 V 408" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 464 V 486" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 542 V 564" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 620 V 642" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 698 V 720" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 776 V 798" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 854 V 876" marker-end="url(#fc-flow-arrow)"></path>
+    <path class="fc-line" d="M 320 932 V 954" marker-end="url(#fc-flow-arrow)"></path>
+
+    <text class="fc-sub" x="328" y="164">matched</text>
+    <text class="fc-sub" x="328" y="242">Yes</text>
+    <text class="fc-sub" x="328" y="320">No</text>
+    <text class="fc-sub" x="328" y="398">Yes</text>
+    <text class="fc-sub" x="328" y="476">Yes</text>
+    <text class="fc-sub" x="328" y="632">No</text>
+    <text class="fc-sub" x="328" y="710">forward</text>
+    <text class="fc-sub" x="328" y="866">No</text>
+    <text class="fc-sub" x="328" y="944">Yes: store, then stream</text>
+  </svg>
+  <figcaption>
+    <strong>Figure 2.</strong> The storefront fallback path. Only unmatched
+    paths reach this code: API, health, metrics and <code>/internal</code>
+    namespaces are routed earlier. Redirects and discovery files are answered
+    before the runtime is consulted, so they keep working when SSR is disabled.
+  </figcaption>
+</figure>

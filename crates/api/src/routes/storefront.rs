@@ -79,6 +79,7 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
             Ok(currency) => currency,
             Err(error) => return ApiError::new(AppError::from(error)).into_response(),
         };
+        let store_id = store.id.clone();
         let store_context = StoreContext {
             store_id: store.id.clone(),
             domain: host.clone(),
@@ -86,9 +87,17 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
             currency,
             timezone: store.timezone.clone(),
         };
-        return universal
+        let path_for_injection = path.to_owned();
+        let response = universal
             .render(request, store_context, request_id, scheme.to_owned())
             .await;
+        return super::storefront_extensions::inject_response(
+            &context,
+            store_id.as_str(),
+            &path_for_injection,
+            response,
+        )
+        .await;
     }
     ApiError::not_found("storefront route").into_response()
 }

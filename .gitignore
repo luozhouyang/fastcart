@@ -53,3 +53,6 @@ test-results/
 
 # Local pnpm store used by sandboxed installs
 /.pnpm-store/
+
+# Local plugin demo data
+.fastcart-demo/

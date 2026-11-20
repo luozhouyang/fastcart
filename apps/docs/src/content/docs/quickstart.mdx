@@ -1,0 +1,84 @@
+---
+title: Quickstart
+description: Build Fastcart, bootstrap a store, and run the API and admin locally.
+sidebar:
+  order: 1
+---
+
+This guide takes a clean checkout to a running Fastcart API and admin UI.
+
+## Prerequisites
+
+<Render file="prerequisites" />
+
+## Steps
+
+<Steps>
+  <Step title="Install front-end dependencies">
+    ```sh
+    pnpm install
+    ```
+  </Step>
+  <Step title="Build the Rust workspace">
+    ```sh
+    cargo build --workspace
+    ```
+  </Step>
+  <Step title="Initialize the platform">
+    This creates the platform database and default configuration.
+
+    ```sh
+    cargo run -p fastcart-cli -- init --dir .
+    ```
+
+  </Step>
+  <Step title="Create the first owner">
+    ```sh
+    cargo run -p fastcart-cli -- user create \
+      --email owner@example.com --password 'change-me-please'
+    ```
+  </Step>
+  <Step title="Create a store">
+    The domain is the `Host` header storefront requests resolve their store from.
+
+    ```sh
+    cargo run -p fastcart-cli -- store create \
+      --name "Demo Store" --slug demo --domain shop.example.com \
+      --owner-email owner@example.com
+    ```
+
+  </Step>
+  <Step title="Start the API">
+    ```sh
+    cargo run -p fastcart-cli -- serve
+    ```
+  </Step>
+  <Step title="Start the admin">
+    In a second terminal:
+
+    ```sh
+    pnpm dev:admin
+    ```
+
+  </Step>
+</Steps>
+
+## Check it works
+
+The API listens on `http://localhost:8080` and the admin on `http://localhost:5174`. Sign in with
+the owner account you created, or choose **Explore the demo store** on the sign-in screen.
+
+<Aside type="tip" title="One-command demo">
+  To see the admin and the plugin extension points without bootstrapping by hand, run
+  `./scripts/plugin-demo.sh`. It creates an isolated demo store under `.fastcart-demo/`, installs
+  the chat example plugin, and starts both processes.
+</Aside>
+
+## Next steps
+
+- [Introduction](/): what Fastcart is and what it includes.
+- [Storefront SSR](/storefront-ssr/): how the universal `workerd` runtime renders pages.
+- [Configuration](https://github.com/luozhouyang/fastcart/blob/main/.env.example): environment
+  overrides for the server, email, and payments.
+- [API reference](https://github.com/luozhouyang/fastcart#http-api): the versioned HTTP surface and
+  examples.
