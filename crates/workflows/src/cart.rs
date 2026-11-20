@@ -5,6 +5,7 @@
 //! clients can never submit authoritative prices.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::ShippingOptionId;
@@ -22,7 +23,15 @@ use fastcart_module_promotion::{
     PromotionCart, PromotionContext, PromotionLine, PromotionService, PromotionStatus,
 };
 use fastcart_module_shipping::ShippingService;
-use fastcart_module_tax::TaxService;
+use fastcart_module_store::StoreService;
+use fastcart_module_tax::{TaxCalculationRequest, TaxDestination, TaxProvider, TaxService};
+
+/// Store setting that selects the tax provider a recalculation runs through.
+///
+/// The value is the identifier of a provider registered in the workflow's
+/// registry. The key is absent by default, which keeps the built-in region/rate
+/// provider; merchants write it through the admin settings API.
+const TAX_PROVIDER_SETTING_KEY: &str = "tax.provider_id";
 
 /// Inputs that affect price and tax selection for a cart.
 #[derive(Clone, Debug)]
@@ -92,6 +101,10 @@ impl CartContext {
 
 /// Orchestrates the cart module with catalog, pricing, promotion, tax and
 /// shipping services for one store.
+///
+/// Tax calculations run through the provider the store selected with the
+/// `tax.provider_id` setting; see [`Self::tax_service`] for registering
+/// providers in the first place.
 #[derive(Clone, Debug)]
 pub struct CartWorkflow {
     cart: CartService,
@@ -99,6 +112,7 @@ pub struct CartWorkflow {
     pricing: PricingService,
     promotion: PromotionService,
     tax: TaxService,
+    store: StoreService,
     shipping: ShippingService,
 }
 
@@ -112,6 +126,7 @@ impl CartWorkflow {
             pricing: PricingService::new(db.clone()),
             promotion: PromotionService::new(db.clone()),
             tax: TaxService::new(db.clone()),
+            store: StoreService::new(db.clone()),
             shipping: ShippingService::new(db),
         }
     }
@@ -120,6 +135,18 @@ impl CartWorkflow {
     #[must_use]
     pub fn cart_service(&self) -> &CartService {
         &self.cart
+    }
+
+    /// Returns the tax service whose provider registry serves calculations.
+    ///
+    /// Registering a provider here — for example an external engine — makes it
+    /// available to recalculation, which selects it once the store's
+    /// `tax.provider_id` setting names it. Registering alone changes nothing:
+    /// the built-in region/rate provider stays in charge until the setting
+    /// selects another.
+    #[must_use]
+    pub fn tax_service(&self) -> &TaxService {
+        &self.tax
     }
 
     /// Creates an empty cart.
@@ -238,6 +265,12 @@ impl CartWorkflow {
     }
 
     /// Applies a coupon code and recalculates discounts.
+    ///
+    /// A code already on the cart from an automatic promotion is neither a
+    /// repeat nor a second discount: the promotion writes its own code onto the
+    /// cart-level row it owns, so entering the code recalculates and returns the
+    /// cart as it already is. A code the customer applied themselves keeps the
+    /// conflict, because that is a genuine repeat.
     pub async fn apply_coupon(
         &self,
         cart_id: &CartId,
@@ -246,11 +279,14 @@ impl CartWorkflow {
     ) -> Result<Cart, AppError> {
         let cart = self.cart.get_cart(cart_id).await?;
         let coupon = self.promotion.validate_coupon(code, context.at).await?;
-        if cart
+        if let Some(existing) = cart
             .discounts
             .iter()
-            .any(|discount| discount.code.as_deref() == Some(coupon.code.as_str()))
+            .find(|discount| discount.code.as_deref() == Some(coupon.code.as_str()))
         {
+            if existing.is_automatic {
+                return self.recalculate(cart_id, context).await;
+            }
             return Err(AppError::conflict("coupon is already applied"));
         }
         self.promotion.get_promotion(&coupon.promotion_id).await?;
@@ -270,6 +306,12 @@ impl CartWorkflow {
     }
 
     /// Removes a coupon code and recalculates discounts.
+    ///
+    /// Only a code the customer applied is a coupon to remove. A code carried by
+    /// an automatic promotion is refused instead of deleted: the row belongs to
+    /// the promotion, the very next recalculation re-derives it, and a
+    /// successful response would claim a change that cannot hold. Retiring the
+    /// promotion, not clearing the cart row, is what takes such a discount away.
     pub async fn remove_coupon(
         &self,
         cart_id: &CartId,
@@ -283,6 +325,11 @@ impl CartWorkflow {
             .iter()
             .find(|discount| discount.code.as_deref() == Some(normalized.as_str()))
             .ok_or_else(|| AppError::not_found("coupon", &normalized))?;
+        if discount.is_automatic {
+            return Err(AppError::conflict(format!(
+                "coupon {normalized} is applied automatically by a promotion and cannot be removed"
+            )));
+        }
         let promotion_id = discount
             .promotion_id
             .clone()
@@ -619,6 +666,14 @@ impl CartWorkflow {
         };
 
         // 4. Calculate tax on the discounted line and shipping amounts.
+        //
+        // The provider the store selected serves this pass. The setting is read
+        // once here rather than once per line, and it is read from the store's
+        // own configuration rather than kept in process, so a change reaches
+        // the next recalculation without a restart. A value no provider answers
+        // to fails the pass before anything is written, which is why the
+        // resolution happens before the per-line loop below.
+        let provider = self.tax_provider().await?;
         let variant_ids: Vec<String> = cart
             .items
             .iter()
@@ -690,29 +745,14 @@ impl CartWorkflow {
                 .get(item.variant_id.as_str())
                 .and_then(|variant| variant.tax_category_id.clone())
                 .map(TaxCategoryId::from_string);
-            let tax = match context.tax_region_id.as_deref() {
-                Some(region_id) => {
-                    self.tax
-                        .calculate_for_line_in_region(
-                            region_id,
-                            category.as_ref(),
-                            taxable,
-                            Some(context.prices_include_tax),
-                        )
-                        .await?
-                }
-                None => {
-                    self.tax
-                        .calculate_for_line(
-                            &context.country_code,
-                            context.province_code.as_deref(),
-                            category.as_ref(),
-                            taxable,
-                            Some(context.prices_include_tax),
-                        )
-                        .await?
-                }
-            };
+            let tax = provider
+                .calculate(TaxCalculationRequest {
+                    destination: tax_destination(context),
+                    category_id: category.as_ref(),
+                    amount_minor: taxable,
+                    inclusive_override: Some(context.prices_include_tax),
+                })
+                .await?;
             match (&tax.rate, &governing_region) {
                 (Some(_), _) => tax_lines.push(TaxLineInput {
                     name: tax
@@ -738,29 +778,14 @@ impl CartWorkflow {
         }
         if let Some(method) = cart.shipping_methods.first() {
             let taxable = (method.amount - shipping_discount).max(0);
-            let tax = match context.tax_region_id.as_deref() {
-                Some(region_id) => {
-                    self.tax
-                        .calculate_for_line_in_region(
-                            region_id,
-                            None,
-                            taxable,
-                            Some(context.prices_include_tax),
-                        )
-                        .await?
-                }
-                None => {
-                    self.tax
-                        .calculate_for_line(
-                            &context.country_code,
-                            context.province_code.as_deref(),
-                            None,
-                            taxable,
-                            Some(context.prices_include_tax),
-                        )
-                        .await?
-                }
-            };
+            let tax = provider
+                .calculate(TaxCalculationRequest {
+                    destination: tax_destination(context),
+                    category_id: None,
+                    amount_minor: taxable,
+                    inclusive_override: Some(context.prices_include_tax),
+                })
+                .await?;
             match (&tax.rate, &governing_region) {
                 (Some(_), _) => tax_lines.push(TaxLineInput {
                     name: tax
@@ -810,6 +835,41 @@ impl CartWorkflow {
     pub async fn complete_cart(&self, cart_id: &CartId) -> Result<Cart, AppError> {
         self.cart.complete_cart(cart_id).await
     }
+
+    /// Resolves the provider that serves one recalculation.
+    ///
+    /// [`TAX_PROVIDER_SETTING_KEY`] names the provider the store selected. An
+    /// absent key keeps the registry's active provider — the built-in
+    /// region/rate provider for a workflow built by [`Self::new`] — so a store
+    /// that never chose one is taxed exactly as before. A present value must
+    /// name a registered provider: silently falling back to the built-in rates
+    /// would let a store believe its external engine is pricing the carts when
+    /// it is not, so an unknown identifier fails the pass instead. The provider
+    /// is returned rather than activated on the registry: the selection belongs
+    /// to the pass that read the setting, not to the process.
+    async fn tax_provider(&self) -> Result<Arc<dyn TaxProvider>, AppError> {
+        let providers = self.tax.providers();
+        let Some(configured) = self.store.get_setting(TAX_PROVIDER_SETTING_KEY).await? else {
+            return providers.active();
+        };
+        if let Some(provider) = providers.get(&configured) {
+            return Ok(provider);
+        }
+        let registered: Vec<String> = providers
+            .list()
+            .iter()
+            .map(|provider| provider.id().to_owned())
+            .collect();
+        Err(AppError::conflict(format!(
+            "{TAX_PROVIDER_SETTING_KEY} is set to \"{configured}\", which is not a registered tax \
+             provider; registered providers: {}",
+            if registered.is_empty() {
+                "none".to_owned()
+            } else {
+                registered.join(", ")
+            }
+        )))
+    }
 }
 
 /// The fields on which a stored cart discount and a wanted one must agree.
@@ -829,6 +889,22 @@ fn discount_key(
         amount,
         is_automatic,
     )
+}
+
+/// The destination a provider is asked to price a line for.
+///
+/// A tax region pinned by the cart's store region wins, mirroring
+/// `TaxService::calculate_for_line_in_region`; otherwise the provider resolves
+/// the region that governs the destination address itself, mirroring
+/// `TaxService::calculate_for_line`.
+fn tax_destination(context: &CartContext) -> TaxDestination<'_> {
+    match context.tax_region_id.as_deref() {
+        Some(region_id) => TaxDestination::Region { region_id },
+        None => TaxDestination::Address {
+            country_code: &context.country_code,
+            province_code: context.province_code.as_deref(),
+        },
+    }
 }
 
 /// Names the tax line recorded when a region governs a destination but no rate

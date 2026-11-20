@@ -381,15 +381,17 @@ fn newest_rate<'a>(rates: impl Iterator<Item = &'a TaxRate>) -> Option<&'a TaxRa
 
 /// Thread-safe registry of available tax providers.
 ///
-/// Exactly one provider is active at a time and it is the one calculations run
-/// through. [`Self::with_defaults`] registers and activates the built-in
-/// region/rate provider; [`crate::service::TaxService::new`] uses it, so the
-/// application service behavior is unchanged until another provider is
-/// activated.
+/// Exactly one provider is active at a time, and [`crate::service::TaxService`]
+/// calculations run through it. [`Self::with_defaults`] registers and activates
+/// the built-in region/rate provider; [`crate::service::TaxService::new`] uses
+/// it, so the application service behavior is unchanged until another provider
+/// is activated.
 ///
-/// Selecting a provider from store configuration is not wired up yet: nothing
-/// persists the choice. Until it is, callers can pick a registered provider at
-/// runtime with [`Self::set_active`].
+/// Store configuration selects a registered provider as well: the cart workflow
+/// reads the store's `tax.provider_id` setting on every recalculation, serves
+/// that pass from the provider the setting names, and leaves this registry's
+/// active provider untouched. Callers that calculate outside that path pick a
+/// provider at runtime with [`Self::set_active`].
 #[derive(Clone, Default)]
 pub struct TaxProviderRegistry {
     providers: Arc<RwLock<HashMap<String, Arc<dyn TaxProvider>>>>,
