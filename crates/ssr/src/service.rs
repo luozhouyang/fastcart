@@ -289,6 +289,14 @@ impl SsrService {
             max_bytes: self.config.artifact_max_bytes,
             max_files: self.config.artifact_max_files,
         };
+        // The manager lock is held across the await on purpose, and it is the
+        // one guard in this service that is not merely protecting a map.
+        // `start_deployment` needs `&mut RuntimeManager` because the manager is
+        // the state it mutates — there is no inner mutability to borrow
+        // instead — and spinning up a workerd group is not something two
+        // deployments should interleave. Serving requests does not take this
+        // lock: it reads `deployments`/`previews` under their own RwLock, so the
+        // only thing serialized here is deployment against deployment.
         let mut manager = self.manager.lock().await;
         let deployment = start_deployment(
             &mut manager,
@@ -461,6 +469,9 @@ impl SsrService {
         let delay = Duration::from_millis(self.config.drain_timeout_ms.max(1));
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
+            // Same reasoning as in `replace`: tearing a group down mutates the
+            // manager, and it happens after the drain delay so a request that
+            // is still in flight is not cut off mid-response.
             match manager.lock().await.stop_group(&group).await {
                 Ok(()) => {
                     release_artifact(artifact_dir, refs, roots, preview_roots).await;
