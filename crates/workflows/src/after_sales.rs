@@ -21,11 +21,15 @@ use fastcart_module_order::{
     Order, OrderClaim, OrderExchange, OrderRefund, OrderReturn, OrderService, ReceiveReturnInput,
     RefundInput, ReplacementUnitPrice, ReturnStatus,
 };
-use fastcart_module_payment::{ListPaymentsFilter, Payment, PaymentService, PaymentStatus, Refund};
+use fastcart_module_payment::{
+    CreatePaymentSessionInput, ListPaymentsFilter, Payment, PaymentCollection, PaymentService,
+    PaymentSession, PaymentStatus, Refund,
+};
 use fastcart_module_pricing::{PriceContext, PricingService};
 use fastcart_module_shipping::{
     CreateFulfillmentRequest, FulfillmentItemRequest, FulfillmentProviderRegistry,
 };
+use serde_json::Value;
 
 /// Prefix for provider and local idempotency keys of return refunds.
 const RETURN_REFUND_PREFIX: &str = "return-refund";
@@ -53,6 +57,38 @@ pub struct ClaimRefundResult {
     /// Accepted claim with its `refund_id` link populated.
     pub claim: OrderClaim,
     /// Order refund row created for the claim's refund-type lines.
+    pub order_refund: Option<OrderRefund>,
+    /// Provider-side refund, when a payment refund was attempted.
+    pub provider_refund: Option<Refund>,
+}
+
+/// Session metadata key that records which settled difference a session pays.
+///
+/// A replay looks for it before opening another session, so collecting the same
+/// difference twice cannot leave the order with two payables for one charge.
+const DIFFERENCE_SESSION_MARKER: &str = "after_sales_difference";
+/// Prefix for provider and local idempotency keys of exchange difference refunds.
+const EXCHANGE_DIFFERENCE_REFUND_PREFIX: &str = "exchange-difference";
+/// Prefix for provider and local idempotency keys of claim difference refunds.
+const CLAIM_DIFFERENCE_REFUND_PREFIX: &str = "claim-difference";
+
+/// Result of making a settled difference payable by the customer.
+#[derive(Clone, Debug)]
+pub struct DifferenceCollectionResult {
+    /// Order aggregate the difference belongs to.
+    pub order: Order,
+    /// Collection that now expects the difference.
+    pub collection: PaymentCollection,
+    /// Session that pays the difference.
+    pub session: PaymentSession,
+}
+
+/// Result of refunding the difference an accepted record owes the customer.
+#[derive(Clone, Debug)]
+pub struct DifferenceRefundResult {
+    /// Order aggregate after the refund.
+    pub order: Order,
+    /// Order refund row created for this difference, when one was needed.
     pub order_refund: Option<OrderRefund>,
     /// Provider-side refund, when a payment refund was attempted.
     pub provider_refund: Option<Refund>,
@@ -995,6 +1031,284 @@ impl AfterSalesWorkflow {
                 metadata: Metadata::empty(),
             })
             .await
+    }
+
+    /// Opens the money an accepted exchange has the customer owing.
+    ///
+    /// Accepting a dearer exchange settles the difference on the order; this
+    /// makes it payable. The order's collection grows by the difference and a
+    /// session pays the increase — nothing is charged here, the customer pays
+    /// that session like any other. Idempotent: replaying it returns the
+    /// session that already collects the difference.
+    pub async fn collect_exchange_difference(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &ExchangeId,
+        provider: &str,
+    ) -> Result<DifferenceCollectionResult, AppError> {
+        let exchange = self.order.get_exchange(order_id, exchange_id).await?;
+        if exchange.status != ExchangeStatus::Accepted {
+            return Err(AppError::conflict(
+                "an exchange must be accepted before its difference can be collected",
+            ));
+        }
+        let difference = exchange.difference_total.ok_or_else(|| {
+            AppError::conflict("the accepted exchange settled no price difference")
+        })?;
+        self.collect_difference(
+            order_id,
+            difference,
+            EXCHANGE_DIFFERENCE_REFUND_PREFIX,
+            exchange_id.as_str(),
+            provider,
+        )
+        .await
+    }
+
+    /// Opens the money an accepted claim has the customer owing.
+    ///
+    /// See [`Self::collect_exchange_difference`]: same settlement, same payable.
+    pub async fn collect_claim_difference(
+        &self,
+        order_id: &OrderId,
+        claim_id: &ClaimId,
+        provider: &str,
+    ) -> Result<DifferenceCollectionResult, AppError> {
+        let claim = self.order.get_claim(order_id, claim_id).await?;
+        if claim.status != ClaimStatus::Accepted {
+            return Err(AppError::conflict(
+                "a claim must be accepted before its difference can be collected",
+            ));
+        }
+        let difference = claim
+            .difference_total
+            .ok_or_else(|| AppError::conflict("the accepted claim settled no price difference"))?;
+        self.collect_difference(
+            order_id,
+            difference,
+            CLAIM_DIFFERENCE_REFUND_PREFIX,
+            claim_id.as_str(),
+            provider,
+        )
+        .await
+    }
+
+    /// Raises the order's collection by a settled difference and prices a
+    /// session to pay it.
+    ///
+    /// Only a positive difference is money the customer owes; a negative one is
+    /// paid back through [`Self::refund_exchange_difference`] instead. An order
+    /// holds one collection, so the difference joins the one the checkout
+    /// opened — or opens the order's first collection when it has none, which
+    /// is the case for an order placed outside a checkout.
+    async fn collect_difference(
+        &self,
+        order_id: &OrderId,
+        difference: i64,
+        prefix: &str,
+        source_id: &str,
+        provider: &str,
+    ) -> Result<DifferenceCollectionResult, AppError> {
+        if difference <= 0 {
+            return Err(AppError::conflict(format!(
+                "a difference of {difference} is owed to the customer, not by them"
+            )));
+        }
+        let order = self.order.get(order_id).await?;
+        let marker = format!("{prefix}:{source_id}");
+        let (collection, opened) = match self.payment.collection_for_order(order_id).await? {
+            Some(existing) => (existing, false),
+            None => (
+                self.payment
+                    .create_collection_for_order(order_id, difference, &order.currency_code)
+                    .await?,
+                true,
+            ),
+        };
+        // A session already carrying this marker collects this difference: the
+        // payable exists and nothing may be raised or opened a second time.
+        let sessions = self
+            .payment
+            .list_collection_sessions(collection.id.as_str())
+            .await?;
+        if let Some(existing) = sessions.iter().find(|session| {
+            session
+                .data
+                .get(DIFFERENCE_SESSION_MARKER)
+                .is_some_and(|value| value.as_str() == Some(marker.as_str()))
+        }) {
+            return Ok(DifferenceCollectionResult {
+                order,
+                collection,
+                session: existing.clone(),
+            });
+        }
+        let collection = if opened {
+            collection
+        } else {
+            self.payment
+                .raise_collection_amount(collection.id.as_str(), difference)
+                .await?
+        };
+        let mut metadata = Metadata::empty();
+        metadata.insert(DIFFERENCE_SESSION_MARKER, Value::String(marker));
+        let session = self
+            .payment
+            .create_session(CreatePaymentSessionInput {
+                cart_id: None,
+                checkout_id: None,
+                order_id: Some(order_id.clone()),
+                provider: provider.to_owned(),
+                amount: difference,
+                currency_code: order.currency_code.clone(),
+                metadata,
+            })
+            .await?;
+        self.payment
+            .attach_session_to_collection(collection.id.as_str(), session.id.as_str())
+            .await?;
+        Ok(DifferenceCollectionResult {
+            order,
+            collection,
+            session,
+        })
+    }
+
+    /// Refunds the difference an accepted exchange owes the customer.
+    ///
+    /// Accepting an exchange settles the difference on the order — a cheaper
+    /// replacement leaves the customer owed money — but paying it back is the
+    /// merchant's decision, so it is its own call rather than a side effect of
+    /// accepting. Idempotent: replaying it pays once.
+    pub async fn refund_exchange_difference(
+        &self,
+        order_id: &OrderId,
+        exchange_id: &ExchangeId,
+    ) -> Result<DifferenceRefundResult, AppError> {
+        let exchange = self.order.get_exchange(order_id, exchange_id).await?;
+        if exchange.status != ExchangeStatus::Accepted {
+            return Err(AppError::conflict(
+                "an exchange must be accepted before its difference can be refunded",
+            ));
+        }
+        let difference = exchange.difference_total.ok_or_else(|| {
+            AppError::conflict("the accepted exchange settled no price difference")
+        })?;
+        self.refund_difference(
+            order_id,
+            difference,
+            EXCHANGE_DIFFERENCE_REFUND_PREFIX,
+            exchange_id.as_str(),
+            exchange.reason.clone(),
+        )
+        .await
+    }
+
+    /// Refunds the difference an accepted claim owes the customer.
+    ///
+    /// See [`Self::refund_exchange_difference`]: same settlement, same
+    /// one-call, idempotent payout.
+    pub async fn refund_claim_difference(
+        &self,
+        order_id: &OrderId,
+        claim_id: &ClaimId,
+    ) -> Result<DifferenceRefundResult, AppError> {
+        let claim = self.order.get_claim(order_id, claim_id).await?;
+        if claim.status != ClaimStatus::Accepted {
+            return Err(AppError::conflict(
+                "a claim must be accepted before its difference can be refunded",
+            ));
+        }
+        let difference = claim
+            .difference_total
+            .ok_or_else(|| AppError::conflict("the accepted claim settled no price difference"))?;
+        self.refund_difference(
+            order_id,
+            difference,
+            CLAIM_DIFFERENCE_REFUND_PREFIX,
+            claim_id.as_str(),
+            claim.reason.clone(),
+        )
+        .await
+    }
+
+    /// Refunds a settled difference that is owed to the customer.
+    ///
+    /// Only a negative difference is money the customer is owed. A positive one
+    /// is money the merchant is owed, and no card can be charged without the
+    /// customer's say-so, so it is refused here rather than silently ignored.
+    /// The amount is capped at what the order still holds, and the refund is
+    /// keyed by the record it settles, so a replay converges on one refund.
+    async fn refund_difference(
+        &self,
+        order_id: &OrderId,
+        difference: i64,
+        prefix: &str,
+        source_id: &str,
+        reason: Option<String>,
+    ) -> Result<DifferenceRefundResult, AppError> {
+        if difference >= 0 {
+            return Err(AppError::conflict(format!(
+                "a difference of {difference} is owed by the customer, not to them"
+            )));
+        }
+        let order = self.order.get(order_id).await?;
+        let key = format!("{prefix}:{source_id}");
+        let local = local_key(&key);
+        if let Some(existing) = self.order.refund_id_by_idempotency_key(&local).await? {
+            let order_refund = order
+                .refunds
+                .iter()
+                .find(|entry| entry.id == existing)
+                .cloned();
+            let provider_refund = self.provider_refund_by_key(order_id, &key).await;
+            return Ok(DifferenceRefundResult {
+                order,
+                order_refund,
+                provider_refund,
+            });
+        }
+        let amount = cap_refund(&order, difference.saturating_neg());
+        if amount <= 0 {
+            return Ok(DifferenceRefundResult {
+                order,
+                order_refund: None,
+                provider_refund: None,
+            });
+        }
+        let payment = self.captured_payment(order_id).await?;
+        let provider_refund = self
+            .payment
+            .refund_with_idempotency(
+                payment.id.as_str(),
+                amount,
+                reason.clone(),
+                Some(key.clone()),
+            )
+            .await?;
+        let (order, refund_id) = self
+            .order
+            .add_refund_idempotent(
+                order_id,
+                RefundInput {
+                    payment_id: payment.id.clone(),
+                    amount,
+                    currency: order.currency_code.clone(),
+                    reason,
+                },
+                &local,
+            )
+            .await?;
+        let order_refund = order
+            .refunds
+            .iter()
+            .find(|entry| entry.id == refund_id)
+            .cloned();
+        Ok(DifferenceRefundResult {
+            order,
+            order_refund,
+            provider_refund: Some(provider_refund),
+        })
     }
 
     async fn captured_payment(&self, order_id: &OrderId) -> Result<Payment, AppError> {

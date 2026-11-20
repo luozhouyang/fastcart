@@ -25,7 +25,7 @@ use fastcart_module_order::{
     OrderStatusHistory, PaymentStatus, ReceiveReturnInput, ReceiveReturnItemInput, RefundInput,
     ReturnItemInput, WriteOffReturnInput, WriteOffReturnItemInput,
 };
-use fastcart_module_payment::{PaymentService, Refund};
+use fastcart_module_payment::{PaymentCollection, PaymentService, PaymentSession, Refund};
 use fastcart_module_shipping::{
     CreateFulfillmentRequest, FulfillmentItemRequest as ProviderFulfillmentItemRequest,
 };
@@ -149,11 +149,15 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(accept_claim))
         .routes(routes!(fulfill_claim))
         .routes(routes!(refund_claim))
+        .routes(routes!(collect_claim_difference))
+        .routes(routes!(refund_claim_difference))
         .routes(routes!(cancel_claim))
         .routes(routes!(list_exchanges, create_exchange))
         .routes(routes!(get_exchange))
         .routes(routes!(accept_exchange))
         .routes(routes!(fulfill_exchange))
+        .routes(routes!(collect_exchange_difference))
+        .routes(routes!(refund_exchange_difference))
         .routes(routes!(cancel_exchange))
         .routes(routes!(list_order_edits, create_order_edit))
         .routes(routes!(get_order_edit))
@@ -1233,6 +1237,35 @@ async fn refund_claim(
     }))
 }
 
+/// The provider a difference is collected through.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CollectDifferenceRequest {
+    /// Registered payment provider identifier.
+    pub provider: String,
+}
+
+/// The payable an after-sales difference was collected as.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct DifferenceCollectionResponse {
+    /// Order aggregate the difference belongs to.
+    pub order: Order,
+    /// Collection that expects the difference.
+    pub payment_collection: PaymentCollection,
+    /// Session that pays the difference.
+    pub payment_session: PaymentSession,
+}
+
+/// An after-sales difference paid back to the customer.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct DifferenceRefundResponse {
+    /// Order aggregate after the refund.
+    pub order: Order,
+    /// Order refund row recorded for the difference, when one was written.
+    pub order_refund: Option<OrderRefund>,
+    /// Provider-side refund, when one was attempted.
+    pub provider_refund: Option<Refund>,
+}
+
 #[utoipa::path(
     post,
     path = "/orders/{id}/claims/{claim_id}/cancel",
@@ -1366,6 +1399,140 @@ async fn accept_exchange(
     .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
     let result = workflow.accept_exchange(&id, &exchange_id).await?;
     Ok(Json(result.exchange))
+}
+
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/exchanges/{exchange_id}/refund-difference",
+    tag = "Admin",
+    summary = "Refund the price difference an accepted exchange owes the customer",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = DifferenceRefundResponse))
+)]
+async fn refund_exchange_difference(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, exchange_id)): Path<(String, String)>,
+) -> ApiResult<Json<DifferenceRefundResponse>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let id = OrderId::from_string(id);
+    let exchange_id = ExchangeId::from_string(exchange_id);
+    let workflow = AfterSalesWorkflow::with_shipping_providers(
+        db.clone(),
+        payment_service(&context, &actor, &db)?,
+        context.shipping_providers.clone(),
+    )
+    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let result = workflow
+        .refund_exchange_difference(&id, &exchange_id)
+        .await?;
+    Ok(Json(DifferenceRefundResponse {
+        order: result.order,
+        order_refund: result.order_refund,
+        provider_refund: result.provider_refund,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/claims/{claim_id}/collect-difference",
+    tag = "Admin",
+    summary = "Make the price difference an accepted claim has the customer owing payable",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CollectDifferenceRequest,
+    responses((status = 200, body = DifferenceCollectionResponse))
+)]
+async fn collect_claim_difference(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, claim_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<CollectDifferenceRequest>,
+) -> ApiResult<Json<DifferenceCollectionResponse>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let id = OrderId::from_string(id);
+    let claim_id = ClaimId::from_string(claim_id);
+    let workflow = AfterSalesWorkflow::new(db.clone(), payment_service(&context, &actor, &db)?)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let result = workflow
+        .collect_claim_difference(&id, &claim_id, &request.provider)
+        .await?;
+    Ok(Json(DifferenceCollectionResponse {
+        order: result.order,
+        payment_collection: result.collection,
+        payment_session: result.session,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/exchanges/{exchange_id}/collect-difference",
+    tag = "Admin",
+    summary = "Make the price difference an accepted exchange has the customer owing payable",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CollectDifferenceRequest,
+    responses((status = 200, body = DifferenceCollectionResponse))
+)]
+async fn collect_exchange_difference(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, exchange_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<CollectDifferenceRequest>,
+) -> ApiResult<Json<DifferenceCollectionResponse>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let id = OrderId::from_string(id);
+    let exchange_id = ExchangeId::from_string(exchange_id);
+    let workflow = AfterSalesWorkflow::with_shipping_providers(
+        db.clone(),
+        payment_service(&context, &actor, &db)?,
+        context.shipping_providers.clone(),
+    )
+    .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let result = workflow
+        .collect_exchange_difference(&id, &exchange_id, &request.provider)
+        .await?;
+    Ok(Json(DifferenceCollectionResponse {
+        order: result.order,
+        payment_collection: result.collection,
+        payment_session: result.session,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/claims/{claim_id}/refund-difference",
+    tag = "Admin",
+    summary = "Refund the price difference an accepted claim owes the customer",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = DifferenceRefundResponse))
+)]
+async fn refund_claim_difference(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, claim_id)): Path<(String, String)>,
+) -> ApiResult<Json<DifferenceRefundResponse>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let id = OrderId::from_string(id);
+    let claim_id = ClaimId::from_string(claim_id);
+    let workflow = AfterSalesWorkflow::new(db.clone(), payment_service(&context, &actor, &db)?)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let result = workflow.refund_claim_difference(&id, &claim_id).await?;
+    Ok(Json(DifferenceRefundResponse {
+        order: result.order,
+        order_refund: result.order_refund,
+        provider_refund: result.provider_refund,
+    }))
 }
 
 #[utoipa::path(

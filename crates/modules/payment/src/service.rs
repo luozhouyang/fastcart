@@ -344,6 +344,60 @@ impl PaymentService {
         Ok(assigned)
     }
 
+    /// Returns the collection an order holds, when it has one.
+    ///
+    /// An order placed by a checkout holds the collection the checkout opened;
+    /// money raised later is collected through that same collection.
+    pub async fn collection_for_order(
+        &self,
+        order_id: &OrderId,
+    ) -> Result<Option<PaymentCollection>, AppError> {
+        let row = sqlx::query_as::<_, PaymentCollectionRow>(
+            "SELECT id, checkout_id, order_id, amount, currency_code, status, created_at, \
+             updated_at FROM payment_collections WHERE order_id = ?",
+        )
+        .bind(order_id.as_str())
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(row.map(collection_from_row))
+    }
+
+    /// Raises what a collection expects to collect.
+    ///
+    /// Money raised after the collection was opened — the price difference of a
+    /// dearer replacement, say — belongs to the same collection: the order owes
+    /// one pot, and capture settles it against one amount. Only an increase is
+    /// accepted; lowering the amount would let a collection look settled
+    /// without the money ever arriving.
+    pub async fn raise_collection_amount(
+        &self,
+        collection_id: &str,
+        additional: i64,
+    ) -> Result<PaymentCollection, AppError> {
+        if additional <= 0 {
+            return Err(AppError::validation(
+                "a payment collection top-up must be positive",
+            ));
+        }
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let collection = load_collection(&mut tx, collection_id).await?;
+        let amount = collection
+            .amount
+            .checked_add(additional)
+            .ok_or_else(|| AppError::validation("payment collection amount overflow"))?;
+        sqlx::query("UPDATE payment_collections SET amount = ?, updated_at = ? WHERE id = ?")
+            .bind(amount)
+            .bind(now_timestamp())
+            .bind(collection.id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        let raised = load_collection(&mut tx, collection_id).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(raised)
+    }
+
     /// Attaches a payment session to a payment collection.
     ///
     /// Attaching the same session again is a no-op. A session that is priced in
