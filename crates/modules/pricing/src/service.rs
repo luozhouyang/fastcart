@@ -24,6 +24,11 @@ const PRICE_COLUMNS: &str = "id, price_list_id, \
      sales_channel_id, starts_at, ends_at, metadata, created_at, updated_at";
 const PRICE_LIST_RULE_COLUMNS: &str = "id, price_list_id, attribute, operator, value, created_at";
 
+/// Maximum number of bound parameters used in one `IN (...)` statement.
+/// SQLite's default limit is 999; staying under it leaves headroom for the
+/// other parameters a query may carry.
+const SQLITE_PARAMETER_LIMIT: usize = 900;
+
 /// Application service for price lists, prices and deterministic selection.
 #[derive(Clone, Debug)]
 pub struct PricingService {
@@ -661,11 +666,42 @@ impl PricingService {
         }
         transaction.commit().await.map_err(database_error)?;
 
-        let mut prices = Vec::with_capacity(ids.len());
-        for id in ids {
-            prices.push(self.get_price(&id).await?);
+        self.load_prices_by_ids(&ids).await
+    }
+
+    /// Loads several prices at once, preserving the order of `ids`.
+    ///
+    /// SQLite caps bound parameters per statement, so the ids are read in
+    /// chunks that comfortably fit.
+    async fn load_prices_by_ids(&self, ids: &[String]) -> Result<Vec<Price>, AppError> {
+        let mut by_id = HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(SQLITE_PARAMETER_LIMIT) {
+            let sql = format!(
+                "SELECT {PRICE_COLUMNS} FROM prices WHERE id IN ({})",
+                sql_markers(chunk.len())
+            );
+            let mut query = sqlx::query_as::<_, PriceRow>(&sql);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            let rows = query
+                .fetch_all(self.db.pool())
+                .await
+                .map_err(database_error)?;
+            for row in rows {
+                let price = row.into_price()?;
+                by_id.insert(price.id.clone(), price);
+            }
         }
-        Ok(prices)
+
+        ids.iter()
+            .map(|id| {
+                by_id
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("price", id))
+            })
+            .collect()
     }
 
     /// Selects the best eligible price for one variant.
@@ -836,6 +872,10 @@ impl PricingService {
         .map_err(database_error)?;
         Ok(rows.into_iter().map(PriceListRuleRow::into_rule).collect())
     }
+}
+
+fn sql_markers(count: usize) -> String {
+    vec!["?"; count].join(", ")
 }
 
 fn unique_or_database(error: sqlx::Error, conflict_message: &str) -> AppError {

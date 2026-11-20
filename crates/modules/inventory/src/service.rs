@@ -1,5 +1,7 @@
 //! SQLite-backed inventory application service.
 
+use std::collections::HashMap;
+
 use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, CheckoutId, EventId, InventoryItemId, InventoryLocationId, LineItemId, Metadata,
@@ -7,7 +9,7 @@ use fastcart_kernel::{
     validate_length, validate_metadata,
 };
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
 use uuid::Uuid;
 
 use crate::domain::{
@@ -23,6 +25,15 @@ const DEFAULT_LOCATION_ID: &str = "loc_default";
 const RETURN_RESTOCK_REASON: &str = "return_restock";
 const EXCHANGE_RESTOCK_REASON: &str = "exchange_restock";
 const AFTER_SALES_CONSUME_REASON: &str = "after_sales_consume";
+
+/// Maximum number of bound parameters used in one `IN (...)` statement.
+/// SQLite's default limit is 999; staying under it leaves headroom for the
+/// other parameters a query may carry.
+const SQLITE_PARAMETER_LIMIT: usize = 900;
+
+fn sql_markers(count: usize) -> String {
+    vec!["?"; count].join(", ")
+}
 
 /// Audit entry appended in the same transaction as a restock.
 ///
@@ -269,6 +280,213 @@ async fn ensure_default_location_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(database_error)?;
+    Ok(())
+}
+
+/// One `(item, location)` level considered by a batched reservation.
+#[derive(Debug)]
+struct LevelCandidate {
+    location_id: String,
+    stocked_quantity: i64,
+    reserved_quantity: i64,
+}
+
+/// One allocated quantity to apply to an `(item, location)` level.
+#[derive(Debug)]
+struct LevelAllocation {
+    item_id: String,
+    location_id: String,
+    quantity: i64,
+}
+
+fn insufficient_stock_for_variant(variant_id: &str) -> AppError {
+    AppError::conflict(format!("insufficient stock for variant {variant_id}"))
+}
+
+/// Loads the inventory item of every variant in one pass.
+///
+/// SQLite caps bound parameters per statement, so the variants are read in
+/// chunks that comfortably fit.
+async fn load_items_by_variant_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    variants: &[VariantId],
+) -> Result<HashMap<String, String>, AppError> {
+    let mut by_variant = HashMap::new();
+    for chunk in variants.chunks(SQLITE_PARAMETER_LIMIT) {
+        let sql = format!(
+            "SELECT id, variant_id FROM inventory_items WHERE variant_id IN ({})",
+            sql_markers(chunk.len())
+        );
+        let mut query = sqlx::query(&sql);
+        for variant in chunk {
+            query = query.bind(variant.as_str());
+        }
+        let rows = query.fetch_all(&mut **tx).await.map_err(database_error)?;
+        for row in rows {
+            let id: String = row.try_get("id").map_err(database_error)?;
+            let variant_id: String = row.try_get("variant_id").map_err(database_error)?;
+            by_variant.insert(variant_id, id);
+        }
+    }
+    Ok(by_variant)
+}
+
+/// Loads the levels of every item in one pass, in allocation order.
+///
+/// Rows keep the `loc_default` first, then ascending location identifier order
+/// the per-line implementation used, and items without levels simply have no
+/// entry.
+async fn load_levels_by_item_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    item_ids: &[String],
+) -> Result<HashMap<String, Vec<LevelCandidate>>, AppError> {
+    let mut by_item: HashMap<String, Vec<LevelCandidate>> = HashMap::new();
+    for chunk in item_ids.chunks(SQLITE_PARAMETER_LIMIT) {
+        let sql = format!(
+            "SELECT inventory_item_id, location_id, stocked_quantity, reserved_quantity \
+             FROM inventory_levels WHERE inventory_item_id IN ({}) \
+             ORDER BY CASE WHEN location_id = ? THEN 0 ELSE 1 END, location_id",
+            sql_markers(chunk.len())
+        );
+        let mut query = sqlx::query(&sql);
+        for item_id in chunk {
+            query = query.bind(item_id);
+        }
+        let rows = query
+            .bind(DEFAULT_LOCATION_ID)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(database_error)?;
+        for row in rows {
+            let item_id: String = row.try_get("inventory_item_id").map_err(database_error)?;
+            by_item.entry(item_id).or_default().push(LevelCandidate {
+                location_id: row.try_get("location_id").map_err(database_error)?,
+                stocked_quantity: row.try_get("stocked_quantity").map_err(database_error)?,
+                reserved_quantity: row.try_get("reserved_quantity").map_err(database_error)?,
+            });
+        }
+    }
+    Ok(by_item)
+}
+
+/// Applies the allocations with one conditional update per item.
+///
+/// Repeated allocations of the same level are folded into one term so a single
+/// statement can carry them; the `stocked_quantity - reserved_quantity >= take`
+/// guard of every term still runs inside SQLite, and a level that fails it
+/// rolls the whole batch back with the variant's conflict error.
+async fn apply_level_allocations(
+    tx: &mut Transaction<'_, Sqlite>,
+    allocations: &[LevelAllocation],
+    now: Timestamp,
+    variants_by_item: &HashMap<String, String>,
+) -> Result<(), AppError> {
+    let mut by_item: Vec<(String, Vec<(String, i64)>)> = Vec::new();
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for allocation in allocations {
+        let position = *positions
+            .entry(allocation.item_id.clone())
+            .or_insert_with(|| {
+                by_item.push((allocation.item_id.clone(), Vec::new()));
+                by_item.len() - 1
+            });
+        let locations = &mut by_item[position].1;
+        match locations
+            .iter_mut()
+            .find(|(location, _)| location == &allocation.location_id)
+        {
+            Some((_, quantity)) => *quantity += allocation.quantity,
+            None => locations.push((allocation.location_id.clone(), allocation.quantity)),
+        }
+    }
+
+    for (item_id, locations) in &by_item {
+        // Five bound parameters per location: two in the `SET` case, one in the
+        // `IN` list and two in the guard case.
+        for chunk in locations.chunks(SQLITE_PARAMETER_LIMIT / 5) {
+            let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
+                "UPDATE inventory_levels \
+                 SET reserved_quantity = reserved_quantity + CASE location_id",
+            );
+            push_location_case(&mut builder, chunk);
+            builder
+                .push(" ELSE 0 END, updated_at = ")
+                .push_bind(now)
+                .push(" WHERE inventory_item_id = ")
+                .push_bind(item_id)
+                .push(" AND location_id IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for (location_id, _) in chunk {
+                    separated.push_bind(location_id);
+                }
+            }
+            builder.push(") AND stocked_quantity - reserved_quantity >= CASE location_id");
+            push_location_case(&mut builder, chunk);
+            builder.push(" ELSE 0 END");
+
+            let affected = builder
+                .build()
+                .execute(&mut **tx)
+                .await
+                .map_err(database_error)?;
+            if affected.rows_affected() != chunk.len() as u64 {
+                // Every item belongs to the variant it was loaded for.
+                let variant_id = variants_by_item
+                    .get(item_id)
+                    .map(String::as_str)
+                    .unwrap_or(item_id);
+                return Err(insufficient_stock_for_variant(variant_id));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pushes the `WHEN location THEN quantity` terms of a level update.
+fn push_location_case<'a>(builder: &mut QueryBuilder<'a, Sqlite>, locations: &'a [(String, i64)]) {
+    for (location_id, quantity) in locations {
+        builder
+            .push(" WHEN ")
+            .push_bind(location_id)
+            .push(" THEN ")
+            .push_bind(*quantity);
+    }
+}
+
+/// Inserts the reservations of one batch with a single multi-row insert.
+async fn insert_reservations(
+    tx: &mut Transaction<'_, Sqlite>,
+    reservations: &[InventoryReservation],
+    now: Timestamp,
+) -> Result<(), AppError> {
+    // Twelve bound parameters per row.
+    for chunk in reservations.chunks(SQLITE_PARAMETER_LIMIT / 12) {
+        let mut builder: QueryBuilder<'_, Sqlite> = QueryBuilder::new(
+            "INSERT INTO inventory_reservations \
+             (id, inventory_item_id, location_id, quantity, status, line_item_id, \
+              checkout_id, order_id, expires_at, metadata, created_at, updated_at) ",
+        );
+        builder.push_values(chunk, |mut row, reservation| {
+            row.push_bind(reservation.id.as_str())
+                .push_bind(reservation.inventory_item_id.as_str())
+                .push_bind(reservation.location_id.as_str())
+                .push_bind(reservation.quantity)
+                .push_bind(reservation.status.as_str())
+                .push_bind(reservation.line_item_id.as_ref().map(LineItemId::as_str))
+                .push_bind(reservation.checkout_id.as_ref().map(CheckoutId::as_str))
+                .push_bind(Option::<String>::None)
+                .push_bind(reservation.expires_at)
+                .push_bind(reservation.metadata.to_json_string())
+                .push_bind(now)
+                .push_bind(now);
+        });
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    }
     Ok(())
 }
 
@@ -976,7 +1194,9 @@ impl InventoryService {
     ///
     /// Locations are visited deterministically: `loc_default` first, then by
     /// ascending location identifier. A line that cannot be fully satisfied
-    /// rolls back the entire batch with a conflict naming the variant.
+    /// rolls back the entire batch with a conflict naming the variant. The
+    /// items, levels and writes of the whole batch are read and written
+    /// together, so the query count does not grow with the number of lines.
     pub async fn reserve(
         &self,
         lines: Vec<ReservationLine>,
@@ -996,77 +1216,47 @@ impl InventoryService {
         let now = now_timestamp();
         let expires_at = now.saturating_add(ttl_seconds);
         let mut tx = self.db.begin().await?;
-        let mut reservations = Vec::new();
 
+        // The transaction holds SQLite's write lock, so the items and levels
+        // read here cannot change while the batch is allocated in memory.
+        let variants = lines
+            .iter()
+            .map(|line| line.variant_id.clone())
+            .collect::<Vec<_>>();
+        let items = load_items_by_variant_tx(&mut tx, &variants).await?;
+        let item_ids = items.values().cloned().collect::<Vec<_>>();
+        let variants_by_item = items
+            .iter()
+            .map(|(variant, item)| (item.clone(), variant.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut levels = load_levels_by_item_tx(&mut tx, &item_ids).await?;
+
+        let mut reservations = Vec::new();
+        let mut allocations: Vec<LevelAllocation> = Vec::new();
         for line in &lines {
-            let item_id: Option<String> =
-                sqlx::query_scalar("SELECT id FROM inventory_items WHERE variant_id = ?")
-                    .bind(line.variant_id.as_str())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(database_error)?;
-            let Some(item_id) = item_id else {
-                return Err(AppError::conflict(format!(
-                    "insufficient stock for variant {}",
-                    line.variant_id
-                )));
+            let Some(item_id) = items.get(line.variant_id.as_str()) else {
+                return Err(insufficient_stock_for_variant(line.variant_id.as_str()));
             };
 
-            let candidates = sqlx::query(
-                "SELECT location_id, stocked_quantity, reserved_quantity \
-                 FROM inventory_levels WHERE inventory_item_id = ? \
-                   AND stocked_quantity - reserved_quantity > 0 \
-                 ORDER BY CASE WHEN location_id = ? THEN 0 ELSE 1 END, location_id",
-            )
-            .bind(&item_id)
-            .bind(DEFAULT_LOCATION_ID)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(database_error)?;
-
             let mut remaining = line.quantity;
-            for candidate in &candidates {
+            for candidate in levels.get_mut(item_id).into_iter().flatten() {
                 if remaining == 0 {
                     break;
                 }
-                let stocked: i64 = candidate
-                    .try_get("stocked_quantity")
-                    .map_err(database_error)?;
-                let reserved: i64 = candidate
-                    .try_get("reserved_quantity")
-                    .map_err(database_error)?;
-                let available = available_quantity_from(stocked, reserved);
+                let available = available_quantity_from(
+                    candidate.stocked_quantity,
+                    candidate.reserved_quantity,
+                );
                 let take = remaining.min(available);
                 if take <= 0 {
                     continue;
                 }
-                let location_id: String =
-                    candidate.try_get("location_id").map_err(database_error)?;
-                let affected = sqlx::query(
-                    "UPDATE inventory_levels \
-                     SET reserved_quantity = reserved_quantity + ?, updated_at = ? \
-                     WHERE inventory_item_id = ? AND location_id = ? \
-                       AND stocked_quantity - reserved_quantity >= ?",
-                )
-                .bind(take)
-                .bind(now)
-                .bind(&item_id)
-                .bind(&location_id)
-                .bind(take)
-                .execute(&mut *tx)
-                .await
-                .map_err(database_error)?;
-                if affected.rows_affected() != 1 {
-                    return Err(AppError::conflict(format!(
-                        "insufficient stock for variant {}",
-                        line.variant_id
-                    )));
-                }
-
-                let reservation = InventoryReservation {
+                candidate.reserved_quantity += take;
+                remaining -= take;
+                reservations.push(InventoryReservation {
                     id: ReservationId::new(),
                     inventory_item_id: InventoryItemId::from_string(item_id.clone()),
-                    location_id: InventoryLocationId::from_string(location_id),
+                    location_id: InventoryLocationId::from_string(candidate.location_id.clone()),
                     quantity: take,
                     status: ReservationStatus::Reserved,
                     line_item_id: line.line_item_id.clone(),
@@ -1076,39 +1266,21 @@ impl InventoryService {
                     metadata: Metadata::empty(),
                     created_at: now,
                     updated_at: now,
-                };
-                sqlx::query(
-                    "INSERT INTO inventory_reservations \
-                     (id, inventory_item_id, location_id, quantity, status, line_item_id, \
-                      checkout_id, order_id, expires_at, metadata, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                )
-                .bind(reservation.id.as_str())
-                .bind(reservation.inventory_item_id.as_str())
-                .bind(reservation.location_id.as_str())
-                .bind(reservation.quantity)
-                .bind(reservation.status.as_str())
-                .bind(reservation.line_item_id.as_ref().map(LineItemId::as_str))
-                .bind(reservation.checkout_id.as_ref().map(CheckoutId::as_str))
-                .bind(Option::<String>::None)
-                .bind(reservation.expires_at)
-                .bind(reservation.metadata.to_json_string())
-                .bind(now)
-                .bind(now)
-                .execute(&mut *tx)
-                .await
-                .map_err(database_error)?;
-                reservations.push(reservation);
-                remaining -= take;
+                });
+                allocations.push(LevelAllocation {
+                    item_id: item_id.clone(),
+                    location_id: candidate.location_id.clone(),
+                    quantity: take,
+                });
             }
 
             if remaining > 0 {
-                return Err(AppError::conflict(format!(
-                    "insufficient stock for variant {}",
-                    line.variant_id
-                )));
+                return Err(insufficient_stock_for_variant(line.variant_id.as_str()));
             }
         }
+
+        apply_level_allocations(&mut tx, &allocations, now, &variants_by_item).await?;
+        insert_reservations(&mut tx, &reservations, now).await?;
 
         tx.commit().await.map_err(database_error)?;
         Ok(reservations)
@@ -1405,22 +1577,21 @@ impl InventoryService {
         }
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
+        let variants = lines
+            .iter()
+            .map(|line| line.variant_id.clone())
+            .collect::<Vec<_>>();
+        let items = load_items_by_variant_tx(&mut tx, &variants).await?;
         let mut restocked = 0_i64;
         for line in lines {
             let target = line.received_quantity.max(line.quantity);
             if target <= 0 {
                 continue;
             }
-            let item_id: Option<String> =
-                sqlx::query_scalar("SELECT id FROM inventory_items WHERE variant_id = ?")
-                    .bind(line.variant_id.as_str())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(database_error)?;
-            let Some(item_id) = item_id else {
+            let Some(item_id) = items.get(line.variant_id.as_str()) else {
                 continue;
             };
-            let item_id = InventoryItemId::from_string(item_id);
+            let item_id = InventoryItemId::from_string(item_id.clone());
 
             // Reconcile against the restock movements already persisted for
             // this return line. A retry after a failed restock sees the
@@ -1625,22 +1796,18 @@ impl InventoryService {
 
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
+        let variants = lines
+            .iter()
+            .map(|line| line.variant_id.clone())
+            .collect::<Vec<_>>();
+        let items = load_items_by_variant_tx(&mut tx, &variants).await?;
         let mut consumed = 0_i64;
         let mut inserted_references = Vec::new();
         for line in lines {
-            let item_id: Option<String> =
-                sqlx::query_scalar("SELECT id FROM inventory_items WHERE variant_id = ?")
-                    .bind(line.variant_id.as_str())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(database_error)?;
-            let Some(item_id) = item_id else {
-                return Err(AppError::conflict(format!(
-                    "insufficient stock for variant {}",
-                    line.variant_id
-                )));
+            let Some(item_id) = items.get(line.variant_id.as_str()) else {
+                return Err(insufficient_stock_for_variant(line.variant_id.as_str()));
             };
-            let item_id = InventoryItemId::from_string(item_id);
+            let item_id = InventoryItemId::from_string(item_id.clone());
 
             let location_id: Option<String> = sqlx::query_scalar(
                 "SELECT location_id FROM inventory_reservations \
@@ -1792,18 +1959,17 @@ impl InventoryService {
     ) -> Result<i64, AppError> {
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
+        let variants = lines
+            .iter()
+            .map(|line| line.variant_id.clone())
+            .collect::<Vec<_>>();
+        let items = load_items_by_variant_tx(&mut tx, &variants).await?;
         let mut restocked = 0_i64;
         for line in lines {
-            let item_id: Option<String> =
-                sqlx::query_scalar("SELECT id FROM inventory_items WHERE variant_id = ?")
-                    .bind(line.variant_id.as_str())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(database_error)?;
-            let Some(item_id) = item_id else {
+            let Some(item_id) = items.get(line.variant_id.as_str()) else {
                 continue;
             };
-            let item_id = InventoryItemId::from_string(item_id);
+            let item_id = InventoryItemId::from_string(item_id.clone());
 
             let location_id: Option<String> = sqlx::query_scalar(
                 "SELECT location_id FROM inventory_reservations \
