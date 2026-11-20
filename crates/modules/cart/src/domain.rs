@@ -572,20 +572,27 @@ pub fn recalculate_totals(cart: &mut Cart) {
 /// Returns a validation error only if the shares cannot be distributed, which
 /// the clamping above makes unreachable.
 pub fn allocate_cart_discounts(cart: &Cart) -> Result<Vec<i64>, AppError> {
-    let headroom: Vec<i64> = cart
-        .items
-        .iter()
-        .map(|item| {
-            let line_subtotal = item.unit_price.max(0).saturating_mul(item.quantity.max(0));
-            let adjustments = item
-                .adjustments
-                .iter()
-                .map(|adjustment| adjustment.amount.max(0))
-                .fold(0_i64, i64::saturating_add);
-            line_subtotal.saturating_sub(adjustments.min(line_subtotal))
-        })
-        .collect();
-    let total = headroom.iter().copied().fold(0_i64, i64::saturating_add);
+    // The running sum is kept exactly representable: `allocate_proportionally`
+    // requires its parts to sum to the total it is given, and a saturated total
+    // does not satisfy that (two lines near `i64::MAX` overflow it again inside
+    // the allocator). At these magnitudes the cart's own totals are saturated
+    // anyway, so a line that cannot fit loses the excess rather than letting the
+    // parts disagree with the total — which would over-allocate discounts.
+    let mut headroom: Vec<i64> = Vec::with_capacity(cart.items.len());
+    let mut total = 0_i64;
+    for item in &cart.items {
+        let line_subtotal = item.unit_price.max(0).saturating_mul(item.quantity.max(0));
+        let adjustments = item
+            .adjustments
+            .iter()
+            .map(|adjustment| adjustment.amount.max(0))
+            .fold(0_i64, i64::saturating_add);
+        let room = line_subtotal
+            .saturating_sub(adjustments.min(line_subtotal))
+            .min(i64::MAX - total);
+        total += room;
+        headroom.push(room);
+    }
     let requested = cart
         .discounts
         .iter()
