@@ -31,6 +31,11 @@ pub const MAX_TAG_VALUE_LENGTH: usize = 100;
 /// Maximum image URL length.
 pub const MAX_URL_LENGTH: usize = 2048;
 
+/// Maximum number of bound parameters used in one `IN (...)` statement.
+/// SQLite's default limit is 999; staying under it leaves headroom for the
+/// other parameters a query may carry.
+const SQLITE_PARAMETER_LIMIT: usize = 900;
+
 const PRODUCT_COLUMNS: &str = "p.id, p.title, p.subtitle, p.description, p.handle, p.status, \
      p.thumbnail, p.weight, p.length, p.height, p.width, p.metadata, p.created_at, p.updated_at";
 
@@ -647,6 +652,70 @@ impl CatalogService {
         let mut variant = variant_from_row(&row)?;
         variant.option_value_ids = self.load_variant_option_value_ids(&variant.id).await?;
         Ok(variant)
+    }
+
+    /// Loads several non-deleted variants in a fixed number of round trips.
+    ///
+    /// Cart recalculation and checkout both need every variant on a cart, and
+    /// asking one at a time turned a constant amount of work into one query per
+    /// line. Ids that do not resolve are simply absent from the result, so the
+    /// caller decides whether a missing variant is an error.
+    pub async fn get_variants(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, ProductVariant>, AppError> {
+        let mut variants = HashMap::new();
+        if ids.is_empty() {
+            return Ok(variants);
+        }
+
+        // SQLite caps bound parameters per statement, so the ids are read in
+        // chunks that comfortably fit.
+        for chunk in ids.chunks(SQLITE_PARAMETER_LIMIT) {
+            let sql = format!(
+                "SELECT * FROM product_variants WHERE deleted_at IS NULL AND id IN ({})",
+                sql_markers(chunk.len())
+            );
+            let mut query = sqlx::query(&sql);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            for row in query
+                .fetch_all(self.db.pool())
+                .await
+                .map_err(database_error)?
+            {
+                let variant = variant_from_row(&row)?;
+                variants.insert(variant.id.clone(), variant);
+            }
+        }
+
+        // Option-value links are loaded in one more pass so the result is
+        // identical to what `get_variant` returns.
+        let loaded: Vec<String> = variants.keys().cloned().collect();
+        let mut links: HashMap<String, Vec<String>> = HashMap::new();
+        for chunk in loaded.chunks(SQLITE_PARAMETER_LIMIT) {
+            let sql = format!(
+                "SELECT variant_id, option_value_id FROM product_variant_option_values \
+                 WHERE variant_id IN ({}) ORDER BY variant_id ASC, option_value_id ASC",
+                sql_markers(chunk.len())
+            );
+            let mut query = sqlx::query_as::<_, (String, String)>(&sql);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            for (variant_id, option_value_id) in query
+                .fetch_all(self.db.pool())
+                .await
+                .map_err(database_error)?
+            {
+                links.entry(variant_id).or_default().push(option_value_id);
+            }
+        }
+        for (id, variant) in &mut variants {
+            variant.option_value_ids = links.remove(id).unwrap_or_default();
+        }
+        Ok(variants)
     }
 
     /// Loads a non-deleted variant by its unique SKU.

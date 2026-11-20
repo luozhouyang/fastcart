@@ -450,6 +450,12 @@ impl CartWorkflow {
             .min(shipping_subtotal);
 
         // 4. Calculate tax on the discounted line and shipping amounts.
+        let variant_ids: Vec<String> = cart
+            .items
+            .iter()
+            .map(|item| item.variant_id.to_string())
+            .collect();
+        let variants = self.catalog.get_variants(&variant_ids).await?;
         let mut tax_lines = Vec::new();
         for (index, item) in cart.items.iter().enumerate() {
             let line_subtotal = prices[index]
@@ -462,12 +468,9 @@ impl CartWorkflow {
                 .map(|entry| entry.amount)
                 .sum();
             let taxable = (line_subtotal - discount).max(0);
-            let category = self
-                .catalog
-                .get_variant(item.variant_id.as_str())
-                .await
-                .ok()
-                .and_then(|variant| variant.tax_category_id)
+            let category = variants
+                .get(item.variant_id.as_str())
+                .and_then(|variant| variant.tax_category_id.clone())
                 .map(TaxCategoryId::from_string);
             let tax = match context.tax_region_id.as_deref() {
                 Some(region_id) => {

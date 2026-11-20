@@ -215,9 +215,17 @@ impl CheckoutWorkflow {
             .transition(&checkout.id, CheckoutStatus::Validating, None)
             .await?;
 
+        let variant_ids: Vec<String> = cart
+            .items
+            .iter()
+            .map(|item| item.variant_id.to_string())
+            .collect();
+        let mut variants = self.catalog.get_variants(&variant_ids).await?;
         let mut reservation_lines = Vec::new();
         for item in &cart.items {
-            let variant = self.catalog.get_variant(item.variant_id.as_str()).await?;
+            let variant = variants
+                .remove(item.variant_id.as_str())
+                .ok_or_else(|| AppError::not_found("variant", &item.variant_id))?;
             if variant.manage_inventory && !variant.allow_backorder {
                 reservation_lines.push(ReservationLine {
                     variant_id: item.variant_id.clone(),
