@@ -922,6 +922,24 @@ impl CartService {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         Self::ensure_open_tx(&mut tx, cart_id).await?;
 
+        if let Some(inclusive) = input.tax_inclusive {
+            sqlx::query(
+                "UPDATE cart_items SET is_tax_inclusive = ?, updated_at = ? WHERE cart_id = ?",
+            )
+            .bind(inclusive)
+            .bind(now)
+            .bind(cart_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            sqlx::query("UPDATE cart_shipping_methods SET is_tax_inclusive = ? WHERE cart_id = ?")
+                .bind(inclusive)
+                .bind(cart_id.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        }
+
         for price in &input.prices {
             let result = sqlx::query(
                 "UPDATE cart_items SET unit_price = ?, updated_at = ? WHERE id = ? AND cart_id = ?",
@@ -2699,6 +2717,7 @@ mod recalculation_tests {
             .apply_recalculation(
                 &cart.id,
                 RecalculationInput {
+                    tax_inclusive: None,
                     currency_code: "USD".to_owned(),
                     prices: vec![],
                     item_adjustments: vec![(item_id.clone(), vec![])],
@@ -2737,6 +2756,7 @@ mod recalculation_tests {
             .apply_recalculation(
                 &cart.id,
                 RecalculationInput {
+                    tax_inclusive: None,
                     currency_code: "USD".to_owned(),
                     prices: vec![crate::domain::ItemPriceInput {
                         item_id: item_id.clone(),
@@ -2772,6 +2792,7 @@ mod recalculation_tests {
             .apply_recalculation(
                 &cart.id,
                 RecalculationInput {
+                    tax_inclusive: None,
                     currency_code: "EUR".to_owned(),
                     prices: vec![crate::domain::ItemPriceInput {
                         item_id: cart.items[0].id.clone(),

@@ -37,6 +37,11 @@ pub struct CartContext {
     pub sales_channel_id: Option<String>,
     /// Tax region pinned by the cart's store region, when configured.
     pub tax_region_id: Option<String>,
+    /// Whether the store's listed prices already include tax.
+    ///
+    /// Stores that quote gross prices (most of the EU, for example) must have
+    /// the tax extracted from the listed amount rather than added on top of it.
+    pub prices_include_tax: bool,
     /// Evaluation timestamp.
     pub at: Timestamp,
 }
@@ -51,6 +56,7 @@ impl CartContext {
             customer_group_ids: Vec::new(),
             sales_channel_id: None,
             tax_region_id: None,
+            prices_include_tax: false,
             at: now_timestamp(),
         }
     }
@@ -73,6 +79,13 @@ impl CartContext {
     #[must_use]
     pub fn with_tax_region(mut self, region_id: impl Into<String>) -> Self {
         self.tax_region_id = Some(region_id.into());
+        self
+    }
+
+    /// Declares whether the store's listed prices already include tax.
+    #[must_use]
+    pub fn with_inclusive_pricing(mut self, inclusive: bool) -> Self {
+        self.prices_include_tax = inclusive;
         self
     }
 }
@@ -166,7 +179,7 @@ impl CartWorkflow {
                     unit_price: price.amount,
                     currency_code: price.currency.to_string(),
                     quantity,
-                    is_tax_inclusive: false,
+                    is_tax_inclusive: context.prices_include_tax,
                     requires_shipping: true,
                     metadata: Metadata::empty(),
                 },
@@ -212,7 +225,7 @@ impl CartWorkflow {
                     name: option.name.clone(),
                     amount: rate.amount_minor,
                     currency_code: rate.currency.to_string(),
-                    is_tax_inclusive: false,
+                    is_tax_inclusive: context.prices_include_tax,
                     data: serde_json::json!({
                         "rate_id": rate.rate_id,
                         "provider_id": option.provider_id,
@@ -479,7 +492,7 @@ impl CartWorkflow {
                             region_id,
                             category.as_ref(),
                             taxable,
-                            Some(item.is_tax_inclusive),
+                            Some(context.prices_include_tax),
                         )
                         .await?
                 }
@@ -490,7 +503,7 @@ impl CartWorkflow {
                             context.province_code.as_deref(),
                             category.as_ref(),
                             taxable,
-                            Some(item.is_tax_inclusive),
+                            Some(context.prices_include_tax),
                         )
                         .await?
                 }
@@ -518,7 +531,7 @@ impl CartWorkflow {
                             region_id,
                             None,
                             taxable,
-                            Some(method.is_tax_inclusive),
+                            Some(context.prices_include_tax),
                         )
                         .await?
                 }
@@ -529,7 +542,7 @@ impl CartWorkflow {
                             context.province_code.as_deref(),
                             None,
                             taxable,
-                            Some(method.is_tax_inclusive),
+                            Some(context.prices_include_tax),
                         )
                         .await?
                 }
@@ -559,6 +572,7 @@ impl CartWorkflow {
                     item_adjustments,
                     shipping_adjustments,
                     tax_lines,
+                    tax_inclusive: Some(context.prices_include_tax),
                 },
             )
             .await

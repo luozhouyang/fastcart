@@ -627,4 +627,8 @@ pub struct RecalculationInput {
     pub shipping_adjustments: Vec<AdjustmentInput>,
     /// Replacement tax lines; replaces every tax line on the cart.
     pub tax_lines: Vec<TaxLineInput>,
+    /// When set, every line and the shipping method are stamped with this
+    /// tax-inclusivity flag, so the stored snapshot follows the store's
+    /// pricing policy instead of whatever was recorded when the line was added.
+    pub tax_inclusive: Option<bool>,
 }

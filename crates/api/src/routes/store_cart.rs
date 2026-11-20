@@ -1067,8 +1067,32 @@ async fn cart_context(
         customer_group_ids,
         sales_channel_id: cart.sales_channel_id.clone(),
         tax_region_id,
+        prices_include_tax: prices_include_tax(db).await,
         at: now_timestamp(),
     })
+}
+
+/// Reads the store's `prices_include_tax` setting.
+///
+/// Stores that quote gross prices must have tax extracted from the listed
+/// amount rather than added on top. A missing or unreadable setting keeps the
+/// platform default (tax added on top, as most US stores quote prices).
+async fn prices_include_tax(db: &StoreDatabase) -> bool {
+    // Never fail a cart request over a settings read: fall back to the default.
+    match StoreService::new(db.clone())
+        .get_setting("prices_include_tax")
+        .await
+    {
+        Ok(Some(value)) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes"
+        ),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to read the tax-inclusive pricing setting");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
