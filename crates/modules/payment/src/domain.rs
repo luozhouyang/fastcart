@@ -19,6 +19,11 @@ pub enum PaymentStatus {
     RequiresAction,
     /// The provider authorized the amount without capturing it.
     Authorized,
+    /// Some, but not all, of the session amount was captured.
+    ///
+    /// The remaining amount may still be captured and the captured amount is
+    /// refundable.
+    PartiallyCaptured,
     /// The amount was captured.
     Captured,
     /// Some, but not all, of the captured amount was refunded.
@@ -39,6 +44,7 @@ impl PaymentStatus {
             Self::Pending => "pending",
             Self::RequiresAction => "requires_action",
             Self::Authorized => "authorized",
+            Self::PartiallyCaptured => "partially_captured",
             Self::Captured => "captured",
             Self::PartiallyRefunded => "partially_refunded",
             Self::Refunded => "refunded",
@@ -54,6 +60,7 @@ impl PaymentStatus {
             "pending" => Some(Self::Pending),
             "requires_action" => Some(Self::RequiresAction),
             "authorized" => Some(Self::Authorized),
+            "partially_captured" => Some(Self::PartiallyCaptured),
             "captured" => Some(Self::Captured),
             "partially_refunded" => Some(Self::PartiallyRefunded),
             "refunded" => Some(Self::Refunded),
@@ -84,17 +91,31 @@ impl PaymentStatus {
                 next,
                 Self::RequiresAction
                     | Self::Authorized
+                    | Self::PartiallyCaptured
                     | Self::Captured
                     | Self::Failed
                     | Self::Canceled
             ),
             Self::RequiresAction => matches!(
                 next,
-                Self::Authorized | Self::Captured | Self::Failed | Self::Canceled
+                Self::Authorized
+                    | Self::PartiallyCaptured
+                    | Self::Captured
+                    | Self::Failed
+                    | Self::Canceled
             ),
-            Self::Authorized => {
-                matches!(next, Self::Captured | Self::Failed | Self::Canceled)
-            }
+            Self::Authorized => matches!(
+                next,
+                Self::PartiallyCaptured | Self::Captured | Self::Failed | Self::Canceled
+            ),
+            // A partially captured session may still be completed or refunded,
+            // but it holds captured money, so failing or canceling it (which
+            // would drop that money from the session state) is not a valid
+            // transition.
+            Self::PartiallyCaptured => matches!(
+                next,
+                Self::PartiallyCaptured | Self::Captured | Self::PartiallyRefunded | Self::Refunded
+            ),
             Self::Captured => matches!(next, Self::PartiallyRefunded | Self::Refunded),
             Self::PartiallyRefunded => matches!(next, Self::PartiallyRefunded | Self::Refunded),
             Self::Failed | Self::Canceled | Self::Refunded => false,
