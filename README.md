@@ -121,6 +121,18 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_SMTP_HOST`, `FASTCART_SMTP_PORT`, `FASTCART_SMTP_USERNAME`,
   `FASTCART_SMTP_PASSWORD`, `FASTCART_SMTP_SECURITY` — SMTP delivery
 - `FASTCART_RESEND_API_KEY` — Resend delivery
+### Store settings
+
+Per-store settings live in the store database and are changed through the admin
+settings API. Two affect pricing:
+
+- `prices_include_tax` — when `true` (or `1`/`yes`), the catalog prices are
+  treated as gross and tax is extracted from them instead of being added at
+  checkout. Stores that quote gross prices (most of the EU, for example) must
+  set it, or customers are charged the listed price plus the tax rate on top.
+  The default is `false`, matching stores that quote net prices.
+- `confirmation_emails` — set to `false` to stop sending order confirmations.
+
 - `FASTCART_SSR_ENABLED` — enable the universal workerd runtime (requires an artifact)
 - `FASTCART_SSR_BINARY`, `FASTCART_SSR_ARTIFACT`, `FASTCART_SSR_RUNTIME_DIR` — pinned workerd binary, source artifact directory and runtime data directory
 - `FASTCART_SSR_LISTEN`, `FASTCART_SSR_DEPLOYMENT_ID`, `FASTCART_SSR_INTERNAL_TOKEN` — loopback listener, deployment identity and optional internal token
