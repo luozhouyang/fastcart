@@ -11,8 +11,8 @@ use fastcart_module_checkout::{
 };
 use fastcart_module_inventory::{InventoryService, ReservationLine, ReservationReference};
 use fastcart_module_order::{
-    CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, Order, OrderService,
-    OrderShippingMethod, OrderStatus, PaymentStatus as OrderPaymentStatus,
+    CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput, Order,
+    OrderService, OrderShippingMethod, OrderStatus, PaymentStatus as OrderPaymentStatus,
 };
 use fastcart_module_payment::{
     CreatePaymentSessionInput, Payment, PaymentService, PaymentStatus as PaymentSessionStatus,
@@ -577,6 +577,29 @@ impl CheckoutWorkflow {
             });
         }
 
+        // The per-rate breakdown is snapshotted so the collected tax can still
+        // be reconciled against a rate after the cart is gone.
+        let item_positions: HashMap<&str, usize> = cart
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (item.id.as_str(), index))
+            .collect();
+        let tax_lines: Vec<CreateOrderTaxLineInput> = cart
+            .tax_lines
+            .iter()
+            .map(|line| CreateOrderTaxLineInput {
+                item_index: line
+                    .cart_item_id
+                    .as_ref()
+                    .and_then(|id| item_positions.get(id.as_str()).copied()),
+                shipping_option_id: line.shipping_method_id.clone(),
+                name: line.name.clone(),
+                rate_bps: line.rate_bps,
+                amount: line.amount,
+                is_tax_inclusive: line.is_tax_inclusive,
+            })
+            .collect();
         let shipping_tax: i64 = cart
             .tax_lines
             .iter()
@@ -652,10 +675,13 @@ impl CheckoutWorkflow {
                 shipping_address: checkout.shipping_address.clone(),
                 billing_address: checkout.billing_address.clone(),
                 shipping_methods,
+                tax_lines,
+                region_id: cart.region_id.clone(),
+                sales_channel_id: cart.sales_channel_id.clone(),
                 subtotal,
                 discount_total,
                 shipping_total,
-                tax_total,
+                tax_total: cart.totals.tax_total,
                 total,
                 metadata: Metadata::empty(),
                 idempotency_key: Some(format!("checkout:{}", checkout.id.as_str())),

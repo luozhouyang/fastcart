@@ -2782,7 +2782,22 @@ mod tests {
         OrderEditAction, OrderEditItemInput, OrderEditStatus, ReceiveReturnInput,
         ReceiveReturnItemInput, ReturnItemInput, ReturnStatus, WriteOffReturnInput,
     };
-    use crate::domain::{CreateOrderInput, CreateOrderItemInput, Order, OrderStatus, RefundInput};
+    /// A single item-scoped tax line, matching what checkout snapshots.
+    fn tax_line(amount: i64) -> CreateOrderTaxLineInput {
+        CreateOrderTaxLineInput {
+            item_index: Some(0),
+            shipping_option_id: None,
+            name: "Sales tax".to_owned(),
+            rate_bps: 1_000,
+            amount,
+            is_tax_inclusive: false,
+        }
+    }
+
+    use crate::domain::{
+        CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput, Order, OrderStatus,
+        RefundInput,
+    };
 
     async fn service() -> OrderService {
         let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
@@ -3383,6 +3398,7 @@ mod tests {
                 discount_total: 200,
                 shipping_total: 500,
                 tax_total: 180,
+                tax_lines: vec![tax_line(180)],
                 total: 2_480,
                 shipping_address: json!({}),
                 billing_address: json!({}),
@@ -3668,7 +3684,21 @@ mod allocation_tests {
 
     use super::OrderService;
     use crate::after_sales::{CreateOrderEditInput, OrderEditAction, OrderEditItemInput};
-    use crate::domain::{CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput};
+    use crate::domain::{
+        CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput,
+    };
+
+    /// A single item-scoped tax line, matching what checkout snapshots.
+    fn tax_line(amount: i64) -> CreateOrderTaxLineInput {
+        CreateOrderTaxLineInput {
+            item_index: Some(0),
+            shipping_option_id: None,
+            name: "Sales tax".to_owned(),
+            rate_bps: 1_000,
+            amount,
+            is_tax_inclusive: false,
+        }
+    }
 
     #[tokio::test]
     async fn confirming_a_removal_scales_order_level_allocations_proportionally() {
@@ -3698,6 +3728,7 @@ mod allocation_tests {
                 discount_total: 201,
                 shipping_total: 500,
                 tax_total: 179,
+                tax_lines: vec![tax_line(179)],
                 total: 2_377,
                 shipping_address: json!({}),
                 billing_address: json!({}),
@@ -3788,6 +3819,7 @@ mod allocation_tests {
                 discount_total: 200,
                 shipping_total: 500,
                 tax_total: 180,
+                tax_lines: vec![tax_line(180)],
                 total: 2_480,
                 shipping_address: json!({}),
                 billing_address: json!({}),

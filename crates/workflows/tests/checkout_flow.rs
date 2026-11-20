@@ -229,7 +229,19 @@ async fn complete_checkout_flow_is_consistent_and_idempotent() {
     assert_eq!(completed.order.total, 4_510);
     assert_eq!(completed.order.subtotal, 4_000);
     assert_eq!(completed.order.discount_total, 400);
-    assert_eq!(completed.order.tax_total, 360);
+    // The order records the tax that was actually collected: 360 on the items
+    // plus 50 on shipping, matching the cart it was placed from.
+    assert_eq!(completed.order.tax_total, 410);
+    assert_eq!(completed.order.tax_lines.len(), 2);
+    assert_eq!(
+        completed
+            .order
+            .tax_lines
+            .iter()
+            .map(|line| line.amount)
+            .sum::<i64>(),
+        completed.order.tax_total
+    );
     assert_eq!(
         completed.order.status,
         fastcart_module_order::OrderStatus::Confirmed

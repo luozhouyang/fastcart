@@ -260,6 +260,10 @@ pub struct Order {
     pub shipping_methods: Vec<OrderShippingMethod>,
     /// Free-form metadata.
     pub metadata: Metadata,
+    /// Store region the order was placed in, when the cart had one.
+    pub region_id: Option<String>,
+    /// Sales channel the order was placed through, when the cart had one.
+    pub sales_channel_id: Option<String>,
     /// Creation timestamp in Unix seconds.
     pub created_at: Timestamp,
     /// Last update timestamp in Unix seconds.
@@ -268,6 +272,8 @@ pub struct Order {
     pub canceled_at: Option<Timestamp>,
     /// Line items.
     pub items: Vec<OrderItem>,
+    /// Per-rate tax breakdown, snapshotted from the cart.
+    pub tax_lines: Vec<OrderTaxLine>,
     /// Order-level adjustments.
     pub adjustments: Vec<OrderAdjustment>,
     /// Status history, oldest first.
@@ -276,6 +282,33 @@ pub struct Order {
     pub fulfillments: Vec<OrderFulfillment>,
     /// Refund records.
     pub refunds: Vec<OrderRefund>,
+}
+
+/// A tax line as it was levied when the order was placed.
+///
+/// Collapsing tax into `orders.tax_total` made the collected amount impossible
+/// to reconcile against a rate, so invoices and filings could not be produced
+/// from the order alone.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OrderTaxLine {
+    /// Tax line identifier.
+    pub id: String,
+    /// Owning order.
+    pub order_id: OrderId,
+    /// Line item the tax was levied on, absent for taxes levied on shipping.
+    pub order_item_id: Option<LineItemId>,
+    /// Shipping option the tax was levied on, absent for item taxes.
+    pub shipping_option_id: Option<String>,
+    /// Human-readable rate name at purchase time.
+    pub name: String,
+    /// Rate in basis points.
+    pub rate_bps: i64,
+    /// Tax amount in minor units.
+    pub amount: i64,
+    /// Whether the amount is already contained in the price.
+    pub is_tax_inclusive: bool,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: Timestamp,
 }
 
 /// A historical snapshot of one purchased line item.
@@ -498,6 +531,27 @@ pub struct CreateAdjustmentInput {
     pub description: Option<String>,
 }
 
+/// Input for one tax line of [`crate::OrderService::create_order`].
+///
+/// The line is scoped to a purchased item by its position in `items` because
+/// item identifiers are generated while the order is inserted; a line with no
+/// `item_index` is levied on shipping.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreateOrderTaxLineInput {
+    /// Position of the taxed item in `CreateOrderInput::items`.
+    pub item_index: Option<usize>,
+    /// Shipping option the tax was levied on, for a shipping tax line.
+    pub shipping_option_id: Option<String>,
+    /// Human-readable rate name.
+    pub name: String,
+    /// Rate in basis points.
+    pub rate_bps: i64,
+    /// Tax amount in minor units.
+    pub amount: i64,
+    /// Whether the amount is already contained in the price.
+    pub is_tax_inclusive: bool,
+}
+
 /// Input for [`crate::OrderService::create_order`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreateOrderInput {
@@ -518,6 +572,15 @@ pub struct CreateOrderInput {
     /// Shipping methods selected at checkout.
     #[serde(default)]
     pub shipping_methods: Vec<OrderShippingMethod>,
+    /// Per-rate tax breakdown; its amounts must sum to `tax_total`.
+    #[serde(default)]
+    pub tax_lines: Vec<CreateOrderTaxLineInput>,
+    /// Store region the order was placed in, when the cart had one.
+    #[serde(default)]
+    pub region_id: Option<String>,
+    /// Sales channel the order was placed through, when the cart had one.
+    #[serde(default)]
+    pub sales_channel_id: Option<String>,
     /// Sum of item subtotals in minor units.
     pub subtotal: i64,
     /// Sum of item discounts in minor units.

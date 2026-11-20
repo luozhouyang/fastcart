@@ -20,9 +20,10 @@ pub use after_sales::{
     ReturnStatus, WriteOffReturnInput, WriteOffReturnItemInput,
 };
 pub use domain::{
-    CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, FulfillmentInput,
-    FulfillmentItemInput, FulfillmentStatus, Order, OrderAdjustment, OrderFilter, OrderFulfillment,
-    OrderFulfillmentItem, OrderItem, OrderItemAdjustment, OrderRefund, OrderShippingMethod,
-    OrderStatus, OrderStatusHistory, PaymentStatus, RefundInput, RefundStatus,
+    CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput,
+    FulfillmentInput, FulfillmentItemInput, FulfillmentStatus, Order, OrderAdjustment, OrderFilter,
+    OrderFulfillment, OrderFulfillmentItem, OrderItem, OrderItemAdjustment, OrderRefund,
+    OrderShippingMethod, OrderStatus, OrderStatusHistory, OrderTaxLine, PaymentStatus, RefundInput,
+    RefundStatus,
 };
 pub use service::OrderService;

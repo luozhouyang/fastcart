@@ -12,10 +12,10 @@ use fastcart_kernel::{
 use serde_json::Value;
 
 use crate::domain::{
-    CreateAdjustmentInput, CreateOrderInput, FulfillmentInput, FulfillmentStatus, Order,
-    OrderAdjustment, OrderFilter, OrderFulfillment, OrderFulfillmentItem, OrderItem,
-    OrderItemAdjustment, OrderRefund, OrderShippingMethod, OrderStatus, OrderStatusHistory,
-    PaymentStatus, RefundInput, RefundStatus,
+    CreateAdjustmentInput, CreateOrderInput, CreateOrderTaxLineInput, FulfillmentInput,
+    FulfillmentStatus, Order, OrderAdjustment, OrderFilter, OrderFulfillment, OrderFulfillmentItem,
+    OrderItem, OrderItemAdjustment, OrderRefund, OrderShippingMethod, OrderStatus,
+    OrderStatusHistory, OrderTaxLine, PaymentStatus, RefundInput, RefundStatus,
 };
 
 /// Scope used for order-creation idempotency keys.
@@ -45,15 +45,19 @@ struct OrderRow {
     billing_address: String,
     shipping_methods: String,
     metadata: String,
+    region_id: Option<String>,
+    sales_channel_id: Option<String>,
     created_at: i64,
     updated_at: i64,
     canceled_at: Option<i64>,
 }
 
 impl OrderRow {
+    #[allow(clippy::too_many_arguments)]
     fn into_order(
         self,
         items: Vec<OrderItem>,
+        tax_lines: Vec<OrderTaxLine>,
         adjustments: Vec<OrderAdjustment>,
         status_history: Vec<OrderStatusHistory>,
         fulfillments: Vec<OrderFulfillment>,
@@ -78,10 +82,13 @@ impl OrderRow {
             billing_address: json_value(&self.billing_address),
             shipping_methods: parse_shipping_methods(&self.shipping_methods)?,
             metadata: Metadata::from_json_str(&self.metadata),
+            region_id: self.region_id,
+            sales_channel_id: self.sales_channel_id,
             created_at: self.created_at,
             updated_at: self.updated_at,
             canceled_at: self.canceled_at,
             items,
+            tax_lines,
             adjustments,
             status_history,
             fulfillments,
@@ -160,6 +167,36 @@ impl ItemAdjustmentRow {
             code: self.code,
             amount: self.amount,
             description: self.description,
+            created_at: self.created_at,
+        }
+    }
+}
+
+/// Persistence row for `order_tax_lines`.
+#[derive(sqlx::FromRow)]
+struct OrderTaxLineRow {
+    id: String,
+    order_id: String,
+    order_item_id: Option<String>,
+    shipping_option_id: Option<String>,
+    name: String,
+    rate_bps: i64,
+    amount: i64,
+    is_tax_inclusive: i64,
+    created_at: i64,
+}
+
+impl OrderTaxLineRow {
+    fn into_domain(self) -> OrderTaxLine {
+        OrderTaxLine {
+            id: self.id,
+            order_id: OrderId::from_string(self.order_id),
+            order_item_id: self.order_item_id.map(LineItemId::from_string),
+            shipping_option_id: self.shipping_option_id,
+            name: self.name,
+            rate_bps: self.rate_bps,
+            amount: self.amount,
+            is_tax_inclusive: self.is_tax_inclusive != 0,
             created_at: self.created_at,
         }
     }
@@ -340,6 +377,9 @@ struct ResolvedOrder {
     shipping_address: Value,
     billing_address: Value,
     shipping_methods: Vec<OrderShippingMethod>,
+    tax_lines: Vec<CreateOrderTaxLineInput>,
+    region_id: Option<String>,
+    sales_channel_id: Option<String>,
     subtotal: i64,
     discount_total: i64,
     shipping_total: i64,
@@ -518,7 +558,8 @@ impl OrderService {
             "SELECT id, display_number, customer_id, email, currency_code, status,
                     payment_status, fulfillment_status, refund_status, subtotal,
                     discount_total, shipping_total, tax_total, total, shipping_address,
-                    billing_address, shipping_methods, metadata, created_at, updated_at, canceled_at
+                    billing_address, shipping_methods, metadata, region_id, sales_channel_id, \
+                    created_at, updated_at, canceled_at
              FROM orders{where_clause}
              ORDER BY created_at DESC, display_number DESC
              LIMIT ? OFFSET ?"
@@ -1474,8 +1515,9 @@ impl OrderService {
                 id, display_number, customer_id, email, currency_code, status,
                 payment_status, fulfillment_status, refund_status, subtotal,
                 discount_total, shipping_total, tax_total, total, shipping_address,
-                billing_address, shipping_methods, metadata, created_at, updated_at, canceled_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                billing_address, shipping_methods, metadata, region_id,
+                sales_channel_id, created_at, updated_at, canceled_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
         )
         .bind(order_id.as_str())
         .bind(display_number)
@@ -1495,6 +1537,8 @@ impl OrderService {
         .bind(json_text(&order.billing_address)?)
         .bind(json_text(&order.shipping_methods)?)
         .bind(order.metadata.to_json_string())
+        .bind(order.region_id.as_deref())
+        .bind(order.sales_channel_id.as_deref())
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
@@ -1507,8 +1551,10 @@ impl OrderService {
             return Err(CreateAttemptError::Failed(database_error(error)));
         }
 
+        let mut item_ids = Vec::with_capacity(order.items.len());
         for item in &order.items {
             let item_id = LineItemId::new();
+            item_ids.push(item_id.clone());
             sqlx::query(
                 "INSERT INTO order_items (
                     id, order_id, product_id, variant_id, product_title, variant_title,
@@ -1555,6 +1601,41 @@ impl OrderService {
                 .await
                 .map_err(|error| CreateAttemptError::Failed(database_error(error)))?;
             }
+        }
+
+        for line in &order.tax_lines {
+            let order_item_id = match line.item_index {
+                Some(index) => Some(
+                    item_ids
+                        .get(index)
+                        .ok_or_else(|| {
+                            CreateAttemptError::Failed(AppError::validation(format!(
+                                "tax line references item {index}, which the order does not have"
+                            )))
+                        })?
+                        .as_str()
+                        .to_owned(),
+                ),
+                None => None,
+            };
+            sqlx::query(
+                "INSERT INTO order_tax_lines (
+                    id, order_id, order_item_id, shipping_option_id, name, rate_bps,
+                    amount, is_tax_inclusive, created_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(EventId::new().as_str())
+            .bind(order_id.as_str())
+            .bind(order_item_id.as_deref())
+            .bind(line.shipping_option_id.as_deref())
+            .bind(&line.name)
+            .bind(line.rate_bps)
+            .bind(line.amount)
+            .bind(if line.is_tax_inclusive { 1 } else { 0 })
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| CreateAttemptError::Failed(database_error(error)))?;
         }
 
         for adjustment in &order.adjustments {
@@ -1825,11 +1906,35 @@ impl OrderService {
                 .push(row.into_domain());
         }
 
+        let mut tax_lines_by_order: HashMap<String, Vec<OrderTaxLine>> = HashMap::new();
+        let tax_lines_query_sql = format!(
+            "SELECT id, order_id, order_item_id, shipping_option_id, name, rate_bps, \
+                    amount, is_tax_inclusive, created_at \
+             FROM order_tax_lines WHERE order_id IN ({order_placeholders}) \
+             ORDER BY created_at ASC, rowid ASC"
+        );
+        let mut tax_lines_query = sqlx::query_as::<_, OrderTaxLineRow>(&tax_lines_query_sql);
+        for id in &ids {
+            tax_lines_query = tax_lines_query.bind(id);
+        }
+        for row in tax_lines_query
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?
+        {
+            let order_id = row.order_id.clone();
+            tax_lines_by_order
+                .entry(order_id)
+                .or_default()
+                .push(row.into_domain());
+        }
+
         let mut orders = Vec::with_capacity(rows.len());
         for row in rows {
             let id = row.id.clone();
             orders.push(row.into_order(
                 items_by_order.remove(&id).unwrap_or_default(),
+                tax_lines_by_order.remove(&id).unwrap_or_default(),
                 adjustments_by_order.remove(&id).unwrap_or_default(),
                 history_by_order.remove(&id).unwrap_or_default(),
                 fulfillments_by_order.remove(&id).unwrap_or_default(),
@@ -1844,7 +1949,8 @@ impl OrderService {
             "SELECT id, display_number, customer_id, email, currency_code, status,
                     payment_status, fulfillment_status, refund_status, subtotal,
                     discount_total, shipping_total, tax_total, total, shipping_address,
-                    billing_address, shipping_methods, metadata, created_at, updated_at, canceled_at
+                    billing_address, shipping_methods, metadata, region_id, sales_channel_id, \
+                    created_at, updated_at, canceled_at
              FROM orders WHERE id = ?",
         )
         .bind(id.as_str())
@@ -1895,6 +2001,21 @@ impl OrderService {
                 let adjustments = item_adjustments.remove(&row.id).unwrap_or_default();
                 row.into_domain(adjustments)
             })
+            .collect();
+
+        let tax_line_rows = sqlx::query_as::<_, OrderTaxLineRow>(
+            "SELECT id, order_id, order_item_id, shipping_option_id, name, rate_bps,
+                    amount, is_tax_inclusive, created_at
+             FROM order_tax_lines WHERE order_id = ?
+             ORDER BY created_at ASC, rowid ASC",
+        )
+        .bind(id.as_str())
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let tax_lines = tax_line_rows
+            .into_iter()
+            .map(OrderTaxLineRow::into_domain)
             .collect();
 
         let order_adjustment_rows = sqlx::query_as::<_, AdjustmentRow>(
@@ -1975,7 +2096,14 @@ impl OrderService {
             .map(RefundRow::into_domain)
             .collect();
 
-        row.into_order(items, adjustments, status_history, fulfillments, refunds)
+        row.into_order(
+            items,
+            tax_lines,
+            adjustments,
+            status_history,
+            fulfillments,
+            refunds,
+        )
     }
 }
 
@@ -2160,10 +2288,34 @@ fn resolve_order(input: CreateOrderInput) -> Result<ResolvedOrder, AppError> {
             input.discount_total
         )));
     }
-    if input.tax_total != computed_tax {
+    // Tax is validated against its breakdown rather than against the item
+    // totals: an order can also be taxed on shipping, and a total nobody can
+    // reconcile against a rate is not reportable.
+    let mut computed_tax_total = 0_i64;
+    for line in &input.tax_lines {
+        if let Some(index) = line.item_index
+            && index >= items.len()
+        {
+            return Err(AppError::validation(format!(
+                "tax line references item {index}, which the order does not have"
+            )));
+        }
+        if line.rate_bps < 0 {
+            return Err(AppError::validation("tax rate must not be negative"));
+        }
+        computed_tax_total = computed_tax_total
+            .checked_add(line.amount)
+            .ok_or_else(|| AppError::validation("tax amount overflow"))?;
+    }
+    if input.tax_total != computed_tax_total {
         return Err(AppError::validation(format!(
-            "order tax_total {} does not match item taxes {computed_tax}",
+            "order tax_total {} does not match its tax lines {computed_tax_total}",
             input.tax_total
+        )));
+    }
+    if computed_tax > computed_tax_total {
+        return Err(AppError::validation(format!(
+            "item taxes {computed_tax} exceed the order tax lines {computed_tax_total}"
         )));
     }
 
@@ -2193,6 +2345,9 @@ fn resolve_order(input: CreateOrderInput) -> Result<ResolvedOrder, AppError> {
         shipping_address: input.shipping_address,
         billing_address: input.billing_address,
         shipping_methods: input.shipping_methods,
+        tax_lines: input.tax_lines,
+        region_id: input.region_id,
+        sales_channel_id: input.sales_channel_id,
         subtotal: input.subtotal,
         discount_total: input.discount_total,
         shipping_total: input.shipping_total,
