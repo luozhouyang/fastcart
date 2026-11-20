@@ -523,7 +523,6 @@ impl CheckoutWorkflow {
 
         let mut items = Vec::with_capacity(cart.items.len());
         let mut items_total = 0_i64;
-        let mut tax_total = 0_i64;
         for (index, item) in cart.items.iter().enumerate() {
             let line_subtotal = item
                 .unit_price
@@ -546,7 +545,6 @@ impl CheckoutWorkflow {
                 .map(|line| line.amount)
                 .sum();
             let line_total = line_subtotal - discount + exclusive_tax;
-            tax_total += line_tax;
             items_total += line_total;
             items.push(CreateOrderItemInput {
                 product_id: Some(item.product_id.clone()),
