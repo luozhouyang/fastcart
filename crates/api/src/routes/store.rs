@@ -67,6 +67,7 @@ fn store_routes() -> Router<Arc<AppContext>> {
         .merge(super::store_content::router())
         .merge(super::store_context::router())
         .merge(super::store_inventory::router())
+        .merge(super::store_payment::router())
         .merge(super::store_inquiry::router())
         .merge(super::store_theme::router())
         .merge(super::store_regions::router())

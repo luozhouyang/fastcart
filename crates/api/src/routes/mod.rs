@@ -32,6 +32,7 @@ pub mod store_context;
 pub mod store_customer;
 pub mod store_inquiry;
 pub mod store_inventory;
+pub mod store_payment;
 pub mod store_regions;
 pub mod store_theme;
 pub mod storefront;

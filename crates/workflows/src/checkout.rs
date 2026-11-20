@@ -4,7 +4,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use fastcart_infrastructure::StoreDatabase;
-use fastcart_kernel::{AppError, CartId, CheckoutId, Metadata, PaymentSessionId, now_timestamp};
+use fastcart_kernel::{
+    AppError, CartId, CheckoutId, Metadata, OrderId, PaymentSessionId, now_timestamp,
+};
 use fastcart_module_catalog::CatalogService;
 use fastcart_module_checkout::{
     CheckoutService, CheckoutSession, CheckoutStatus, CreateCheckoutInput,
@@ -814,6 +816,18 @@ impl CheckoutWorkflow {
         // leaves the usage keyed to the checkout; replaying converges here.
         self.reassign_promotion_usage(&checkout.id, order.id.as_str())
             .await;
+        // A crash between placement and the collection being linked leaves the
+        // collection of a placed checkout unnamed. The order is already placed
+        // and paid, so a failed link is logged instead of failing the replay;
+        // the next replay converges.
+        if let Err(error) = self.link_collection_to_order(&checkout.id, &order.id).await {
+            tracing::warn!(
+                checkout_id = %checkout.id,
+                order_id = %order.id,
+                error = %error,
+                "failed to link the checkout payment collection to its order"
+            );
+        }
         if let Ok(cart) = self.carts.get_cart(&checkout.cart_id).await {
             // A crash between placement and cart completion leaves an open
             // cart behind an already placed checkout. Completing it here makes
@@ -894,6 +908,30 @@ impl CheckoutWorkflow {
         Ok((payment, additional))
     }
 
+    /// Links the checkout's payment collection to the order it paid for.
+    ///
+    /// The collection is the money the checkout owed, and the order is where
+    /// that money ends up. A checkout with no collection — one from before
+    /// collections existed — has nothing to link. The link is idempotent, so a
+    /// replay converges on the same record instead of failing.
+    async fn link_collection_to_order(
+        &self,
+        checkout_id: &CheckoutId,
+        order_id: &OrderId,
+    ) -> Result<(), AppError> {
+        let Some(collection) = self
+            .payment
+            .collection_for_checkout(checkout_id.as_str())
+            .await?
+        else {
+            return Ok(());
+        };
+        self.payment
+            .assign_collection_to_order(collection.id.as_str(), order_id)
+            .await?;
+        Ok(())
+    }
+
     async fn finish_order(
         &self,
         checkout: &CheckoutSession,
@@ -925,6 +963,10 @@ impl CheckoutWorkflow {
                 .assign_order(additional.id.as_str(), &order.id)
                 .await?;
         }
+        // The collection is the money this order owes, so from here on it must
+        // name the order: a later charge, refund or report finds it that way.
+        self.link_collection_to_order(&checkout.id, &order.id)
+            .await?;
         let mut order = self.order.get(&order.id).await?;
         if order.payment_status != OrderPaymentStatus::Captured {
             match self
