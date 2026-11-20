@@ -24,6 +24,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - **Rust performance.** Async Rust with Axum and Tokio, integer money, explicit module boundaries.
 - **Medusa-style modules.** Catalog, pricing, inventory, customer, cart, promotion, checkout, order, payment, shipping, tax, content and webhooks are independent crates; workflows compose them.
 - **Extensible core.** Provider interfaces, capability-scoped plugin manifests, a transactional outbox, a persistent job queue, and an auditable AI tool registry.
+- **Honest about what is wired.** The checkout money path fenced and compensated by hand; the generic workflow engine in `crates/workflows/src/engine.rs` is tested but not yet used by any production workflow ([ADR 0010](.livingdocs/adr/0010-checkout-keeps-hand-rolled-compensation.md)).
 
 ## Implemented backend
 

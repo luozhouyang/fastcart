@@ -939,10 +939,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastcart-commerce"
-version = "0.1.0"
-
-[[package]]
 name = "fastcart-email"
 version = "0.1.0"
 dependencies = [

@@ -4,7 +4,6 @@ members = [
     "apps/server",
     "crates/kernel",
     "crates/platform",
-    "crates/commerce",
     "crates/infrastructure",
     "crates/http",
     "crates/workflows",
@@ -92,7 +91,6 @@ uuid = { version = "1.29.0", features = ["v7", "serde"] }
 
 fastcart-ai = { path = "crates/ai" }
 fastcart-api = { path = "crates/api" }
-fastcart-commerce = { path = "crates/commerce" }
 fastcart-http = { path = "crates/http" }
 fastcart-infrastructure = { path = "crates/infrastructure" }
 fastcart-kernel = { path = "crates/kernel" }
