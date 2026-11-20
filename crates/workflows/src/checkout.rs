@@ -1250,6 +1250,18 @@ impl CheckoutWorkflow {
                     adjustment.amount.max(0);
             }
         }
+        // An order-target promotion is applied to the cart itself and leaves no
+        // adjustment behind, so its cart-level row is the only record that it
+        // was used. A row that granted nothing — the marker a coupon leaves
+        // before anything applies — is not a use and stays out of the claim.
+        for discount in &cart.discounts {
+            if discount.amount <= 0 {
+                continue;
+            }
+            if let Some(promotion_id) = discount.promotion_id.as_ref() {
+                *promotions.entry(promotion_id.to_string()).or_default() += discount.amount;
+            }
+        }
         promotions
     }
 
