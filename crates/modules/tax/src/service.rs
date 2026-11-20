@@ -755,6 +755,47 @@ impl TaxService {
         Ok(None)
     }
 
+    /// Finds the tax region that governs a destination, whether or not any of
+    /// its rates apply.
+    ///
+    /// [`Self::resolve_rate`] answers "what rate applies here" and returns
+    /// `None` both when the store does not tax the destination at all and when
+    /// a region governs it but no rate matches the line. Those two are not the
+    /// same situation: the first is a legitimate configuration, the second
+    /// silently sells the line untaxed, so callers need to tell them apart.
+    ///
+    /// The ordering matches [`Self::resolve_rate`]: a province-specific region
+    /// first, then the country-wide one.
+    pub async fn region_for_destination(
+        &self,
+        country_code: &CountryCode,
+        province_code: Option<&str>,
+    ) -> Result<Option<TaxRegion>, AppError> {
+        let province_code = normalize_province(province_code);
+        let rows = sqlx::query(&format!(
+            "SELECT {REGION_COLUMNS} FROM tax_regions WHERE country_code = ?"
+        ))
+        .bind(country_code.as_str())
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        let regions = rows
+            .iter()
+            .map(row_to_region)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if province_code.is_some()
+            && let Some(region) = regions
+                .iter()
+                .find(|region| region.province_code == province_code)
+        {
+            return Ok(Some(region.clone()));
+        }
+        Ok(regions
+            .into_iter()
+            .find(|region| region.province_code.is_none()))
+    }
+
     /// Calculates tax for one line using a store-configured tax region.
     ///
     /// Region-scoped pricing must use the region's tax region even when the

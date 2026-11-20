@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::ShippingOptionId;
 use fastcart_kernel::{
-    AppError, CartId, CountryCode, LineItemId, Metadata, PromotionId, TaxCategoryId, Timestamp,
-    VariantId, now_timestamp,
+    AppError, CartId, CountryCode, LineItemId, Metadata, PromotionId, TaxCategoryId, TaxRegionId,
+    Timestamp, VariantId, now_timestamp,
 };
 use fastcart_module_cart::{
     AddItemInput, AdjustmentInput, Cart, CartService, CreateCartInput, DiscountInput,
@@ -469,6 +469,23 @@ impl CartWorkflow {
             .map(|item| item.variant_id.to_string())
             .collect();
         let variants = self.catalog.get_variants(&variant_ids).await?;
+        // "No region covers this destination" is a legitimate configuration;
+        // "a region covers it but no rate applies to this line" is a
+        // misconfiguration that would otherwise sell the line untaxed with
+        // nothing in the data to show why. Resolve the governing region once so
+        // the two can be told apart.
+        let governing_region = match context.tax_region_id.as_deref() {
+            Some(region_id) => self
+                .tax
+                .get_region(&TaxRegionId::from_string(region_id.to_owned()))
+                .await
+                .ok(),
+            None => {
+                self.tax
+                    .region_for_destination(&context.country_code, context.province_code.as_deref())
+                    .await?
+            }
+        };
         let mut tax_lines = Vec::new();
         for (index, item) in cart.items.iter().enumerate() {
             let line_subtotal = prices[index]
@@ -508,8 +525,8 @@ impl CartWorkflow {
                         .await?
                 }
             };
-            if tax.rate.is_some() {
-                tax_lines.push(TaxLineInput {
+            match (&tax.rate, &governing_region) {
+                (Some(_), _) => tax_lines.push(TaxLineInput {
                     name: tax
                         .rate
                         .as_ref()
@@ -519,7 +536,16 @@ impl CartWorkflow {
                     is_tax_inclusive: tax.is_inclusive,
                     cart_item_id: Some(item.id.clone()),
                     shipping_method_id: None,
-                });
+                }),
+                (None, Some(region)) => tax_lines.push(TaxLineInput {
+                    name: no_rate_label(&region.name),
+                    rate_bps: 0,
+                    amount: 0,
+                    is_tax_inclusive: false,
+                    cart_item_id: Some(item.id.clone()),
+                    shipping_method_id: None,
+                }),
+                (None, None) => {}
             }
         }
         if let Some(method) = cart.shipping_methods.first() {
@@ -547,8 +573,8 @@ impl CartWorkflow {
                         .await?
                 }
             };
-            if tax.rate.is_some() {
-                tax_lines.push(TaxLineInput {
+            match (&tax.rate, &governing_region) {
+                (Some(_), _) => tax_lines.push(TaxLineInput {
                     name: tax
                         .rate
                         .as_ref()
@@ -558,7 +584,16 @@ impl CartWorkflow {
                     is_tax_inclusive: tax.is_inclusive,
                     cart_item_id: None,
                     shipping_method_id: Some(method.shipping_option_id.to_string()),
-                });
+                }),
+                (None, Some(region)) => tax_lines.push(TaxLineInput {
+                    name: no_rate_label(&region.name),
+                    rate_bps: 0,
+                    amount: 0,
+                    is_tax_inclusive: false,
+                    cart_item_id: None,
+                    shipping_method_id: Some(method.shipping_option_id.to_string()),
+                }),
+                (None, None) => {}
             }
         }
 
@@ -581,5 +616,20 @@ impl CartWorkflow {
     /// Completes a cart after an order was placed.
     pub async fn complete_cart(&self, cart_id: &CartId) -> Result<Cart, AppError> {
         self.cart.complete_cart(cart_id).await
+    }
+}
+
+/// Names the tax line recorded when a region governs a destination but no rate
+/// matched the line.
+///
+/// The name has to fit the cart's 160-character limit even when a merchant
+/// chose a long region name, and a rejection here would fail the whole
+/// recalculation over a label.
+fn no_rate_label(region_name: &str) -> String {
+    let label = format!("No tax rate for {region_name}");
+    if label.chars().count() > 160 {
+        "No matching tax rate".to_owned()
+    } else {
+        label
     }
 }
