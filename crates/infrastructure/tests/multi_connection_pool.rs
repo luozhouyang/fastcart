@@ -72,6 +72,20 @@ async fn in_memory_pools_are_pinned_to_a_single_connection() {
 }
 
 #[tokio::test]
+async fn a_memory_backed_path_is_rejected() {
+    // SQLite `:memory:` databases are private to each connection, so a
+    // multi-connection pool over `:memory:` would silently give every task an
+    // empty schema. The constructor refuses instead.
+    let error = StoreDatabase::file_backed_multi_connection(StoreId::new(), ":memory:", 4)
+        .await
+        .expect_err("a memory-backed multi-connection store must be rejected");
+    assert!(
+        error.to_string().contains("needs a file path"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn a_naive_read_modify_write_loses_an_update_on_this_harness() {
     // Counterexample, deliberately asserting the *bug*: two writers that read a
     // value and write `read + 1` back are interleaved here and one increment is

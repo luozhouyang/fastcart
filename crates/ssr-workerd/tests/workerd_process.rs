@@ -35,11 +35,17 @@ async fn collect_body(body: SsrBody) -> Vec<u8> {
 }
 
 #[tokio::test]
+#[ignore = "requires the workerd binary; run with --ignored"]
 async fn starts_proxies_and_stops_workerd() {
-    let Some(binary) = workerd_binary() else {
-        eprintln!("skipping: set FASTCART_WORKERD_BIN or install experiments/workerd/bin/workerd");
-        return;
-    };
+    let binary = workerd_binary().unwrap_or_else(|| {
+        panic!(
+            "workerd binary not found. This test is ignored by default because the binary is not \
+             installed in CI; run it explicitly once you have it: set FASTCART_WORKERD_BIN to the \
+             workerd executable or install it at experiments/workerd/bin/workerd (see \
+             scripts/install-workerd.sh), then run `cargo test -p fastcart-ssr-workerd \
+             --test workerd_process -- --ignored`."
+        )
+    });
     let port = free_port();
     let directory = tempfile::tempdir().expect("temp dir");
     std::fs::write(
