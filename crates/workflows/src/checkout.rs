@@ -285,6 +285,35 @@ impl CheckoutWorkflow {
             }
         };
 
+        // The collection is the money this checkout owes. It holds the one
+        // session that pays it; a combination payment attaches further sessions
+        // to the collection before the checkout is completed.
+        let collection = match self
+            .payment
+            .create_collection(
+                checkout.id.as_str(),
+                cart.totals.total,
+                cart.currency_code.as_str(),
+            )
+            .await
+        {
+            Ok(collection) => collection,
+            Err(error) => {
+                self.abort_checkout_creation(&checkout, &error, Some(&session.id))
+                    .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .payment
+            .attach_session_to_collection(collection.id.as_str(), session.id.as_str())
+            .await
+        {
+            self.abort_checkout_creation(&checkout, &error, Some(&session.id))
+                .await;
+            return Err(error);
+        }
+
         match self
             .checkout
             .attach_payment_session(&checkout.id, &session.id)
@@ -497,7 +526,9 @@ impl CheckoutWorkflow {
 
         // Capture before marking the checkout as confirmed. A session that
         // looks paid but was never captured must never reach order placement.
-        let payment = self.payment.capture(payment_session_id.as_str()).await?;
+        let (payment, combination_payments) = self
+            .capture_checkout_payments(&checkout_id, &payment_session_id)
+            .await?;
         if payment.status != PaymentSessionStatus::Captured {
             return Err(AppError::conflict(format!(
                 "payment is in state {} and cannot complete this checkout",
@@ -523,8 +554,14 @@ impl CheckoutWorkflow {
                             CheckoutStatus::Failed | CheckoutStatus::Canceled => {
                                 // The checkout was expired while we captured.
                                 // Refund the customer rather than orphan money.
-                                self.compensate(&latest, &payment, None, placement_token)
-                                    .await;
+                                self.compensate(
+                                    &latest,
+                                    &payment,
+                                    &combination_payments,
+                                    None,
+                                    placement_token,
+                                )
+                                .await;
                                 return Err(error);
                             }
                             _ => return Err(error),
@@ -709,20 +746,39 @@ impl CheckoutWorkflow {
         {
             Ok(order) => order,
             Err(error) => {
-                self.compensate(&checkout, &payment, None, placement_token)
-                    .await;
+                self.compensate(
+                    &checkout,
+                    &payment,
+                    &combination_payments,
+                    None,
+                    placement_token,
+                )
+                .await;
                 return Err(error);
             }
         };
 
         let order = match self
-            .finish_order(&checkout, &cart, &payment, &order, placement_token)
+            .finish_order(
+                &checkout,
+                &cart,
+                &payment,
+                &combination_payments,
+                &order,
+                placement_token,
+            )
             .await
         {
             Ok(order) => order,
             Err(error) => {
-                self.compensate(&checkout, &payment, Some(&order), placement_token)
-                    .await;
+                self.compensate(
+                    &checkout,
+                    &payment,
+                    &combination_payments,
+                    Some(&order),
+                    placement_token,
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -779,11 +835,71 @@ impl CheckoutWorkflow {
         })
     }
 
+    /// Captures the payments that settle a checkout's payment collection.
+    ///
+    /// Returns the payment of the checkout's own session — the one replays and
+    /// the completion result report — together with the payments of any further
+    /// session a combination payment was split into.
+    ///
+    /// A collection that is just the checkout's own session (and a checkout
+    /// from before collections existed) keeps the original single-session
+    /// capture: same provider idempotency key, same errors, same concurrency
+    /// fence. A collection split across several sessions is captured as a
+    /// collection, which only succeeds when the captures cover its amount.
+    async fn capture_checkout_payments(
+        &self,
+        checkout_id: &CheckoutId,
+        payment_session_id: &PaymentSessionId,
+    ) -> Result<(Payment, Vec<Payment>), AppError> {
+        let collection = self
+            .payment
+            .collection_for_checkout(checkout_id.as_str())
+            .await?;
+        let sessions = match collection.as_ref() {
+            Some(collection) => {
+                self.payment
+                    .list_collection_sessions(collection.id.as_str())
+                    .await?
+            }
+            None => Vec::new(),
+        };
+        // A combination payment is the only case that needs the collection
+        // path: everything else captures the checkout's one session.
+        let Some(collection) = collection.as_ref().filter(|_| sessions.len() > 1) else {
+            let payment = self.payment.capture(payment_session_id.as_str()).await?;
+            return Ok((payment, Vec::new()));
+        };
+        if !sessions
+            .iter()
+            .any(|session| session.id == *payment_session_id)
+        {
+            // The checkout's money is not part of its collection, so capturing
+            // the collection would place an order the customer never paid for.
+            return Err(AppError::conflict(
+                "checkout payment collection does not hold the checkout's payment session",
+            ));
+        }
+        let captured = self
+            .payment
+            .capture_collection(collection.id.as_str())
+            .await?;
+        let payment = self
+            .payment
+            .payment_for_session_id(payment_session_id.as_str())
+            .await?;
+        let additional = captured
+            .into_iter()
+            .filter(|candidate| candidate.id != payment.id)
+            .collect();
+        Ok((payment, additional))
+    }
+
     async fn finish_order(
         &self,
         checkout: &CheckoutSession,
         cart: &fastcart_module_cart::Cart,
         payment: &Payment,
+        combination_payments: &[Payment],
         order: &Order,
         placement_token: &str,
     ) -> Result<Order, AppError> {
@@ -799,9 +915,16 @@ impl CheckoutWorkflow {
             ));
         }
 
+        // Every payment of the collection pays for this order; a combination
+        // payment leaves several payments behind.
         self.payment
             .assign_order(payment.id.as_str(), &order.id)
             .await?;
+        for additional in combination_payments {
+            self.payment
+                .assign_order(additional.id.as_str(), &order.id)
+                .await?;
+        }
         let mut order = self.order.get(&order.id).await?;
         if order.payment_status != OrderPaymentStatus::Captured {
             match self
@@ -901,6 +1024,7 @@ impl CheckoutWorkflow {
         &self,
         checkout: &CheckoutSession,
         payment: &Payment,
+        combination_payments: &[Payment],
         order: Option<&Order>,
         placement_token: &str,
     ) {
@@ -1020,27 +1144,9 @@ impl CheckoutWorkflow {
         // fence as the refund above, and are given back with it: the customer
         // never got the discount, so the promotion counters must not keep it.
         self.release_promotion_usage(&checkout.id).await;
-        let refund_key = format!("checkout-compensation:{}", checkout.id.as_str());
-        let refunded = match self
-            .payment
-            .refund_with_idempotency(
-                payment.id.as_str(),
-                payment.amount,
-                Some("checkout compensation".to_owned()),
-                Some(refund_key),
-            )
-            .await
-        {
-            Ok(_) => true,
-            Err(error) => {
-                tracing::error!(
-                    payment_id = %payment.id,
-                    error = %error,
-                    "checkout compensation refund failed; manual reconciliation is required"
-                );
-                false
-            }
-        };
+        let refunded = self
+            .refund_compensation(checkout, payment, combination_payments)
+            .await;
 
         // Mark the checkout failed only once the money is back with the
         // customer. A failed refund keeps the session retryable so a later
@@ -1066,6 +1172,61 @@ impl CheckoutWorkflow {
                 "failed to mark the compensated checkout as failed"
             );
         }
+    }
+
+    /// Refunds every payment a failed completion captured.
+    ///
+    /// A single payment keeps the historical refund key, so an earlier build
+    /// retrying the same compensation still deduplicates against it. A
+    /// combination payment keys every refund separately: one key identifies one
+    /// logical refund, and these are different money.
+    async fn refund_compensation(
+        &self,
+        checkout: &CheckoutSession,
+        payment: &Payment,
+        combination_payments: &[Payment],
+    ) -> bool {
+        let refunds: Vec<(&Payment, String)> = if combination_payments.is_empty() {
+            vec![(
+                payment,
+                format!("checkout-compensation:{}", checkout.id.as_str()),
+            )]
+        } else {
+            std::iter::once(payment)
+                .chain(combination_payments.iter())
+                .map(|candidate| {
+                    (
+                        candidate,
+                        format!(
+                            "checkout-compensation:{}:{}",
+                            checkout.id.as_str(),
+                            candidate.id.as_str()
+                        ),
+                    )
+                })
+                .collect()
+        };
+        let mut refunded = true;
+        for (candidate, refund_key) in refunds {
+            if let Err(error) = self
+                .payment
+                .refund_with_idempotency(
+                    candidate.id.as_str(),
+                    candidate.amount,
+                    Some("checkout compensation".to_owned()),
+                    Some(refund_key),
+                )
+                .await
+            {
+                tracing::error!(
+                    payment_id = %candidate.id,
+                    error = %error,
+                    "checkout compensation refund failed; manual reconciliation is required"
+                );
+                refunded = false;
+            }
+        }
+        refunded
     }
 
     /// Promotions the cart applied, with the discount each one granted.

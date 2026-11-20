@@ -1193,6 +1193,7 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
+ "uuid 1.29.0",
 ]
 
 [[package]]

@@ -327,6 +327,141 @@ pub struct PaymentWebhookRecord {
     pub created_at: i64,
 }
 
+/// Identifier of a payment collection.
+///
+/// Collections only exist inside the payment module, so the identifier lives
+/// here instead of `fastcart_kernel`; it still follows the kernel identifier
+/// shape (`"{prefix}_{uuid}"` with a UUID v7 suffix).
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, utoipa::ToSchema,
+)]
+#[serde(transparent)]
+#[schema(value_type = String)]
+pub struct PaymentCollectionId(String);
+
+impl PaymentCollectionId {
+    /// Creates a new identifier with a UUID v7 suffix.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(format!("pcoll_{}", uuid::Uuid::now_v7().simple()))
+    }
+
+    /// Wraps an existing identifier string without validation.
+    #[must_use]
+    pub fn from_string(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Returns the identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for PaymentCollectionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for PaymentCollectionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl From<String> for PaymentCollectionId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for PaymentCollectionId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+/// Lifecycle status of a payment collection.
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentCollectionStatus {
+    /// Nothing has been captured against the collection yet.
+    Open,
+    /// Some, but not all, of the collection amount was captured.
+    PartiallyCaptured,
+    /// The captured amount covers the collection amount.
+    Captured,
+}
+
+impl PaymentCollectionStatus {
+    /// Stable storage representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::PartiallyCaptured => "partially_captured",
+            Self::Captured => "captured",
+        }
+    }
+
+    /// Parses a stored status, returning `None` for unknown values.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "open" => Some(Self::Open),
+            "partially_captured" => Some(Self::PartiallyCaptured),
+            "captured" => Some(Self::Captured),
+            _ => None,
+        }
+    }
+
+    /// Derives the status from the amount captured against the collection.
+    #[must_use]
+    pub fn from_captured(amount: i64, captured: i64) -> Self {
+        if captured <= 0 {
+            Self::Open
+        } else if captured >= amount {
+            Self::Captured
+        } else {
+            Self::PartiallyCaptured
+        }
+    }
+}
+
+impl std::fmt::Display for PaymentCollectionStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// The money a checkout or order owes, paid by one or more payment sessions.
+///
+/// A collection is the anchor for combination payments: a single checkout can
+/// be paid with several sessions, and it is only settled once the captured
+/// amounts add up to [`PaymentCollection::amount`].
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PaymentCollection {
+    /// Collection identifier.
+    pub id: PaymentCollectionId,
+    /// Owning checkout, when the collection was opened by a checkout.
+    pub checkout_id: Option<CheckoutId>,
+    /// Owning order, when the collection was associated with an order.
+    pub order_id: Option<OrderId>,
+    /// Amount due in minor units.
+    pub amount: i64,
+    /// ISO-style currency code.
+    pub currency_code: String,
+    /// Status last recorded by the service; [`crate::PaymentService::collection_status`]
+    /// derives the live value from the amounts actually captured.
+    pub status: PaymentCollectionStatus,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: i64,
+}
+
 /// Input for [`crate::PaymentService::create_session`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreatePaymentSessionInput {
@@ -394,7 +529,7 @@ impl ListPaymentsFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::PaymentStatus;
+    use super::{PaymentCollectionStatus, PaymentStatus};
 
     #[test]
     fn pending_can_reach_every_non_refund_state() {
@@ -434,6 +569,34 @@ mod tests {
         assert!(PaymentStatus::PartiallyRefunded.can_transition_to(PaymentStatus::Refunded));
         assert!(
             PaymentStatus::PartiallyRefunded.can_transition_to(PaymentStatus::PartiallyRefunded)
+        );
+    }
+
+    #[test]
+    fn payment_collection_status_round_trips_and_follows_the_captured_amount() {
+        for status in [
+            PaymentCollectionStatus::Open,
+            PaymentCollectionStatus::PartiallyCaptured,
+            PaymentCollectionStatus::Captured,
+        ] {
+            assert_eq!(
+                PaymentCollectionStatus::parse(status.as_str()),
+                Some(status)
+            );
+        }
+        assert_eq!(PaymentCollectionStatus::parse("unknown"), None);
+
+        assert_eq!(
+            PaymentCollectionStatus::from_captured(1_000, 0),
+            PaymentCollectionStatus::Open
+        );
+        assert_eq!(
+            PaymentCollectionStatus::from_captured(1_000, 400),
+            PaymentCollectionStatus::PartiallyCaptured
+        );
+        assert_eq!(
+            PaymentCollectionStatus::from_captured(1_000, 1_000),
+            PaymentCollectionStatus::Captured
         );
     }
 

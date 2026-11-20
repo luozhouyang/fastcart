@@ -21,6 +21,7 @@ thiserror.workspace = true
 utoipa.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 fastcart-kernel.workspace = true
 fastcart-infrastructure.workspace = true
 
