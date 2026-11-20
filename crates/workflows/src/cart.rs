@@ -9,12 +9,12 @@ use std::collections::{HashMap, HashSet};
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::ShippingOptionId;
 use fastcart_kernel::{
-    AppError, CartId, CountryCode, Metadata, PromotionId, TaxCategoryId, Timestamp, VariantId,
-    now_timestamp,
+    AppError, CartId, CountryCode, LineItemId, Metadata, PromotionId, TaxCategoryId, Timestamp,
+    VariantId, now_timestamp,
 };
 use fastcart_module_cart::{
     AddItemInput, AdjustmentInput, Cart, CartService, CreateCartInput, DiscountInput,
-    SetShippingMethodInput, TaxLineInput,
+    ItemPriceInput, RecalculationInput, SetShippingMethodInput, TaxLineInput,
 };
 use fastcart_module_catalog::CatalogService;
 use fastcart_module_pricing::{PriceContext, PricingService};
@@ -282,6 +282,11 @@ impl CartWorkflow {
     ///
     /// Stored totals are never trusted: every read after this call is derived
     /// from the rows written here.
+    ///
+    /// The whole snapshot is derived in memory and then applied in a single
+    /// transaction. Deriving first also means a pricing, promotion or tax
+    /// failure leaves the cart exactly as it was, instead of a cart whose
+    /// discounts were already cleared when the failing step ran.
     pub async fn recalculate(
         &self,
         cart_id: &CartId,
@@ -289,7 +294,8 @@ impl CartWorkflow {
     ) -> Result<Cart, AppError> {
         let cart = self.cart.get_cart(cart_id).await?;
 
-        // 1. Refresh unit prices from the pricing module.
+        // 1. Refresh unit prices from the pricing module, in memory.
+        let mut prices = Vec::with_capacity(cart.items.len());
         for item in &cart.items {
             let price = self
                 .pricing
@@ -313,31 +319,19 @@ impl CartWorkflow {
                         item.variant_id, cart.currency_code
                     ))
                 })?;
-            if price.amount != item.unit_price {
-                self.cart
-                    .set_item_unit_price(cart_id, &item.id, price.amount, price.currency.as_str())
-                    .await?;
-            }
+            prices.push(ItemPriceInput {
+                item_id: item.id.clone(),
+                unit_price: price.amount,
+            });
         }
-        let cart = self.cart.get_cart(cart_id).await?;
 
-        // 2. Clear stale adjustments before evaluating promotions.
-        for item in &cart.items {
-            self.cart
-                .replace_item_adjustments(cart_id, &item.id, Vec::new())
-                .await?;
-        }
-        if !cart.shipping_methods.is_empty() {
-            self.cart
-                .replace_shipping_adjustments(cart_id, Vec::new())
-                .await?;
-        }
-        let cart = self.cart.get_cart(cart_id).await?;
-
-        // 3. Build the promotion snapshot.
+        // 2. Build the promotion snapshot from the refreshed prices. Both
+        // totals are the undiscounted ones: this pass replaces the discount
+        // snapshot, so the promotions being evaluated must see the cart's full
+        // value rather than what the previous pass discounted it to.
         let mut category_cache: HashMap<String, Vec<String>> = HashMap::new();
         let mut lines = Vec::with_capacity(cart.items.len());
-        for item in &cart.items {
+        for (index, item) in cart.items.iter().enumerate() {
             let product_id = item.product_id.to_string();
             let categories = if let Some(categories) = category_cache.get(&product_id) {
                 categories.clone()
@@ -354,15 +348,31 @@ impl CartWorkflow {
                 product_id,
                 variant_id: item.variant_id.to_string(),
                 category_ids: categories,
-                unit_price: item.unit_price,
+                unit_price: prices[index].unit_price,
                 quantity: item.quantity,
                 is_shipping: false,
             });
         }
+        let item_subtotal = cart
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                prices[index]
+                    .unit_price
+                    .max(0)
+                    .saturating_mul(item.quantity.max(0))
+            })
+            .fold(0_i64, i64::saturating_add);
+        let shipping_subtotal = cart
+            .shipping_methods
+            .iter()
+            .map(|method| method.amount.max(0))
+            .fold(0_i64, i64::saturating_add);
         let promotion_cart = PromotionCart {
             currency: cart.currency_code.clone(),
-            subtotal: cart.totals.item_subtotal,
-            shipping_total: cart.totals.shipping_total,
+            subtotal: item_subtotal,
+            shipping_total: shipping_subtotal,
             customer_id: cart.customer_id.as_ref().map(ToString::to_string),
             customer_group_ids: context.customer_group_ids.clone(),
             lines,
@@ -399,8 +409,9 @@ impl CartWorkflow {
         }
         let results = self.promotion.calculate(&contexts, &promotion_cart)?;
 
-        // 4. Persist line and shipping adjustments.
-        let mut line_adjustments: HashMap<String, Vec<AdjustmentInput>> = HashMap::new();
+        // 3. Group the applications per line, keeping cart order so the write
+        // below is deterministic.
+        let mut line_adjustments: HashMap<&str, Vec<AdjustmentInput>> = HashMap::new();
         let mut shipping_adjustments = Vec::new();
         for result in &results {
             for application in &result.applications {
@@ -412,34 +423,44 @@ impl CartWorkflow {
                 };
                 if application.is_shipping {
                     shipping_adjustments.push(adjustment);
-                } else if let Some(line_id) = application.line_id.as_ref() {
+                } else if let Some(line_id) = application.line_id.as_deref() {
                     line_adjustments
-                        .entry(line_id.clone())
+                        .entry(line_id)
                         .or_default()
                         .push(adjustment);
                 }
             }
         }
-        for item in &cart.items {
-            let adjustments = line_adjustments
-                .remove(item.id.as_str())
-                .unwrap_or_default();
-            self.cart
-                .replace_item_adjustments(cart_id, &item.id, adjustments)
-                .await?;
-        }
-        if !cart.shipping_methods.is_empty() {
-            self.cart
-                .replace_shipping_adjustments(cart_id, shipping_adjustments)
-                .await?;
-        }
-        let cart = self.cart.get_cart(cart_id).await?;
+        let item_adjustments: Vec<(LineItemId, Vec<AdjustmentInput>)> = cart
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.id.clone(),
+                    line_adjustments
+                        .remove(item.id.as_str())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        let shipping_discount = shipping_adjustments
+            .iter()
+            .map(|adjustment| adjustment.amount.max(0))
+            .fold(0_i64, i64::saturating_add)
+            .min(shipping_subtotal);
 
-        // 5. Recalculate tax on discounted line and shipping amounts.
+        // 4. Calculate tax on the discounted line and shipping amounts.
         let mut tax_lines = Vec::new();
-        for item in &cart.items {
-            let line_subtotal = item.unit_price.saturating_mul(item.quantity);
-            let discount: i64 = item.adjustments.iter().map(|entry| entry.amount).sum();
+        for (index, item) in cart.items.iter().enumerate() {
+            let line_subtotal = prices[index]
+                .unit_price
+                .max(0)
+                .saturating_mul(item.quantity.max(0));
+            let discount: i64 = item_adjustments[index]
+                .1
+                .iter()
+                .map(|entry| entry.amount)
+                .sum();
             let taxable = (line_subtotal - discount).max(0);
             let category = self
                 .catalog
@@ -486,7 +507,6 @@ impl CartWorkflow {
             }
         }
         if let Some(method) = cart.shipping_methods.first() {
-            let shipping_discount = cart.totals.shipping_discount_total;
             let taxable = (method.amount - shipping_discount).max(0);
             let tax = match context.tax_region_id.as_deref() {
                 Some(region_id) => {
@@ -525,8 +545,20 @@ impl CartWorkflow {
                 });
             }
         }
-        self.cart.replace_tax_lines(cart_id, tax_lines).await?;
-        self.cart.get_cart(cart_id).await
+
+        // 5. Apply the whole snapshot in one transaction.
+        self.cart
+            .apply_recalculation(
+                cart_id,
+                RecalculationInput {
+                    currency_code: cart.currency_code.to_string(),
+                    prices,
+                    item_adjustments,
+                    shipping_adjustments,
+                    tax_lines,
+                },
+            )
+            .await
     }
 
     /// Completes a cart after an order was placed.

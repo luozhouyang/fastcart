@@ -597,3 +597,34 @@ pub fn allocate_cart_discounts(cart: &Cart) -> Result<Vec<i64>, AppError> {
     }
     fastcart_kernel::allocate_proportionally(&headroom, total, amount).map_err(AppError::from)
 }
+
+/// One line's authoritative price refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemPriceInput {
+    /// Line item being repriced.
+    pub item_id: LineItemId,
+    /// Authoritative unit price in minor units.
+    pub unit_price: i64,
+}
+
+/// Every derived snapshot a recalculation replaces.
+///
+/// Prices, discounts and tax come from other modules. Writing them one
+/// statement at a time left the cart half-updated whenever a later step failed
+/// — most visibly with every discount already cleared while the caller saw an
+/// error. [`CartService::apply_recalculation`] writes the whole snapshot in one
+/// transaction instead.
+#[derive(Clone, Debug, Default)]
+pub struct RecalculationInput {
+    /// Currency every price is expressed in; must match the cart.
+    pub currency_code: String,
+    /// Authoritative unit prices, keyed by line item.
+    pub prices: Vec<ItemPriceInput>,
+    /// Replacement adjustments for each line item named here; lines omitted
+    /// from this list keep their existing adjustments.
+    pub item_adjustments: Vec<(LineItemId, Vec<AdjustmentInput>)>,
+    /// Replacement shipping adjustments.
+    pub shipping_adjustments: Vec<AdjustmentInput>,
+    /// Replacement tax lines; replaces every tax line on the cart.
+    pub tax_lines: Vec<TaxLineInput>,
+}

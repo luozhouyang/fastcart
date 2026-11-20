@@ -580,6 +580,47 @@ mod tests {
         assert_eq!(authenticated.session_id, session.session_id);
     }
 
+    /// Argon2 must not run on the async worker: a single-threaded runtime has
+    /// to keep polling other tasks while the (deliberately slow) hash is
+    /// computed, otherwise one login attempt starves the whole worker.
+    #[tokio::test(flavor = "current_thread")]
+    async fn login_does_not_block_the_async_runtime() {
+        let auth = service().await;
+        auth.register(
+            CreateUserInput::new("owner@example.com"),
+            "hunter2hunter2",
+        )
+        .await
+        .unwrap();
+
+        let (armed, armed_rx) = tokio::sync::oneshot::channel();
+        let (fired, mut fired_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = armed.send(());
+            // Long enough to fall inside the Argon2 work, short enough that a
+            // responsive event loop always reaches it first.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            let _ = fired.send(());
+        });
+        armed_rx.await.unwrap();
+
+        let login = auth.login("owner@example.com", "hunter2hunter2");
+        tokio::pin!(login);
+        let watchdog_ran_during_login = loop {
+            tokio::select! {
+                result = &mut login => {
+                    result.unwrap();
+                    break false;
+                }
+                _ = &mut fired_rx => break true,
+            }
+        };
+        assert!(
+            watchdog_ran_during_login,
+            "the async runtime was blocked while Argon2 verified a password"
+        );
+    }
+
     #[tokio::test]
     async fn wrong_password_and_unknown_email_fail() {
         let auth = service().await;

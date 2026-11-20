@@ -50,6 +50,41 @@ impl StoreDatabase {
         Ok(Self::new(store_id, pool))
     }
 
+    /// Test-only: opens a store database on a file with a real multi-connection
+    /// pool so tests can exercise true concurrency.
+    ///
+    /// [`StoreDatabase::in_memory`] pins its pool to a single connection, which
+    /// serializes every "concurrent" task at the pool boundary. A multi-connection
+    /// pool cannot be memory-backed instead: SQLite gives every connection its
+    /// own private database for `:memory:`, so each pooled connection would see
+    /// an empty schema. The caller therefore supplies a file path (typically
+    /// inside a `tempfile::TempDir` it keeps alive for the lifetime of the
+    /// database) and an explicit pool size.
+    ///
+    /// Not part of any production path; production store databases are opened
+    /// through [`StoreDatabaseManager`].
+    pub async fn file_backed_multi_connection(
+        store_id: StoreId,
+        path: impl AsRef<Path>,
+        max_connections: u32,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        if path.to_string_lossy().trim() == ":memory:" {
+            return Err(InfrastructureError::InvalidInput(
+                "a multi-connection store database needs a file path; SQLite :memory: databases \
+                 are private to each connection"
+                    .to_owned(),
+            ));
+        }
+        let options = DatabaseOptions::default().with_max_connections(max_connections);
+        let pool = connect_sqlite(path, &options).await?;
+        STORE_MIGRATOR
+            .run(&pool)
+            .await
+            .map_err(|error| InfrastructureError::Migration(error.to_string()))?;
+        Ok(Self::new(store_id, pool))
+    }
+
     /// Returns the owning store identifier.
     #[must_use]
     pub fn store_id(&self) -> &StoreId {
