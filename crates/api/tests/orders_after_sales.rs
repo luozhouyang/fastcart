@@ -344,7 +344,8 @@ async fn admin_can_run_the_full_post_purchase_flow() {
     assert_eq!(status, StatusCode::OK, "{accepted}");
     assert_eq!(accepted["status"], "accepted");
 
-    // Order edit: add a gift line, confirm and observe the recalculated total.
+    // Order edit: add a gift line, confirm, and observe the recalculated totals
+    // together with the line the edit materialized.
     let edits = format!("/api/v1/admin/orders/{}/edits", fixture.order_id);
     let (status, edit, _) = send(
         &fixture.app,
@@ -391,9 +392,31 @@ async fn admin_can_run_the_full_post_purchase_flow() {
     assert_eq!(status, StatusCode::OK, "{order}");
     assert_eq!(order["total"], 4_500);
     assert_eq!(order["subtotal"], 4_500);
-    // The historical item snapshot is unchanged.
-    assert_eq!(order["items"].as_array().unwrap().len(), 1);
-    assert_eq!(order["items"][0]["quantity"], 4);
+    // The edit is materialized on the lines: the gift line exists and the
+    // order totals are the sums of the materialized lines.
+    let items = order["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{order}");
+    let gift = items
+        .iter()
+        .find(|item| item["sku"] == "GIFT-1")
+        .expect("the added line must be materialized");
+    assert_eq!(gift["quantity"], 1);
+    assert_eq!(gift["unit_price"], 500);
+    assert_eq!(gift["subtotal"], 500);
+    assert_eq!(gift["total"], 500);
+    let purchased = items
+        .iter()
+        .find(|item| item["sku"].is_null())
+        .expect("the purchased line must survive the edit");
+    assert_eq!(purchased["quantity"], 4);
+    assert_eq!(purchased["subtotal"], 4_000);
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["subtotal"].as_i64().unwrap())
+            .sum::<i64>(),
+        order["subtotal"].as_i64().unwrap()
+    );
 }
 
 #[tokio::test]

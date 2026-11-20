@@ -1,10 +1,10 @@
 ---
 type: ADR
 title: Order edits must materialize their line changes
-description: Confirming an order edit rewrites the order totals but leaves order_items frozen, so the aggregate stops describing the purchase.
+description: Confirming an order edit must materialize its line changes, so the order totals and order_items always describe the same purchase.
 owner: luozhouyang
-status: Proposed
-implementation: pending
+status: Accepted
+implementation: complete
 timestamp: 2026-11-20T00:00:00Z
 ---
 
@@ -17,13 +17,13 @@ lines: `subtotal` is the sum of line subtotals, `discount_total` the sum of line
 discounts, and `total` is the sum of line totals plus shipping plus order-level
 adjustments (`resolve_order` in `crates/modules/order/src/service.rs`).
 
-`confirm_order_edit` breaks that identity. It scales `orders` and
-`order_adjustments` by `retained_subtotal / subtotal` and confirms the
-`order_edit_items` draft, but leaves `order_items` untouched — deliberately, as
-the module documents "historical `order_items` rows are never updated".
+`confirm_order_edit` broke that identity. It scaled `orders` and
+`order_adjustments` by `retained_subtotal / subtotal` and confirmed the
+`order_edit_items` draft, but left `order_items` untouched — deliberately, as
+the module documented "historical `order_items` rows are never updated".
 
-The result is an order whose aggregate describes the edited purchase while its
-lines still describe the original one. Every consumer that reads lines —
+The result was an order whose aggregate described the edited purchase while its
+lines still described the original one. Every consumer that reads lines —
 fulfillment's remaining shippable quantity, return/claim/exchange availability,
 invoices, reports — then operates on quantities the totals no longer match. A
 line removed by an edit can still be returned in full.
@@ -41,6 +41,9 @@ identity holds after every edit:
   reference `order_items.id` with `ON DELETE RESTRICT`.
 - Order totals are then derived from the lines rather than scaled
   independently, which is the same identity checkout already relies on.
+- A tax line follows the base it is levied on: an item-scoped tax line shrinks
+  with its line, a shipping-scoped one is preserved with the shipping, and
+  `orders.tax_total` becomes the sum of those tax lines.
 - Two guards are added: a confirmation fails when a line's quantity no longer
   matches the edit's `before_quantity` (someone else changed it while the draft
   was open), and an edit cannot shrink a line below the quantity already
@@ -48,28 +51,27 @@ identity holds after every edit:
 
 ## Status
 
-Proposed. The acceptance tests are checked in as
-`crates/modules/order/tests/order_edit_line_consistency.rs` and are `#[ignore]`d
-until this lands.
+Accepted and implemented. `confirm_order_edit` materializes the draft on
+`order_items` and derives the order totals, including `tax_total`, from those
+rows and the scaled tax lines. The acceptance tests in
+`crates/modules/order/tests/order_edit_line_consistency.rs` pass.
 
-A verified implementation exists as a patch (applied to
-`service_after_sales.rs`): with it, all seven acceptance tests pass. It is not
-landed because it is a behaviour change to order history that also rewrites
-four existing assertions encoding the current "lines are frozen" contract, and
-because one question is still open: for an order whose tax is partly levied on
-shipping, the per-line tax scaling can leave `Σ order_tax_lines` a few minor
-units away from `orders.tax_total`, and where that remainder should land has not
-been decided.
+The tax-line rounding question is settled without placing a remainder on a
+chosen line: because `orders.tax_total` *is* the sum of the scaled tax lines,
+the identity `Σ order_tax_lines == orders.tax_total` that `create_order`
+enforces cannot drift, whatever per-line flooring does. The rule is covered by
+`order_tax_lines_follow_their_base_and_keep_adding_up` in the service tests,
+including an order whose tax is partly levied on shipping.
 
 Inventory movement for edits is deliberately out of scope here and should be a
 second step once line changes exist to reference.
 
 ## Consequences
 
-- `order.items` becomes the current state of the order rather than an immutable
+- `order.items` is the current state of the order rather than an immutable
   record of the original purchase. The module docs, the `after_sales` module
-  docs and the header of `migrations/store/0018_returns.sql` all state the
-  opposite and must be updated with the implementation.
+  docs and the domain docs now say so. The header of
+  `migrations/store/0018_returns.sql` still states the opposite; a migration
+  cannot be edited in place, so that wording has to be corrected separately.
 - Auditing "what did the customer originally buy" moves to `order_edits` and
-  `order_edit_items`, which already record `before_quantity`/`after_quantity`.
-- Until this lands, order edits produce orders whose totals and lines disagree.
+  `order_edit_items`, which record `before_quantity`/`after_quantity`.

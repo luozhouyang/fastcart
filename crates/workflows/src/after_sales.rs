@@ -148,8 +148,9 @@ impl AfterSalesWorkflow {
 
     /// Refunds the requested quantities of a return.
     ///
-    /// The refundable amount is proportional to the immutable order line
-    /// totals and capped by the order total minus refunds already recorded.
+    /// The refundable amount is proportional to the current order line totals
+    /// (a confirmed order edit rewrites the lines it touches) and capped by the
+    /// order total minus refunds already recorded.
     /// Repeating the call returns the existing link without moving money
     /// again.
     pub async fn refund_return(

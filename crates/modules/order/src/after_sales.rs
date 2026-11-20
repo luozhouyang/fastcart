@@ -1,8 +1,12 @@
 //! Post-purchase domain entities: returns, claims, exchanges and order edits.
 //!
-//! These flows never rewrite the immutable `order_items` snapshot. Requested,
-//! received and written-off quantities, replacement variants and edit deltas
-//! are persisted in dedicated tables and exposed through the order aggregate.
+//! Returns, claims and exchanges never rewrite the `order_items` rows they
+//! reference: requested, received and written-off quantities and replacement
+//! variants are persisted in dedicated tables and exposed through the order
+//! aggregate. A confirmed order edit is the one flow that lands on the lines:
+//! it inserts added lines, rewrites changed quantities and amounts, and zeroes
+//! removed ones, while `order_edits` and `order_edit_items` record what did
+//! change.
 
 use fastcart_kernel::{
     ClaimId, EventId, ExchangeId, FulfillmentId, LineItemId, Metadata, OrderEditId, OrderId,
@@ -175,7 +179,7 @@ string_enum! {
     pub enum OrderEditStatus {
         /// Edit prepared but not applied.
         Draft => "draft",
-        /// Edit applied and order totals recalculated.
+        /// Edit applied: the line changes are materialized and the order totals recalculated.
         Confirmed => "confirmed",
         /// Edit canceled without changing the order.
         Canceled => "canceled",
@@ -185,7 +189,7 @@ string_enum! {
 string_enum! {
     /// Kind of change proposed by an order edit line.
     pub enum OrderEditAction {
-        /// Add a line that is not part of the historical snapshot.
+        /// Add a line the original purchase did not contain.
         Add => "add",
         /// Remove quantity from an existing line.
         Remove => "remove",

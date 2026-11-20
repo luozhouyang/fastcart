@@ -1,8 +1,9 @@
 //! Order entities, status enums and service input types.
 //!
-//! Orders are immutable historical records: item titles, SKUs, prices and
-//! quantities are copied from the cart at placement time and are never
-//! rewritten when catalog data changes.
+//! Orders are historical records: item titles, SKUs, prices and quantities are
+//! copied from the cart at placement time and are never rewritten when catalog
+//! data changes. Only an explicit, recorded order edit rewrites a line's
+//! quantity and amounts afterwards.
 
 use fastcart_kernel::{
     CustomerId, FulfillmentId, LineItemId, Metadata, OrderId, PaymentId, ProductId, PromotionId,
@@ -221,7 +222,7 @@ fn default_shipping_provider() -> String {
     "manual".to_owned()
 }
 
-/// An order with every historical commercial snapshot attached.
+/// An order with its line items and every historical commercial snapshot.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Order {
     /// Order identifier.
@@ -270,9 +271,10 @@ pub struct Order {
     pub updated_at: Timestamp,
     /// Cancellation timestamp in Unix seconds.
     pub canceled_at: Option<Timestamp>,
-    /// Line items.
+    /// Line items; `subtotal`, `discount_total` and `total` are their sums.
     pub items: Vec<OrderItem>,
-    /// Per-rate tax breakdown, snapshotted from the cart.
+    /// Per-rate tax breakdown; an edit scales it with the lines it is levied
+    /// on, so it still adds up to `tax_total`.
     pub tax_lines: Vec<OrderTaxLine>,
     /// Order-level adjustments.
     pub adjustments: Vec<OrderAdjustment>,
@@ -288,7 +290,9 @@ pub struct Order {
 ///
 /// Collapsing tax into `orders.tax_total` made the collected amount impossible
 /// to reconcile against a rate, so invoices and filings could not be produced
-/// from the order alone.
+/// from the order alone. An order edit scales a tax line with the line it is
+/// levied on and preserves shipping-scoped tax with the shipping, so the lines
+/// still sum to `orders.tax_total`.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderTaxLine {
     /// Tax line identifier.
@@ -311,7 +315,10 @@ pub struct OrderTaxLine {
     pub created_at: Timestamp,
 }
 
-/// A historical snapshot of one purchased line item.
+/// One line item of an order.
+///
+/// Titles, SKUs and prices are snapshotted at placement time; a confirmed
+/// order edit is the only flow that rewrites the quantity and amounts.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderItem {
     /// Line item identifier.
@@ -481,7 +488,8 @@ pub struct OrderRefund {
 /// Input for one line item when placing an order.
 ///
 /// `subtotal` and `total` are derived when omitted. Every other title, SKU and
-/// pricing field is persisted as an immutable snapshot.
+/// pricing field is persisted as a snapshot, later rewritable only by an
+/// explicit order edit.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreateOrderItemInput {
     /// Product identifier.

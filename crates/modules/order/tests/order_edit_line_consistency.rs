@@ -5,21 +5,14 @@
 //! of line subtotals, `discount_total` the sum of line discounts, and `total`
 //! is the sum of line totals plus shipping plus order adjustments.
 //!
-//! `confirm_order_edit` breaks that identity: it rewrites `orders` and the
-//! order-level adjustments but leaves `order_items` frozen, so the aggregate
-//! keeps describing the pre-edit purchase. Every consumer that reads order
-//! lines — fulfillment, returns, claims, exchanges, invoices, reports — then
-//! sees lines and quantities the order totals no longer describe.
+//! `confirm_order_edit` has to keep that identity: a confirmed edit lands on
+//! `order_items` — additions insert a line, quantity changes rewrite the line's
+//! quantity and amounts, removals keep the row with a zero quantity — and the
+//! order totals are read back from the lines. Every consumer that reads order
+//! lines (fulfillment, returns, claims, exchanges, invoices, reports) then sees
+//! the same purchase the totals describe.
 //!
-//! These tests are the acceptance criteria for the fix. They are `#[ignore]`d
-//! because the fix is a behaviour change to order history that has not been
-//! agreed yet; run them with `--ignored` once it lands. A verified
-//! implementation exists as `order_edit_line_items_impl.patch` (apply to
-//! `service_after_sales.rs`), but it also changes four existing assertions that
-//! encode the current "lines are frozen" contract, and its tax-line rounding
-//! has an open question for orders whose tax is partly levied on shipping.
-//!
-//! Constraints the fix has to respect:
+//! Constraints the implementation has to respect:
 //!
 //! * `order_return_items`, `order_claim_items` and `order_exchange_items`
 //!   reference `order_items.id` with `ON DELETE RESTRICT` (`order_fulfillment_items`
@@ -27,6 +20,10 @@
 //!   expressed as a zero quantity on the existing row.
 //! * After-sales records that already reference a line keep working: their
 //!   `order_item_id` must still resolve to a live `order_items` row.
+//! * Tax is levied per line: an item-scoped tax line shrinks with its line and
+//!   shipping-scoped tax is preserved with the shipping, so the breakdown still
+//!   adds up to `orders.tax_total`. The service tests cover that rule in
+//!   `order_tax_lines_follow_their_base_and_keep_adding_up`.
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{AppError, Metadata, StoreId};
@@ -178,7 +175,6 @@ fn edit_input(items: Vec<OrderEditItemInput>) -> CreateOrderEditInput {
 }
 
 #[tokio::test]
-#[ignore = "blocked on order edits materializing their line changes; see the patch referenced in the module docs"]
 async fn an_added_line_is_materialized_in_order_items() {
     let (db, service) = service().await;
     let order = single_line_order(&service, 2, 1_000, 0, 0).await;
@@ -247,7 +243,6 @@ async fn an_added_line_is_materialized_in_order_items() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on order edits materializing their line changes; see the patch referenced in the module docs"]
 async fn a_quantity_change_lands_on_the_line_and_keeps_the_amounts_derived() {
     let (_db, service) = service().await;
     let order = single_line_order(&service, 4, 1_000, 400, 0).await;
@@ -277,7 +272,6 @@ async fn a_quantity_change_lands_on_the_line_and_keeps_the_amounts_derived() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on order edits materializing their line changes; see the patch referenced in the module docs"]
 async fn a_removed_line_keeps_its_row_with_a_zero_quantity() {
     let (db, service) = service().await;
     let order = single_line_order(&service, 2, 1_000, 0, 0).await;
@@ -334,7 +328,6 @@ async fn a_removed_line_keeps_its_row_with_a_zero_quantity() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on order edits materializing their line changes; see the patch referenced in the module docs"]
 async fn existing_return_references_survive_a_quantity_reduction() {
     let (_db, service) = service().await;
     let order = single_line_order(&service, 3, 1_000, 0, 0).await;
@@ -386,7 +379,6 @@ async fn existing_return_references_survive_a_quantity_reduction() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on order edits materializing their line changes; see the patch referenced in the module docs"]
 async fn an_edit_cannot_shrink_a_line_below_committed_after_sales_quantities() {
     let (_db, service) = service().await;
     let order = single_line_order(&service, 3, 1_000, 0, 0).await;
@@ -442,7 +434,6 @@ async fn an_edit_cannot_shrink_a_line_below_committed_after_sales_quantities() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on order edits materializing their line changes; see the patch referenced in the module docs"]
 async fn fulfillment_references_survive_a_quantity_reduction() {
     let (_db, service) = service().await;
     let order = single_line_order(&service, 4, 1_000, 0, 0).await;
@@ -508,7 +499,6 @@ async fn fulfillment_references_survive_a_quantity_reduction() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on order edits materializing their line changes; see the patch referenced in the module docs"]
 async fn an_added_line_is_shippable() {
     let (_db, service) = service().await;
     let order = single_line_order(&service, 1, 1_000, 0, 0).await;
