@@ -507,17 +507,25 @@ impl CheckoutWorkflow {
             _ => unreachable!("checkout status was validated above"),
         };
 
+        // Line items carry only their own adjustments, so the cart-level part of
+        // the discount has to be attributed to lines here: order placement
+        // rebuilds the aggregate from these items, and the order must record the
+        // amount the customer was actually charged.
+        let item_discounts = fastcart_module_cart::allocate_cart_discounts(&cart)?;
+
         let mut items = Vec::with_capacity(cart.items.len());
-        let mut subtotal = 0_i64;
-        let mut discount_total = 0_i64;
-        let mut tax_total = 0_i64;
         let mut items_total = 0_i64;
-        for item in &cart.items {
+        let mut tax_total = 0_i64;
+        for (index, item) in cart.items.iter().enumerate() {
             let line_subtotal = item
                 .unit_price
                 .checked_mul(item.quantity)
                 .ok_or_else(|| AppError::validation("line subtotal overflow"))?;
-            let discount: i64 = item.adjustments.iter().map(|entry| entry.amount).sum();
+            // The cart caps a line's own adjustments at the line's value, so
+            // the order must cap them identically or the two totals diverge.
+            let own_discount: i64 = item.adjustments.iter().map(|entry| entry.amount).sum();
+            let discount = own_discount.max(0).min(line_subtotal)
+                + item_discounts.get(index).copied().unwrap_or(0);
             let line_taxes: Vec<_> = cart
                 .tax_lines
                 .iter()
@@ -530,8 +538,6 @@ impl CheckoutWorkflow {
                 .map(|line| line.amount)
                 .sum();
             let line_total = line_subtotal - discount + exclusive_tax;
-            subtotal += line_subtotal;
-            discount_total += discount;
             tax_total += line_tax;
             items_total += line_total;
             items.push(CreateOrderItemInput {
@@ -581,6 +587,25 @@ impl CheckoutWorkflow {
         };
         let shipping_total = cart.totals.shipping_total;
         let total = items_total + shipping_total + shipping_tax;
+        // The aggregate figures are the cart's own, and the per-item figures
+        // above are built to add up to them. Refuse to place an order whose
+        // stored total disagrees with the captured amount: an operator cannot
+        // reconcile a payment against an order that never matched it.
+        let subtotal = cart.totals.item_subtotal;
+        let discount_total = cart.totals.discount_total;
+        if total != cart.totals.total
+            || discount_total
+                != items
+                    .iter()
+                    .map(|item| item.discount_total.unwrap_or(0))
+                    .sum::<i64>()
+        {
+            return Err(AppError::internal(format!(
+                "order totals {total}/{discount_total} do not reconcile with the charged cart \
+                 total {}/{}",
+                cart.totals.total, cart.totals.discount_total
+            )));
+        }
         let shipping_methods = cart
             .shipping_methods
             .iter()

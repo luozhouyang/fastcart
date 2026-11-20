@@ -554,3 +554,46 @@ pub fn calculate_totals(cart: &Cart, tax_lines: &[CartTaxLine]) -> CartTotals {
 pub fn recalculate_totals(cart: &mut Cart) {
     cart.totals = calculate_totals(cart, &cart.tax_lines);
 }
+
+/// Spreads the cart's cart-level discounts across its line items.
+///
+/// [`CartTotals::discount_total`] folds per-line adjustments and cart-level
+/// discounts into one figure, but line items only carry their own adjustments.
+/// A consumer that rebuilds the aggregate from the items alone — order
+/// placement does — would therefore drop the cart-level part and record a
+/// total nobody was ever charged, while refunds are capped by that total.
+///
+/// Each line's share is proportional to the value it still has left after its
+/// own adjustments, and the shares sum to exactly the cart-level portion of
+/// [`CartTotals::discount_total`].
+///
+/// # Errors
+///
+/// Returns a validation error only if the shares cannot be distributed, which
+/// the clamping above makes unreachable.
+pub fn allocate_cart_discounts(cart: &Cart) -> Result<Vec<i64>, AppError> {
+    let headroom: Vec<i64> = cart
+        .items
+        .iter()
+        .map(|item| {
+            let line_subtotal = item.unit_price.max(0).saturating_mul(item.quantity.max(0));
+            let adjustments = item
+                .adjustments
+                .iter()
+                .map(|adjustment| adjustment.amount.max(0))
+                .fold(0_i64, i64::saturating_add);
+            line_subtotal.saturating_sub(adjustments.min(line_subtotal))
+        })
+        .collect();
+    let total = headroom.iter().copied().fold(0_i64, i64::saturating_add);
+    let requested = cart
+        .discounts
+        .iter()
+        .map(|discount| discount.amount.max(0))
+        .fold(0_i64, i64::saturating_add);
+    let amount = requested.min(total);
+    if amount <= 0 {
+        return Ok(vec![0; cart.items.len()]);
+    }
+    fastcart_kernel::allocate_proportionally(&headroom, total, amount).map_err(AppError::from)
+}

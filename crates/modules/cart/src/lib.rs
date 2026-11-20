@@ -16,6 +16,6 @@ pub use domain::{
     AddItemInput, Address, AddressInput, AdjustmentInput, Cart, CartAdjustment, CartDiscount,
     CartItem, CartShippingMethod, CartStatus, CartTaxLine, CartTotals, CreateCartInput,
     DEFAULT_CART_TTL_SECONDS, DiscountInput, MAX_ITEM_QUANTITY, SetShippingMethodInput,
-    TaxLineInput, UpdateItemInput, calculate_totals, recalculate_totals,
+    TaxLineInput, UpdateItemInput, allocate_cart_discounts, calculate_totals, recalculate_totals,
 };
 pub use service::CartService;

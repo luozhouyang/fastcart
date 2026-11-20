@@ -7,7 +7,8 @@
 use std::str::FromStr;
 
 use fastcart_kernel::{
-    AppError, CurrencyCode, Metadata, Money, Rounding, validate_length, validate_metadata,
+    AppError, CurrencyCode, Metadata, Money, Rounding, allocate_proportionally, validate_length,
+    validate_metadata,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -757,21 +758,15 @@ fn fixed_amount_result(
         return Ok(None);
     }
 
-    let last_index = eligible.len() - 1;
+    // Split the discount by value. Handing the whole integer remainder to the
+    // last line — as this once did — can push that line's discount past its own
+    // value, which makes the line total negative and aborts checkout after the
+    // customer's payment was captured.
+    let parts: Vec<i64> = eligible.iter().map(|(_, subtotal)| *subtotal).collect();
+    let shares = allocate_proportionally(&parts, eligible_subtotal, discount)?;
+
     let mut applications = Vec::new();
-    let mut allocated = 0_i64;
-    for (index, (line, subtotal)) in eligible.iter().enumerate() {
-        let share = if index == last_index {
-            discount - allocated
-        } else {
-            let proportional =
-                i128::from(*subtotal) * i128::from(discount) / i128::from(eligible_subtotal);
-            i64::try_from(proportional)
-                .map_err(|_| AppError::validation("discount allocation overflow"))?
-        };
-        allocated = allocated
-            .checked_add(share)
-            .ok_or_else(|| AppError::validation("discount allocation overflow"))?;
+    for ((line, _), share) in eligible.iter().zip(shares) {
         if share <= 0 {
             continue;
         }
@@ -1206,4 +1201,103 @@ pub(crate) fn validate_campaign_budget(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use fastcart_kernel::{CurrencyCode, Metadata};
+
+    use super::{
+        Promotion, PromotionCart, PromotionContext, PromotionLine, PromotionStatus, PromotionType,
+        calculate_promotions,
+    };
+
+    fn line(id: &str, unit_price: i64) -> PromotionLine {
+        PromotionLine {
+            line_id: id.to_owned(),
+            product_id: format!("prod_{id}"),
+            variant_id: format!("var_{id}"),
+            category_ids: Vec::new(),
+            unit_price,
+            quantity: 1,
+            is_shipping: false,
+        }
+    }
+
+    fn cart(lines: Vec<PromotionLine>) -> PromotionCart {
+        let subtotal = lines.iter().map(|line| line.unit_price).sum();
+        PromotionCart {
+            currency: CurrencyCode::new("USD").unwrap(),
+            subtotal,
+            shipping_total: 0,
+            customer_id: None,
+            customer_group_ids: Vec::new(),
+            lines,
+            at: 0,
+        }
+    }
+
+    fn fixed_amount(value: i64) -> PromotionContext {
+        PromotionContext {
+            promotion: Promotion {
+                id: "promo_1".to_owned(),
+                code: None,
+                title: "Ten off".to_owned(),
+                promotion_type: PromotionType::FixedAmount,
+                value,
+                status: PromotionStatus::Active,
+                is_automatic: true,
+                starts_at: None,
+                ends_at: None,
+                usage_limit: None,
+                usage_count: 0,
+                metadata: Metadata::empty(),
+                rules: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            rules: Vec::new(),
+        }
+    }
+
+    /// The integer remainder of a proportional split must never push a line's
+    /// discount above that line's own value. A line discounted below zero makes
+    /// the checkout's line total negative, which aborts order placement after
+    /// the customer's payment was already captured.
+    #[test]
+    fn fixed_amount_never_discounts_a_line_below_its_value() {
+        let cart = cart(vec![line("a", 10), line("b", 1), line("c", 1)]);
+
+        let results = calculate_promotions(&[fixed_amount(10)], &cart).unwrap();
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result.total_discount,
+            result
+                .applications
+                .iter()
+                .map(|application| application.amount)
+                .sum::<i64>(),
+            "the reported discount must equal the sum of its applications"
+        );
+        assert_eq!(
+            result.total_discount, 10,
+            "a cart worth more than the coupon must still grant its full value"
+        );
+        for application in &result.applications {
+            let target = cart
+                .lines
+                .iter()
+                .find(|line| Some(&line.line_id) == application.line_id.as_ref())
+                .expect("every application targets a cart line");
+            let line_value = target.unit_price * target.quantity;
+            assert!(
+                application.amount <= line_value,
+                "line {} is worth {line_value} but was discounted {}",
+                target.line_id,
+                application.amount
+            );
+        }
+    }
 }

@@ -258,8 +258,86 @@ impl std::fmt::Display for Money {
     }
 }
 
+/// Splits `amount` across `parts` in proportion to their values.
+///
+/// Integer division alone leaves a remainder that has to go somewhere. Handing
+/// the whole remainder to a single part can push that part past its own value,
+/// which makes every amount derived from it negative downstream — a discount
+/// larger than its line, for example, aborts checkout after the customer has
+/// already been charged. Each leftover unit therefore goes to the part with
+/// the largest fractional share that still has room under its own value.
+///
+/// `parts` must be non-negative and sum to `total`, and `amount` must be
+/// between zero and `total`. The returned shares sum to `amount`.
+pub fn allocate_proportionally(
+    parts: &[i64],
+    total: i64,
+    amount: i64,
+) -> Result<Vec<i64>, KernelError> {
+    if total < 0 || amount < 0 || amount > total {
+        return Err(KernelError::Validation(format!(
+            "cannot allocate {amount} of {total}"
+        )));
+    }
+    if parts.iter().any(|part| *part < 0) {
+        return Err(KernelError::Validation(
+            "allocation parts must not be negative".to_owned(),
+        ));
+    }
+    debug_assert_eq!(
+        parts.iter().copied().sum::<i64>(),
+        total,
+        "allocation parts must sum to the total"
+    );
+
+    let denominator = i128::from(total);
+    let mut shares = Vec::with_capacity(parts.len());
+    let mut remainders = Vec::with_capacity(parts.len());
+    let mut allocated = 0_i64;
+    for (index, part) in parts.iter().enumerate() {
+        let exact = i128::from(*part) * i128::from(amount);
+        // An amount never exceeds the total, so a part's share never exceeds
+        // the part itself and the conversion cannot truncate.
+        let share = if total == 0 {
+            0
+        } else {
+            i64::try_from(exact / denominator)
+                .map_err(|_| KernelError::Validation("allocation share overflow".to_owned()))?
+        };
+        allocated += share;
+        shares.push(share);
+        remainders.push((index, if total == 0 { 0 } else { exact % denominator }));
+    }
+
+    // Largest fractional share first; ties keep input order so the split is
+    // deterministic across runs and replicas.
+    remainders.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    let mut leftover = amount - allocated;
+    let mut distributing = true;
+    while leftover > 0 && distributing {
+        distributing = false;
+        for (index, _) in &remainders {
+            if leftover == 0 {
+                break;
+            }
+            if shares[*index] < parts[*index] {
+                shares[*index] += 1;
+                leftover -= 1;
+                distributing = true;
+            }
+        }
+    }
+    if leftover > 0 {
+        return Err(KernelError::Validation(
+            "allocation parts cannot absorb the amount".to_owned(),
+        ));
+    }
+    Ok(shares)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::allocate_proportionally;
     use super::{CurrencyCode, Money, Rounding};
 
     fn usd() -> CurrencyCode {
@@ -332,5 +410,40 @@ mod tests {
             Money::new(1234, CurrencyCode::new("JPY").unwrap()).to_string(),
             "1234 JPY"
         );
+    }
+
+    #[test]
+    fn allocation_splits_an_amount_in_proportion() {
+        // 100 across three equal parts: the remainder lands somewhere, but the
+        // split stays proportional and never exceeds a part's own value.
+        let shares = allocate_proportionally(&[100, 100, 100], 300, 100).unwrap();
+        assert_eq!(shares.iter().sum::<i64>(), 100);
+        assert!(shares.iter().all(|share| *share <= 100));
+        assert_eq!(
+            shares.iter().max().unwrap() - shares.iter().min().unwrap(),
+            1,
+            "proportional split must not skew: {shares:?}"
+        );
+    }
+
+    #[test]
+    fn allocation_never_exceeds_a_parts_value() {
+        // The proportional remainder for the small parts rounds down to zero,
+        // leaving two units to hand out. Neither small part may take more than
+        // its own value.
+        let shares = allocate_proportionally(&[10, 1, 1], 12, 10).unwrap();
+        assert_eq!(shares.iter().sum::<i64>(), 10);
+        assert!(
+            shares
+                .iter()
+                .zip([10, 1, 1])
+                .all(|(share, value)| *share <= value),
+            "allocation must respect each part's ceiling: {shares:?}"
+        );
+    }
+
+    #[test]
+    fn allocation_rejects_an_amount_larger_than_the_total() {
+        assert!(allocate_proportionally(&[10, 1], 11, 12).is_err());
     }
 }

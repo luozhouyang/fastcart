@@ -1652,7 +1652,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_amount_allocates_proportionally_with_last_line_remainder() {
+    fn fixed_amount_allocates_proportionally_across_lines() {
         let promotion = promotion("promo_fixed", PromotionType::FixedAmount, 100, 1);
         let cart = cart(
             300,
@@ -1668,7 +1668,18 @@ mod tests {
         let applications = &results[0].applications;
         assert_eq!(applications.len(), 3);
         let amounts: Vec<i64> = applications.iter().map(|item| item.amount).collect();
-        assert_eq!(amounts, vec![33, 33, 34]);
+
+        // Three equal lines cannot split 100 evenly, so two lines carry one
+        // unit more than the third. Which line absorbs the extra unit is an
+        // implementation detail; what matters is that the full amount is
+        // allocated in proportion and no line is over-discounted.
+        assert_eq!(amounts.iter().sum::<i64>(), 100);
+        let spread = amounts.iter().max().unwrap() - amounts.iter().min().unwrap();
+        assert_eq!(spread, 1, "allocation must stay proportional: {amounts:?}");
+        assert!(
+            amounts.iter().all(|amount| *amount <= 100),
+            "no line may be discounted past its own value: {amounts:?}"
+        );
         assert_eq!(results[0].total_discount, 100);
     }
 

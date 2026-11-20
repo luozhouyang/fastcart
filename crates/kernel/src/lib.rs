@@ -23,7 +23,7 @@ pub use ids::{
     ShippingOptionId, ShippingProfileId, StoreId, TagId, TaxCategoryId, TaxRateId, TaxRegionId,
     ThemeActivationId, ThemeId, UserId, VariantId, WebhookDeliveryId, WebhookId,
 };
-pub use money::{CurrencyCode, Money, Rounding};
+pub use money::{CurrencyCode, Money, Rounding, allocate_proportionally};
 pub use types::{
     CountryCode, DomainEventEnvelope, Locale, Metadata, PageResult, Pagination, Timestamp,
     now_timestamp,
