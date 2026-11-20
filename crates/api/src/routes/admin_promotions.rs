@@ -380,6 +380,8 @@ pub struct CreatePromotionRequest {
     starts_at: Option<i64>,
     ends_at: Option<i64>,
     usage_limit: Option<i64>,
+    priority: Option<i64>,
+    is_stackable: Option<bool>,
     metadata: Option<Metadata>,
     #[serde(default)]
     rules: Vec<PromotionRuleRequest>,
@@ -394,6 +396,8 @@ impl CreatePromotionRequest {
         input.starts_at = self.starts_at;
         input.ends_at = self.ends_at;
         input.usage_limit = self.usage_limit;
+        input.priority = self.priority.unwrap_or(0);
+        input.is_stackable = self.is_stackable.unwrap_or(true);
         input.metadata = self.metadata.unwrap_or_default();
         input.rules = self.rules.into_iter().map(Into::into).collect();
         input
@@ -416,6 +420,8 @@ pub struct UpdatePromotionRequest {
     #[serde(default, deserialize_with = "nullable")]
     usage_limit: Option<Option<i64>>,
     per_customer_limit: Option<Option<i64>>,
+    priority: Option<i64>,
+    is_stackable: Option<bool>,
     metadata: Option<Metadata>,
     rules: Option<Vec<PromotionRuleRequest>>,
 }
@@ -433,6 +439,8 @@ impl UpdatePromotionRequest {
             ends_at: self.ends_at,
             usage_limit: self.usage_limit,
             per_customer_limit: self.per_customer_limit,
+            priority: self.priority,
+            is_stackable: self.is_stackable,
             metadata: self.metadata,
             rules: self
                 .rules

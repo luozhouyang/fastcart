@@ -265,6 +265,13 @@ pub struct Promotion {
     pub usage_count: i64,
     /// Optional limit on how many times one customer may redeem the promotion.
     pub per_customer_limit: Option<i64>,
+    /// Ordering weight: promotions with a higher priority consume the cart
+    /// first, then by `created_at` and `id`. The default of 0 puts every
+    /// promotion in the historic `created_at, id` order.
+    pub priority: i64,
+    /// Whether promotions ordered after this one still apply once it has
+    /// discounted. `false` makes the promotion exclusive.
+    pub is_stackable: bool,
     /// Extension metadata.
     pub metadata: Metadata,
     /// Rules attached to the promotion.
@@ -298,6 +305,10 @@ pub struct CreatePromotionInput {
     pub usage_limit: Option<i64>,
     /// Optional limit on how many times one customer may redeem the promotion.
     pub per_customer_limit: Option<i64>,
+    /// Ordering weight, defaulting to 0 (the `created_at, id` order).
+    pub priority: i64,
+    /// Whether later promotions still apply once this one has discounted.
+    pub is_stackable: bool,
     /// Extension metadata.
     pub metadata: Metadata,
     /// Rules attached to the promotion.
@@ -319,6 +330,8 @@ impl CreatePromotionInput {
             ends_at: None,
             usage_limit: None,
             per_customer_limit: None,
+            priority: 0,
+            is_stackable: true,
             metadata: Metadata::empty(),
             rules: Vec::new(),
         }
@@ -367,6 +380,21 @@ impl CreatePromotionInput {
         self
     }
 
+    /// Sets the ordering weight. A higher priority is applied earlier.
+    #[must_use]
+    pub fn with_priority(mut self, priority: i64) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Makes the promotion exclusive: once it produces a discount, promotions
+    /// ordered after it are skipped for that batch.
+    #[must_use]
+    pub fn exclusive(mut self) -> Self {
+        self.is_stackable = false;
+        self
+    }
+
     /// Adds a rule.
     #[must_use]
     pub fn with_rule(mut self, rule: PromotionRuleInput) -> Self {
@@ -401,6 +429,11 @@ pub struct UpdatePromotionInput {
     pub usage_limit: Option<Option<i64>>,
     /// New per-customer limit.
     pub per_customer_limit: Option<Option<i64>>,
+    /// New ordering weight; `None` keeps the stored one.
+    pub priority: Option<i64>,
+    /// New stackability; `None` keeps the stored one, `Some(false)` makes the
+    /// promotion exclusive.
+    pub is_stackable: Option<bool>,
     /// Replacement metadata.
     pub metadata: Option<Metadata>,
     /// Replacement rules when present.
@@ -626,20 +659,35 @@ pub fn apply_promotion(
     )
 }
 
-/// Applies promotions in creation/id order against the remaining cart value.
+/// Applies promotions in priority order against the remaining cart value.
+///
+/// Promotions are ordered by `priority` descending, then `created_at`, then
+/// `id`. Every priority defaults to 0, so a store that never configures one
+/// keeps the historic `created_at, id` order and its discount allocation is
+/// unchanged; raising a promotion's priority is the only way to move it.
 ///
 /// Each promotion sees the subtotal and shipping left after previous
 /// promotions, so no combination of promotions can discount a cart below zero.
 /// Promotions that do not match or produce no discount are omitted.
+///
+/// A promotion with `is_stackable = false` is exclusive: once it produces a
+/// discount it owns the batch and the promotions ordered after it are skipped.
+/// A non-stackable promotion that produces no discount — it does not match, or
+/// there is nothing left to discount — does not affect the promotions after it.
 pub fn calculate_promotions(
     contexts: &[PromotionContext],
     cart: &PromotionCart,
 ) -> Result<Vec<PromotionResult>, AppError> {
     let mut ordered: Vec<&PromotionContext> = contexts.iter().collect();
+    // Every existing row defaults to priority 0, so this key collapses to the
+    // historic `created_at, id` order unless a priority is configured: the
+    // comparator returns `Equal` for equal priorities and falls through.
     ordered.sort_by(|left, right| {
-        left.promotion
-            .created_at
-            .cmp(&right.promotion.created_at)
+        right
+            .promotion
+            .priority
+            .cmp(&left.promotion.priority)
+            .then_with(|| left.promotion.created_at.cmp(&right.promotion.created_at))
             .then_with(|| left.promotion.id.cmp(&right.promotion.id))
     });
 
@@ -652,7 +700,13 @@ pub fn calculate_promotions(
         {
             remaining_subtotal = (remaining_subtotal - result.total_discount).max(0);
             remaining_shipping = (remaining_shipping - result.shipping_discount).max(0);
+            // Exclusivity is earned by discounting: a non-stackable promotion
+            // that produced nothing stays out of the way.
+            let exclusive = !context.promotion.is_stackable;
             results.push(result);
+            if exclusive {
+                break;
+            }
         }
     }
     Ok(results)
@@ -1277,6 +1331,8 @@ mod tests {
                 usage_limit: None,
                 usage_count: 0,
                 per_customer_limit: None,
+                priority: 0,
+                is_stackable: true,
                 metadata: Metadata::empty(),
                 rules: Vec::new(),
                 created_at: 0,

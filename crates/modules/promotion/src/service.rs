@@ -19,8 +19,8 @@ use crate::domain::{
 };
 
 const PROMOTION_COLUMNS: &str = "id, code, title, type AS promotion_type, value, status, \
-     is_automatic, starts_at, ends_at, usage_limit, usage_count, per_customer_limit, metadata, \
-     created_at, updated_at";
+     is_automatic, starts_at, ends_at, usage_limit, usage_count, per_customer_limit, priority, \
+     is_stackable, metadata, created_at, updated_at";
 const PROMOTION_RULE_COLUMNS: &str = "id, promotion_id, attribute, operator, value, created_at";
 const COUPON_COLUMNS: &str = "id, code, promotion_id, usage_limit, usage_count, starts_at, \
      ends_at, metadata, created_at, updated_at";
@@ -99,8 +99,9 @@ impl PromotionService {
         sqlx::query(
             "INSERT INTO promotions
              (id, code, title, type, value, status, is_automatic, starts_at, ends_at, usage_limit,
-              usage_count, per_customer_limit, metadata, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+              usage_count, per_customer_limit, priority, is_stackable, metadata, created_at,
+              updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&code)
@@ -113,6 +114,8 @@ impl PromotionService {
         .bind(input.ends_at)
         .bind(input.usage_limit)
         .bind(input.per_customer_limit)
+        .bind(input.priority)
+        .bind(if input.is_stackable { 1_i64 } else { 0_i64 })
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
@@ -136,6 +139,8 @@ impl PromotionService {
             usage_limit: input.usage_limit,
             usage_count: 0,
             per_customer_limit: input.per_customer_limit,
+            priority: input.priority,
+            is_stackable: input.is_stackable,
             metadata: input.metadata,
             rules,
             created_at: now,
@@ -177,6 +182,8 @@ impl PromotionService {
         let per_customer_limit = input
             .per_customer_limit
             .unwrap_or(existing.per_customer_limit);
+        let priority = input.priority.unwrap_or(existing.priority);
+        let is_stackable = input.is_stackable.unwrap_or(existing.is_stackable);
         let metadata = input.metadata.unwrap_or(existing.metadata);
         validate_per_customer_limit(per_customer_limit)?;
 
@@ -202,7 +209,7 @@ impl PromotionService {
             "UPDATE promotions
              SET code = ?, title = ?, type = ?, value = ?, status = ?, is_automatic = ?,
                  starts_at = ?, ends_at = ?, usage_limit = ?, per_customer_limit = ?,
-                 metadata = ?, updated_at = ?
+                 priority = ?, is_stackable = ?, metadata = ?, updated_at = ?
              WHERE id = ? AND (? IS NULL OR ? >= usage_count)",
         )
         .bind(&code)
@@ -215,6 +222,8 @@ impl PromotionService {
         .bind(ends_at)
         .bind(usage_limit)
         .bind(per_customer_limit)
+        .bind(priority)
+        .bind(if is_stackable { 1_i64 } else { 0_i64 })
         .bind(metadata.to_json_string())
         .bind(now)
         .bind(id)
@@ -263,6 +272,8 @@ impl PromotionService {
             usage_limit,
             usage_count,
             per_customer_limit,
+            priority,
+            is_stackable,
             metadata,
             rules,
             created_at,
@@ -1422,7 +1433,7 @@ impl PromotionService {
         count.ok_or_else(|| AppError::not_found("coupon", coupon_id))
     }
 
-    /// Applies eligible active promotions to a cart in creation/id order.
+    /// Applies eligible active promotions to a cart in priority order.
     pub fn calculate(
         &self,
         promotions_with_rules: &[PromotionContext],
@@ -1846,6 +1857,8 @@ struct PromotionRow {
     usage_limit: Option<i64>,
     usage_count: i64,
     per_customer_limit: Option<i64>,
+    priority: i64,
+    is_stackable: i64,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -1866,6 +1879,8 @@ impl PromotionRow {
             usage_limit: self.usage_limit,
             usage_count: self.usage_count,
             per_customer_limit: self.per_customer_limit,
+            priority: self.priority,
+            is_stackable: self.is_stackable != 0,
             metadata: fastcart_kernel::Metadata::from_json_str(&self.metadata),
             rules: Vec::new(),
             created_at: self.created_at,
@@ -2007,6 +2022,8 @@ mod tests {
             usage_limit: None,
             usage_count: 0,
             per_customer_limit: None,
+            priority: 0,
+            is_stackable: true,
             metadata: Metadata::empty(),
             rules: Vec::new(),
             created_at,
