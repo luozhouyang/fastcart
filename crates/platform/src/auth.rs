@@ -167,6 +167,10 @@ impl AuthService {
     }
 
     /// Hashes a password with Argon2id.
+    ///
+    /// This is a CPU- and memory-bound call. Async callers must use
+    /// [`AuthService::hash_password_offloaded`] so the work runs on the
+    /// blocking pool instead of stalling a runtime worker.
     pub fn hash_password(password: &str) -> PlatformResult<String> {
         let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
@@ -176,6 +180,10 @@ impl AuthService {
     }
 
     /// Verifies a password against a stored Argon2 hash.
+    ///
+    /// This is a CPU- and memory-bound call. Async callers must use
+    /// [`AuthService::verify_password_offloaded`] so the work runs on the
+    /// blocking pool instead of stalling a runtime worker.
     #[must_use]
     pub fn verify_password(stored_hash: &str, password: &str) -> bool {
         PasswordHash::new(stored_hash).is_ok_and(|hash| {
@@ -183,6 +191,30 @@ impl AuthService {
                 .verify_password(password.as_bytes(), &hash)
                 .is_ok()
         })
+    }
+
+    /// Hashes a password on the blocking pool.
+    ///
+    /// Argon2 deliberately costs tens of milliseconds; running it inline on a
+    /// runtime worker (the login endpoint is unauthenticated and can be hit
+    /// concurrently) starves every other task on that worker.
+    async fn hash_password_offloaded(password: &str) -> PlatformResult<String> {
+        let password = password.to_owned();
+        tokio::task::spawn_blocking(move || Self::hash_password(&password))
+            .await
+            .map_err(password_task_error)?
+    }
+
+    /// Verifies a password on the blocking pool.
+    ///
+    /// Only the wrong-password case is `Ok(false)`; a failed or panicked task
+    /// surfaces as an error so callers never report it as invalid credentials.
+    async fn verify_password_offloaded(stored_hash: &str, password: &str) -> PlatformResult<bool> {
+        let stored_hash = stored_hash.to_owned();
+        let password = password.to_owned();
+        tokio::task::spawn_blocking(move || Self::verify_password(&stored_hash, &password))
+            .await
+            .map_err(password_task_error)
     }
 
     /// Registers a platform user.
@@ -195,7 +227,7 @@ impl AuthService {
                 "password must contain at least 8 characters".to_owned(),
             ));
         }
-        let hash = Self::hash_password(password)?;
+        let hash = Self::hash_password_offloaded(password).await?;
         self.platform
             .create_user_with_credential(input, &hash)
             .await
@@ -216,7 +248,7 @@ impl AuthService {
             .get_password_hash(&user.id)
             .await?
             .ok_or(PlatformError::InvalidCredentials)?;
-        if !Self::verify_password(&stored_hash, password) {
+        if !Self::verify_password_offloaded(&stored_hash, password).await? {
             return Err(PlatformError::InvalidCredentials);
         }
         self.create_session(user).await
@@ -323,10 +355,10 @@ impl AuthService {
             .get_password_hash(user_id)
             .await?
             .ok_or(PlatformError::Unauthorized)?;
-        if !Self::verify_password(&stored, current_password) {
+        if !Self::verify_password_offloaded(&stored, current_password).await? {
             return Err(PlatformError::InvalidCredentials);
         }
-        let hash = Self::hash_password(new_password)?;
+        let hash = Self::hash_password_offloaded(new_password).await?;
         self.platform.update_password_hash(user_id, &hash).await?;
         self.revoke_all_sessions(user_id).await?;
         Ok(())
@@ -526,6 +558,14 @@ fn random_token(bytes: usize) -> String {
     hex::encode(buffer)
 }
 
+/// Maps a hashing task that failed to join into an internal error.
+///
+/// The task panicked or the runtime shut down, so the result says nothing
+/// about the password and must not be reported as invalid credentials.
+fn password_task_error(error: tokio::task::JoinError) -> PlatformError {
+    PlatformError::PasswordHash(format!("password task failed: {error}"))
+}
+
 /// SHA-256 token digest used for session and API token lookup.
 #[must_use]
 pub fn hash_token(token: &str) -> String {
@@ -586,38 +626,43 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn login_does_not_block_the_async_runtime() {
         let auth = service().await;
-        auth.register(
-            CreateUserInput::new("owner@example.com"),
-            "hunter2hunter2",
-        )
-        .await
-        .unwrap();
+        auth.register(CreateUserInput::new("owner@example.com"), "hunter2hunter2")
+            .await
+            .unwrap();
 
-        let (armed, armed_rx) = tokio::sync::oneshot::channel();
-        let (fired, mut fired_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let _ = armed.send(());
-            // Long enough to fall inside the Argon2 work, short enough that a
-            // responsive event loop always reaches it first.
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            let _ = fired.send(());
-        });
-        armed_rx.await.unwrap();
-
-        let login = auth.login("owner@example.com", "hunter2hunter2");
-        tokio::pin!(login);
-        let watchdog_ran_during_login = loop {
-            tokio::select! {
-                result = &mut login => {
-                    result.unwrap();
-                    break false;
+        // The watchdog ticks every millisecond and records the longest time it
+        // went unscheduled. Database round trips are sub-millisecond, so any
+        // multi-millisecond gap is the Argon2 call being run inline.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let max_gap_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let watchdog = tokio::spawn({
+            let stop = stop.clone();
+            let max_gap_ms = max_gap_ms.clone();
+            async move {
+                let mut last = tokio::time::Instant::now();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    let now = tokio::time::Instant::now();
+                    max_gap_ms.fetch_max(
+                        u64::try_from((now - last).as_millis()).unwrap_or(u64::MAX),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    last = now;
                 }
-                _ = &mut fired_rx => break true,
             }
-        };
+        });
+        tokio::task::yield_now().await;
+
+        auth.login("owner@example.com", "hunter2hunter2")
+            .await
+            .unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        watchdog.await.unwrap();
+
+        let gap_ms = max_gap_ms.load(std::sync::atomic::Ordering::Relaxed);
         assert!(
-            watchdog_ran_during_login,
-            "the async runtime was blocked while Argon2 verified a password"
+            gap_ms < 20,
+            "the async runtime was blocked for {gap_ms}ms while Argon2 verified a password"
         );
     }
 

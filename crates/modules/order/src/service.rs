@@ -2102,6 +2102,14 @@ fn resolve_order(input: CreateOrderInput) -> Result<ResolvedOrder, AppError> {
         };
         let discount_total = item.discount_total.unwrap_or(0);
         validate_non_negative_amount(discount_total, "item discount_total")?;
+        // A line discounted past its own value yields a negative line total,
+        // and every total derived from it — including the amount the customer
+        // was charged — stops meaning anything.
+        if discount_total > subtotal {
+            return Err(AppError::validation(format!(
+                "item discount_total {discount_total} exceeds its subtotal {subtotal}"
+            )));
+        }
         let tax_total = item.tax_total.unwrap_or(0);
         validate_non_negative_amount(tax_total, "item tax_total")?;
         let total = match item.total {
@@ -2990,5 +2998,54 @@ mod tests {
 
         // Replaying the reconciliation does not duplicate the local row.
         assert_eq!(service.reconcile_provider_refunds().await.unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod line_discount_tests {
+    use fastcart_infrastructure::StoreDatabase;
+    use fastcart_kernel::StoreId;
+    use serde_json::json;
+
+    use super::OrderService;
+    use crate::domain::{CreateOrderInput, CreateOrderItemInput};
+
+    async fn service() -> OrderService {
+        let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+        OrderService::new(db)
+    }
+
+    /// A line cannot be discounted past its own value: the remainder would make
+    /// the line total negative, and every total derived from it — including the
+    /// amount the customer was charged — stops meaning anything.
+    #[tokio::test]
+    async fn rejects_a_line_discounted_past_its_own_value() {
+        let service = service().await;
+        let error = service
+            .create_order(CreateOrderInput {
+                email: "buyer@example.com".to_owned(),
+                currency_code: "USD".to_owned(),
+                items: vec![CreateOrderItemInput {
+                    product_title: "Widget".to_owned(),
+                    unit_price: 1_000,
+                    quantity: 1,
+                    subtotal: Some(1_000),
+                    discount_total: Some(1_500),
+                    tax_total: Some(0),
+                    total: Some(0),
+                    requires_shipping: true,
+                    ..CreateOrderItemInput::default()
+                }],
+                subtotal: 1_000,
+                discount_total: 1_500,
+                total: 0,
+                shipping_address: json!({"city": "Berlin"}),
+                billing_address: json!({"city": "Berlin"}),
+                ..CreateOrderInput::default()
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, fastcart_kernel::AppError::Validation(_)));
     }
 }
