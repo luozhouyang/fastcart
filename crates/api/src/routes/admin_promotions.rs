@@ -380,6 +380,7 @@ pub struct CreatePromotionRequest {
     starts_at: Option<i64>,
     ends_at: Option<i64>,
     usage_limit: Option<i64>,
+    per_customer_limit: Option<i64>,
     priority: Option<i64>,
     is_stackable: Option<bool>,
     metadata: Option<Metadata>,
@@ -396,6 +397,7 @@ impl CreatePromotionRequest {
         input.starts_at = self.starts_at;
         input.ends_at = self.ends_at;
         input.usage_limit = self.usage_limit;
+        input.per_customer_limit = self.per_customer_limit;
         input.priority = self.priority.unwrap_or(0);
         input.is_stackable = self.is_stackable.unwrap_or(true);
         input.metadata = self.metadata.unwrap_or_default();
