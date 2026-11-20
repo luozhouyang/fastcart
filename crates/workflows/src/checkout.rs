@@ -1,7 +1,7 @@
 //! Checkout orchestration: cart validation, stock reservation, payment capture
 //! and idempotent order placement.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{AppError, CartId, CheckoutId, Metadata, PaymentSessionId, now_timestamp};
@@ -17,7 +17,7 @@ use fastcart_module_order::{
 use fastcart_module_payment::{
     CreatePaymentSessionInput, Payment, PaymentService, PaymentStatus as PaymentSessionStatus,
 };
-use fastcart_module_promotion::PromotionService;
+use fastcart_module_promotion::{PromotionService, checkout_usage_key};
 use fastcart_module_store::{Region, RegionService};
 
 use crate::cart::{CartContext, CartWorkflow};
@@ -474,6 +474,15 @@ impl CheckoutWorkflow {
             ));
         }
 
+        // Claim the promotions the cart applies before charging for them. The
+        // quote-time filter only decides what is offered, so the claim is what
+        // makes a usage limit binding: without it two checkouts can both read
+        // the same usage count, both pass, and both place an order. A promotion
+        // that cannot be claimed rejects the completion here, before any money
+        // moves.
+        self.claim_promotion_usage(&cart, &checkout_id, placement_token)
+            .await?;
+
         // Capture before marking the checkout as confirmed. A session that
         // looks paid but was never captured must never reach order placement.
         let payment = self.payment.capture(payment_session_id.as_str()).await?;
@@ -706,7 +715,8 @@ impl CheckoutWorkflow {
             }
         };
 
-        self.record_promotion_usage(&cart, &order).await;
+        self.reassign_promotion_usage(&checkout_id, order.id.as_str())
+            .await;
         let checkout = self.checkout.get(&checkout.id).await?;
         Ok(CompleteCheckoutResult {
             order,
@@ -732,8 +742,11 @@ impl CheckoutWorkflow {
             .payment
             .payment_for_session_id(payment_session_id.as_str())
             .await?;
+        // A crash between placement and the claim being moved onto the order
+        // leaves the usage keyed to the checkout; replaying converges here.
+        self.reassign_promotion_usage(&checkout.id, order.id.as_str())
+            .await;
         if let Ok(cart) = self.carts.get_cart(&checkout.cart_id).await {
-            self.record_promotion_usage(&cart, &order).await;
             // A crash between placement and cart completion leaves an open
             // cart behind an already placed checkout. Completing it here makes
             // replay converge without touching money or stock.
@@ -980,6 +993,10 @@ impl CheckoutWorkflow {
         }
 
         let _ = self.inventory.release_checkout(&checkout.id).await;
+        // The claims were taken before the capture, under the same placement
+        // fence as the refund above, and are given back with it: the customer
+        // never got the discount, so the promotion counters must not keep it.
+        self.release_promotion_usage(&checkout.id).await;
         let refund_key = format!("checkout-compensation:{}", checkout.id.as_str());
         let refunded = match self
             .payment
@@ -1028,8 +1045,13 @@ impl CheckoutWorkflow {
         }
     }
 
-    async fn record_promotion_usage(&self, cart: &fastcart_module_cart::Cart, order: &Order) {
-        let mut promotions: HashMap<String, i64> = HashMap::new();
+    /// Promotions the cart applied, with the discount each one granted.
+    ///
+    /// Keyed by promotion id and ordered, so the claim order is deterministic.
+    /// Only the adjustments that were actually granted are listed: a promotion
+    /// the calculator dropped is not charged anything.
+    fn cart_promotion_discounts(cart: &fastcart_module_cart::Cart) -> BTreeMap<String, i64> {
+        let mut promotions: BTreeMap<String, i64> = BTreeMap::new();
         for item in &cart.items {
             for adjustment in &item.adjustments {
                 if let Some(promotion_id) = adjustment.promotion_id.as_ref() {
@@ -1044,37 +1066,152 @@ impl CheckoutWorkflow {
                     adjustment.amount.max(0);
             }
         }
+        promotions
+    }
+
+    /// Coupon that unlocked a promotion on this cart, when the customer used one.
+    async fn coupon_for_promotion(
+        &self,
+        cart: &fastcart_module_cart::Cart,
+        promotion_id: &str,
+    ) -> Option<String> {
+        let code = cart
+            .discounts
+            .iter()
+            .find(|discount| {
+                discount
+                    .promotion_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == promotion_id)
+            })
+            .and_then(|discount| discount.code.clone())?;
+        match self.promotion.validate_coupon(&code, now_timestamp()).await {
+            Ok(coupon) => Some(coupon.id),
+            Err(_) => None,
+        }
+    }
+
+    /// Atomically claims one usage per promotion the cart applies.
+    ///
+    /// Runs before the capture, so a promotion whose limit, per-customer cap or
+    /// campaign budget is used up by a competing checkout rejects the
+    /// completion instead of over-issuing the discount. Everything claimed
+    /// before the failing one is given back, while this runner still holds the
+    /// placement claim.
+    async fn claim_promotion_usage(
+        &self,
+        cart: &fastcart_module_cart::Cart,
+        checkout_id: &CheckoutId,
+        placement_token: &str,
+    ) -> Result<(), AppError> {
+        let key = checkout_usage_key(checkout_id.as_str());
         let customer_id = cart.customer_id.as_ref().map(ToString::to_string);
-        for (promotion_id, amount) in promotions {
-            let coupon_id = cart
-                .discounts
-                .iter()
-                .find(|discount| {
-                    discount.promotion_id.as_ref().map(ToString::to_string)
-                        == Some(promotion_id.clone())
-                })
-                .and_then(|discount| discount.code.clone());
-            let coupon_id = match coupon_id {
-                Some(code) => match self.promotion.validate_coupon(&code, now_timestamp()).await {
-                    Ok(coupon) => Some(coupon.id),
-                    Err(_) => None,
-                },
-                None => None,
-            };
-            if let Err(error) = self
+        let currency_code = cart.currency_code.to_string();
+        let mut claimed = false;
+        for (promotion_id, amount) in Self::cart_promotion_discounts(cart) {
+            let coupon_id = self.coupon_for_promotion(cart, &promotion_id).await;
+            match self
                 .promotion
-                .record_usage(
+                .reserve_usage(
                     &promotion_id,
                     coupon_id.as_deref(),
                     customer_id.as_deref(),
-                    Some(order.id.as_str()),
+                    checkout_id.as_str(),
                     amount,
-                    Some(&order.currency_code),
+                    Some(&currency_code),
                 )
                 .await
             {
-                tracing::warn!(promotion_id = %promotion_id, error = %error, "failed to record promotion usage");
+                Ok(_) => claimed = true,
+                Err(error) => {
+                    if claimed {
+                        self.rollback_promotion_usage(&key, checkout_id, placement_token)
+                            .await;
+                    }
+                    return Err(error);
+                }
             }
+        }
+        Ok(())
+    }
+
+    /// Gives back the claims of a completion that is about to fail.
+    ///
+    /// Fenced by the placement claim, like compensation: a runner whose lease
+    /// was taken over must not release the claims the new owner is working with.
+    async fn rollback_promotion_usage(
+        &self,
+        key: &str,
+        checkout_id: &CheckoutId,
+        placement_token: &str,
+    ) {
+        match self
+            .checkout
+            .holds_placement(checkout_id, placement_token)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    checkout_id = %checkout_id,
+                    "checkout placement was taken over; skipping the promotion claim rollback"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    checkout_id = %checkout_id,
+                    error = %error,
+                    "could not verify the placement claim; skipping the promotion claim rollback"
+                );
+                return;
+            }
+        }
+        match self.promotion.release_usage(key).await {
+            Ok(released) => tracing::info!(
+                checkout_id = %checkout_id,
+                released,
+                "released the promotion claims of a rejected completion"
+            ),
+            Err(error) => tracing::error!(
+                checkout_id = %checkout_id,
+                error = %error,
+                "failed to release the promotion claims of a rejected completion; the counters stay consumed"
+            ),
+        }
+    }
+
+    /// Moves the checkout's promotion claims onto the order that was placed.
+    ///
+    /// The counters are already charged, so this only renames the key. If it
+    /// fails the order stands and the usage stays keyed to the checkout: the
+    /// counts are right, only the key did not move, and a replay retries it.
+    async fn reassign_promotion_usage(&self, checkout_id: &CheckoutId, order_id: &str) {
+        let key = checkout_usage_key(checkout_id.as_str());
+        if let Err(error) = self.promotion.reassign_usage(&key, order_id).await {
+            tracing::error!(
+                checkout_id = %checkout_id,
+                order_id = %order_id,
+                error = %error,
+                "failed to move the promotion usage onto the placed order"
+            );
+        }
+    }
+
+    /// Gives the promotion claims of a compensated checkout back to its counters.
+    async fn release_promotion_usage(&self, checkout_id: &CheckoutId) {
+        let key = checkout_usage_key(checkout_id.as_str());
+        match self.promotion.release_usage(&key).await {
+            Ok(released) => tracing::info!(
+                checkout_id = %checkout_id,
+                released,
+                "released the promotion claims of a compensated checkout"
+            ),
+            Err(error) => tracing::error!(
+                checkout_id = %checkout_id,
+                error = %error,
+                "failed to release the promotion claims of a compensated checkout; manual reconciliation is required"
+            ),
         }
     }
 }

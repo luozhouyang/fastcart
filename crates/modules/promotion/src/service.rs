@@ -14,12 +14,13 @@ use crate::domain::{
     CreatePromotionInput, Promotion, PromotionCart, PromotionContext, PromotionFilter,
     PromotionResult, PromotionRule, PromotionRuleInput, PromotionStatus, PromotionUsage,
     UpdateCampaignInput, UpdateCouponInput, UpdatePromotionInput, calculate_promotions,
-    normalize_code, validate_campaign_budget, validate_promotion_fields, validate_usage_limit,
-    validate_window, window_contains,
+    normalize_code, validate_campaign_budget, validate_per_customer_limit,
+    validate_promotion_fields, validate_usage_limit, validate_window, window_contains,
 };
 
 const PROMOTION_COLUMNS: &str = "id, code, title, type AS promotion_type, value, status, \
-     is_automatic, starts_at, ends_at, usage_limit, usage_count, metadata, created_at, updated_at";
+     is_automatic, starts_at, ends_at, usage_limit, usage_count, per_customer_limit, metadata, \
+     created_at, updated_at";
 const PROMOTION_RULE_COLUMNS: &str = "id, promotion_id, attribute, operator, value, created_at";
 const COUPON_COLUMNS: &str = "id, code, promotion_id, usage_limit, usage_count, starts_at, \
      ends_at, metadata, created_at, updated_at";
@@ -86,6 +87,7 @@ impl PromotionService {
             input.ends_at,
             &input.metadata,
         )?;
+        validate_per_customer_limit(input.per_customer_limit)?;
         let code = input.code.as_deref().map(normalize_code).transpose()?;
 
         let id = PromotionId::new().to_string();
@@ -97,8 +99,8 @@ impl PromotionService {
         sqlx::query(
             "INSERT INTO promotions
              (id, code, title, type, value, status, is_automatic, starts_at, ends_at, usage_limit,
-              usage_count, metadata, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+              usage_count, per_customer_limit, metadata, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&code)
@@ -110,6 +112,7 @@ impl PromotionService {
         .bind(input.starts_at)
         .bind(input.ends_at)
         .bind(input.usage_limit)
+        .bind(input.per_customer_limit)
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
@@ -132,6 +135,7 @@ impl PromotionService {
             ends_at: input.ends_at,
             usage_limit: input.usage_limit,
             usage_count: 0,
+            per_customer_limit: input.per_customer_limit,
             metadata: input.metadata,
             rules,
             created_at: now,
@@ -170,6 +174,9 @@ impl PromotionService {
         let ends_at = input.ends_at.unwrap_or(existing.ends_at);
         let usage_limit = input.usage_limit.unwrap_or(existing.usage_limit);
         let usage_count = existing.usage_count;
+        // `UpdatePromotionInput` has no field for it, so an update keeps the
+        // stored per-customer limit.
+        let per_customer_limit = existing.per_customer_limit;
         let metadata = input.metadata.unwrap_or(existing.metadata);
 
         validate_promotion_fields(
@@ -252,6 +259,7 @@ impl PromotionService {
             ends_at,
             usage_limit,
             usage_count,
+            per_customer_limit,
             metadata,
             rules,
             created_at,
@@ -911,6 +919,242 @@ impl PromotionService {
         usage_amount: i64,
         currency_code: Option<&str>,
     ) -> Result<PromotionUsage, AppError> {
+        self.record_usage_keyed(
+            promotion_id,
+            coupon_id,
+            customer_id,
+            order_id,
+            usage_amount,
+            currency_code,
+        )
+        .await
+    }
+
+    /// Atomically claims one usage for a checkout before the money moves.
+    ///
+    /// The claim is recorded under the checkout-scoped key
+    /// (`checkout:<checkout_id>`) so it can be moved onto the order once it
+    /// exists ([`Self::reassign_usage`]) or given back if it never does
+    /// ([`Self::release_usage`]). Claiming reuses the recording path, so it
+    /// validates and charges the promotion, coupon, per-customer and campaign
+    /// counters in one `BEGIN IMMEDIATE` transaction; a caller that loses the
+    /// race gets a conflict instead of an over-issued discount. Repeating the
+    /// call for the same checkout returns the existing claim and counts once.
+    pub async fn reserve_usage(
+        &self,
+        promotion_id: &str,
+        coupon_id: Option<&str>,
+        customer_id: Option<&str>,
+        checkout_id: &str,
+        usage_amount: i64,
+        currency_code: Option<&str>,
+    ) -> Result<PromotionUsage, AppError> {
+        let checkout_id = checkout_id.trim();
+        if checkout_id.is_empty() {
+            return Err(AppError::validation(
+                "a checkout id is required to reserve a promotion usage",
+            ));
+        }
+        let key = checkout_usage_key(checkout_id);
+        self.record_usage_keyed(
+            promotion_id,
+            coupon_id,
+            customer_id,
+            Some(&key),
+            usage_amount,
+            currency_code,
+        )
+        .await
+    }
+
+    /// Moves the usage a checkout claimed onto the order that was placed.
+    ///
+    /// The counters are left alone: the usage was charged when it was claimed,
+    /// and moving the key must not charge — or refund — a second time. A claim
+    /// whose promotion already records the order is dropped instead of
+    /// duplicated, so a takeover or a replay converges on one row. Returns the
+    /// number of claims the key held.
+    pub async fn reassign_usage(&self, from_key: &str, to_order_id: &str) -> Result<u64, AppError> {
+        let from_key = from_key.trim();
+        if from_key.is_empty() {
+            return Err(AppError::validation(
+                "a checkout usage key is required to reassign a promotion usage",
+            ));
+        }
+        let to_order_id = to_order_id.trim();
+        if to_order_id.is_empty() {
+            return Err(AppError::validation(
+                "an order id is required to reassign a promotion usage",
+            ));
+        }
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let claims: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, promotion_id FROM promotion_usage WHERE order_id = ? ORDER BY id",
+        )
+        .bind(from_key)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(database_error)?;
+
+        let mut moved = 0_u64;
+        for (id, promotion_id) in claims {
+            let already_recorded: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM promotion_usage WHERE promotion_id = ? AND order_id = ? LIMIT 1",
+            )
+            .bind(&promotion_id)
+            .bind(to_order_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+            if already_recorded.is_some() {
+                sqlx::query("DELETE FROM promotion_usage WHERE id = ?")
+                    .bind(&id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(database_error)?;
+                delete_usage_application(&mut transaction, &promotion_id, from_key).await?;
+            } else {
+                sqlx::query("UPDATE promotion_usage SET order_id = ? WHERE id = ?")
+                    .bind(to_order_id)
+                    .bind(&id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(database_error)?;
+                move_usage_application(&mut transaction, &promotion_id, from_key, to_order_id)
+                    .await?;
+            }
+            moved += 1;
+        }
+        transaction.commit().await.map_err(database_error)?;
+        Ok(moved)
+    }
+
+    /// Gives every usage a checkout claimed back, counters included.
+    ///
+    /// Deletes the `checkout:<checkout_id>` rows and reverses what the claim
+    /// charged in the same transaction: `promotions.usage_count`,
+    /// `coupons.usage_count` and the campaign budget the claim consumed. Every
+    /// counter is floored at zero, so releasing twice cannot drive one
+    /// negative. Returns the number of released claims.
+    pub async fn release_usage(&self, checkout_key: &str) -> Result<u64, AppError> {
+        let checkout_key = checkout_key.trim();
+        if checkout_key.is_empty() {
+            return Err(AppError::validation(
+                "a checkout usage key is required to release a promotion usage",
+            ));
+        }
+        let now = now_timestamp();
+        let mut transaction = self.db.begin().await.map_err(AppError::from)?;
+        let claims: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, promotion_id, coupon_id FROM promotion_usage WHERE order_id = ? ORDER BY id",
+        )
+        .bind(checkout_key)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(database_error)?;
+
+        let mut released = 0_u64;
+        for (id, promotion_id, coupon_id) in claims {
+            // The amount and currency the claim charged are recorded next to the
+            // usage row; `promotion_usage` itself has no amount column.
+            let charge: Option<(i64, Option<String>)> = sqlx::query_as(
+                "SELECT amount, currency_code FROM promotion_applications
+                 WHERE promotion_id = ? AND order_id = ? ORDER BY id LIMIT 1",
+            )
+            .bind(&promotion_id)
+            .bind(checkout_key)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+
+            for campaign in load_promotion_campaigns(&mut transaction, &promotion_id).await? {
+                let budget_type: CampaignBudgetType = campaign.budget_type.parse()?;
+                let decrement = match budget_type {
+                    CampaignBudgetType::Usage => 1,
+                    CampaignBudgetType::Spend => {
+                        let Some((amount, currency)) = charge.as_ref() else {
+                            tracing::warn!(
+                                promotion_id = %promotion_id,
+                                campaign_id = %campaign.id,
+                                "no recorded amount for a claimed spend campaign budget; leaving it consumed"
+                            );
+                            continue;
+                        };
+                        if currency.as_deref() != campaign.currency_code.as_deref() {
+                            tracing::warn!(
+                                promotion_id = %promotion_id,
+                                campaign_id = %campaign.id,
+                                "recorded currency does not match the campaign; leaving its budget consumed"
+                            );
+                            continue;
+                        }
+                        *amount
+                    }
+                };
+                sqlx::query(
+                    "UPDATE campaigns SET budget_used = MAX(0, budget_used - ?), updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(decrement)
+                .bind(now)
+                .bind(&campaign.id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(database_error)?;
+            }
+            if let Some(coupon_id) = coupon_id.as_deref() {
+                sqlx::query(
+                    "UPDATE coupons SET usage_count = MAX(0, usage_count - 1), updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(now)
+                .bind(coupon_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(database_error)?;
+            }
+            sqlx::query(
+                "UPDATE promotions SET usage_count = MAX(0, usage_count - 1), updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(now)
+            .bind(&promotion_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+            sqlx::query("DELETE FROM promotion_usage WHERE id = ?")
+                .bind(&id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(database_error)?;
+            sqlx::query(
+                "DELETE FROM promotion_applications WHERE promotion_id = ? AND order_id = ?",
+            )
+            .bind(&promotion_id)
+            .bind(checkout_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+            released += 1;
+        }
+        transaction.commit().await.map_err(database_error)?;
+        Ok(released)
+    }
+
+    /// Shared insert path of [`Self::record_usage`] and [`Self::reserve_usage`].
+    ///
+    /// `order_key` is the order id for a recorded usage and the checkout key for
+    /// a claimed one. The caller owns the transaction, so the limit checks, the
+    /// counter updates and the insert all run under one write lock.
+    async fn record_usage_keyed(
+        &self,
+        promotion_id: &str,
+        coupon_id: Option<&str>,
+        customer_id: Option<&str>,
+        order_key: Option<&str>,
+        usage_amount: i64,
+        currency_code: Option<&str>,
+    ) -> Result<PromotionUsage, AppError> {
         if usage_amount < 0 {
             return Err(AppError::validation(
                 "promotion usage amount must not be negative",
@@ -922,13 +1166,13 @@ impl PromotionService {
 
         // The idempotency lookup runs under the same write lock as the insert,
         // so a duplicate order cannot slip in between the two statements.
-        if let Some(order_id) = order_id
+        if let Some(order_key) = order_key
             && let Some(existing) = sqlx::query_as::<_, PromotionUsageRow>(
                 "SELECT id, promotion_id, coupon_id, customer_id, order_id, created_at
                  FROM promotion_usage WHERE promotion_id = ? AND order_id = ?",
             )
             .bind(promotion_id)
-            .bind(order_id)
+            .bind(order_key)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(database_error)?
@@ -936,17 +1180,35 @@ impl PromotionService {
             return Ok(existing.into_usage());
         }
 
-        let promotion: Option<(Option<i64>, i64)> =
-            sqlx::query_as("SELECT usage_limit, usage_count FROM promotions WHERE id = ?")
-                .bind(promotion_id)
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(database_error)?;
-        let Some((usage_limit, usage_count)) = promotion else {
+        let promotion: Option<(Option<i64>, i64, Option<i64>)> = sqlx::query_as(
+            "SELECT usage_limit, usage_count, per_customer_limit FROM promotions WHERE id = ?",
+        )
+        .bind(promotion_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(database_error)?;
+        let Some((usage_limit, usage_count, per_customer_limit)) = promotion else {
             return Err(AppError::not_found("promotion", promotion_id));
         };
         if usage_limit.is_some_and(|limit| usage_count >= limit) {
             return Err(AppError::conflict("promotion usage limit reached"));
+        }
+        if let (Some(limit), Some(customer_id)) = (per_customer_limit, customer_id) {
+            // Counted under the same write lock as the insert, so two checkouts
+            // of one customer cannot both pass the check.
+            let recorded: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM promotion_usage WHERE promotion_id = ? AND customer_id = ?",
+            )
+            .bind(promotion_id)
+            .bind(customer_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+            if recorded >= limit {
+                return Err(AppError::conflict(
+                    "promotion per-customer usage limit reached",
+                ));
+            }
         }
 
         if let Some(coupon_id) = coupon_id {
@@ -992,19 +1254,19 @@ impl PromotionService {
         .bind(promotion_id)
         .bind(coupon_id)
         .bind(customer_id)
-        .bind(order_id)
+        .bind(order_key)
         .bind(now)
         .execute(&mut *transaction)
         .await;
         if let Err(error) = inserted {
             if is_unique_violation(&error)
-                && let Some(order_id) = order_id
+                && let Some(order_key) = order_key
                 && let Some(existing) = sqlx::query_as::<_, PromotionUsageRow>(
                     "SELECT id, promotion_id, coupon_id, customer_id, order_id, created_at
                      FROM promotion_usage WHERE promotion_id = ? AND order_id = ?",
                 )
                 .bind(promotion_id)
-                .bind(order_id)
+                .bind(order_key)
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(database_error)?
@@ -1013,6 +1275,24 @@ impl PromotionService {
             }
             return Err(database_error(error));
         }
+        // The usage row carries no amount, so the charge is recorded here:
+        // `release_usage` reverses a claimed campaign budget from this row. The
+        // column is `NOT NULL`, and a spend campaign always requires a currency,
+        // so an absent one is stored empty.
+        sqlx::query(
+            "INSERT INTO promotion_applications
+             (id, promotion_id, cart_id, order_id, code, amount, currency_code, created_at)
+             VALUES (?, ?, NULL, ?, NULL, ?, ?, ?)",
+        )
+        .bind(EventId::new().to_string())
+        .bind(promotion_id)
+        .bind(order_key)
+        .bind(usage_amount)
+        .bind(usage_currency.as_deref().unwrap_or_default())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_error)?;
         let updated = sqlx::query(
             "UPDATE promotions SET usage_count = usage_count + 1, updated_at = ?
              WHERE id = ? AND (usage_limit IS NULL OR usage_count < usage_limit)",
@@ -1026,17 +1306,7 @@ impl PromotionService {
             return Err(AppError::conflict("promotion usage limit reached"));
         }
 
-        let campaigns: Vec<CampaignBudgetRow> = sqlx::query_as(
-            "SELECT c.id, c.budget_type, c.currency_code, c.budget_limit, c.budget_used
-             FROM campaigns c
-             JOIN campaign_promotions cp ON cp.campaign_id = c.id
-             WHERE cp.promotion_id = ?",
-        )
-        .bind(promotion_id)
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(database_error)?;
-        for campaign in campaigns {
+        for campaign in load_promotion_campaigns(&mut transaction, promotion_id).await? {
             let budget_type: CampaignBudgetType = campaign.budget_type.parse()?;
             let increment = match budget_type {
                 CampaignBudgetType::Usage => 1,
@@ -1085,7 +1355,7 @@ impl PromotionService {
             promotion_id: promotion_id.to_owned(),
             coupon_id: coupon_id.map(str::to_owned),
             customer_id: customer_id.map(str::to_owned),
-            order_id: order_id.map(str::to_owned),
+            order_id: order_key.map(str::to_owned),
             created_at: now,
         })
     }
@@ -1357,6 +1627,86 @@ async fn insert_promotion_rules(
     Ok(stored)
 }
 
+/// Prefix of the usage key a checkout claims its promotions under.
+const CHECKOUT_USAGE_KEY_PREFIX: &str = "checkout:";
+
+/// Builds the usage key a checkout claims its promotions under.
+///
+/// [`PromotionService::reserve_usage`] records this key,
+/// [`PromotionService::reassign_usage`] moves it onto the order and
+/// [`PromotionService::release_usage`] gives it back, so every caller must
+/// build it here instead of formatting the prefix itself.
+#[must_use]
+pub fn checkout_usage_key(checkout_id: &str) -> String {
+    format!("{CHECKOUT_USAGE_KEY_PREFIX}{}", checkout_id.trim())
+}
+
+/// Loads the campaigns a promotion belongs to, with their budget state.
+async fn load_promotion_campaigns(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    promotion_id: &str,
+) -> Result<Vec<CampaignBudgetRow>, AppError> {
+    sqlx::query_as(
+        "SELECT c.id, c.budget_type, c.currency_code, c.budget_limit, c.budget_used
+         FROM campaigns c
+         JOIN campaign_promotions cp ON cp.campaign_id = c.id
+         WHERE cp.promotion_id = ?",
+    )
+    .bind(promotion_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(database_error)
+}
+
+/// Moves the recorded charge of a claim onto the order that owns it now.
+///
+/// A charge already recorded for the order wins; the checkout copy is dropped so
+/// a release can never reverse the same budget twice.
+async fn move_usage_application(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    promotion_id: &str,
+    from_key: &str,
+    to_order_id: &str,
+) -> Result<(), AppError> {
+    let already_recorded: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM promotion_applications
+         WHERE promotion_id = ? AND order_id = ? LIMIT 1",
+    )
+    .bind(promotion_id)
+    .bind(to_order_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    if already_recorded.is_some() {
+        return delete_usage_application(transaction, promotion_id, from_key).await;
+    }
+    sqlx::query(
+        "UPDATE promotion_applications SET order_id = ? WHERE promotion_id = ? AND order_id = ?",
+    )
+    .bind(to_order_id)
+    .bind(promotion_id)
+    .bind(from_key)
+    .execute(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
+/// Forgets the recorded charge of a claim that no longer exists.
+async fn delete_usage_application(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    promotion_id: &str,
+    key: &str,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM promotion_applications WHERE promotion_id = ? AND order_id = ?")
+        .bind(promotion_id)
+        .bind(key)
+        .execute(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    Ok(())
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct CampaignBudgetRow {
     id: String,
@@ -1449,6 +1799,7 @@ struct PromotionRow {
     ends_at: Option<i64>,
     usage_limit: Option<i64>,
     usage_count: i64,
+    per_customer_limit: Option<i64>,
     metadata: String,
     created_at: i64,
     updated_at: i64,
@@ -1468,6 +1819,7 @@ impl PromotionRow {
             ends_at: self.ends_at,
             usage_limit: self.usage_limit,
             usage_count: self.usage_count,
+            per_customer_limit: self.per_customer_limit,
             metadata: fastcart_kernel::Metadata::from_json_str(&self.metadata),
             rules: Vec::new(),
             created_at: self.created_at,
@@ -1608,6 +1960,7 @@ mod tests {
             ends_at: None,
             usage_limit: None,
             usage_count: 0,
+            per_customer_limit: None,
             metadata: Metadata::empty(),
             rules: Vec::new(),
             created_at,

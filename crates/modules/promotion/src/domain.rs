@@ -263,6 +263,8 @@ pub struct Promotion {
     pub usage_limit: Option<i64>,
     /// Number of recorded usages.
     pub usage_count: i64,
+    /// Optional limit on how many times one customer may redeem the promotion.
+    pub per_customer_limit: Option<i64>,
     /// Extension metadata.
     pub metadata: Metadata,
     /// Rules attached to the promotion.
@@ -294,6 +296,8 @@ pub struct CreatePromotionInput {
     pub ends_at: Option<i64>,
     /// Optional total usage limit.
     pub usage_limit: Option<i64>,
+    /// Optional limit on how many times one customer may redeem the promotion.
+    pub per_customer_limit: Option<i64>,
     /// Extension metadata.
     pub metadata: Metadata,
     /// Rules attached to the promotion.
@@ -314,6 +318,7 @@ impl CreatePromotionInput {
             starts_at: None,
             ends_at: None,
             usage_limit: None,
+            per_customer_limit: None,
             metadata: Metadata::empty(),
             rules: Vec::new(),
         }
@@ -352,6 +357,13 @@ impl CreatePromotionInput {
     #[must_use]
     pub fn with_usage_limit(mut self, usage_limit: i64) -> Self {
         self.usage_limit = Some(usage_limit);
+        self
+    }
+
+    /// Sets how many times one customer may redeem the promotion.
+    #[must_use]
+    pub fn with_per_customer_limit(mut self, per_customer_limit: i64) -> Self {
+        self.per_customer_limit = Some(per_customer_limit);
         self
     }
 
@@ -1014,6 +1026,17 @@ pub(crate) fn validate_usage_limit(usage_limit: Option<i64>, field: &str) -> Res
     Ok(())
 }
 
+/// A per-customer limit, when set, must allow at least one redemption: zero or
+/// a negative value would make the promotion unusable rather than capped.
+pub(crate) fn validate_per_customer_limit(per_customer_limit: Option<i64>) -> Result<(), AppError> {
+    if per_customer_limit.is_some_and(|limit| limit <= 0) {
+        return Err(AppError::validation(
+            "per_customer_limit must be a positive number of redemptions",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_promotion_fields(
     title: &str,
     promotion_type: PromotionType,
@@ -1251,6 +1274,7 @@ mod tests {
                 ends_at: None,
                 usage_limit: None,
                 usage_count: 0,
+                per_customer_limit: None,
                 metadata: Metadata::empty(),
                 rules: Vec::new(),
                 created_at: 0,

@@ -15,4 +15,4 @@ pub use domain::{
     UpdateCampaignInput, UpdateCouponInput, UpdatePromotionInput, apply_promotion,
     calculate_promotions,
 };
-pub use service::PromotionService;
+pub use service::{PromotionService, checkout_usage_key};
