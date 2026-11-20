@@ -24,7 +24,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - **Rust performance.** Async Rust with Axum and Tokio, integer money, explicit module boundaries.
 - **Medusa-style modules.** Catalog, pricing, inventory, customer, cart, promotion, checkout, order, payment, shipping, tax, content and webhooks are independent crates; workflows compose them.
 - **Extensible core.** Provider interfaces, capability-scoped plugin manifests, a transactional outbox, a persistent job queue, and an auditable AI tool registry.
-- **Honest about what is wired.** The checkout money path fenced and compensated by hand; the generic workflow engine in `crates/workflows/src/engine.rs` is tested but not yet used by any production workflow ([ADR 0010](.livingdocs/adr/0010-checkout-keeps-hand-rolled-compensation.md)).
+- **Honest about what is wired.** The checkout money path fenced and compensated by hand; the generic workflow engine in `crates/workflows/src/engine.rs` is tested but not yet used by any production workflow ([ADR 0010](.livingdocs/adr/0010-checkout-keeps-hand-rolled-compensation.md)). The newer seams are honest too: a payment collection can hold several sessions and is captured as a collection, but no API creates the second session yet; the tax provider port can serve calculations from another engine, but which provider a store uses is not persisted, so switching happens in process; an exchange or claim settles its price difference on the order, while collecting or refunding that difference is left to an operator.
 
 ## Implemented backend
 
@@ -43,15 +43,15 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 | store     | Store settings and sales channels                                                                        |
 | catalog   | Products, variants, options, media, categories, collections, tags, FTS5 search, publication              |
 | pricing   | Price lists, scoped prices and deterministic price selection                                             |
-| promotion | Percentage/fixed/free-shipping promotions, coupons, rules, usage limits, proportional allocation         |
+| promotion | Percentage/fixed/free-shipping promotions, order/items/shipping targets, coupons, rules, usage limits, proportional allocation |
 | inventory | Locations, levels, atomic reservations, release/commit, expiry and movement history                      |
 | shipping  | Profiles, options and region/weight-aware flat rate selection                                            |
-| tax       | Categories, regions, rates and inclusive/exclusive tax calculation                                       |
+| tax       | Categories, regions, rates, inclusive/exclusive tax calculation, and a provider port for external engines |
 | customer  | Profiles, addresses, groups, Argon2id credentials and store-scoped sessions                              |
 | cart      | Snapshot line items and server-derived totals                                                            |
 | checkout  | Persisted state machine with transition history                                                          |
-| order     | Immutable commercial snapshots, idempotent placement, fulfillment and refunds                            |
-| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events              |
+| order     | Immutable commercial snapshots, idempotent placement, fulfillment, refunds, exchange/claim price differences |
+| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events, collections  |
 | content   | Pages, versions, navigation trees and redirects                                                          |
 | webhook   | Endpoint subscriptions, HMAC-signed deliveries, retries, replay and delivery history                     |
 | theme     | Theme settings registry (themes are deployment artifacts), JSON Schema settings, activation and rollback |
