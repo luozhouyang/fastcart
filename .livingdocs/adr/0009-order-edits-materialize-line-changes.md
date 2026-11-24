@@ -63,8 +63,10 @@ enforces cannot drift, whatever per-line flooring does. The rule is covered by
 `order_tax_lines_follow_their_base_and_keep_adding_up` in the service tests,
 including an order whose tax is partly levied on shipping.
 
-Inventory movement for edits is deliberately out of scope here and should be a
-second step once line changes exist to reference.
+Inventory movement for edits was deliberately out of scope here and was taken
+as a second step once line changes existed to reference. That step, together
+with the money difference and fulfillment-state reconciliation, is
+[ADR 0011](0011-order-edits-settle-stock-and-money.md).
 
 ## Consequences
 

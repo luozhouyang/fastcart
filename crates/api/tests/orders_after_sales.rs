@@ -380,6 +380,44 @@ async fn admin_can_run_the_full_post_purchase_flow() {
     .await;
     assert_eq!(status, StatusCode::OK, "{confirmed}");
     assert_eq!(confirmed["status"], "confirmed");
+    assert_eq!(confirmed["difference_total"], 500);
+
+    // The edit settled a difference the customer still owes. The summary
+    // reports it, and collecting it twice opens one payable, not two.
+    let summary_url = format!("/api/v1/admin/orders/{}/payment-summary", fixture.order_id);
+    let (status, summary, _) = send(&fixture.app, "GET", &summary_url, None, &headers).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["total"], 4_500);
+    assert_eq!(summary["captured_total"], 4_000);
+    assert_eq!(summary["refunded_total"], 0);
+    assert_eq!(summary["outstanding"], 500);
+    assert_eq!(summary["refund_due"], 0);
+
+    let collect_url = format!("{edits}/{edit_id}/collect-difference");
+    let (status, collected, _) = send(
+        &fixture.app,
+        "POST",
+        &collect_url,
+        Some(json!({"provider": "manual"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{collected}");
+    assert_eq!(collected["payment_session"]["amount"], 500);
+    let session_id = collected["payment_session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, replay, _) = send(
+        &fixture.app,
+        "POST",
+        &collect_url,
+        Some(json!({"provider": "manual"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["payment_session"]["id"], session_id.as_str());
 
     let (status, order, _) = send(
         &fixture.app,
@@ -524,4 +562,63 @@ async fn receiving_restocks_once_and_refunds_are_idempotent() {
         provider_refund_id
     );
     assert_eq!(replay["order"]["refunds"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_cheaper_edit_refunds_its_difference_once() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let edits = format!("/api/v1/admin/orders/{}/edits", fixture.order_id);
+    let (status, edit, _) = send(
+        &fixture.app,
+        "POST",
+        &edits,
+        Some(json!({
+            "reason": "customer kept two",
+            "items": [{
+                "action": "update",
+                "order_item_id": fixture.order_item_id,
+                "before_quantity": 4,
+                "after_quantity": 2
+            }]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{edit}");
+    let edit_id = edit["id"].as_str().unwrap().to_owned();
+    let (status, confirmed, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{edits}/{edit_id}/confirm"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    assert_eq!(confirmed["difference_total"], -2_000);
+
+    let refund_url = format!("{edits}/{edit_id}/refund-difference");
+    let (status, refund, _) = send(&fixture.app, "POST", &refund_url, None, &headers).await;
+    assert_eq!(status, StatusCode::OK, "{refund}");
+    assert_eq!(refund["order_refund"]["amount"], 2_000);
+    let refund_id = refund["order_refund"]["id"].as_str().unwrap().to_owned();
+    let (status, replay, _) = send(&fixture.app, "POST", &refund_url, None, &headers).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["order_refund"]["id"], refund_id.as_str());
+
+    let (status, summary, _) = send(
+        &fixture.app,
+        "GET",
+        &format!("/api/v1/admin/orders/{}/payment-summary", fixture.order_id),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["total"], 2_000);
+    assert_eq!(summary["captured_total"], 4_000);
+    assert_eq!(summary["refunded_total"], 2_000);
+    assert_eq!(summary["outstanding"], 0);
+    assert_eq!(summary["refund_due"], 0);
 }

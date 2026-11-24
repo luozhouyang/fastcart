@@ -11,7 +11,8 @@ pub mod maintenance;
 
 pub use after_sales::{
     AfterSalesWorkflow, ClaimFulfillmentResult, ClaimRefundResult, ExchangeAcceptResult,
-    ExchangeFulfillmentResult, ReceiveReturnResult, ReturnRefundResult,
+    ExchangeFulfillmentResult, OrderEditConfirmation, OrderPaymentSummary, ReceiveReturnResult,
+    ReturnRefundResult,
 };
 pub use cart::{CartContext, CartWorkflow};
 pub use checkout::{CheckoutWorkflow, CompleteCheckoutResult, CreateCheckoutRequest};

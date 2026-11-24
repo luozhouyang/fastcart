@@ -241,6 +241,7 @@ async fn an_added_edit_line_that_overflows_is_rejected() {
                     unit_price: Some(MAX),
                     before_quantity: None,
                     after_quantity: 2,
+                    requires_shipping: None,
                 }],
             },
         )
@@ -273,6 +274,7 @@ async fn an_updated_edit_line_that_overflows_is_rejected() {
                     unit_price: None,
                     before_quantity: Some(1),
                     after_quantity: 3,
+                    requires_shipping: None,
                 }],
             },
         )
@@ -305,6 +307,7 @@ async fn an_edit_that_overflows_the_order_subtotal_is_rejected() {
                     unit_price: Some(1),
                     before_quantity: None,
                     after_quantity: 1,
+                    requires_shipping: None,
                 }],
             },
         )
@@ -340,6 +343,7 @@ async fn an_edit_that_overflows_the_order_total_is_rejected() {
                     unit_price: Some(1),
                     before_quantity: None,
                     after_quantity: 1,
+                    requires_shipping: None,
                 }],
             },
         )

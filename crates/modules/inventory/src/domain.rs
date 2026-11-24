@@ -357,6 +357,43 @@ pub fn exchange_restock_reference(exchange_id: &str, exchange_item_id: &str) -> 
     format!("exchange-restock:{exchange_id}:{exchange_item_id}")
 }
 
+/// One signed stock change an order edit applies to a line.
+///
+/// The caller supplies a unique `reference` per edit line; replaying the same
+/// reference never moves stock twice. A positive `delta` consumes stock for a
+/// line the edit added or grew, a negative one returns the units a shrunk or
+/// removed line no longer holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrderEditStockLine {
+    /// Deterministic idempotency reference for this line's movement.
+    pub reference: String,
+    /// Catalog variant whose inventory level moves.
+    pub variant_id: VariantId,
+    /// Signed quantity: positive consumes, negative restocks.
+    pub delta: i64,
+}
+
+impl OrderEditStockLine {
+    /// Creates an order-edit stock line.
+    #[must_use]
+    pub fn new(variant_id: VariantId, delta: i64, reference: impl Into<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            variant_id,
+            delta,
+        }
+    }
+}
+
+/// Builds the deterministic movement reference of one order-edit line.
+///
+/// The order is part of the reference so the service can total what edits have
+/// already done to that order's stock when it bounds a restock.
+#[must_use]
+pub fn order_edit_stock_reference(order_id: &str, edit_id: &str, edit_item_id: &str) -> String {
+    format!("order-edit:{order_id}:{edit_id}:{edit_item_id}")
+}
+
 /// One variant quantity consumed from stock by an after-sales replacement.
 ///
 /// The caller supplies a unique `reference` per consumed line; replaying the

@@ -109,13 +109,24 @@ fn modules() -> Vec<(String, PathBuf)> {
 }
 
 fn source_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<_> = fs::read_dir(dir)
-        .expect("module src directory")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "rs"))
-        .filter(|path| path.file_name().is_some_and(|name| name != "tests.rs"))
-        .collect();
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).expect("module src directory") {
+            let path = entry.expect("module source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let is_test = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "tests.rs" || name.ends_with("_tests.rs"));
+            if path.extension().is_some_and(|ext| ext == "rs") && !is_test {
+                files.push(path);
+            }
+        }
+    }
     files.sort();
     files
 }

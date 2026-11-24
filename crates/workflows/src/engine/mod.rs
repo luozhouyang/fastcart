@@ -1,0 +1,536 @@
+//! Generic persistent workflow engine.
+//!
+//! Workflows are ordered lists of named steps. Executions, step checkpoints,
+//! retry counts and leases live in the store database so a crashed runner can
+//! resume where it stopped and concurrent runners cannot both advance the same
+//! execution.
+//!
+//! The engine deliberately never holds a SQLite transaction while awaiting
+//! arbitrary step code. Each state transition is its own short transaction and
+//! carries a fencing check against the runner's lease.
+
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+use async_trait::async_trait;
+use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_kernel::{AppError, PageResult, Pagination, now_timestamp};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sqlx::FromRow;
+use uuid::Uuid;
+
+mod drive;
+mod execution;
+mod lease;
+
+/// Persisted workflow execution statuses.
+pub mod status {
+    /// Waiting to be picked up by a runner.
+    pub const PENDING: &str = "pending";
+    /// A runner holds the lease.
+    pub const RUNNING: &str = "running";
+    /// Every step succeeded.
+    pub const COMPLETED: &str = "completed";
+    /// A step failed and compensation finished.
+    pub const FAILED: &str = "failed";
+
+    /// Persisted workflow step statuses.
+    pub mod step {
+        /// Not attempted yet.
+        pub const PENDING: &str = "pending";
+        /// An attempt is in flight.
+        pub const RUNNING: &str = "running";
+        /// The step returned successfully.
+        pub const SUCCEEDED: &str = "succeeded";
+        /// The step exhausted its attempts.
+        pub const FAILED: &str = "failed";
+        /// Compensation completed.
+        pub const COMPENSATED: &str = "compensated";
+        /// Compensation ran but returned an error.
+        pub const COMPENSATION_FAILED: &str = "compensation_failed";
+    }
+}
+
+/// Error returned by a workflow step.
+///
+/// `retryable` lets a step opt out of the engine retry budget, for example for
+/// validation failures that cannot succeed on a second attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepError {
+    /// Human-readable failure message.
+    pub message: String,
+    /// Whether the engine may retry this step.
+    pub retryable: bool,
+}
+
+impl StepError {
+    /// Creates a retryable step error.
+    #[must_use]
+    pub fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    /// Creates a non-retryable step error.
+    #[must_use]
+    pub fn non_retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    /// Returns true when the engine may retry the step.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+}
+
+impl std::fmt::Display for StepError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StepError {}
+
+/// Context passed to a step implementation.
+#[derive(Clone, Debug)]
+pub struct StepContext {
+    /// Execution identifier.
+    pub execution_id: String,
+    /// Name of the step being executed.
+    pub step_name: String,
+    /// Workflow input.
+    pub input: Value,
+    /// Outputs of steps that already succeeded, keyed by step name.
+    pub outputs: Value,
+    /// One-based attempt number for this step.
+    pub attempt: i64,
+}
+
+impl StepContext {
+    /// Returns the accumulated state, which is the map of step outputs.
+    #[must_use]
+    pub fn state(&self) -> &Value {
+        &self.outputs
+    }
+
+    /// Returns the output of an earlier step, if present.
+    #[must_use]
+    pub fn output(&self, step_name: &str) -> Option<&Value> {
+        self.outputs.get(step_name)
+    }
+}
+
+/// One executable workflow step.
+#[async_trait]
+pub trait WorkflowStep: Send + Sync {
+    /// Runs the step and returns its JSON output.
+    async fn execute(&self, context: &StepContext) -> Result<Value, StepError>;
+
+    /// Reverts a previously succeeded step.
+    ///
+    /// The default is a no-op so steps without side effects need no extra code.
+    ///
+    /// # Idempotency
+    ///
+    /// Compensation is retried across resumed drives until it succeeds or the
+    /// engine's attempt budget is exhausted. A runner can observe the outcome
+    /// of an external side effect but not atomically checkpoint it, so a crash
+    /// after the provider call and before the checkpoint is written causes the
+    /// same compensation to be invoked again with the same output.
+    /// Implementations must therefore be safe to call more than once.
+    async fn compensate(&self, _context: &StepContext, _output: &Value) -> Result<(), StepError> {
+        Ok(())
+    }
+}
+
+/// Ordered definition of a workflow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowDefinition {
+    /// Stable workflow identifier. Idempotency keys are scoped to this value.
+    pub id: String,
+    /// Ordered step names.
+    pub steps: Vec<String>,
+}
+
+impl WorkflowDefinition {
+    /// Creates a definition from any iterable of step names.
+    #[must_use]
+    pub fn new<I, S>(id: impl Into<String>, steps: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            id: id.into(),
+            steps: steps.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Persisted workflow execution row.
+#[derive(Clone, Debug, FromRow, Serialize, Deserialize)]
+pub struct WorkflowExecution {
+    /// Execution identifier.
+    pub id: String,
+    /// Workflow identifier.
+    pub workflow_id: String,
+    /// Optional deduplication key scoped to the workflow.
+    pub idempotency_key: Option<String>,
+    /// Execution status.
+    pub status: String,
+    /// Workflow input as stored JSON.
+    pub input: String,
+    /// Final step output as stored JSON.
+    pub output: Option<String>,
+    /// Last failure message.
+    pub error: Option<String>,
+    /// Total step attempts made by this execution.
+    pub attempts: i64,
+    /// Lease owner.
+    pub locked_by: Option<String>,
+    /// Lease expiry timestamp.
+    pub locked_until: Option<i64>,
+    /// First time a runner acquired the execution.
+    pub started_at: Option<i64>,
+    /// Completion or permanent-failure timestamp.
+    pub finished_at: Option<i64>,
+    /// Creation timestamp.
+    pub created_at: i64,
+    /// Last update timestamp.
+    pub updated_at: i64,
+}
+
+impl WorkflowExecution {
+    /// Parses the stored workflow input.
+    #[must_use]
+    pub fn input_json(&self) -> Value {
+        parse_json(&self.input)
+    }
+
+    /// Parses the stored execution output.
+    #[must_use]
+    pub fn output_json(&self) -> Option<Value> {
+        self.output.as_deref().map(parse_json)
+    }
+}
+
+/// Persisted workflow step checkpoint.
+#[derive(Clone, Debug, FromRow, Serialize, Deserialize)]
+pub struct WorkflowStepRecord {
+    /// Step row identifier.
+    pub id: String,
+    /// Owning execution.
+    pub execution_id: String,
+    /// Zero-based position in the workflow.
+    pub seq: i64,
+    /// Step name.
+    pub name: String,
+    /// Step status.
+    pub status: String,
+    /// Step input as stored JSON.
+    pub input: String,
+    /// Step output as stored JSON.
+    pub output: Option<String>,
+    /// Last failure or compensation error.
+    pub error: Option<String>,
+    /// Attempts made against this step.
+    pub attempts: i64,
+    /// Compensation attempts made against this step.
+    ///
+    /// Bounds how many times a failed compensation is retried across resumed
+    /// drives before the execution is finalized as failed.
+    pub compensation_attempts: i64,
+    /// Compensation timestamp, whether it succeeded or failed.
+    pub compensated_at: Option<i64>,
+    /// Creation timestamp.
+    pub created_at: i64,
+    /// Last update timestamp.
+    pub updated_at: i64,
+}
+
+impl WorkflowStepRecord {
+    /// Parses the stored step input.
+    #[must_use]
+    pub fn input_json(&self) -> Value {
+        parse_json(&self.input)
+    }
+
+    /// Parses the stored step output.
+    #[must_use]
+    pub fn output_json(&self) -> Option<Value> {
+        self.output.as_deref().map(parse_json)
+    }
+}
+
+/// An execution together with its ordered step checkpoints.
+#[derive(Clone, Debug)]
+pub struct WorkflowExecutionDetail {
+    /// Execution row.
+    pub execution: WorkflowExecution,
+    /// Step rows ordered by sequence.
+    pub steps: Vec<WorkflowStepRecord>,
+}
+
+/// Optional execution list filters for admin inspection.
+#[derive(Clone, Debug, Default)]
+pub struct WorkflowExecutionFilter {
+    /// Restrict to one workflow.
+    pub workflow_id: Option<String>,
+    /// Restrict to one status.
+    pub status: Option<String>,
+    /// Restrict to one idempotency key.
+    pub idempotency_key: Option<String>,
+}
+
+/// Engine retry and lease policy.
+#[derive(Clone, Copy, Debug)]
+pub struct EngineConfig {
+    /// Maximum attempts per step, including the first one.
+    pub max_attempts: i64,
+    /// Lease length in seconds.
+    pub lease_seconds: i64,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            lease_seconds: 300,
+        }
+    }
+}
+
+/// Registers steps and runs persistent workflow executions.
+#[derive(Clone)]
+pub struct WorkflowEngine {
+    database: StoreDatabase,
+    steps: Arc<RwLock<HashMap<String, Arc<dyn WorkflowStep>>>>,
+    config: EngineConfig,
+}
+
+impl WorkflowEngine {
+    /// Creates an engine over one store database.
+    #[must_use]
+    pub fn new(database: StoreDatabase) -> Self {
+        Self {
+            database,
+            steps: Arc::new(RwLock::new(HashMap::new())),
+            config: EngineConfig::default(),
+        }
+    }
+
+    /// Replaces the retry and lease policy.
+    #[must_use]
+    pub fn with_config(mut self, config: EngineConfig) -> Self {
+        self.config = EngineConfig {
+            max_attempts: config.max_attempts.max(1),
+            lease_seconds: config.lease_seconds.max(0),
+        };
+        self
+    }
+
+    /// Sets the maximum attempts per step.
+    #[must_use]
+    pub fn with_max_attempts(mut self, max_attempts: i64) -> Self {
+        self.config.max_attempts = max_attempts.max(1);
+        self
+    }
+
+    /// Sets the lease length in seconds.
+    #[must_use]
+    pub fn with_lease_seconds(mut self, lease_seconds: i64) -> Self {
+        self.config.lease_seconds = lease_seconds.max(0);
+        self
+    }
+
+    /// Returns the underlying store database.
+    #[must_use]
+    pub fn database(&self) -> &StoreDatabase {
+        &self.database
+    }
+
+    /// Registers a step implementation under a unique name.
+    ///
+    /// Registering the same name twice is rejected so a typo cannot silently
+    /// replace the implementation used by persisted executions.
+    pub fn register(
+        &self,
+        name: impl Into<String>,
+        step: Arc<dyn WorkflowStep>,
+    ) -> Result<(), AppError> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(AppError::validation("workflow step name must not be empty"));
+        }
+        let mut steps = self
+            .steps
+            .write()
+            .map_err(|_| AppError::internal("workflow step registry is poisoned"))?;
+        if steps.contains_key(&name) {
+            return Err(AppError::conflict(format!(
+                "workflow step already registered: {name}"
+            )));
+        }
+        steps.insert(name, step);
+        Ok(())
+    }
+
+    /// Runs or resumes a workflow execution.
+    ///
+    /// With an idempotency key, a duplicate call returns the existing execution
+    /// instead of creating a second one. A non-terminal execution is resumed
+    /// once its lease is acquired; terminal executions are returned untouched.
+    pub async fn run(
+        &self,
+        definition: &WorkflowDefinition,
+        input: Value,
+        idempotency_key: Option<String>,
+    ) -> Result<WorkflowExecution, AppError> {
+        self.validate_definition(definition)?;
+        let (execution, _) = self
+            .get_or_create(definition, &input, idempotency_key.as_deref())
+            .await?;
+        if is_terminal(&execution.status) {
+            return Ok(execution);
+        }
+
+        let owner = format!("wfrun_{}", Uuid::now_v7().simple());
+        if !self.acquire_lease(&execution.id, &owner).await? {
+            // Another runner holds the lease. Return its current snapshot.
+            return self.get_execution_row(&execution.id).await;
+        }
+        self.drive(&execution.id, &owner).await
+    }
+
+    /// Returns one execution with its step checkpoints.
+    pub async fn get(&self, id: &str) -> Result<WorkflowExecutionDetail, AppError> {
+        let execution = self.get_execution_row(id).await?;
+        let steps = self.load_steps(id).await?;
+        Ok(WorkflowExecutionDetail { execution, steps })
+    }
+
+    /// Lists executions, with step checkpoints, newest first.
+    pub async fn list(
+        &self,
+        filter: &WorkflowExecutionFilter,
+        pagination: Pagination,
+    ) -> Result<PageResult<WorkflowExecutionDetail>, AppError> {
+        let pagination = Pagination::new(Some(pagination.limit), Some(pagination.offset))?;
+        let workflow_id = filter.workflow_id.as_deref();
+        let status = filter.status.as_deref();
+        let idempotency_key = filter.idempotency_key.as_deref();
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workflow_executions
+             WHERE (?1 IS NULL OR workflow_id = ?1)
+               AND (?2 IS NULL OR status = ?2)
+               AND (?3 IS NULL OR idempotency_key = ?3)",
+        )
+        .bind(workflow_id)
+        .bind(status)
+        .bind(idempotency_key)
+        .fetch_one(self.database.pool())
+        .await
+        .map_err(database_error)?;
+
+        let executions = sqlx::query_as::<_, WorkflowExecution>(
+            "SELECT * FROM workflow_executions
+             WHERE (?1 IS NULL OR workflow_id = ?1)
+               AND (?2 IS NULL OR status = ?2)
+               AND (?3 IS NULL OR idempotency_key = ?3)
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4 OFFSET ?5",
+        )
+        .bind(workflow_id)
+        .bind(status)
+        .bind(idempotency_key)
+        .bind(pagination.limit)
+        .bind(pagination.offset)
+        .fetch_all(self.database.pool())
+        .await
+        .map_err(database_error)?;
+
+        let mut data = Vec::with_capacity(executions.len());
+        for execution in executions {
+            let steps = self.load_steps(&execution.id).await?;
+            data.push(WorkflowExecutionDetail { execution, steps });
+        }
+        Ok(PageResult::new(data, count, pagination))
+    }
+
+    fn validate_definition(&self, definition: &WorkflowDefinition) -> Result<(), AppError> {
+        if definition.id.trim().is_empty() {
+            return Err(AppError::validation("workflow id must not be empty"));
+        }
+        let registry = self
+            .steps
+            .read()
+            .map_err(|_| AppError::internal("workflow step registry is poisoned"))?;
+        let mut seen = std::collections::HashSet::with_capacity(definition.steps.len());
+        for name in &definition.steps {
+            if name.trim().is_empty() {
+                return Err(AppError::validation("workflow step name must not be empty"));
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(AppError::validation(format!(
+                    "workflow definition contains duplicate step: {name}"
+                )));
+            }
+            if !registry.contains_key(name) {
+                return Err(AppError::not_found("workflow step", name));
+            }
+        }
+        Ok(())
+    }
+
+    fn step(&self, name: &str) -> Option<Arc<dyn WorkflowStep>> {
+        self.steps
+            .read()
+            .ok()
+            .and_then(|steps| steps.get(name).cloned())
+    }
+}
+
+fn is_terminal(status: &str) -> bool {
+    matches!(status, status::COMPLETED | status::FAILED)
+}
+
+fn is_step_done(status: &str) -> bool {
+    matches!(status, status::step::SUCCEEDED | status::step::COMPENSATED)
+}
+
+fn parse_json(value: &str) -> Value {
+    serde_json::from_str(value).unwrap_or(Value::Null)
+}
+
+fn step_context(
+    execution: &WorkflowExecution,
+    steps: &[WorkflowStepRecord],
+    step_name: &str,
+    attempt: i64,
+) -> StepContext {
+    let mut outputs = serde_json::Map::new();
+    for step in steps {
+        if matches!(
+            step.status.as_str(),
+            status::step::SUCCEEDED | status::step::COMPENSATED | status::step::COMPENSATION_FAILED
+        ) && let Some(output) = &step.output
+        {
+            outputs.insert(step.name.clone(), parse_json(output));
+        }
+    }
+    StepContext {
+        execution_id: execution.id.clone(),
+        step_name: step_name.to_owned(),
+        input: execution.input_json(),
+        outputs: Value::Object(outputs),
+        attempt,
+    }
+}

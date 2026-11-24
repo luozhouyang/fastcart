@@ -133,6 +133,7 @@ fn add_item(title: &str, sku: &str, unit_price: i64, quantity: i64) -> OrderEdit
         unit_price: Some(unit_price),
         before_quantity: None,
         after_quantity: quantity,
+        requires_shipping: None,
     }
 }
 
@@ -148,6 +149,7 @@ fn update_item(order: &Order, index: usize, after_quantity: i64) -> OrderEditIte
         unit_price: None,
         before_quantity: Some(order.items[index].quantity),
         after_quantity,
+        requires_shipping: None,
     }
 }
 
@@ -163,6 +165,7 @@ fn remove_item(order: &Order, index: usize) -> OrderEditItemInput {
         unit_price: None,
         before_quantity: Some(order.items[index].quantity),
         after_quantity: 0,
+        requires_shipping: None,
     }
 }
 

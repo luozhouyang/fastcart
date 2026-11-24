@@ -7,6 +7,9 @@
 * [0006 — Per-store SQLite database for tenant isolation](0006-per-store-sqlite-database-for-tenant-isolation.md) - Accepted
 * [0007 — Universal SSR runtime with workerd](0007-universal-ssr-runtime-with-workerd.md) - Accepted
 * [0008 — Storefront themes as deployment artifacts](0008-themes-as-deployment-artifacts.md) - Accepted
+* [0009 — Order edits materialize their line changes](0009-order-edits-materialize-line-changes.md) - Accepted
+* [0010 — Checkout keeps hand-rolled compensation](0010-checkout-keeps-hand-rolled-compensation.md) - Accepted
+* [0011 — Order edits settle stock, money and fulfillment state](0011-order-edits-settle-stock-and-money.md) - Accepted
 
 ## Superseded
 

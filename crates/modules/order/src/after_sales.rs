@@ -412,10 +412,19 @@ pub struct OrderEdit {
     pub before_subtotal: i64,
     /// Order subtotal after the edit.
     pub after_subtotal: i64,
-    /// Order total before the edit.
+    /// Order total when the edit was prepared. It may be stale if another
+    /// change landed before confirmation; `difference_total` records the change
+    /// the confirmation actually made.
     pub before_total: i64,
-    /// Order total after the edit.
+    /// Order total the edit is expected to produce, rewritten to the actual
+    /// total when it is confirmed.
     pub after_total: i64,
+    /// Price difference the confirmed edit settled on the order: the order
+    /// total after confirmation minus the total that was current when the
+    /// confirmation transaction began. A positive difference is money the
+    /// customer owes, a negative one is money owed to them. `None` until the
+    /// edit is confirmed.
+    pub difference_total: Option<i64>,
     /// Creation timestamp in Unix seconds.
     pub created_at: Timestamp,
     /// Last update timestamp in Unix seconds.
@@ -455,6 +464,8 @@ pub struct OrderEditItem {
     pub before_quantity: i64,
     /// Quantity after the edit.
     pub after_quantity: i64,
+    /// Whether the line takes stock, snapshotted when the edit was prepared.
+    pub requires_shipping: bool,
     /// Line state.
     pub status: OrderEditItemStatus,
     /// Creation timestamp in Unix seconds.
@@ -695,6 +706,9 @@ pub struct OrderEditItemInput {
     pub before_quantity: Option<i64>,
     /// Quantity after the edit.
     pub after_quantity: i64,
+    /// Whether an added line takes stock. Ignored for existing lines, which
+    /// inherit the value from the order line they rewrite.
+    pub requires_shipping: Option<bool>,
 }
 
 /// Input for [`crate::OrderService::create_order_edit`].
