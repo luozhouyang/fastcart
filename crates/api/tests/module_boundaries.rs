@@ -118,10 +118,14 @@ fn source_files(dir: &Path) -> Vec<PathBuf> {
                 pending.push(path);
                 continue;
             }
-            let is_test = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name == "tests.rs" || name.ends_with("_tests.rs"));
+            let in_tests_dir = path
+                .components()
+                .any(|component| component.as_os_str() == std::ffi::OsStr::new("tests"));
+            let is_test = in_tests_dir
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == "tests.rs" || name.ends_with("_tests.rs"));
             if path.extension().is_some_and(|ext| ext == "rs") && !is_test {
                 files.push(path);
             }
