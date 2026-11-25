@@ -3,6 +3,7 @@ use super::*;
 #[derive(Default)]
 pub(crate) struct RecordingUniversal {
     pub(crate) seen: Arc<Mutex<Vec<RecordedContext>>>,
+    pub(crate) invalidations: Arc<Mutex<Vec<String>>>,
     pub(crate) preview: bool,
     pub(crate) html: Option<&'static str>,
 }
@@ -60,6 +61,10 @@ impl UniversalStorefront for RecordingUniversal {
 
     async fn rollback(&self, _store_id: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    async fn invalidate_cache(&self, store_id: &str) {
+        self.invalidations.lock().unwrap().push(store_id.to_owned());
     }
 
     async fn render_preview(

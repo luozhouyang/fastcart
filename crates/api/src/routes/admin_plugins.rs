@@ -124,6 +124,11 @@ fn service(context: &AppContext, db: StoreDatabase, actor: &ActorContext) -> Plu
         .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
 }
 
+/// Plugin lifecycle changes alter resolved grants, so cached renders must go.
+async fn invalidate_after_plugin_change(context: &AppContext, db: &StoreDatabase) {
+    super::invalidate_storefront_cache(context, db.store_id().as_str()).await;
+}
+
 async fn read_archive(multipart: &mut Multipart, max_bytes: usize) -> ApiResult<Vec<u8>> {
     while let Some(field) = multipart
         .next_field()
@@ -210,8 +215,10 @@ async fn enable_plugin(
 ) -> ApiResult<Json<InstalledPlugin>> {
     require(&actor, "plugins.write")?;
     require_runtime(&context)?;
-    let service = service(&context, db, &actor);
-    Ok(Json(service.enable(&id).await.map_err(api)?))
+    let service = service(&context, db.clone(), &actor);
+    let plugin = service.enable(&id).await.map_err(api)?;
+    invalidate_after_plugin_change(&context, &db).await;
+    Ok(Json(plugin))
 }
 
 #[utoipa::path(
@@ -230,8 +237,10 @@ async fn disable_plugin(
     Path(id): Path<String>,
 ) -> ApiResult<Json<InstalledPlugin>> {
     require(&actor, "plugins.write")?;
-    let service = service(&context, db, &actor);
-    Ok(Json(service.disable(&id).await.map_err(api)?))
+    let service = service(&context, db.clone(), &actor);
+    let plugin = service.disable(&id).await.map_err(api)?;
+    invalidate_after_plugin_change(&context, &db).await;
+    Ok(Json(plugin))
 }
 
 #[utoipa::path(
@@ -333,8 +342,10 @@ async fn rollback_plugin(
     Path(id): Path<String>,
 ) -> ApiResult<Json<InstalledPlugin>> {
     require(&actor, "plugins.write")?;
-    let service = service(&context, db, &actor);
-    Ok(Json(service.rollback(&id).await.map_err(api)?))
+    let service = service(&context, db.clone(), &actor);
+    let plugin = service.rollback(&id).await.map_err(api)?;
+    invalidate_after_plugin_change(&context, &db).await;
+    Ok(Json(plugin))
 }
 
 #[utoipa::path(
@@ -353,8 +364,9 @@ async fn delete_plugin(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     require(&actor, "plugins.install")?;
-    let service = service(&context, db, &actor);
+    let service = service(&context, db.clone(), &actor);
     service.remove(&id).await.map_err(api)?;
+    invalidate_after_plugin_change(&context, &db).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -388,9 +400,12 @@ async fn upgrade_plugin(
     require(&actor, "plugins.install")?;
     require_runtime(&context)?;
     let bytes = read_archive(&mut multipart, context.config.max_plugin_archive_bytes).await?;
-    let service = service(&context, db, &actor);
+    let service = service(&context, db.clone(), &actor);
     match service.upgrade(&id, &bytes, query.accept_new_scopes).await {
-        Ok(plugin) => Ok(Json(plugin)),
+        Ok(plugin) => {
+            invalidate_after_plugin_change(&context, &db).await;
+            Ok(Json(plugin))
+        }
         Err(error) => {
             service.record_failure("plugin.upgrade", &error).await;
             Err(api(error))

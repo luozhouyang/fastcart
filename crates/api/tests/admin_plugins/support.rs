@@ -10,6 +10,58 @@ pub(crate) struct Fixture {
     pub(crate) _dir: tempfile::TempDir,
 }
 
+/// Storefront runtime that records the stores whose cache it invalidated.
+#[derive(Default)]
+pub(crate) struct RecordingUniversal {
+    pub(crate) invalidations: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingUniversal {
+    pub(crate) fn invalidated(&self) -> Vec<String> {
+        self.invalidations.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl fastcart_ssr::UniversalStorefront for RecordingUniversal {
+    async fn render(
+        &self,
+        _request: Request<Body>,
+        _store: fastcart_kernel::StoreContext,
+        _capabilities: fastcart_ssr::CapabilityGrants,
+        _request_id: Option<String>,
+        _scheme: String,
+    ) -> axum::response::Response {
+        (StatusCode::OK, "<h1>universal</h1>").into_response()
+    }
+
+    async fn serve_asset(
+        &self,
+        _store_id: &str,
+        _path: String,
+        _headers: axum::http::HeaderMap,
+    ) -> axum::response::Response {
+        StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn activate(
+        &self,
+        _store_id: &str,
+        _deployment_id: &str,
+        _artifact_path: String,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _store_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn invalidate_cache(&self, store_id: &str) {
+        self.invalidations.lock().unwrap().push(store_id.to_owned());
+    }
+}
+
 pub(crate) async fn fixture() -> Fixture {
     fixture_with(true).await
 }
@@ -22,6 +74,14 @@ pub(crate) async fn fixture_options(
     plugins_enabled: bool,
     commerce_addr: Option<SocketAddr>,
 ) -> Fixture {
+    fixture_full(plugins_enabled, commerce_addr, None).await
+}
+
+pub(crate) async fn fixture_full(
+    plugins_enabled: bool,
+    commerce_addr: Option<SocketAddr>,
+    universal: Option<Arc<dyn fastcart_ssr::UniversalStorefront>>,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let platform = PlatformStore::in_memory().await.unwrap();
     let databases = Arc::new(StoreDatabaseManager::new(
@@ -29,26 +89,29 @@ pub(crate) async fn fixture_options(
         DatabaseOptions::default().with_max_connections(2),
     ));
     let plugins_root = dir.path().join("plugins");
-    let context = Arc::new(AppContext::new(
-        ApiConfig {
-            cookie_secure: false,
-            backup_dir: dir.path().join("backups"),
-            storage_root: dir.path().join("assets"),
-            plugins_root: plugins_root.clone(),
-            plugins_enabled,
-            plugin_runtime_token: Some(RUNTIME_TOKEN.to_owned()),
-            plugin_context_secret: Some(b"test-secret".to_vec()),
-            plugin_workerd_binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../experiments/workerd/bin/workerd"),
-            plugin_runtime_dir: dir.path().join("runtime"),
-            plugin_commerce_addr: commerce_addr
-                .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 8080))),
-            ..ApiConfig::default()
-        },
-        platform,
-        databases.clone(),
-        StoreCache::default_capacity(),
-    ));
+    let context = Arc::new(
+        AppContext::new(
+            ApiConfig {
+                cookie_secure: false,
+                backup_dir: dir.path().join("backups"),
+                storage_root: dir.path().join("assets"),
+                plugins_root: plugins_root.clone(),
+                plugins_enabled,
+                plugin_runtime_token: Some(RUNTIME_TOKEN.to_owned()),
+                plugin_context_secret: Some(b"test-secret".to_vec()),
+                plugin_workerd_binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../experiments/workerd/bin/workerd"),
+                plugin_runtime_dir: dir.path().join("runtime"),
+                plugin_commerce_addr: commerce_addr
+                    .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 8080))),
+                ..ApiConfig::default()
+            },
+            platform,
+            databases.clone(),
+            StoreCache::default_capacity(),
+        )
+        .with_universal_storefront(universal),
+    );
     let app = build_router(context);
 
     let setup = request(

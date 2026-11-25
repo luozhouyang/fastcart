@@ -227,6 +227,17 @@ pub async fn record_store_audit(
     }
 }
 
+/// Drops every cached SSR response for a store.
+///
+/// Plugin state feeds the rendered grants and component catalog, so enabling,
+/// disabling, upgrading, rolling back or removing a plugin must make the next
+/// render observe the change. Binding changes use the same helper.
+pub(crate) async fn invalidate_storefront_cache(context: &AppContext, store_id: &str) {
+    if let Some(runtime) = context.universal_storefront.as_ref() {
+        runtime.invalidate_cache(store_id).await;
+    }
+}
+
 /// Invalidates the universal storefront render cache after successful mutations.
 ///
 /// This closes the window for the ordinary storefront flows (cart edits,

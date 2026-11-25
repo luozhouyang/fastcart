@@ -390,3 +390,76 @@ async fn admin_binds_capabilities_to_enabled_providers() {
     assert_eq!(status, StatusCode::OK);
     assert!(catalog["bindings"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn plugin_lifecycle_changes_invalidate_the_storefront_cache() {
+    let universal = Arc::new(RecordingUniversal::default());
+    let fixture = fixture_full(true, None, Some(universal.clone())).await;
+    let headers = fixture.headers();
+    let mut document = manifest("demo", "1.0.0", &[]);
+    document["provides"] = json!([{
+        "kind": "storefront_capability",
+        "id": "chat",
+        "version": 1,
+        "title": "Live chat"
+    }]);
+    let bytes = archive(&document, "export default {};");
+    let (status, installed) = upload(
+        &fixture.app,
+        "/api/v1/admin/plugins/install",
+        &headers,
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{installed}");
+
+    let store_id = fixture.store_id.clone();
+    let count = || universal.invalidated().len();
+    let invalidated_store = || universal.invalidated().last().cloned();
+
+    let (status, enabled, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/enable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert_eq!(count(), 1, "enable invalidates cached renders");
+    assert_eq!(invalidated_store().as_deref(), Some(store_id.as_str()));
+
+    let (status, _, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/disable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count(), 2, "disable invalidates cached renders");
+
+    let (status, _, _) = request(
+        &fixture.app,
+        "DELETE",
+        "/api/v1/admin/plugins/demo",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(count(), 3, "removal invalidates cached renders");
+
+    let (status, catalog, _) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/capabilities",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(catalog["bindings"].as_array().unwrap().is_empty());
+    assert_eq!(count(), 3, "reads never invalidate");
+}

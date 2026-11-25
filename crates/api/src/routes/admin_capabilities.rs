@@ -170,7 +170,5 @@ async fn unbind_capability(
 
 /// Drops cached SSR responses so a binding change is visible immediately.
 async fn invalidate_storefront(context: &AppContext, db: &StoreDatabase) {
-    if let Some(universal) = context.universal_storefront.as_ref() {
-        universal.invalidate_cache(db.store_id().as_str()).await;
-    }
+    super::invalidate_storefront_cache(context, db.store_id().as_str()).await;
 }
