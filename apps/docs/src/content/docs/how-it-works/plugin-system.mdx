@@ -242,6 +242,38 @@ The storefront runtime resolves enabled bindings into grants and passes them to 
 
 Activation and rollback fail with a conflict while a non-optional requirement has no enabled binding backed by an enabled provider; mark the requirement `"optional": true` when the theme can render without it. The chat template's `storefront/boot.js` illustrates graceful degradation: it probes `/store/capabilities/livechat/session` with same-origin credentials, and on a `404` keeps its built-in greeting and accent and falls back to the plugin's legacy `/apps/chat-widget/*` path instead of calling the unbound capability.
 
+### Storefront components
+
+A `storefront_component` contribution describes a page block a theme can render. The host validates and indexes the declaration; it does not render the component. The admin page editor and the theme consume the index.
+
+`GET /api/v1/admin/components` (`plugins.read`) lists the components declared by enabled plugins:
+
+```json
+{
+  "components": [
+    {
+      "plugin_id": "chat-widget",
+      "plugin_name": "Chat widget",
+      "plugin_version": "1.0.0",
+      "digest": "9f2c…",
+      "id": "livechat-button",
+      "title": "Live chat button",
+      "category": "commerce",
+      "editor_manifest": { "title": "Live chat button", "fields": { "greeting": { "type": "text" } } },
+      "entry": "/_fastcart/extensions/chat-widget/9f2c…/components/livechat.js",
+      "requires": [{ "id": "livechat", "version": 1, "optional": false }]
+    }
+  ]
+}
+```
+
+- Only enabled plugins are listed, and an invalid manifest is skipped instead of failing the response.
+- `editor_manifest` is editor metadata shaped like a theme editor component. The page editor merges it into its built-in catalog: built-in component ids win a collision, plugin components join a matching built-in category or the **Plugin components** category, and malformed field or slot metadata is dropped before it reaches the palette.
+- `entry` is a storefront-relative URL. The file is served from the plugin archive by the same digest-scoped, immutable route as storefront extensions (`/_fastcart/extensions/{plugin}/{digest}/{path}`); a disabled plugin or a digest mismatch returns `404`. It is a same-origin ES module, so the theme decides how to mount it.
+- `requires` is component metadata. A non-optional requirement means the component is meant to be used only while the bound capability is available; mark it `optional` when the component degrades gracefully. Runtime availability comes from the theme's capability grants in `x-fastcart-capabilities`, not from this endpoint.
+
+Plugin components are additive: if the catalog request fails, the page editor keeps the built-in catalog and remains usable.
+
 ## Lifecycle
 
 <PluginLifecycle />
