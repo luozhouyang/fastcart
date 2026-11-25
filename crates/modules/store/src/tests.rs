@@ -615,3 +615,32 @@ async fn audited_mutations_append_outbox_rows_once() {
             .all(|audit| audit.actor_id.as_deref() == Some("user_1"))
     );
 }
+
+#[tokio::test]
+async fn inclusive_pricing_setting_is_parsed_leniently() {
+    let service = service().await;
+    assert!(
+        !service.prices_include_tax().await.unwrap(),
+        "the platform default adds tax on top"
+    );
+    for value in ["true", "1", "yes", " TRUE "] {
+        service
+            .set_setting("prices_include_tax", value)
+            .await
+            .unwrap();
+        assert!(
+            service.prices_include_tax().await.unwrap(),
+            "{value:?} means prices include tax"
+        );
+    }
+    for value in ["false", "0", "no", "anything else"] {
+        service
+            .set_setting("prices_include_tax", value)
+            .await
+            .unwrap();
+        assert!(
+            !service.prices_include_tax().await.unwrap(),
+            "{value:?} means tax is added on top"
+        );
+    }
+}

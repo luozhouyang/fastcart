@@ -51,6 +51,15 @@ export function NewDraftOrderDialog({
 
   const submit = async () => {
     if (!client || busy) return;
+    const customerEmail = email.trim();
+    if (customerEmail.length === 0) {
+      toast.error("Enter the customer email.");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail)) {
+      toast.error("Enter a valid customer email address.");
+      return;
+    }
     const unitPrice = Math.round(Number(price) * 100);
     if (!Number.isFinite(unitPrice) || unitPrice < 0 || price.trim().length === 0) {
       toast.error("Enter a unit price of zero or more.");
@@ -73,7 +82,7 @@ export function NewDraftOrderDialog({
     setBusy(true);
     try {
       await client.orders.createDraft({
-        email: email.trim(),
+        email: customerEmail,
         currency_code: store?.currency_code ?? "USD",
         items: [
           {
@@ -110,10 +119,13 @@ export function NewDraftOrderDialog({
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-2">
-            <Label htmlFor="draft-email">Customer email</Label>
+            <Label htmlFor="draft-email">
+              Customer email <span className="text-destructive">*</span>
+            </Label>
             <Input
               id="draft-email"
               type="email"
+              required
               placeholder="buyer@example.com"
               value={email}
               onChange={(event) => setEmail(event.target.value)}

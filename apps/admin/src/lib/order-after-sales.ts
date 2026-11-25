@@ -50,17 +50,30 @@ function requestedQuantity(quantities: Record<string, number>, item: OrderItemVi
   return value === undefined ? 0 : value;
 }
 
+/** A new line appended to an order through an edit. */
+export interface NewOrderLine {
+  productTitle: string;
+  /** Unit price in minor units. */
+  unitPrice: number;
+  quantity: number;
+  requiresShipping?: boolean;
+}
+
 /**
  * Builds an edit request from per-item target quantities.
  *
- * Unchanged lines are omitted; a target of zero removes the line.
+ * Unchanged lines are omitted; a target of zero removes the line. A supplied
+ * new line is appended as an explicit `add`, which the backend prices from its
+ * own unit price. Draft orders are re-taxed when they are converted, so the
+ * added line enters the placed order with the destination's tax.
  */
 export function buildOrderEditRequest(
   items: OrderItemView[],
   quantities: Record<string, number>,
   reason: string,
+  newLine?: NewOrderLine,
 ): CreateOrderEditRequest {
-  const lines = items.flatMap((item) => {
+  const lines: CreateOrderEditRequest["items"] = items.flatMap((item) => {
     const target = quantities[item.id ?? item.sku];
     if (target === undefined || target === item.quantity) return [];
     if (!Number.isInteger(target) || target < 0) {
@@ -75,6 +88,25 @@ export function buildOrderEditRequest(
       },
     ];
   });
+  if (newLine) {
+    const title = newLine.productTitle.trim();
+    if (title.length === 0) {
+      throw new Error("Enter a title for the line to add.");
+    }
+    if (!Number.isInteger(newLine.quantity) || newLine.quantity < 1) {
+      throw new Error("Enter a whole quantity greater than zero for the new line.");
+    }
+    if (!Number.isInteger(newLine.unitPrice) || newLine.unitPrice < 0) {
+      throw new Error("Enter a unit price of zero or more for the new line.");
+    }
+    lines.push({
+      action: "add",
+      product_title: title,
+      unit_price: newLine.unitPrice,
+      after_quantity: newLine.quantity,
+      requires_shipping: newLine.requiresShipping ?? true,
+    });
+  }
   if (lines.length === 0) {
     throw new Error("Change at least one quantity.");
   }

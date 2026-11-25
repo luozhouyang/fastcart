@@ -344,6 +344,28 @@ async fn admin_can_run_the_full_post_purchase_flow() {
     assert_eq!(status, StatusCode::OK, "{accepted}");
     assert_eq!(accepted["status"], "accepted");
 
+    // Difference settlement is mounted for claims and exchanges as well; a
+    // record with nothing to settle answers with a domain error, not the 501
+    // route fallback.
+    let (status, body, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{claims}/{claim_id}/collect-difference"),
+        Some(json!({"provider": "manual"})),
+        &headers,
+    )
+    .await;
+    assert_ne!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    let (status, body, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{exchanges}/{exchange_id}/refund-difference"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_ne!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+
     // Order edit: add a gift line, confirm, and observe the recalculated totals
     // together with the line the edit materialized.
     let edits = format!("/api/v1/admin/orders/{}/edits", fixture.order_id);

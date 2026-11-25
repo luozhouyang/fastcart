@@ -274,6 +274,41 @@ impl ReservationReference {
     }
 }
 
+/// One line of an admin-authored order whose stock conversion commits.
+///
+/// Draft orders take no stock while they are authored. Converting one is the
+/// moment it enters the paid lifecycle, so the units it promises leave the
+/// warehouse exactly like a checkout's committed reservation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrderConversionStockLine {
+    /// Variant whose inventory item holds the stock.
+    pub variant_id: VariantId,
+    /// Order line the committed units belong to.
+    pub line_item_id: LineItemId,
+    /// Positive number of units to take.
+    pub quantity: i64,
+    /// Whether a shortfall is recorded as backorder instead of failing.
+    pub allow_backorder: bool,
+}
+
+impl OrderConversionStockLine {
+    /// Creates a conversion stock line.
+    #[must_use]
+    pub fn new(
+        variant_id: VariantId,
+        line_item_id: LineItemId,
+        quantity: i64,
+        allow_backorder: bool,
+    ) -> Self {
+        Self {
+            variant_id,
+            line_item_id,
+            quantity,
+            allow_backorder,
+        }
+    }
+}
+
 /// One returned quantity to place back into stock.
 ///
 /// `received_quantity` is the cumulative quantity received on the return line

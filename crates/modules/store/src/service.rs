@@ -72,6 +72,25 @@ impl StoreService {
             .map_err(database_error)
     }
 
+    /// Returns whether the store quotes tax-inclusive prices.
+    ///
+    /// This is the single parser for the `prices_include_tax` setting, so the
+    /// cart, draft-order and order-edit flows all read the same value from the
+    /// same place. A missing or unrecognised setting keeps the platform
+    /// default (tax is added on top, as most US stores quote prices).
+    pub async fn prices_include_tax(&self) -> Result<bool, AppError> {
+        Ok(self
+            .get_setting("prices_include_tax")
+            .await?
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "true" | "1" | "yes"
+                )
+            })
+            .unwrap_or(false))
+    }
+
     /// Creates or replaces a setting after validating the key and value.
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<(), AppError> {
         validate_setting(key, value)?;

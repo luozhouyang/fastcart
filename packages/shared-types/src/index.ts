@@ -1279,6 +1279,8 @@ export interface OrderEditItem {
   before_quantity: number;
   after_quantity: number;
   requires_shipping: boolean;
+  /** Whether an added line's unit price already contains tax. */
+  is_tax_inclusive: boolean;
   status: OrderEditItemStatus;
   created_at: Timestamp;
   updated_at: Timestamp;
@@ -1315,6 +1317,8 @@ export interface OrderEditItemRequest {
   before_quantity?: number | null;
   after_quantity: number;
   requires_shipping?: boolean | null;
+  /** Added lines only; defaults to the store's `prices_include_tax` setting. */
+  is_tax_inclusive?: boolean | null;
 }
 
 export interface CreateOrderEditRequest {

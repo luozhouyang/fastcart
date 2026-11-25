@@ -23,6 +23,7 @@ async fn order_edits_recalculate_totals_and_materialize_the_line_changes() {
                     before_quantity: None,
                     after_quantity: 1,
                     requires_shipping: None,
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -109,6 +110,7 @@ async fn order_edits_validate_before_quantities_and_overflow() {
                     before_quantity: Some(1),
                     after_quantity: 0,
                     requires_shipping: None,
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -134,6 +136,7 @@ async fn order_edits_validate_before_quantities_and_overflow() {
                     before_quantity: Some(2),
                     after_quantity: 1,
                     requires_shipping: None,
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -198,6 +201,7 @@ async fn confirming_an_edit_keeps_all_order_totals_consistent() {
                     before_quantity: None,
                     after_quantity: 1,
                     requires_shipping: None,
+                    is_tax_inclusive: None,
                 }],
             },
         )

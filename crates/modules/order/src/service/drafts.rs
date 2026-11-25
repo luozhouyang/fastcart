@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use fastcart_infrastructure::{append_outbox_event, database_error};
 use fastcart_kernel::{
-    AppError, DomainEventEnvelope, EventId, OrderId, now_timestamp, validate_non_negative_amount,
+    AppError, DomainEventEnvelope, EventId, OrderId, Timestamp, now_timestamp,
+    validate_non_negative_amount,
 };
 use serde_json::Value;
 
@@ -33,16 +34,15 @@ impl OrderService {
         tax_lines: Vec<DraftOrderTaxLineInput>,
     ) -> Result<Order, AppError> {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        let current = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
-            "SELECT status, fulfillment_status, shipping_total, tax_total, total
-             FROM orders WHERE id = ?",
+        let current = sqlx::query_as::<_, (String, String, i64, i64)>(
+            "SELECT status, fulfillment_status, tax_total, total FROM orders WHERE id = ?",
         )
         .bind(id.as_str())
         .fetch_optional(&mut *tx)
         .await
         .map_err(database_error)?
         .ok_or_else(|| AppError::not_found("order", id))?;
-        let (status, fulfillment_status, shipping_total, before_tax_total, before_total) = current;
+        let (status, fulfillment_status, before_tax_total, before_total) = current;
         let status = OrderStatus::from_stored(&status)?;
         if status != OrderStatus::Draft {
             return Err(AppError::conflict(format!(
@@ -55,12 +55,57 @@ impl OrderService {
                 "a fulfilled draft order cannot be re-taxed",
             ));
         }
+        self.apply_draft_tax_lines(
+            &mut tx,
+            id,
+            shipping_address,
+            billing_address,
+            &tax_lines,
+            before_tax_total,
+            before_total,
+            now_timestamp(),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
+        self.load_order(id).await
+    }
+
+    /// Rewrites the item-scoped tax of a draft inside the caller's transaction.
+    ///
+    /// The caller must have verified the order is a draft and must hold the
+    /// write transaction. Item and order totals are read back from the rows
+    /// after the rewrite, so the order and its breakdown always describe the
+    /// same amounts. An address is only rewritten when supplied; conversion
+    /// passes `None` because it has already validated the destination its tax
+    /// lines were priced for.
+    ///
+    /// The audit entry and the `order.taxes_recalculated` event are appended in
+    /// the same transaction, which lets conversion price and place a draft
+    /// atomically without losing the tax history.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn apply_draft_tax_lines(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &OrderId,
+        shipping_address: Option<Value>,
+        billing_address: Option<Value>,
+        tax_lines: &[DraftOrderTaxLineInput],
+        before_tax_total: i64,
+        before_total: i64,
+        now: Timestamp,
+    ) -> Result<(), AppError> {
+        let shipping_total: i64 =
+            sqlx::query_scalar("SELECT shipping_total FROM orders WHERE id = ?")
+                .bind(id.as_str())
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(database_error)?;
 
         let items = sqlx::query_as::<_, (String, i64, i64)>(
             "SELECT id, subtotal, discount_total FROM order_items WHERE order_id = ?",
         )
         .bind(id.as_str())
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .map_err(database_error)?;
         let item_ids: HashSet<&str> = items
@@ -72,7 +117,7 @@ impl OrderService {
         // of its net price (exclusive tax). Inclusive tax is already contained
         // in the price, so it must not grow the line total again.
         let mut per_item: HashMap<String, (i64, i64)> = HashMap::new();
-        for line in &tax_lines {
+        for line in tax_lines {
             if !item_ids.contains(line.order_item_id.as_str()) {
                 return Err(AppError::validation(format!(
                     "tax line references order item {}, which the order does not have",
@@ -112,18 +157,17 @@ impl OrderService {
             .bind(line_total)
             .bind(item_id)
             .bind(id.as_str())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(database_error)?;
         }
 
         sqlx::query("DELETE FROM order_tax_lines WHERE order_id = ? AND order_item_id IS NOT NULL")
             .bind(id.as_str())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(database_error)?;
-        let now = now_timestamp();
-        for line in &tax_lines {
+        for line in tax_lines {
             sqlx::query(
                 "INSERT INTO order_tax_lines (
                     id, order_id, order_item_id, shipping_option_id, name, rate_bps,
@@ -138,7 +182,7 @@ impl OrderService {
             .bind(line.amount)
             .bind(i64::from(line.is_tax_inclusive))
             .bind(now)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(database_error)?;
         }
@@ -147,21 +191,21 @@ impl OrderService {
             "SELECT COALESCE(SUM(amount), 0) FROM order_tax_lines WHERE order_id = ?",
         )
         .bind(id.as_str())
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(database_error)?;
         let item_total: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(total), 0) FROM order_items WHERE order_id = ?",
         )
         .bind(id.as_str())
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(database_error)?;
         let adjustment_total: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount), 0) FROM order_adjustments WHERE order_id = ?",
         )
         .bind(id.as_str())
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(database_error)?;
         let next_total = item_total
@@ -190,7 +234,7 @@ impl OrderService {
         .bind(now)
         .bind(id.as_str())
         .bind(OrderStatus::Draft.as_str())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(database_error)?;
         if updated.rows_affected() == 0 {
@@ -198,7 +242,7 @@ impl OrderService {
         }
 
         self.append_audit(
-            &mut tx,
+            tx,
             "order.taxes_recalculated",
             "order",
             id.as_str(),
@@ -220,10 +264,9 @@ impl OrderService {
                 "tax_total": next_tax_total,
             }),
         );
-        append_outbox_event(&mut *tx, &event)
+        append_outbox_event(&mut **tx, &event)
             .await
             .map_err(database_error)?;
-        tx.commit().await.map_err(database_error)?;
-        self.load_order(id).await
+        Ok(())
     }
 }

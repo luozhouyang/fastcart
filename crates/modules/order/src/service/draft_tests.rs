@@ -8,7 +8,8 @@ use crate::after_sales::{
     CreateOrderEditInput, CreateReturnInput, OrderEditAction, OrderEditItemInput, ReturnItemInput,
 };
 use crate::domain::{
-    CreateOrderInput, CreateOrderItemInput, DraftOrderTaxLineInput, OrderFilter, OrderStatus,
+    CreateOrderInput, CreateOrderItemInput, DraftConversionSnapshot, DraftOrderTaxLineInput,
+    OrderFilter, OrderStatus,
 };
 
 async fn service() -> (OrderService, StoreDatabase) {
@@ -55,6 +56,7 @@ fn quantity_edit(order_item_id: &str, after_quantity: i64) -> CreateOrderEditInp
             before_quantity: Some(2),
             after_quantity,
             requires_shipping: None,
+            is_tax_inclusive: None,
         }],
     }
 }
@@ -311,4 +313,45 @@ async fn re_calculating_tax_on_a_placed_order_is_refused() {
         matches!(error, fastcart_kernel::AppError::Conflict(_)),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn a_conversion_refuses_a_snapshot_an_edit_overtook() {
+    let (orders, _db) = service().await;
+    let draft = orders
+        .create_draft_order(draft_input(None, 2))
+        .await
+        .unwrap();
+    let priced = DraftConversionSnapshot::from_order(&draft);
+
+    // An edit between pricing and conversion changes the line the tax and
+    // stock inputs described.
+    let edit = orders
+        .create_order_edit(&draft.id, quantity_edit(draft.items[0].id.as_str(), 3))
+        .await
+        .unwrap();
+    orders
+        .confirm_order_edit(&draft.id, &edit.id)
+        .await
+        .unwrap();
+
+    let error = orders
+        .convert_priced_draft_order(&draft.id, &priced, None, Vec::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, fastcart_kernel::AppError::Conflict(_)),
+        "{error:?}"
+    );
+    let reloaded = orders.get(&draft.id).await.unwrap();
+    assert_eq!(reloaded.status, OrderStatus::Draft);
+    assert_eq!(reloaded.items[0].quantity, 3);
+
+    // Re-pricing the current lines converts the draft.
+    let fresh = DraftConversionSnapshot::from_order(&reloaded);
+    let converted = orders
+        .convert_priced_draft_order(&draft.id, &fresh, None, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(converted.status, OrderStatus::Pending);
 }

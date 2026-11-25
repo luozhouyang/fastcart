@@ -17,6 +17,7 @@ tracing.workspace = true
 fastcart-kernel.workspace = true
 fastcart-infrastructure.workspace = true
 fastcart-module-inventory.workspace = true
+fastcart-module-store.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

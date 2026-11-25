@@ -139,6 +139,7 @@ pub(crate) fn edit(
         before_quantity: before,
         after_quantity: after,
         requires_shipping: Some(true),
+        is_tax_inclusive: None,
     }
 }
 

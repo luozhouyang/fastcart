@@ -1185,6 +1185,7 @@ dependencies = [
  "fastcart-infrastructure",
  "fastcart-kernel",
  "fastcart-module-inventory",
+ "fastcart-module-store",
  "serde",
  "serde_json",
  "sqlx",

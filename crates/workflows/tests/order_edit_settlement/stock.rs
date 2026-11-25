@@ -69,6 +69,7 @@ async fn increasing_a_line_or_adding_one_consumes_stock() {
                     before_quantity: None,
                     after_quantity: 2,
                     requires_shipping: Some(true),
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -209,6 +210,7 @@ async fn insufficient_stock_rolls_the_edit_back() {
                     before_quantity: None,
                     after_quantity: 10,
                     requires_shipping: Some(true),
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -298,6 +300,7 @@ async fn growing_a_fulfilled_order_reopens_fulfillment() {
                     before_quantity: None,
                     after_quantity: 1,
                     requires_shipping: Some(true),
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -361,6 +364,7 @@ async fn stock_demand_is_summed_across_edit_lines() {
         before_quantity: None,
         after_quantity: quantity,
         requires_shipping: Some(true),
+        is_tax_inclusive: None,
     };
     let edit = fixture
         .orders
@@ -419,6 +423,7 @@ async fn a_mixed_edit_nets_stock_within_one_transaction() {
                         before_quantity: None,
                         after_quantity: 1,
                         requires_shipping: Some(true),
+                        is_tax_inclusive: None,
                     },
                 ],
             },

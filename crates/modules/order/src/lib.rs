@@ -21,9 +21,9 @@ pub use after_sales::{
 };
 pub use domain::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput,
-    DraftOrderTaxLineInput, FulfillmentInput, FulfillmentItemInput, FulfillmentStatus, Order,
-    OrderAdjustment, OrderFilter, OrderFulfillment, OrderFulfillmentItem, OrderItem,
-    OrderItemAdjustment, OrderRefund, OrderShippingMethod, OrderStatus, OrderStatusHistory,
-    OrderTaxLine, PaymentStatus, RefundInput, RefundStatus,
+    DraftConversionItem, DraftConversionSnapshot, DraftOrderTaxLineInput, FulfillmentInput,
+    FulfillmentItemInput, FulfillmentStatus, Order, OrderAdjustment, OrderFilter, OrderFulfillment,
+    OrderFulfillmentItem, OrderItem, OrderItemAdjustment, OrderRefund, OrderShippingMethod,
+    OrderStatus, OrderStatusHistory, OrderTaxLine, PaymentStatus, RefundInput, RefundStatus,
 };
 pub use service::OrderService;

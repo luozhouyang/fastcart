@@ -8,6 +8,7 @@ use fastcart_kernel::{
     validate_metadata, validate_quantity,
 };
 use fastcart_module_inventory::{InventoryService, OrderEditStockLine, order_edit_stock_reference};
+use fastcart_module_store::StoreService;
 use sqlx::SqliteConnection;
 
 use crate::after_sales::{
@@ -57,6 +58,7 @@ struct EditItemRow {
     before_quantity: i64,
     after_quantity: i64,
     requires_shipping: i64,
+    is_tax_inclusive: i64,
     status: String,
     created_at: i64,
     updated_at: i64,
@@ -78,6 +80,7 @@ impl EditItemRow {
             before_quantity: self.before_quantity,
             after_quantity: self.after_quantity,
             requires_shipping: self.requires_shipping != 0,
+            is_tax_inclusive: self.is_tax_inclusive != 0,
             status: OrderEditItemStatus::from_stored(&self.status)?,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -90,6 +93,7 @@ struct ExistingLineAmounts {
     quantity: i64,
     discount_total: i64,
     tax_total: i64,
+    is_tax_inclusive: i64,
 }
 
 /// The summed amounts of an order's materialized lines.
@@ -113,6 +117,7 @@ struct ResolvedEditItem {
     before_quantity: i64,
     after_quantity: i64,
     requires_shipping: bool,
+    is_tax_inclusive: bool,
     delta: i64,
 }
 impl OrderService {
@@ -136,12 +141,18 @@ impl OrderService {
             ));
         }
         let reason = normalize_text(input.reason);
+        // Added lines follow the store's pricing convention unless the caller
+        // states otherwise, exactly like a draft line: a store that quotes
+        // gross prices must not have tax added on top of a new line.
+        let default_is_tax_inclusive = StoreService::new(self.database().clone())
+            .prices_include_tax()
+            .await?;
 
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
         let mut seen = HashSet::new();
         let mut resolved = Vec::with_capacity(input.items.len());
         for item in &input.items {
-            let line = resolve_edit_item(&mut tx, order_id, item).await?;
+            let line = resolve_edit_item(&mut tx, order_id, item, default_is_tax_inclusive).await?;
             if let Some(order_item_id) = &line.order_item_id
                 && !seen.insert(order_item_id.as_str().to_owned())
             {
@@ -195,8 +206,9 @@ impl OrderService {
                 "INSERT INTO order_edit_items
                     (id, edit_id, order_item_id, action, product_id, variant_id,
                      product_title, variant_title, sku, unit_price, before_quantity,
-                     after_quantity, requires_shipping, status, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     after_quantity, requires_shipping, is_tax_inclusive, status,
+                     created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(EventId::new().as_str())
             .bind(edit_id.as_str())
@@ -211,6 +223,7 @@ impl OrderService {
             .bind(item.before_quantity)
             .bind(item.after_quantity)
             .bind(i64::from(item.requires_shipping))
+            .bind(i64::from(item.is_tax_inclusive))
             .bind(OrderEditItemStatus::Draft.as_str())
             .bind(now)
             .bind(now)
@@ -352,7 +365,8 @@ impl OrderService {
         let item_rows = sqlx::query_as::<_, EditItemRow>(
             "SELECT id, edit_id, order_item_id, action, product_id, variant_id,
                     product_title, variant_title, sku, unit_price, before_quantity,
-                    after_quantity, requires_shipping, status, created_at, updated_at
+                    after_quantity, requires_shipping, is_tax_inclusive, status,
+                    created_at, updated_at
              FROM order_edit_items WHERE edit_id = ? ORDER BY rowid ASC",
         )
         .bind(&row.id)
@@ -542,6 +556,7 @@ async fn resolve_edit_item(
     executor: &mut SqliteConnection,
     order_id: &OrderId,
     input: &crate::after_sales::OrderEditItemInput,
+    default_is_tax_inclusive: bool,
 ) -> Result<ResolvedEditItem, AppError> {
     match input.action {
         OrderEditAction::Add => {
@@ -578,6 +593,7 @@ async fn resolve_edit_item(
                 before_quantity: 0,
                 after_quantity: input.after_quantity,
                 requires_shipping: input.requires_shipping.unwrap_or(true),
+                is_tax_inclusive: input.is_tax_inclusive.unwrap_or(default_is_tax_inclusive),
                 delta,
             })
         }
@@ -629,6 +645,7 @@ async fn resolve_edit_item(
                 before_quantity: existing.quantity,
                 after_quantity: input.after_quantity,
                 requires_shipping: existing.requires_shipping,
+                is_tax_inclusive: existing.is_tax_inclusive,
                 delta,
             })
         }
@@ -648,7 +665,10 @@ fn checked_sum(values: impl Iterator<Item = i64>) -> Result<i64, AppError> {
 /// Scales an order-level amount by `retained / original`, flooring toward
 /// negative infinity so the result is deterministic for signed adjustments.
 ///
-/// When the base is unchanged or unknown, the amount is returned untouched.
+/// A reduction only shrinks order-level allocations; an increase (`retained >
+/// original`) leaves them untouched because additions are priced explicitly by
+/// the edit line rather than diluting the existing allocation. When the base is
+/// unchanged or unknown, the amount is returned untouched.
 fn scale_amount(amount: i64, retained: i64, original: i64) -> Result<i64, AppError> {
     if original <= 0 || retained >= original {
         return Ok(amount);
@@ -656,6 +676,24 @@ fn scale_amount(amount: i64, retained: i64, original: i64) -> Result<i64, AppErr
     let retained = retained.max(0);
     let numerator = i128::from(amount)
         .checked_mul(i128::from(retained))
+        .ok_or_else(|| AppError::validation("allocation overflow"))?;
+    let scaled = numerator.div_euclid(i128::from(original));
+    i64::try_from(scaled).map_err(|_| AppError::validation("allocation overflow"))
+}
+
+/// Scales a line amount with its quantity, in either direction.
+///
+/// A grown line keeps its effective rate, so its discount and tax grow with
+/// it; a shrunk line loses the share represented by the removed units.
+/// Flooring matches [`scale_amount`], and a zero original quantity leaves the
+/// amount untouched because there is no rate to extrapolate from.
+fn scale_line_amount(amount: i64, quantity: i64, original: i64) -> Result<i64, AppError> {
+    if original <= 0 || quantity == original {
+        return Ok(amount);
+    }
+    let quantity = quantity.max(0);
+    let numerator = i128::from(amount)
+        .checked_mul(i128::from(quantity))
         .ok_or_else(|| AppError::validation("allocation overflow"))?;
     let scaled = numerator.div_euclid(i128::from(original));
     i64::try_from(scaled).map_err(|_| AppError::validation("allocation overflow"))

@@ -38,6 +38,27 @@ fn shipping_tax_line(amount: i64) -> CreateOrderTaxLineInput {
     }
 }
 
+/// An item-scoped tax line whose amount is already inside the unit price.
+fn inclusive_item_tax_line(index: usize, amount: i64) -> CreateOrderTaxLineInput {
+    CreateOrderTaxLineInput {
+        item_index: Some(index),
+        shipping_option_id: None,
+        name: "VAT".to_owned(),
+        rate_bps: 1_900,
+        amount,
+        is_tax_inclusive: true,
+    }
+}
+
+/// A shipping-tax adjustment, matching checkout and draft creation.
+fn shipping_tax_adjustment(amount: i64) -> CreateAdjustmentInput {
+    CreateAdjustmentInput {
+        code: Some("shipping_tax".to_owned()),
+        amount,
+        ..CreateAdjustmentInput::default()
+    }
+}
+
 #[tokio::test]
 async fn confirming_a_removal_scales_order_level_allocations_proportionally() {
     let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
@@ -93,6 +114,7 @@ async fn confirming_a_removal_scales_order_level_allocations_proportionally() {
                     before_quantity: Some(2),
                     after_quantity: 1,
                     requires_shipping: None,
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -201,6 +223,7 @@ async fn additions_keep_explicit_amounts_and_do_not_scale_allocations() {
                     before_quantity: None,
                     after_quantity: 1,
                     requires_shipping: None,
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -285,6 +308,7 @@ async fn order_tax_lines_follow_their_base_and_keep_adding_up() {
                         before_quantity: Some(2),
                         after_quantity: 1,
                         requires_shipping: None,
+                        is_tax_inclusive: None,
                     },
                     OrderEditItemInput {
                         order_item_id: Some(order.items[1].id.clone()),
@@ -298,6 +322,7 @@ async fn order_tax_lines_follow_their_base_and_keep_adding_up() {
                         before_quantity: Some(2),
                         after_quantity: 0,
                         requires_shipping: None,
+                        is_tax_inclusive: None,
                     },
                 ],
             },
@@ -352,4 +377,235 @@ async fn order_tax_lines_follow_their_base_and_keep_adding_up() {
     assert!(item_tax <= reloaded.tax_total);
     assert_eq!(reloaded.subtotal, 1_000);
     assert_eq!(reloaded.total, 1_575);
+}
+
+#[tokio::test]
+async fn shipping_tax_is_preserved_when_the_goods_shrink() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = OrderService::new(db);
+    // 2x1000 at 19% exclusive plus 500 shipping taxed at 19%: item tax 380,
+    // shipping tax 95, total 2975.
+    let order = service
+        .create_order(CreateOrderInput {
+            email: "buyer@example.com".to_owned(),
+            currency_code: "EUR".to_owned(),
+            items: vec![CreateOrderItemInput {
+                product_title: "Widget".to_owned(),
+                unit_price: 1_000,
+                quantity: 2,
+                subtotal: Some(2_000),
+                tax_total: Some(380),
+                total: Some(2_380),
+                requires_shipping: true,
+                ..CreateOrderItemInput::default()
+            }],
+            adjustments: vec![shipping_tax_adjustment(95)],
+            subtotal: 2_000,
+            shipping_total: 500,
+            tax_total: 475,
+            tax_lines: vec![
+                CreateOrderTaxLineInput {
+                    rate_bps: 1_900,
+                    ..item_tax_line(0, 380)
+                },
+                shipping_tax_line(95),
+            ],
+            total: 2_975,
+            shipping_address: json!({}),
+            billing_address: json!({}),
+            ..CreateOrderInput::default()
+        })
+        .await
+        .unwrap();
+
+    let edit = service
+        .create_order_edit(
+            &order.id,
+            CreateOrderEditInput {
+                reason: None,
+                metadata: fastcart_kernel::Metadata::default(),
+                items: vec![OrderEditItemInput {
+                    order_item_id: Some(order.items[0].id.clone()),
+                    action: OrderEditAction::Update,
+                    product_id: None,
+                    variant_id: None,
+                    product_title: None,
+                    variant_title: None,
+                    sku: None,
+                    unit_price: None,
+                    before_quantity: Some(2),
+                    after_quantity: 1,
+                    requires_shipping: None,
+                    is_tax_inclusive: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let confirmed = service
+        .confirm_order_edit(&order.id, &edit.id)
+        .await
+        .unwrap();
+    let reloaded = service.get(&order.id).await.unwrap();
+
+    assert_eq!(reloaded.items[0].subtotal, 1_000);
+    assert_eq!(reloaded.items[0].tax_total, 190);
+    assert_eq!(reloaded.items[0].total, 1_190);
+    // The shipping and the tax on it do not follow the retained goods.
+    assert_eq!(reloaded.adjustments.len(), 1);
+    assert_eq!(reloaded.adjustments[0].amount, 95);
+    assert_eq!(reloaded.tax_total, 285);
+    assert_eq!(
+        reloaded
+            .tax_lines
+            .iter()
+            .map(|line| line.amount)
+            .sum::<i64>(),
+        reloaded.tax_total
+    );
+    // Total = retained line total + preserved shipping + preserved shipping
+    // tax; every unit of `tax_total` is embedded in it.
+    assert_eq!(reloaded.total, 1_785);
+    assert_eq!(confirmed.difference_total, Some(-1_190));
+}
+
+#[tokio::test]
+async fn growing_a_line_scales_its_tax() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = OrderService::new(db);
+    let order = service
+        .create_order(CreateOrderInput {
+            email: "buyer@example.com".to_owned(),
+            currency_code: "EUR".to_owned(),
+            items: vec![CreateOrderItemInput {
+                product_title: "Widget".to_owned(),
+                unit_price: 1_000,
+                quantity: 1,
+                subtotal: Some(1_000),
+                tax_total: Some(190),
+                total: Some(1_190),
+                requires_shipping: false,
+                ..CreateOrderItemInput::default()
+            }],
+            subtotal: 1_000,
+            tax_total: 190,
+            tax_lines: vec![CreateOrderTaxLineInput {
+                rate_bps: 1_900,
+                ..item_tax_line(0, 190)
+            }],
+            total: 1_190,
+            shipping_address: json!({}),
+            billing_address: json!({}),
+            ..CreateOrderInput::default()
+        })
+        .await
+        .unwrap();
+
+    let edit = service
+        .create_order_edit(
+            &order.id,
+            CreateOrderEditInput {
+                reason: None,
+                metadata: fastcart_kernel::Metadata::default(),
+                items: vec![OrderEditItemInput {
+                    order_item_id: Some(order.items[0].id.clone()),
+                    action: OrderEditAction::Update,
+                    product_id: None,
+                    variant_id: None,
+                    product_title: None,
+                    variant_title: None,
+                    sku: None,
+                    unit_price: None,
+                    before_quantity: Some(1),
+                    after_quantity: 2,
+                    requires_shipping: None,
+                    is_tax_inclusive: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let confirmed = service
+        .confirm_order_edit(&order.id, &edit.id)
+        .await
+        .unwrap();
+    let reloaded = service.get(&order.id).await.unwrap();
+
+    assert_eq!(reloaded.items[0].subtotal, 2_000);
+    assert_eq!(reloaded.items[0].tax_total, 380);
+    assert_eq!(reloaded.items[0].total, 2_380);
+    assert_eq!(reloaded.tax_total, 380);
+    assert_eq!(reloaded.tax_lines[0].amount, 380);
+    assert_eq!(reloaded.total, 2_380);
+    assert_eq!(confirmed.difference_total, Some(1_190));
+}
+
+#[tokio::test]
+async fn inclusive_tax_stays_inside_the_line_total_when_a_line_grows() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = OrderService::new(db);
+    // 1190 per unit including 19% VAT: the tax is part of the price, so the
+    // line total is the subtotal, not subtotal plus tax.
+    let order = service
+        .create_order(CreateOrderInput {
+            email: "buyer@example.com".to_owned(),
+            currency_code: "EUR".to_owned(),
+            items: vec![CreateOrderItemInput {
+                product_title: "Widget".to_owned(),
+                unit_price: 1_190,
+                quantity: 1,
+                subtotal: Some(1_190),
+                tax_total: Some(190),
+                total: Some(1_190),
+                is_tax_inclusive: true,
+                requires_shipping: false,
+                ..CreateOrderItemInput::default()
+            }],
+            subtotal: 1_190,
+            tax_total: 190,
+            tax_lines: vec![inclusive_item_tax_line(0, 190)],
+            total: 1_190,
+            shipping_address: json!({}),
+            billing_address: json!({}),
+            ..CreateOrderInput::default()
+        })
+        .await
+        .unwrap();
+
+    let edit = service
+        .create_order_edit(
+            &order.id,
+            CreateOrderEditInput {
+                reason: None,
+                metadata: fastcart_kernel::Metadata::default(),
+                items: vec![OrderEditItemInput {
+                    order_item_id: Some(order.items[0].id.clone()),
+                    action: OrderEditAction::Update,
+                    product_id: None,
+                    variant_id: None,
+                    product_title: None,
+                    variant_title: None,
+                    sku: None,
+                    unit_price: None,
+                    before_quantity: Some(1),
+                    after_quantity: 2,
+                    requires_shipping: None,
+                    is_tax_inclusive: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let confirmed = service
+        .confirm_order_edit(&order.id, &edit.id)
+        .await
+        .unwrap();
+    let reloaded = service.get(&order.id).await.unwrap();
+
+    assert_eq!(reloaded.subtotal, 2_380);
+    assert_eq!(reloaded.items[0].tax_total, 380);
+    assert_eq!(reloaded.items[0].total, 2_380);
+    assert_eq!(reloaded.tax_total, 380);
+    assert_eq!(reloaded.total, 2_380);
+    assert_eq!(confirmed.difference_total, Some(1_190));
 }

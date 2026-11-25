@@ -356,6 +356,60 @@ pub struct DraftOrderTaxLineInput {
     pub is_tax_inclusive: bool,
 }
 
+/// One line of a draft as it was when its conversion priced tax and stock.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DraftConversionItem {
+    /// Order line the line describes.
+    pub order_item_id: LineItemId,
+    /// Variant whose inventory item holds the stock.
+    pub variant_id: Option<VariantId>,
+    /// Quantity the order promises.
+    pub quantity: i64,
+    /// Line subtotal the tax was priced on.
+    pub subtotal: i64,
+    /// Line discount the tax was priced on.
+    pub discount_total: i64,
+    /// Whether the unit price already contains tax.
+    pub is_tax_inclusive: bool,
+}
+
+/// The draft state a conversion priced tax and stock from.
+///
+/// Conversion cannot hold a database lock while the tax provider is called, so
+/// the snapshot it priced is compared again inside the conversion transaction.
+/// A concurrent edit confirmation or destination change then fails the
+/// conversion instead of placing a draft whose lines do not match the tax and
+/// stock inputs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DraftConversionSnapshot {
+    /// Shipping destination the tax was priced for.
+    pub shipping_address: Value,
+    /// Lines the tax and stock inputs describe, in order.
+    pub items: Vec<DraftConversionItem>,
+}
+
+impl DraftConversionSnapshot {
+    /// Snapshots an order for conversion.
+    #[must_use]
+    pub fn from_order(order: &Order) -> Self {
+        Self {
+            shipping_address: order.shipping_address.clone(),
+            items: order
+                .items
+                .iter()
+                .map(|item| DraftConversionItem {
+                    order_item_id: item.id.clone(),
+                    variant_id: item.variant_id.clone(),
+                    quantity: item.quantity,
+                    subtotal: item.subtotal,
+                    discount_total: item.discount_total,
+                    is_tax_inclusive: item.is_tax_inclusive,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One line item of an order.
 ///
 /// Titles, SKUs and prices are snapshotted at placement time; a confirmed

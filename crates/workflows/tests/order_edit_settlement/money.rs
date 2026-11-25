@@ -26,6 +26,7 @@ async fn a_dearer_edit_becomes_payable_once() {
                     before_quantity: None,
                     after_quantity: 1,
                     requires_shipping: Some(false),
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -242,6 +243,7 @@ async fn a_stale_draft_settles_only_its_own_difference() {
                     before_quantity: None,
                     after_quantity: 1,
                     requires_shipping: Some(false),
+                    is_tax_inclusive: None,
                 }],
             },
         )
@@ -367,6 +369,7 @@ async fn a_zero_difference_edit_needs_no_settlement() {
                     before_quantity: None,
                     after_quantity: 1,
                     requires_shipping: Some(false),
+                    is_tax_inclusive: None,
                 }],
             },
         )

@@ -1,6 +1,6 @@
 //! Stock reservations, commits, releases and expiry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fastcart_infrastructure::database_error;
 use fastcart_kernel::{
@@ -10,9 +10,9 @@ use fastcart_kernel::{
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
 
 use crate::domain::{
-    InventoryReservation, ReservationLine, ReservationLinePolicy, ReservationRebinding,
-    ReservationReference, ReservationStatus, available_quantity_from, validate_positive_quantity,
-    validate_ttl,
+    InventoryReservation, OrderConversionStockLine, ReservationLine, ReservationLinePolicy,
+    ReservationRebinding, ReservationReference, ReservationStatus, available_quantity_from,
+    validate_positive_quantity, validate_ttl,
 };
 
 use super::*;
@@ -212,7 +212,7 @@ async fn insert_reservations(
                 .push_bind(reservation.status.as_str())
                 .push_bind(reservation.line_item_id.as_ref().map(LineItemId::as_str))
                 .push_bind(reservation.checkout_id.as_ref().map(CheckoutId::as_str))
-                .push_bind(Option::<String>::None)
+                .push_bind(reservation.order_id.as_ref().map(OrderId::as_str))
                 .push_bind(reservation.expires_at)
                 .push_bind(reservation.metadata.to_json_string())
                 .push_bind(now)
@@ -225,6 +225,31 @@ async fn insert_reservations(
             .map_err(database_error)?;
     }
     Ok(())
+}
+
+/// Builds the committed reservation of one draft order line allocation.
+fn conversion_reservation(
+    item_id: &InventoryItemId,
+    location_id: &InventoryLocationId,
+    quantity: i64,
+    line: &OrderConversionStockLine,
+    order_id: &OrderId,
+    now: Timestamp,
+) -> InventoryReservation {
+    InventoryReservation {
+        id: ReservationId::new(),
+        inventory_item_id: item_id.clone(),
+        location_id: location_id.clone(),
+        quantity,
+        status: ReservationStatus::Committed,
+        line_item_id: Some(line.line_item_id.clone()),
+        checkout_id: None,
+        order_id: Some(order_id.clone()),
+        expires_at: None,
+        metadata: Metadata::empty(),
+        created_at: now,
+        updated_at: now,
+    }
 }
 
 async fn release_rows_in_tx(
@@ -699,6 +724,228 @@ impl InventoryService {
 
         tx.commit().await.map_err(database_error)?;
         Ok(u64::try_from(rows.len()).unwrap_or(u64::MAX))
+    }
+
+    /// Commits the stock an admin-authored draft order takes when it is
+    /// converted, inside the caller's transaction.
+    ///
+    /// A draft reserves nothing while it is authored; conversion is the moment
+    /// it enters the paid lifecycle, so the units it promises have to leave
+    /// the warehouse. The committed reservations this records are bound to the
+    /// order and its line items, exactly like the reservations a checkout
+    /// commits at settlement: returns restock to the recorded location, edits
+    /// can only give back what the order took, and cancelling the order
+    /// restates the units through [`Self::restock_order`].
+    ///
+    /// Allocation follows [`Self::reserve_lines`]: `loc_default` first, then
+    /// ascending location identifier. A line whose variant has no inventory
+    /// item has no ledger to take from and is skipped when it allows
+    /// backorders — a strict line fails the batch. The shortfall of an allowed
+    /// backorder is recorded on the default location and drives its stocked
+    /// quantity negative, keeping the units the store owes visible.
+    ///
+    /// The caller supplies its transaction so the stock movement and the order
+    /// status change commit or roll back together. A line that already owns a
+    /// committed reservation is left alone, which makes a replay a no-op.
+    pub async fn commit_order_conversion_stock(
+        tx: &mut Transaction<'_, Sqlite>,
+        order_id: &OrderId,
+        lines: &[OrderConversionStockLine],
+    ) -> Result<u64, AppError> {
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        for line in lines {
+            validate_positive_quantity(line.quantity, "line quantity")?;
+        }
+
+        // A committed reservation for an order line means that line's stock
+        // was already taken. Skipping it makes replaying a partially applied
+        // conversion converge instead of moving stock twice.
+        let committed_lines: HashSet<String> = sqlx::query_scalar::<_, String>(
+            "SELECT line_item_id FROM inventory_reservations \
+             WHERE order_id = ? AND status = 'committed' AND line_item_id IS NOT NULL",
+        )
+        .bind(order_id.as_str())
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?
+        .into_iter()
+        .collect();
+        let pending: Vec<&OrderConversionStockLine> = lines
+            .iter()
+            .filter(|line| !committed_lines.contains(line.line_item_id.as_str()))
+            .collect();
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        let variants = pending
+            .iter()
+            .map(|line| line.variant_id.clone())
+            .collect::<Vec<_>>();
+        let items = load_items_by_variant_tx(tx, &variants).await?;
+        let item_ids = items.values().cloned().collect::<Vec<_>>();
+        let mut levels = load_levels_by_item_tx(tx, &item_ids).await?;
+
+        let now = now_timestamp();
+        let mut reservations = Vec::new();
+        // `(item, location, quantity, backordered)` in allocation order.
+        let mut allocations: Vec<(InventoryItemId, InventoryLocationId, i64, bool)> = Vec::new();
+        for line in pending {
+            let Some(item_id) = items.get(line.variant_id.as_str()) else {
+                // No inventory item means no level to record the line
+                // against. A line that may backorder is skipped, matching
+                // `reserve_lines`; a strict line can never be satisfied.
+                if line.allow_backorder {
+                    continue;
+                }
+                return Err(insufficient_stock_for_variant(line.variant_id.as_str()));
+            };
+            let item_id = InventoryItemId::from_string(item_id.clone());
+
+            let mut remaining = line.quantity;
+            for candidate in levels.get_mut(item_id.as_str()).into_iter().flatten() {
+                if remaining == 0 {
+                    break;
+                }
+                let available = available_quantity_from(
+                    candidate.stocked_quantity,
+                    candidate.reserved_quantity,
+                );
+                let take = remaining.min(available);
+                if take <= 0 {
+                    continue;
+                }
+                // Later lines of the same variant must see this allocation.
+                candidate.stocked_quantity -= take;
+                remaining -= take;
+                let location_id = InventoryLocationId::from_string(candidate.location_id.clone());
+                reservations.push(conversion_reservation(
+                    &item_id,
+                    &location_id,
+                    take,
+                    line,
+                    order_id,
+                    now,
+                ));
+                allocations.push((item_id.clone(), location_id, take, false));
+            }
+
+            if remaining > 0 {
+                if !line.allow_backorder {
+                    return Err(insufficient_stock_for_variant(line.variant_id.as_str()));
+                }
+                let location_id = InventoryLocationId::from_string(DEFAULT_LOCATION_ID);
+                ensure_default_location_in_tx(tx, now).await?;
+                ensure_level_in_tx(tx, &item_id, &location_id, now).await?;
+                if let Some(candidates) = levels.get_mut(item_id.as_str()) {
+                    match candidates
+                        .iter_mut()
+                        .find(|candidate| candidate.location_id == DEFAULT_LOCATION_ID)
+                    {
+                        Some(candidate) => candidate.stocked_quantity -= remaining,
+                        None => candidates.push(LevelCandidate {
+                            location_id: DEFAULT_LOCATION_ID.to_owned(),
+                            stocked_quantity: -remaining,
+                            reserved_quantity: 0,
+                        }),
+                    }
+                }
+                reservations.push(conversion_reservation(
+                    &item_id,
+                    &location_id,
+                    remaining,
+                    line,
+                    order_id,
+                    now,
+                ));
+                allocations.push((item_id.clone(), location_id, remaining, true));
+            }
+        }
+
+        // Covered allocations keep the level's sellable quantity honest and
+        // never take reserved stock. They run before the backorder writes so
+        // the guard cannot be poisoned by a shortfall recorded on the same
+        // default level.
+        let mut covered: HashMap<(String, String), i64> = HashMap::new();
+        for (item_id, location_id, quantity, backordered) in &allocations {
+            if *backordered {
+                continue;
+            }
+            let entry = covered
+                .entry((item_id.as_str().to_owned(), location_id.as_str().to_owned()))
+                .or_insert(0);
+            *entry = entry
+                .checked_add(*quantity)
+                .ok_or_else(|| AppError::validation("conversion quantity overflow"))?;
+        }
+        for ((item_id, location_id), quantity) in covered {
+            let affected = sqlx::query(
+                "UPDATE inventory_levels \
+                 SET stocked_quantity = stocked_quantity - ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ? \
+                   AND stocked_quantity - reserved_quantity >= ?",
+            )
+            .bind(quantity)
+            .bind(now)
+            .bind(&item_id)
+            .bind(&location_id)
+            .bind(quantity)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+            if affected.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "inventory level no longer matches the conversion reservation",
+                ));
+            }
+        }
+        for (item_id, location_id, quantity, backordered) in &allocations {
+            if !backordered {
+                continue;
+            }
+            let affected = sqlx::query(
+                "UPDATE inventory_levels \
+                 SET stocked_quantity = stocked_quantity - ?, updated_at = ? \
+                 WHERE inventory_item_id = ? AND location_id = ?",
+            )
+            .bind(quantity)
+            .bind(now)
+            .bind(item_id.as_str())
+            .bind(location_id.as_str())
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+            if affected.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "inventory level no longer matches the conversion backorder",
+                ));
+            }
+        }
+
+        for reservation in &reservations {
+            insert_movement(
+                tx,
+                Movement {
+                    item_id: &reservation.inventory_item_id,
+                    location_id: &reservation.location_id,
+                    quantity_delta: -reservation.quantity,
+                    reason: "commit",
+                    reference: Some(order_id.as_str()),
+                    actor_id: None,
+                    now,
+                },
+            )
+            .await?;
+        }
+        insert_reservations(tx, &reservations, now).await?;
+
+        let committed: i64 = reservations
+            .iter()
+            .map(|reservation| reservation.quantity)
+            .sum();
+        Ok(u64::try_from(committed).unwrap_or(u64::MAX))
     }
 
     /// Releases reservations whose expiry is at or before `now`.

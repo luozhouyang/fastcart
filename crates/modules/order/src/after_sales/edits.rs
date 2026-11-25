@@ -71,6 +71,10 @@ pub struct OrderEditItem {
     pub after_quantity: i64,
     /// Whether the line takes stock, snapshotted when the edit was prepared.
     pub requires_shipping: bool,
+    /// Whether an added line's unit price already contains tax, snapshotted
+    /// when the edit was prepared. Existing lines inherit the flag from the
+    /// order line they rewrite.
+    pub is_tax_inclusive: bool,
     /// Line state.
     pub status: OrderEditItemStatus,
     /// Creation timestamp in Unix seconds.
@@ -105,6 +109,10 @@ pub struct OrderEditItemInput {
     /// Whether an added line takes stock. Ignored for existing lines, which
     /// inherit the value from the order line they rewrite.
     pub requires_shipping: Option<bool>,
+    /// Whether an added line's unit price already contains tax; defaults to
+    /// the store's `prices_include_tax` setting. Ignored for existing lines,
+    /// which inherit the value from the order line they rewrite.
+    pub is_tax_inclusive: Option<bool>,
 }
 
 /// Input for [`crate::OrderService::create_order_edit`].

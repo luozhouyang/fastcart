@@ -46,6 +46,7 @@ async fn item_with_variant(service: &InventoryService, variant: &VariantId) -> I
 }
 
 mod catalog;
+mod conversions;
 mod exchanges;
 mod fulfillments;
 mod order_edits;

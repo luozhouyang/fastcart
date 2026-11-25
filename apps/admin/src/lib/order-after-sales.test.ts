@@ -69,6 +69,36 @@ describe("buildOrderEditRequest", () => {
       "Enter a whole quantity for Linen throw.",
     );
   });
+
+  it("appends an explicitly priced new line", () => {
+    const request = buildOrderEditRequest(items, {}, "", {
+      productTitle: "  Gift card  ",
+      unitPrice: 2_500,
+      quantity: 2,
+    });
+
+    expect(request.items).toEqual([
+      {
+        action: "add",
+        product_title: "Gift card",
+        unit_price: 2_500,
+        after_quantity: 2,
+        requires_shipping: true,
+      },
+    ]);
+  });
+
+  it("validates the new line", () => {
+    expect(() =>
+      buildOrderEditRequest(items, {}, "", { productTitle: " ", unitPrice: 0, quantity: 1 }),
+    ).toThrow("Enter a title for the line to add.");
+    expect(() =>
+      buildOrderEditRequest(items, {}, "", { productTitle: "Gift", unitPrice: 0, quantity: 0 }),
+    ).toThrow("Enter a whole quantity greater than zero for the new line.");
+    expect(() =>
+      buildOrderEditRequest(items, {}, "", { productTitle: "Gift", unitPrice: -1, quantity: 1 }),
+    ).toThrow("Enter a unit price of zero or more for the new line.");
+  });
 });
 
 describe("buildReturnRequest", () => {

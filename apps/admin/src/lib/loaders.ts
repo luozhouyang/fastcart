@@ -256,6 +256,11 @@ function dayKey(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+/** Whether an order represents placed revenue rather than a draft or a cancellation. */
+function isPlacedOrder(order: Order): boolean {
+  return order.status !== "canceled" && order.status !== "draft";
+}
+
 function revenueSeries(orders: Order[], days: number): RevenuePointView[] {
   const buckets = new Map<string, number>();
   const today = new Date();
@@ -265,7 +270,7 @@ function revenueSeries(orders: Order[], days: number): RevenuePointView[] {
     buckets.set(dayKey(date), 0);
   }
   for (const order of orders) {
-    if (order.status === "canceled") continue;
+    if (!isPlacedOrder(order)) continue;
     const key = dayKey(new Date(order.created_at * 1000));
     if (buckets.has(key)) {
       buckets.set(key, (buckets.get(key) ?? 0) + toMajor(order.total));
@@ -385,9 +390,7 @@ export async function loadOverview(
   const within = (order: Order, fromDays: number, toDays: number): boolean => {
     const at = order.created_at * 1000;
     return (
-      order.status !== "canceled" &&
-      at >= now - fromDays * 86_400_000 &&
-      at < now - toDays * 86_400_000
+      isPlacedOrder(order) && at >= now - fromDays * 86_400_000 && at < now - toDays * 86_400_000
     );
   };
   const orders30 = orders.filter((order) => within(order, 30, 0));
@@ -862,7 +865,7 @@ export async function loadCustomers(
   const byCustomer = new Map<string, { orders: number; spent: number; lastOrder: number }>();
   const byEmail = new Map<string, { orders: number; spent: number; lastOrder: number }>();
   for (const order of orders) {
-    if (order.status === "canceled") continue;
+    if (!isPlacedOrder(order)) continue;
     const entry = {
       orders: 1,
       spent: toMajor(order.total),

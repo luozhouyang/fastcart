@@ -262,6 +262,37 @@ describe("OrderAfterSalesPanel", () => {
     expect(screen.queryByRole("button", { name: "Exchange" })).not.toBeInTheDocument();
   });
 
+  it("adds a line to a draft through an order edit", async () => {
+    const create = vi.fn(async () => draftEdit());
+    const client = {
+      orders: { edits: { create } },
+    } as unknown as AdminClient;
+    renderPanel({ order: { ...order, status: "draft" }, client });
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await userEvent.type(screen.getByLabelText("New line item title"), "Gift card");
+    await userEvent.type(screen.getByLabelText("New line unit price"), "25");
+    await userEvent.clear(screen.getByLabelText("New line quantity"));
+    await userEvent.type(screen.getByLabelText("New line quantity"), "2");
+    await userEvent.click(screen.getByRole("button", { name: "Edit items" }));
+
+    await waitFor(() =>
+      expect(create).toHaveBeenCalledWith("order_1", {
+        reason: null,
+        metadata: {},
+        items: [
+          {
+            action: "add",
+            product_title: "Gift card",
+            unit_price: 2_500,
+            after_quantity: 2,
+            requires_shipping: true,
+          },
+        ],
+      }),
+    );
+  });
+
   it("disables record creation without the orders.write permission", () => {
     renderPanel({ canWrite: false });
 

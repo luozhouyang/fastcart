@@ -355,15 +355,8 @@ async fn cart_context(
 /// platform default (tax added on top, as most US stores quote prices).
 async fn prices_include_tax(db: &StoreDatabase) -> bool {
     // Never fail a cart request over a settings read: fall back to the default.
-    match StoreService::new(db.clone())
-        .get_setting("prices_include_tax")
-        .await
-    {
-        Ok(Some(value)) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "true" | "1" | "yes"
-        ),
-        Ok(None) => false,
+    match StoreService::new(db.clone()).prices_include_tax().await {
+        Ok(inclusive) => inclusive,
         Err(error) => {
             tracing::warn!(error = %error, "failed to read the tax-inclusive pricing setting");
             false

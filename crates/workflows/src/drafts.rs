@@ -3,9 +3,16 @@
 //! A draft order is authored before money or stock are involved. The workflow
 //! prices its lines through the store's tax provider, so a draft totals the
 //! same way a placed order would, and re-prices the goods whenever the
-//! destination changes. Conversion hands the draft to the normal order
-//! lifecycle; the workflow deliberately moves no stock, mirroring manually
-//! recorded orders that own no checkout reservation.
+//! destination changes.
+//!
+//! Conversion is the point the draft enters the paid lifecycle: the workflow
+//! prices the current lines, snapshots what that pricing described, and asks
+//! the order service to apply the tax, commit the stock and place the order in
+//! one transaction. The snapshot is validated again under the write lock, so a
+//! concurrent edit or destination change cannot leave a line untaxed or
+//! unstocked. Stock is committed rather than merely reserved because a
+//! checkout-placed order in this platform commits its reservations at
+//! settlement; conversion is the equivalent placement moment.
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{
@@ -13,9 +20,10 @@ use fastcart_kernel::{
     validate_non_negative_amount, validate_quantity,
 };
 use fastcart_module_catalog::CatalogService;
+use fastcart_module_inventory::OrderConversionStockLine;
 use fastcart_module_order::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput,
-    DraftOrderTaxLineInput, Order, OrderService,
+    DraftConversionSnapshot, DraftOrderTaxLineInput, Order, OrderService,
 };
 use fastcart_module_store::StoreService;
 use fastcart_module_tax::{
@@ -44,8 +52,9 @@ pub struct DraftOrderLine {
     pub unit_price: i64,
     /// Quantity to buy.
     pub quantity: i64,
-    /// Whether the unit price already contains tax.
-    pub is_tax_inclusive: bool,
+    /// Whether the unit price already contains tax; defaults to the store's
+    /// `prices_include_tax` setting.
+    pub is_tax_inclusive: Option<bool>,
     /// Whether the line requires shipping.
     pub requires_shipping: bool,
     /// Line metadata snapshot.
@@ -157,6 +166,11 @@ impl DraftOrderWorkflow {
             Some(_) => Some(resolve_tax_provider(&self.tax, &self.store).await?),
             None => None,
         };
+        // A unit price is gross or net according to the store's pricing
+        // convention unless the caller states otherwise, mirroring how a cart
+        // line is created. The resolved flag is stored on the order line so
+        // conversion and later edits price tax the same way.
+        let default_is_tax_inclusive = self.store.prices_include_tax().await?;
 
         let mut items = Vec::with_capacity(request.lines.len());
         let mut tax_lines = Vec::new();
@@ -165,6 +179,7 @@ impl DraftOrderWorkflow {
         for (index, line) in request.lines.iter().enumerate() {
             validate_non_negative_amount(line.unit_price, "unit_price")?;
             validate_quantity(line.quantity, false)?;
+            let is_tax_inclusive = line.is_tax_inclusive.unwrap_or(default_is_tax_inclusive);
             let subtotal = line
                 .unit_price
                 .checked_mul(line.quantity)
@@ -181,7 +196,7 @@ impl DraftOrderWorkflow {
                             .and_then(|variant| variants.get(variant.as_str()))
                             .and_then(|category| category.as_deref()),
                         subtotal,
-                        Some(line.is_tax_inclusive),
+                        Some(is_tax_inclusive),
                     )
                     .await?;
                 if let Some((name, rate_bps, amount, is_tax_inclusive)) =
@@ -219,7 +234,7 @@ impl DraftOrderWorkflow {
                 discount_total: Some(0),
                 tax_total: Some(tax_total),
                 total: None,
-                is_tax_inclusive: line.is_tax_inclusive,
+                is_tax_inclusive,
                 requires_shipping: line.requires_shipping,
                 metadata: line.metadata.clone(),
                 adjustments: Vec::new(),
@@ -246,7 +261,7 @@ impl DraftOrderWorkflow {
                         destination,
                         None,
                         request.shipping_total,
-                        Some(false),
+                        Some(default_is_tax_inclusive),
                     )
                     .await?;
                 if let Some((name, rate_bps, amount, is_tax_inclusive)) =
@@ -340,11 +355,20 @@ impl DraftOrderWorkflow {
             .await
     }
 
-    /// Converts a draft order into a pending order.
+    /// Converts a draft order into a pending order, taking its stock.
     ///
     /// The goods are re-priced once more for the draft's current destination,
     /// so lines added or changed through order edits enter the lifecycle with
-    /// the tax they should carry. No stock or payment is taken here.
+    /// the tax they should carry. The lines and destination that pricing
+    /// looked at are snapshotted and validated again by the order service under
+    /// the write lock; applying the tax, committing the stock and placing the
+    /// order then commit together. A concurrent edit or destination change
+    /// makes the conversion conflict instead of placing a line the inputs did
+    /// not describe.
+    ///
+    /// Stock is committed here rather than reserved until fulfillment because
+    /// a checkout-placed order commits its reservations at settlement in this
+    /// platform; conversion is its placement moment. No payment is taken.
     pub async fn convert_draft_order(&self, order_id: &OrderId) -> Result<Order, AppError> {
         let order = self.orders.get(order_id).await?;
         if !order.is_draft_order() {
@@ -352,13 +376,58 @@ impl DraftOrderWorkflow {
                 "only draft orders can be converted, found a placed order",
             ));
         }
-        if let Some(destination) = destination(&order.shipping_address)? {
-            let tax_lines = self.item_tax_lines(&order, &destination).await?;
-            self.orders
-                .recalculate_draft_taxes(order_id, None, None, tax_lines)
-                .await?;
+        let snapshot = DraftConversionSnapshot::from_order(&order);
+        let tax_lines = match destination(&order.shipping_address)? {
+            Some(destination) => Some(self.item_tax_lines(&order, &destination).await?),
+            None => None,
+        };
+        let stock_lines = self.conversion_stock_lines(&order).await?;
+        self.orders
+            .convert_priced_draft_order(order_id, &snapshot, tax_lines, stock_lines)
+            .await
+    }
+
+    /// Builds the stock conversion takes for a draft's active lines.
+    ///
+    /// Only variants that manage inventory take stock; the flag comes from the
+    /// catalog, exactly like checkout. Lines whose variant no longer exists are
+    /// skipped: there is no policy left to apply, and the order line keeps its
+    /// own snapshot of the goods. A managed variant without an inventory item
+    /// is still reported, so the inventory service can skip it or record a
+    /// backorder exactly as a checkout reservation would.
+    async fn conversion_stock_lines(
+        &self,
+        order: &Order,
+    ) -> Result<Vec<OrderConversionStockLine>, AppError> {
+        let variant_ids: Vec<String> = order
+            .items
+            .iter()
+            .filter(|item| item.quantity > 0)
+            .filter_map(|item| item.variant_id.as_ref().map(ToString::to_string))
+            .collect();
+        if variant_ids.is_empty() {
+            return Ok(Vec::new());
         }
-        self.orders.convert_draft_order(order_id).await
+        let variants = self.catalog.get_variants(&variant_ids).await?;
+        let mut lines = Vec::new();
+        for item in order.items.iter().filter(|item| item.quantity > 0) {
+            let Some(variant_id) = item.variant_id.clone() else {
+                continue;
+            };
+            let Some(variant) = variants.get(variant_id.as_str()) else {
+                continue;
+            };
+            if !variant.manage_inventory {
+                continue;
+            }
+            lines.push(OrderConversionStockLine::new(
+                variant_id,
+                item.id.clone(),
+                item.quantity,
+                variant.allow_backorder,
+            ));
+        }
+        Ok(lines)
     }
 
     /// Prices every active item line of a draft for one destination.

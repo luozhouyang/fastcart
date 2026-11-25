@@ -7,7 +7,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabase, StoreDatabaseManager};
-use fastcart_kernel::{CountryCode, StoreId};
+use fastcart_kernel::{CountryCode, StoreId, VariantId};
+use fastcart_module_catalog::{CatalogService, CreateProductInput, CreateVariantInput};
+use fastcart_module_inventory::{CreateInventoryItemInput, CreateLocationInput, InventoryService};
+use fastcart_module_store::StoreService;
 use fastcart_module_tax::{CreateTaxRateInput, CreateTaxRegionInput, TaxService};
 use fastcart_platform::PlatformStore;
 use http_body_util::BodyExt;
@@ -358,4 +361,139 @@ async fn draft_creation_requires_an_order_email_and_lines() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+}
+
+#[tokio::test]
+async fn draft_lines_follow_the_store_pricing_setting() {
+    let fixture = fixture().await;
+    configure_tax(&fixture.db, "DE", "Germany", 1_900).await;
+    StoreService::new(fixture.db.clone())
+        .set_setting("prices_include_tax", "true")
+        .await
+        .unwrap();
+    let headers = fixture.headers();
+
+    let (status, draft, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/orders",
+        Some(draft_request("DE")),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{draft}");
+    assert_eq!(draft["items"][0]["is_tax_inclusive"], true);
+    // 2000 gross at 19%: the tax is inside the price, not on top of it.
+    assert_eq!(draft["items"][0]["tax_total"], 319);
+    assert_eq!(draft["items"][0]["total"], 2_000);
+    assert_eq!(draft["tax_total"], 319);
+    assert_eq!(draft["total"], 2_000);
+
+    // An explicit flag still wins over the store convention.
+    let mut request = draft_request("DE");
+    request["items"][0]["is_tax_inclusive"] = json!(false);
+    let (status, exclusive, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/orders",
+        Some(request),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{exclusive}");
+    assert_eq!(exclusive["items"][0]["is_tax_inclusive"], false);
+    assert_eq!(exclusive["items"][0]["tax_total"], 380);
+    assert_eq!(exclusive["items"][0]["total"], 2_380);
+    assert_eq!(exclusive["total"], 2_380);
+}
+
+#[tokio::test]
+async fn converting_a_draft_takes_its_stock() {
+    let fixture = fixture().await;
+    let inventory = InventoryService::new(fixture.db.clone());
+    let catalog = CatalogService::new(fixture.db.clone());
+    let product = catalog
+        .create_product(CreateProductInput {
+            title: "Managed widget".to_owned(),
+            variants: vec![CreateVariantInput {
+                title: "Default".to_owned(),
+                manage_inventory: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    catalog.publish_product(&product.id).await.unwrap();
+    let variant = VariantId::from_string(product.variants[0].id.clone());
+    let location = inventory
+        .create_location(CreateLocationInput {
+            name: "Warehouse".to_owned(),
+            address: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let item = inventory
+        .create_item(CreateInventoryItemInput {
+            sku: None,
+            variant_id: Some(variant.clone()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    inventory
+        .adjust_stock(&item.id, &location.id, 10, "restock", None)
+        .await
+        .unwrap();
+    let headers = fixture.headers();
+
+    let (status, draft, _) = send(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/orders",
+        Some(json!({
+            "email": "buyer@example.com",
+            "currency_code": "USD",
+            "items": [{
+                "variant_id": variant.as_str(),
+                "product_title": "Managed widget",
+                "unit_price": 1_000,
+                "quantity": 2,
+                "requires_shipping": true
+            }],
+            "shipping_address": {"country_code": "US"},
+            "billing_address": {}
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{draft}");
+    let order_id = draft["id"].as_str().unwrap();
+    assert_eq!(inventory.variant_availability(&variant).await.unwrap(), 10);
+
+    let (status, converted, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("/api/v1/admin/orders/{order_id}/convert"),
+        None,
+        &headers,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{converted}");
+    assert_eq!(converted["status"], "pending");
+    assert_eq!(
+        inventory.variant_availability(&variant).await.unwrap(),
+        8,
+        "conversion commits the units the order promises"
+    );
+    let reservations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM inventory_reservations WHERE order_id = ? AND status = 'committed'",
+    )
+    .bind(order_id)
+    .fetch_one(fixture.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(reservations, 1);
 }

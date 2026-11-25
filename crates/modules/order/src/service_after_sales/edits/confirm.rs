@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Adjustment code under which checkout and draft creation record the tax
+/// levied on shipping.
+const SHIPPING_TAX_ADJUSTMENT_CODE: &str = "shipping_tax";
+
 impl OrderService {
     /// Applies a draft edit, rewriting the order lines and recalculating the
     /// order totals from them.
@@ -22,7 +26,8 @@ impl OrderService {
     ///   shipping, so the tax lines and `orders.tax_total` stay in step.
     /// * Order-level adjustments shrink with the retained base
     ///   (`retained_subtotal / order.subtotal`, floored) and their flooring
-    ///   remainder is distributed to the last row.
+    ///   remainder is distributed to the last row. The shipping-tax adjustment
+    ///   is exempt because shipping is preserved.
     /// * Added lines keep their explicit edit amount and do not inherit any
     ///   existing order-level allocation.
     /// * Shipping is preserved.
@@ -88,8 +93,8 @@ impl OrderService {
         if current_status == OrderStatus::Canceled {
             return Err(AppError::conflict("cannot edit a canceled order"));
         }
-        let adjustments = sqlx::query_as::<_, (String, i64)>(
-            "SELECT id, amount FROM order_adjustments
+        let adjustments = sqlx::query_as::<_, (String, i64, Option<String>)>(
+            "SELECT id, amount, code FROM order_adjustments
              WHERE order_id = ? ORDER BY created_at ASC, rowid ASC",
         )
         .bind(order_id.as_str())
@@ -97,9 +102,30 @@ impl OrderService {
         .await
         .map_err(database_error)?;
         let retained_subtotal = current_subtotal.saturating_add(removed_amount).max(0);
-        let adjustment_total = checked_sum(adjustments.iter().map(|(_, amount)| *amount))?;
-        let next_adjustment_total =
-            scale_amount(adjustment_total, retained_subtotal, current_subtotal)?;
+        let adjustment_total = checked_sum(adjustments.iter().map(|(_, amount, _)| *amount))?;
+        // Shipping tax is collected on the shipping snapshot, and shipping is
+        // preserved by an edit, so that adjustment must not shrink with the
+        // retained goods. Scaling it while the shipping-scoped tax line stays
+        // put would leave `orders.tax_total` claiming tax the total no longer
+        // contains. Only the remaining order-level adjustments follow the
+        // retained subtotal.
+        let preserved_adjustment_total = checked_sum(
+            adjustments
+                .iter()
+                .filter(|(_, _, code)| code.as_deref() == Some(SHIPPING_TAX_ADJUSTMENT_CODE))
+                .map(|(_, amount, _)| *amount),
+        )?;
+        let scalable_adjustment_total = adjustment_total
+            .checked_sub(preserved_adjustment_total)
+            .ok_or_else(|| AppError::validation("adjustment overflow"))?;
+        let next_scalable_adjustment = scale_amount(
+            scalable_adjustment_total,
+            retained_subtotal,
+            current_subtotal,
+        )?;
+        let next_adjustment_total = preserved_adjustment_total
+            .checked_add(next_scalable_adjustment)
+            .ok_or_else(|| AppError::validation("adjustment overflow"))?;
 
         // Everything below runs under `BEGIN IMMEDIATE`, so the shipped
         // quantities cannot change between this guard and the line rewrite:
@@ -128,7 +154,7 @@ impl OrderService {
                             (id, order_id, product_id, variant_id, product_title, variant_title,
                              sku, thumbnail, unit_price, quantity, subtotal, discount_total,
                              tax_total, total, is_tax_inclusive, requires_shipping, metadata)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, 0, ?, 0, ?, ?)",
+                         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, 0, ?, ?, ?, ?)",
                     )
                     .bind(line_id.as_str())
                     .bind(order_id.as_str())
@@ -141,6 +167,7 @@ impl OrderService {
                     .bind(item.after_quantity)
                     .bind(subtotal)
                     .bind(subtotal)
+                    .bind(i64::from(item.is_tax_inclusive))
                     .bind(i64::from(item.requires_shipping))
                     .bind(serde_json::json!({"order_edit_id": edit_id.as_str()}).to_string())
                     .execute(&mut *tx)
@@ -167,7 +194,7 @@ impl OrderService {
                         )
                     })?;
                     let current = sqlx::query_as::<_, ExistingLineAmounts>(
-                        "SELECT unit_price, quantity, discount_total, tax_total
+                        "SELECT unit_price, quantity, discount_total, tax_total, is_tax_inclusive
                          FROM order_items WHERE id = ? AND order_id = ?",
                     )
                     .bind(line_id.as_str())
@@ -188,18 +215,29 @@ impl OrderService {
                         .checked_mul(item.after_quantity)
                         .ok_or_else(|| AppError::validation("edit amount overflow"))?;
                     // The line keeps the same effective rate: its discount and
-                    // tax shrink with its quantity.
-                    let discount_total = scale_amount(
+                    // tax follow its quantity in either direction. Inclusive
+                    // tax is already contained in the unit price, so only
+                    // exclusive tax grows the line total.
+                    let discount_total = scale_line_amount(
                         current.discount_total,
                         item.after_quantity,
                         current.quantity,
                     )?;
-                    let tax_total =
-                        scale_amount(current.tax_total, item.after_quantity, current.quantity)?;
-                    let total = subtotal
+                    let tax_total = scale_line_amount(
+                        current.tax_total,
+                        item.after_quantity,
+                        current.quantity,
+                    )?;
+                    let net_total = subtotal
                         .checked_sub(discount_total)
-                        .and_then(|value| value.checked_add(tax_total))
                         .ok_or_else(|| AppError::validation("order item total overflow"))?;
+                    let total = if current.is_tax_inclusive != 0 {
+                        net_total
+                    } else {
+                        net_total
+                            .checked_add(tax_total)
+                            .ok_or_else(|| AppError::validation("order item total overflow"))?
+                    };
                     sqlx::query(
                         "UPDATE order_items
                          SET quantity = ?, subtotal = ?, discount_total = ?, tax_total = ?,
@@ -269,7 +307,7 @@ impl OrderService {
                 .as_ref()
                 .and_then(|order_item_id| edited_tax_lines.get(order_item_id))
             {
-                Some((before, after)) => scale_amount(amount, *after, *before)?,
+                Some((before, after)) => scale_line_amount(amount, *after, *before)?,
                 None => amount,
             };
             next_tax = next_tax
@@ -353,31 +391,38 @@ impl OrderService {
             .await?;
         }
 
-        if retained_subtotal != current_subtotal && !adjustments.is_empty() {
-            // Give the last adjustment the flooring remainder so the rows add
-            // up to the scaled order-level total exactly.
-            let last_index = adjustments.len() - 1;
-            let mut allocated = 0_i64;
-            for (index, (id, amount)) in adjustments.iter().enumerate() {
-                let amount = if index == last_index {
-                    next_adjustment_total
-                        .checked_sub(allocated)
-                        .ok_or_else(|| AppError::validation("adjustment overflow"))?
-                } else {
-                    scale_amount(*amount, retained_subtotal, current_subtotal)?
-                };
-                allocated = allocated
-                    .checked_add(amount)
-                    .ok_or_else(|| AppError::validation("adjustment overflow"))?;
-                sqlx::query(
-                    "UPDATE order_adjustments SET amount = ? WHERE id = ? AND order_id = ?",
-                )
-                .bind(amount)
-                .bind(id)
-                .bind(order_id.as_str())
-                .execute(&mut *tx)
-                .await
-                .map_err(database_error)?;
+        if retained_subtotal != current_subtotal {
+            // Scale only the allocations that follow the goods; the shipping
+            // tax row keeps the amount shipping was quoted with. Give the last
+            // scalable row the flooring remainder so those rows add up to
+            // `next_scalable_adjustment` exactly.
+            let scalable: Vec<&(String, i64, Option<String>)> = adjustments
+                .iter()
+                .filter(|(_, _, code)| code.as_deref() != Some(SHIPPING_TAX_ADJUSTMENT_CODE))
+                .collect();
+            if let Some((last_index, _)) = scalable.iter().enumerate().next_back() {
+                let mut allocated = 0_i64;
+                for (index, (id, amount, _)) in scalable.iter().enumerate() {
+                    let amount = if index == last_index {
+                        next_scalable_adjustment
+                            .checked_sub(allocated)
+                            .ok_or_else(|| AppError::validation("adjustment overflow"))?
+                    } else {
+                        scale_amount(*amount, retained_subtotal, current_subtotal)?
+                    };
+                    allocated = allocated
+                        .checked_add(amount)
+                        .ok_or_else(|| AppError::validation("adjustment overflow"))?;
+                    sqlx::query(
+                        "UPDATE order_adjustments SET amount = ? WHERE id = ? AND order_id = ?",
+                    )
+                    .bind(amount)
+                    .bind(id)
+                    .bind(order_id.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+                }
             }
         }
 

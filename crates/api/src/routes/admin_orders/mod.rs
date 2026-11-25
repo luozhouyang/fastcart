@@ -112,6 +112,14 @@ pub fn router() -> Router<Arc<AppContext>> {
             post(claims::refund_claim),
         )
         .route(
+            "/orders/{id}/claims/{claim_id}/collect-difference",
+            post(claims::collect_claim_difference),
+        )
+        .route(
+            "/orders/{id}/claims/{claim_id}/refund-difference",
+            post(claims::refund_claim_difference),
+        )
+        .route(
             "/orders/{id}/claims/{claim_id}/cancel",
             post(claims::cancel_claim),
         )
@@ -130,6 +138,14 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route(
             "/orders/{id}/exchanges/{exchange_id}/fulfill",
             post(exchanges::fulfill_exchange),
+        )
+        .route(
+            "/orders/{id}/exchanges/{exchange_id}/collect-difference",
+            post(exchanges::collect_exchange_difference),
+        )
+        .route(
+            "/orders/{id}/exchanges/{exchange_id}/refund-difference",
+            post(exchanges::refund_exchange_difference),
         )
         .route(
             "/orders/{id}/exchanges/{exchange_id}/cancel",
@@ -614,6 +630,7 @@ fn map_edit_input(request: CreateOrderEditRequest) -> CreateOrderEditInput {
                 before_quantity: item.before_quantity,
                 after_quantity: item.after_quantity,
                 requires_shipping: item.requires_shipping,
+                is_tax_inclusive: item.is_tax_inclusive,
             })
             .collect(),
     }

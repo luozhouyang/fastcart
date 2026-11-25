@@ -30,6 +30,7 @@ import {
   refundDifference,
   type CreationKind,
   type DifferenceKind,
+  type NewOrderLine,
   type OrderAfterSalesData,
 } from "@/lib/order-after-sales";
 
@@ -87,6 +88,9 @@ export function OrderAfterSalesPanel({
   const [creation, setCreation] = useState<CreationKind | null>(null);
   const [draftQuantities, setDraftQuantities] = useState<Record<string, number>>({});
   const [draftReason, setDraftReason] = useState("");
+  const [newLineTitle, setNewLineTitle] = useState("");
+  const [newLinePrice, setNewLinePrice] = useState("");
+  const [newLineQuantity, setNewLineQuantity] = useState("1");
   const [replacementVariant, setReplacementVariant] = useState("");
   const [creating, setCreating] = useState(false);
   const [collectTarget, setCollectTarget] = useState<{ kind: DifferenceKind; id: string } | null>(
@@ -98,6 +102,9 @@ export function OrderAfterSalesPanel({
     setCreation(null);
     setDraftQuantities({});
     setDraftReason("");
+    setNewLineTitle("");
+    setNewLinePrice("");
+    setNewLineQuantity("1");
     setReplacementVariant("");
     setCollectTarget(null);
   }, [order.id]);
@@ -118,12 +125,37 @@ export function OrderAfterSalesPanel({
   const openCreation = (kind: CreationKind) => {
     setCreation(kind);
     setDraftReason("");
+    setNewLineTitle("");
+    setNewLinePrice("");
+    setNewLineQuantity("1");
     setReplacementVariant("");
     setDraftQuantities(
       Object.fromEntries(
         order.items.map((item) => [item.id ?? item.sku, kind === "edit" ? item.quantity : 0]),
       ),
     );
+  };
+
+  /** Reads the optional add-line fields, or returns undefined when they are blank. */
+  const readNewLine = (): NewOrderLine | undefined => {
+    const title = newLineTitle.trim();
+    const price = newLinePrice.trim();
+    if (title.length === 0 && price.length === 0) return undefined;
+    if (title.length === 0) {
+      throw new Error("Enter a title for the line to add.");
+    }
+    if (price.length === 0) {
+      throw new Error("Enter a unit price for the line to add.");
+    }
+    const unitPrice = Math.round(Number(price) * 100);
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+      throw new Error("Enter a unit price of zero or more for the new line.");
+    }
+    return {
+      productTitle: title,
+      unitPrice,
+      quantity: Number(newLineQuantity),
+    };
   };
 
   const submitCreation = async () => {
@@ -134,7 +166,12 @@ export function OrderAfterSalesPanel({
         case "edit":
           await client.orders.edits.create(
             order.id,
-            buildOrderEditRequest(order.items, draftQuantities, draftReason),
+            buildOrderEditRequest(
+              order.items,
+              draftQuantities,
+              draftReason,
+              order.status === "draft" ? readNewLine() : undefined,
+            ),
           );
           break;
         case "return":
@@ -703,6 +740,43 @@ export function OrderAfterSalesPanel({
                 />
                 <p className="text-[11px] text-muted-foreground">
                   Every exchanged unit ships as this variant.
+                </p>
+              </div>
+            ) : null}
+            {creation === "edit" && order.status === "draft" ? (
+              <div className="space-y-2 rounded-md border border-border/70 p-3">
+                <p className="text-[11.5px] font-medium text-ink-soft">Add a line</p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <Input
+                    aria-label="New line item title"
+                    placeholder="Item title"
+                    value={newLineTitle}
+                    onChange={(event) => setNewLineTitle(event.target.value)}
+                    disabled={creating}
+                  />
+                  <Input
+                    aria-label="New line unit price"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Unit price"
+                    value={newLinePrice}
+                    onChange={(event) => setNewLinePrice(event.target.value)}
+                    disabled={creating}
+                  />
+                  <Input
+                    aria-label="New line quantity"
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="Quantity"
+                    value={newLineQuantity}
+                    onChange={(event) => setNewLineQuantity(event.target.value)}
+                    disabled={creating}
+                  />
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Tax is priced when the draft is converted.
                 </p>
               </div>
             ) : null}

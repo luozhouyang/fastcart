@@ -140,6 +140,9 @@ pub struct OrderEditItemRequest {
     pub after_quantity: i64,
     /// Whether the added line requires shipping; defaults to true.
     pub requires_shipping: Option<bool>,
+    /// Whether an added line's unit price already contains tax; defaults to
+    /// the store's `prices_include_tax` setting. Ignored for existing lines.
+    pub is_tax_inclusive: Option<bool>,
 }
 
 /// Request body for creating an order edit.
@@ -173,9 +176,10 @@ pub struct DraftOrderItemRequest {
     pub unit_price: i64,
     /// Quantity to buy.
     pub quantity: i64,
-    /// Whether the unit price already contains tax.
+    /// Whether the unit price already contains tax; defaults to the store's
+    /// `prices_include_tax` setting.
     #[serde(default)]
-    pub is_tax_inclusive: bool,
+    pub is_tax_inclusive: Option<bool>,
     /// Whether the line requires shipping; defaults to true.
     #[serde(default = "default_true")]
     pub requires_shipping: bool,

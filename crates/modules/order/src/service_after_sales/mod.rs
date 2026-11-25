@@ -38,6 +38,7 @@ struct ExistingOrderItem {
     unit_price: i64,
     quantity: i64,
     requires_shipping: bool,
+    is_tax_inclusive: bool,
 }
 
 /// Loads one order line from the order's own items.
@@ -48,7 +49,7 @@ async fn fetch_order_item(
 ) -> Result<ExistingOrderItem, AppError> {
     sqlx::query_as::<_, ExistingOrderItem>(
         "SELECT product_id, variant_id, product_title, variant_title, sku, unit_price, quantity, \
-                requires_shipping
+                requires_shipping, is_tax_inclusive
          FROM order_items WHERE id = ? AND order_id = ?",
     )
     .bind(order_item_id.as_str())
