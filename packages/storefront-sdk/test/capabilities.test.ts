@@ -177,8 +177,17 @@ test("grant versions must be positive integers", () => {
   }
 });
 
-test("grant endpoints must be non-empty strings", () => {
-  for (const endpoint of [undefined, null, "", 42]) {
+test("grant endpoints must be site-relative strings", () => {
+  for (const endpoint of [
+    undefined,
+    null,
+    "",
+    42,
+    "https://evil.example/store/capabilities/search",
+    "//evil.example/store/capabilities/search",
+    "/store\\capabilities\\search",
+    "/store/capabilities/search\n",
+  ]) {
     assert.throws(
       () =>
         parseCapabilityGrants(
@@ -189,7 +198,7 @@ test("grant endpoints must be non-empty strings", () => {
             },
           }),
         ),
-      /invalid endpoint/i,
+      /site-relative endpoint/i,
       String(endpoint),
     );
   }
