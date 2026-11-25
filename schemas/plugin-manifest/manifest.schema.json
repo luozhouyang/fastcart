@@ -172,7 +172,8 @@
           "items": {
             "enum": [
               "store.read",
-              "customer.read"
+              "customer.read",
+              "storefront.component"
             ]
           },
           "uniqueItems": true
@@ -296,6 +297,99 @@
             }
           }
         }
+      }
+    },
+    "provides": {
+      "type": "array",
+      "description": "Declarative storefront contributions. The host validates and indexes these declarations without loading plugin code.",
+      "maxItems": 20,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "id",
+              "version",
+              "title"
+            ],
+            "properties": {
+              "kind": {
+                "const": "storefront_capability"
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,118}[a-z0-9])?$"
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "title": {
+                "type": "string"
+              },
+              "config_schema": {
+                "type": "object",
+                "description": "JSON Schema for the capability configuration."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "id",
+              "title"
+            ],
+            "properties": {
+              "kind": {
+                "const": "storefront_component"
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,118}[a-z0-9])?$"
+              },
+              "title": {
+                "type": "string"
+              },
+              "category": {
+                "type": "string"
+              },
+              "editor_manifest": {
+                "type": "object"
+              },
+              "entry": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\\.(?:js|mjs)$"
+              },
+              "requires": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,118}[a-z0-9])?$"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "optional": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "settings": {

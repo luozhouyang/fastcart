@@ -8,6 +8,7 @@
 pub mod artifact;
 pub mod bundle;
 pub mod capability;
+pub mod contribution;
 pub mod dispatch;
 pub mod error;
 pub mod inject;
@@ -21,6 +22,10 @@ pub mod targets;
 pub use artifact::{ArchiveLimits, ArtifactStore, ArtifactSummary, StoredArtifact};
 pub use bundle::RuntimeBundle;
 pub use capability::Scope;
+pub use contribution::{
+    CapabilityContribution, CapabilityRequirement, ComponentContribution, Contribution,
+    ContributionProvider, ContributionRegistry,
+};
 pub use dispatch::{DispatchReport, PluginDispatch};
 pub use error::PluginError;
 pub use manifest::{HOST_API_VERSION, PluginManifest};

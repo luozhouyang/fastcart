@@ -136,7 +136,7 @@ Capabilities are grouped by area, and the group constrains which scope is valid.
 | `data` | `catalog.read`, `orders.read`, `customers.read`, `content.read`, `carts.read` | Read scoped business data through the host API |
 | `storage` | `kv.read`, `kv.write` | Per-plugin, per-store key-value storage |
 | `secrets` | `secrets.read` | Read named secrets through the host API; values are encrypted at rest and write-only through the admin API |
-| `storefront` | `store.read`, `customer.read` | Storefront context; the storefront token is restricted to a small read-only scope set |
+| `storefront` | `store.read`, `customer.read`, `storefront.component` | Storefront context; the storefront token is restricted to a small read-only scope set. `storefront.component` is required to declare component contributions |
 | `events` | Event names such as `order.placed` | Subscribe to outbox events; at most 20 |
 | `network` | Lowercase hostnames (at most 10) | Call allowlisted HTTPS hosts through the egress proxy |
 | `network_auth` | Hosts already in `network` | Forward the plugin's `Authorization` header to those hosts |
@@ -167,6 +167,33 @@ Known but reserved targets (for example `admin.global.banner`) are rejected rath
 v1 supports one storefront kind: `embed`, with `head:start`, `head:end`, `body:start` or `body:end` placement. `pages` and `exclude_paths` decide where the boot script loads. At most five storefront extensions are declared per plugin.
 
 Server-rendered slots and theme-block positions are deferred. The current model mounts client-side custom elements after the page loads.
+
+### Declarative contributions
+
+A manifest may declare up to 20 contributions in `provides`. The host validates and indexes these declarations; a declaration does not load or execute plugin code.
+
+| Kind | Required fields | Optional fields |
+| --- | --- | --- |
+| `storefront_capability` | `id`, `version` (at least 1), `title` | `config_schema` (a JSON Schema object) |
+| `storefront_component` | `id`, `title` | `category`, `editor_manifest` (an object), `entry`, `requires` |
+
+```json
+"capabilities": { "storefront": ["store.read", "storefront.component"] },
+"provides": [
+  { "kind": "storefront_capability", "id": "search", "version": 1, "title": "Search" },
+  {
+    "kind": "storefront_component",
+    "id": "hero-banner",
+    "title": "Hero banner",
+    "entry": "components/hero.js",
+    "requires": [{ "id": "search", "version": 1 }]
+  }
+]
+```
+
+Contribution ids follow the plugin id rules. `(kind, id, version)` must be unique within a manifest. A component `entry` must be a safe relative `.js`/`.mjs` path shipped in the archive. A manifest may declare a `storefront_component` only when it also requests the `storefront.component` storefront scope. Each `requires` entry names a capability id, may pin a version, and may be optional; requirement ids are unique per component.
+
+The host builds a contribution index keyed by `(kind, id, version)` and reports providers that collide across plugins. Themes and store bindings consume that index; contributions grant no execution rights on their own.
 
 ## Lifecycle
 
@@ -346,6 +373,7 @@ Two rules follow from the table:
 | Jobs | 10 jobs · 5 attempts · five-field UTC cron, one-minute resolution · 30-day terminal retention |
 | Logs | 4 KB message · retained 7 days |
 | Admin UI | 10 extensions · 3 rendered per slot · height 80–1,200 px |
+| Contributions | 20 declarations per plugin |
 
 Every runtime value above is enforced by Rust. The loader's own `limits` field is not relied on; the pinned build accepts it but does not enforce CPU or subrequest limits, which is why the watchdog restarts the process.
 

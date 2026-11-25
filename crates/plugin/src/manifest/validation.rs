@@ -46,6 +46,7 @@ impl PluginManifest {
         self.validate_entry()?;
         self.validate_capabilities()?;
         self.validate_extensions()?;
+        self.validate_contributions()?;
         self.validate_settings()?;
         self.validate_jobs()?;
         Ok(())
@@ -276,6 +277,121 @@ impl PluginManifest {
         }
         Ok(())
     }
+}
+
+impl PluginManifest {
+    fn validate_contributions(&self) -> Result<(), PluginError> {
+        if self.provides.len() > MAX_CONTRIBUTIONS {
+            return Err(PluginError::InvalidManifest(format!(
+                "at most {MAX_CONTRIBUTIONS} contributions are allowed"
+            )));
+        }
+        let component_scope = self
+            .capabilities
+            .storefront
+            .iter()
+            .any(|scope| scope == "storefront.component");
+        let mut seen = BTreeSet::new();
+        let mut requires_component_scope = false;
+        for contribution in &self.provides {
+            let (kind, id, version) = match contribution {
+                Contribution::StorefrontCapability(capability) => {
+                    if !valid_identifier(&capability.id) {
+                        return Err(PluginError::InvalidManifest(format!(
+                            "invalid capability contribution id: {}",
+                            capability.id
+                        )));
+                    }
+                    if capability.version == 0 {
+                        return Err(PluginError::InvalidManifest(format!(
+                            "capability contribution {} version must be at least 1",
+                            capability.id
+                        )));
+                    }
+                    validate_contribution_schema(
+                        &capability.config_schema,
+                        "capability config_schema",
+                    )?;
+                    (
+                        contribution.kind(),
+                        capability.id.as_str(),
+                        Some(capability.version),
+                    )
+                }
+                Contribution::StorefrontComponent(component) => {
+                    if !valid_identifier(&component.id) {
+                        return Err(PluginError::InvalidManifest(format!(
+                            "invalid component contribution id: {}",
+                            component.id
+                        )));
+                    }
+                    validate_contribution_object(&component.editor_manifest, "editor_manifest")?;
+                    if let Some(entry) = &component.entry {
+                        validate_relative_path(entry, &["js", "mjs"])?;
+                    }
+                    let mut requirement_ids = BTreeSet::new();
+                    for requirement in &component.requires {
+                        if !valid_identifier(&requirement.id) {
+                            return Err(PluginError::InvalidManifest(format!(
+                                "invalid capability requirement id: {}",
+                                requirement.id
+                            )));
+                        }
+                        if requirement.version == Some(0) {
+                            return Err(PluginError::InvalidManifest(format!(
+                                "capability requirement {} version must be at least 1",
+                                requirement.id
+                            )));
+                        }
+                        if !requirement_ids.insert(requirement.id.as_str()) {
+                            return Err(PluginError::InvalidManifest(format!(
+                                "duplicate capability requirement: {}",
+                                requirement.id
+                            )));
+                        }
+                    }
+                    requires_component_scope = true;
+                    (contribution.kind(), component.id.as_str(), None)
+                }
+            };
+            if !seen.insert((kind, id, version)) {
+                return Err(PluginError::InvalidManifest(format!(
+                    "duplicate {kind} contribution: {id}"
+                )));
+            }
+        }
+        if requires_component_scope && !component_scope {
+            return Err(PluginError::InvalidManifest(
+                "component contributions require the storefront.component scope".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_contribution_schema(schema: &Option<Value>, field: &str) -> Result<(), PluginError> {
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    if !schema.is_object() {
+        return Err(PluginError::InvalidManifest(format!(
+            "{field} must be a JSON object"
+        )));
+    }
+    jsonschema::validator_for(schema)
+        .map_err(|error| PluginError::InvalidManifest(format!("invalid {field}: {error}")))?;
+    Ok(())
+}
+
+fn validate_contribution_object(value: &Option<Value>, field: &str) -> Result<(), PluginError> {
+    if let Some(value) = value
+        && !value.is_object()
+    {
+        return Err(PluginError::InvalidManifest(format!(
+            "{field} must be a JSON object"
+        )));
+    }
+    Ok(())
 }
 
 impl PluginManifest {

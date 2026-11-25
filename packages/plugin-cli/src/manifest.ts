@@ -34,6 +34,32 @@ export interface StorefrontExtension {
   height_hint?: number;
 }
 
+export interface CapabilityRequirement {
+  id: string;
+  version?: number;
+  optional?: boolean;
+}
+
+export interface CapabilityContribution {
+  kind: "storefront_capability";
+  id: string;
+  version: number;
+  title: string;
+  config_schema?: Record<string, unknown>;
+}
+
+export interface ComponentContribution {
+  kind: "storefront_component";
+  id: string;
+  title: string;
+  category?: string;
+  editor_manifest?: Record<string, unknown>;
+  entry?: string;
+  requires?: CapabilityRequirement[];
+}
+
+export type Contribution = CapabilityContribution | ComponentContribution;
+
 export interface PluginManifest {
   schema_version: string;
   id: string;
@@ -44,11 +70,15 @@ export interface PluginManifest {
   entry: { type: string; path: string; export?: string };
   capabilities?: Record<string, string[]>;
   extensions?: { admin?: AdminExtension[]; storefront?: StorefrontExtension[] };
+  provides?: Contribution[];
   settings?: { schema: Record<string, unknown>; ui?: string };
   rpc?: string[];
   rpc_permissions?: Record<string, string>;
   jobs?: Array<{ name: string; schedule?: string }>;
 }
+
+const IDENTIFIER = /^[a-z0-9](?:[a-z0-9._-]{0,118}[a-z0-9])?$/;
+const MAX_CONTRIBUTIONS = 20;
 
 export class PluginValidationError extends Error {
   override name = "PluginValidationError";
@@ -81,10 +111,7 @@ export function validateManifest(manifest: PluginManifest): void {
     throw new PluginValidationError(message);
   };
   if (manifest.schema_version !== "1") fail('schema_version must be "1"');
-  if (
-    typeof manifest.id !== "string" ||
-    !/^[a-z0-9](?:[a-z0-9._-]{0,118}[a-z0-9])?$/.test(manifest.id)
-  ) {
+  if (typeof manifest.id !== "string" || !IDENTIFIER.test(manifest.id)) {
     fail("id must be lowercase alphanumeric with . _ - separators");
   }
   if (!manifest.name) fail("name is required");
@@ -136,6 +163,89 @@ export function validateManifest(manifest: PluginManifest): void {
       fail(`invalid permission for RPC method ${method}: ${permission}`);
     }
   }
+  validateContributions(manifest, fail);
+}
+
+function validateContributions(
+  manifest: PluginManifest,
+  fail: (message: string) => never,
+): void {
+  const provides: unknown = manifest.provides ?? [];
+  if (!Array.isArray(provides)) fail("provides must be an array");
+  if (provides.length > MAX_CONTRIBUTIONS) {
+    fail(`at most ${MAX_CONTRIBUTIONS} contributions are allowed`);
+  }
+  const componentScope = (manifest.capabilities?.storefront ?? []).includes(
+    "storefront.component",
+  );
+  const seen = new Set<string>();
+  for (const raw of provides as unknown[]) {
+    if (!isJsonObject(raw)) fail("contribution must be an object");
+    const contribution = raw as unknown as Contribution;
+    if (
+      contribution.kind !== "storefront_capability" &&
+      contribution.kind !== "storefront_component"
+    ) {
+      fail(`unsupported contribution kind: ${String((contribution as { kind?: unknown }).kind)}`);
+    }
+    if (typeof contribution.id !== "string" || !IDENTIFIER.test(contribution.id)) {
+      fail("contribution id must be lowercase alphanumeric with . _ - separators");
+    }
+    if (contribution.kind === "storefront_capability") {
+      if (!Number.isInteger(contribution.version) || contribution.version < 1) {
+        fail(`capability ${contribution.id} version must be a positive integer`);
+      }
+      if (contribution.config_schema !== undefined && !isJsonObject(contribution.config_schema)) {
+        fail(`capability ${contribution.id} config_schema must be a JSON object`);
+      }
+      const key = `${contribution.kind}:${contribution.id}:${contribution.version}`;
+      if (seen.has(key)) fail(`duplicate contribution: ${key}`);
+      seen.add(key);
+      continue;
+    }
+    if (
+      contribution.editor_manifest !== undefined &&
+      !isJsonObject(contribution.editor_manifest)
+    ) {
+      fail(`component ${contribution.id} editor_manifest must be a JSON object`);
+    }
+    if (
+      contribution.entry !== undefined &&
+      (!safePath(contribution.entry) || !/\.(?:js|mjs)$/.test(contribution.entry))
+    ) {
+      fail(`component ${contribution.id} entry must be a relative .js/.mjs path`);
+    }
+    const requirementIds = new Set<string>();
+    for (const requirement of contribution.requires ?? []) {
+      if (
+        !isJsonObject(requirement) ||
+        typeof requirement.id !== "string" ||
+        !IDENTIFIER.test(requirement.id)
+      ) {
+        fail(`component ${contribution.id} has an invalid requirement id`);
+      }
+      if (
+        requirement.version !== undefined &&
+        (!Number.isInteger(requirement.version) || requirement.version < 1)
+      ) {
+        fail(`requirement ${requirement.id} version must be a positive integer`);
+      }
+      if (requirementIds.has(requirement.id)) {
+        fail(`duplicate requirement: ${requirement.id}`);
+      }
+      requirementIds.add(requirement.id);
+    }
+    if (!componentScope) {
+      fail(`component ${contribution.id} requires the storefront.component scope`);
+    }
+    const key = `${contribution.kind}:${contribution.id}`;
+    if (seen.has(key)) fail(`duplicate contribution: ${key}`);
+    seen.add(key);
+  }
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function safePath(value: string): boolean {
@@ -155,6 +265,11 @@ export function referencedFiles(manifest: PluginManifest): string[] {
   for (const extension of manifest.extensions?.storefront ?? []) {
     files.push(extension.entry);
     if (extension.css) files.push(extension.css);
+  }
+  for (const contribution of manifest.provides ?? []) {
+    if (contribution.kind === "storefront_component" && contribution.entry) {
+      files.push(contribution.entry);
+    }
   }
   if (manifest.settings?.ui) files.push(manifest.settings.ui);
   return [...new Set(files)];

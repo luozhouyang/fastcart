@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::capability::{Scope, parse_scope};
+use crate::contribution::Contribution;
 use crate::error::PluginError;
 use crate::targets::{is_page_target, validate_target};
 
@@ -30,6 +31,8 @@ pub const MAX_ADMIN_EXTENSIONS: usize = 10;
 pub const MAX_STOREFRONT_EXTENSIONS: usize = 5;
 /// Maximum number of subscribed event types.
 pub const MAX_EVENTS: usize = 20;
+/// Maximum number of declarative contributions.
+pub const MAX_CONTRIBUTIONS: usize = 20;
 
 /// A validated plugin manifest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -61,6 +64,9 @@ pub struct PluginManifest {
     /// UI extensions.
     #[serde(default)]
     pub extensions: Extensions,
+    /// Declarative storefront contributions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<Contribution>,
     /// Settings schema and optional custom UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<SettingsSpec>,
@@ -333,6 +339,13 @@ impl PluginManifest {
             require_file(files, &extension.entry)?;
             if let Some(css) = &extension.css {
                 require_file(files, css)?;
+            }
+        }
+        for contribution in &self.provides {
+            if let Contribution::StorefrontComponent(component) = contribution
+                && let Some(entry) = &component.entry
+            {
+                require_file(files, entry)?;
             }
         }
         if let Some(settings) = &self.settings

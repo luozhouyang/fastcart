@@ -55,6 +55,9 @@ pub enum Scope {
     /// Read the signed-in storefront customer.
     #[serde(rename = "customer.read")]
     CustomerRead,
+    /// Declare and use storefront components.
+    #[serde(rename = "storefront.component")]
+    StorefrontComponent,
 }
 
 impl Scope {
@@ -78,6 +81,7 @@ impl Scope {
             Self::StorefrontUi => "storefront.ui",
             Self::StorefrontRead => "store.read",
             Self::CustomerRead => "customer.read",
+            Self::StorefrontComponent => "storefront.component",
         }
     }
 
@@ -101,6 +105,7 @@ impl Scope {
             "storefront.ui" => Self::StorefrontUi,
             "store.read" => Self::StorefrontRead,
             "customer.read" => Self::CustomerRead,
+            "storefront.component" => Self::StorefrontComponent,
             _ => return None,
         })
     }
@@ -150,7 +155,10 @@ pub fn parse_scope(group: &str, value: &str) -> Result<Scope, PluginError> {
         ),
         "storage" => matches!(scope, Scope::KvRead | Scope::KvWrite),
         "secrets" => matches!(scope, Scope::SecretsRead),
-        "storefront" => matches!(scope, Scope::StorefrontRead | Scope::CustomerRead),
+        "storefront" => matches!(
+            scope,
+            Scope::StorefrontRead | Scope::CustomerRead | Scope::StorefrontComponent
+        ),
         _ => false,
     };
     if !allowed {

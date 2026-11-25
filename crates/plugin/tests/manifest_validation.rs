@@ -1,5 +1,7 @@
-use fastcart_plugin::PluginError;
+use std::collections::BTreeMap;
+
 use fastcart_plugin::manifest::{PluginManifest, validate_settings};
+use fastcart_plugin::{ContributionRegistry, PluginError};
 use serde_json::{Value, json};
 
 fn base() -> Value {
@@ -218,4 +220,257 @@ fn the_chat_template_manifest_is_valid() {
     assert!(manifest.extensions.admin.len() == 3);
     assert!(manifest.extensions.storefront.len() == 1);
     assert!(manifest.rpc.contains(&"conversations.list".to_owned()));
+}
+
+fn capability_contribution() -> Value {
+    json!({
+        "kind": "storefront_capability",
+        "id": "search",
+        "version": 1,
+        "title": "Search",
+        "config_schema": {
+            "type": "object",
+            "properties": { "placeholder": { "type": "string" } }
+        }
+    })
+}
+
+fn component_contribution(entry: &str) -> Value {
+    json!({
+        "kind": "storefront_component",
+        "id": "hero-banner",
+        "title": "Hero banner",
+        "category": "marketing",
+        "editor_manifest": { "fields": ["title", "image"] },
+        "entry": entry,
+        "requires": [
+            { "id": "search", "version": 1 },
+            { "id": "recommendations", "optional": true }
+        ]
+    })
+}
+
+fn archive_files(paths: &[&str]) -> BTreeMap<String, u64> {
+    paths.iter().map(|path| ((*path).to_owned(), 1)).collect()
+}
+
+fn contribution_manifest() -> Value {
+    let mut value = base();
+    value["capabilities"]["storefront"] = json!(["store.read", "storefront.component"]);
+    value["provides"] = json!([
+        capability_contribution(),
+        component_contribution("components/hero.js")
+    ]);
+    value
+}
+
+#[test]
+fn accepts_valid_storefront_contributions() {
+    let manifest = parse(&contribution_manifest()).expect("parse");
+    manifest.validate().expect("valid");
+    assert_eq!(manifest.provides.len(), 2);
+    assert_eq!(manifest.provides[0].kind(), "storefront_capability");
+    assert_eq!(manifest.provides[1].kind(), "storefront_component");
+
+    let scopes: Vec<&str> = manifest
+        .scopes()
+        .unwrap()
+        .iter()
+        .map(|scope| scope.as_str())
+        .collect();
+    assert!(
+        scopes.contains(&"storefront.component"),
+        "component scope missing: {scopes:?}"
+    );
+
+    let files = archive_files(&[
+        "plugin.json",
+        "worker/index.js",
+        "ui/settings.html",
+        "storefront/boot.js",
+        "components/hero.js",
+    ]);
+    manifest
+        .validate_archive(&files, 1024 * 1024)
+        .expect("all referenced files exist");
+
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/plugin-manifest/manifest.schema.json"
+    ))
+    .expect("schema parses");
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+    let instance = contribution_manifest();
+    assert!(
+        validator.is_valid(&instance),
+        "contributions violate the JSON schema: {:?}",
+        validator.iter_errors(&instance).next()
+    );
+}
+
+#[test]
+fn omits_the_component_scope_unless_requested() {
+    let manifest = parse(&base()).expect("parse");
+    let scopes: Vec<&str> = manifest
+        .scopes()
+        .unwrap()
+        .iter()
+        .map(|scope| scope.as_str())
+        .collect();
+    assert!(!scopes.contains(&"storefront.component"));
+}
+
+#[test]
+fn rejects_duplicate_contributions_and_requirements() {
+    let mut value = contribution_manifest();
+    value["provides"]
+        .as_array_mut()
+        .unwrap()
+        .push(capability_contribution());
+    expect_invalid(&value);
+
+    let mut value = contribution_manifest();
+    value["provides"]
+        .as_array_mut()
+        .unwrap()
+        .push(component_contribution("components/other.js"));
+    expect_invalid(&value);
+
+    let mut value = contribution_manifest();
+    value["provides"][1]["requires"] =
+        json!([{ "id": "search" }, { "id": "search", "version": 2 }]);
+    expect_invalid(&value);
+}
+
+#[test]
+fn rejects_bad_contribution_ids_and_versions() {
+    let long_id = "a".repeat(121);
+    for id in ["Bad Id", "-leading", "trailing-", long_id.as_str()] {
+        let mut value = contribution_manifest();
+        value["provides"][0]["id"] = json!(id);
+        expect_invalid(&value);
+    }
+
+    let mut value = contribution_manifest();
+    value["provides"][1]["id"] = json!("UPPER");
+    expect_invalid(&value);
+
+    let mut value = contribution_manifest();
+    value["provides"][0]["version"] = json!(0);
+    expect_invalid(&value);
+
+    let mut value = contribution_manifest();
+    value["provides"][1]["requires"][0]["version"] = json!(0);
+    expect_invalid(&value);
+
+    let mut value = contribution_manifest();
+    value["provides"][1]["requires"][0]["id"] = json!("Bad/Id");
+    expect_invalid(&value);
+}
+
+#[test]
+fn rejects_bad_contribution_schemas_and_manifests() {
+    let mut value = contribution_manifest();
+    value["provides"][0]["config_schema"] = json!("not-an-object");
+    expect_invalid(&value);
+
+    let mut value = contribution_manifest();
+    value["provides"][0]["config_schema"] = json!({ "type": "nonsense" });
+    expect_invalid(&value);
+
+    let mut value = contribution_manifest();
+    value["provides"][1]["editor_manifest"] = json!([1, 2, 3]);
+    expect_invalid(&value);
+}
+
+#[test]
+fn rejects_unsafe_component_entries() {
+    for entry in [
+        "../hero.js",
+        "/components/hero.js",
+        "components/hero.css",
+        "",
+    ] {
+        let mut value = contribution_manifest();
+        value["provides"][1]["entry"] = json!(entry);
+        expect_invalid(&value);
+    }
+}
+
+#[test]
+fn rejects_a_missing_component_entry_file() {
+    let manifest = parse(&contribution_manifest()).expect("parse");
+    manifest.validate().expect("valid");
+    let files = archive_files(&[
+        "plugin.json",
+        "worker/index.js",
+        "ui/settings.html",
+        "storefront/boot.js",
+    ]);
+    let error = manifest
+        .validate_archive(&files, 1024 * 1024)
+        .expect_err("missing entry must be rejected");
+    assert!(
+        matches!(error, PluginError::InvalidManifest(_)),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn rejects_components_without_the_storefront_component_scope() {
+    let mut value = contribution_manifest();
+    value["capabilities"]["storefront"] = json!(["store.read"]);
+    expect_invalid(&value);
+}
+
+#[test]
+fn rejects_more_than_twenty_contributions() {
+    let mut value = contribution_manifest();
+    value["provides"] = Value::Array(
+        (0..21)
+            .map(|index| {
+                json!({
+                    "kind": "storefront_capability",
+                    "id": format!("capability-{index}"),
+                    "version": 1,
+                    "title": "Capability"
+                })
+            })
+            .collect(),
+    );
+    expect_invalid(&value);
+}
+
+#[test]
+fn the_registry_detects_duplicates_across_plugins() {
+    let mut first = contribution_manifest();
+    first["id"] = json!("plugin-a");
+    let mut second = contribution_manifest();
+    second["id"] = json!("plugin-b");
+    second["provides"] = json!([capability_contribution()]);
+
+    let first = parse(&first).expect("first parses");
+    first.validate().expect("first validates");
+    let second = parse(&second).expect("second parses");
+    second.validate().expect("second validates");
+
+    let registry = ContributionRegistry::from_plugins([
+        ("plugin-b".to_owned(), second),
+        ("plugin-a".to_owned(), first),
+    ]);
+    let capabilities = registry.capabilities();
+    assert_eq!(capabilities.len(), 2);
+    assert_eq!(capabilities[0].plugin_id, "plugin-a");
+    assert_eq!(capabilities[1].plugin_id, "plugin-b");
+    assert_eq!(registry.components().len(), 1);
+    assert_eq!(registry.components()[0].plugin_id, "plugin-a");
+    assert_eq!(registry.find_capability("search", Some(1)).len(), 2);
+    assert!(registry.find_capability("search", Some(2)).is_empty());
+
+    let duplicates = registry.duplicates();
+    assert_eq!(duplicates.len(), 1);
+    assert_eq!(duplicates[0].len(), 2);
+    assert_eq!(
+        duplicates[0][0].contribution.kind(),
+        "storefront_capability"
+    );
 }
