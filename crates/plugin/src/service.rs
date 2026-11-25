@@ -572,9 +572,9 @@ impl PluginService {
 
     /// Removes a disabled plugin installation and its store-scoped state.
     ///
-    /// Event subscriptions, deliveries, jobs, KV, secrets and logs are deleted
-    /// with the installation. Artifacts are kept for the shared garbage
-    /// collector.
+    /// Event subscriptions, deliveries, jobs, KV, secrets, logs and capability
+    /// bindings are deleted with the installation. Artifacts are kept for the
+    /// shared garbage collector.
     ///
     /// # Errors
     ///
@@ -606,6 +606,10 @@ impl PluginService {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM plugin_logs WHERE plugin_id = ?")
+            .bind(plugin_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM store_capability_bindings WHERE plugin_id = ?")
             .bind(plugin_id)
             .execute(&mut *tx)
             .await?;

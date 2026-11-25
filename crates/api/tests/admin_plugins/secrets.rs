@@ -115,7 +115,7 @@ async fn secrets_are_write_only_and_scoped() {
 }
 
 #[tokio::test]
-async fn removing_a_plugin_purges_secrets_kv_and_logs() {
+async fn removing_a_plugin_purges_dependent_state() {
     let fixture = fixture().await;
     let document = manifest("demo", "1.0.0", &[]);
     let (digest, _) = install_enabled(&fixture, &document).await;
@@ -150,6 +150,14 @@ async fn removing_a_plugin_purges_secrets_kv_and_logs() {
     .execute(database.pool())
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO store_capability_bindings \
+         (capability_id, version, plugin_id, config_json, enabled, created_at, updated_at) \
+         VALUES ('chat', 1, 'demo', '{}', 1, 1, 1)",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
 
     let (status, _, _) = request(
         &fixture.app,
@@ -170,7 +178,12 @@ async fn removing_a_plugin_purges_secrets_kv_and_logs() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    for table in ["plugin_secrets", "plugin_kv", "plugin_logs"] {
+    for table in [
+        "plugin_secrets",
+        "plugin_kv",
+        "plugin_logs",
+        "store_capability_bindings",
+    ] {
         let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
             .fetch_one(database.pool())
             .await
