@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArrowUpRight,
+  Blocks,
   Command,
   Bell,
   Check,
@@ -71,7 +72,8 @@ interface NavItem {
     | "/shipping"
     | "/tax"
     | "/settings"
-    | "/plugins";
+    | "/plugins"
+    | "/capabilities";
   label: string;
   icon: typeof LayoutGrid;
   /** Read permission required to see this section. */
@@ -133,6 +135,12 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         icon: Puzzle,
         permission: PERMISSIONS.plugins.read,
       },
+      {
+        to: "/capabilities",
+        label: "Capabilities",
+        icon: Blocks,
+        permission: PERMISSIONS.plugins.read,
+      },
     ],
   },
 ];
@@ -153,6 +161,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/shipping": "Shipping",
   "/tax": "Tax",
   "/settings": "Settings",
+  "/capabilities": "Capabilities",
 };
 
 function pageTitleFor(pathname: string): string {

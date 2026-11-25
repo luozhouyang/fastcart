@@ -1,5 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import {
+  Blocks,
   ExternalLink,
   Globe2,
   Layers3,
@@ -56,6 +57,12 @@ const PAGES: Array<{
   { to: "/shipping", label: "Shipping", icon: Truck, permission: PERMISSIONS.settings.read },
   { to: "/tax", label: "Tax", icon: Percent, permission: PERMISSIONS.settings.read },
   { to: "/settings", label: "Settings", icon: Settings2, permission: PERMISSIONS.settings.read },
+  {
+    to: "/capabilities",
+    label: "Capabilities",
+    icon: Blocks,
+    permission: PERMISSIONS.plugins.read,
+  },
 ];
 
 export function CommandPalette({

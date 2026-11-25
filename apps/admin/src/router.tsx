@@ -71,6 +71,9 @@ const ThemesPage = lazyRouteComponent(() =>
 const PluginsPage = lazyRouteComponent(() =>
   import("@/pages/plugins").then((module) => ({ default: module.PluginsPage })),
 );
+const CapabilitiesPage = lazyRouteComponent(() =>
+  import("@/pages/capabilities").then((module) => ({ default: module.CapabilitiesPage })),
+);
 const PluginPage = lazyRouteComponent(() =>
   import("@/pages/plugin-page").then((module) => ({ default: module.PluginPage })),
 );
@@ -235,6 +238,12 @@ const pluginsRoute = createRoute({
   component: guarded(PluginsPage, PERMISSIONS.plugins.read),
 });
 
+const capabilitiesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/capabilities",
+  component: guarded(CapabilitiesPage, PERMISSIONS.plugins.read),
+});
+
 const pluginPageRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/apps/$pluginId",
@@ -288,6 +297,7 @@ const routeTree = rootRoute.addChildren([
   pageEditorRoute,
   settingsRoute,
   pluginsRoute,
+  capabilitiesRoute,
   pluginPageRoute,
   pluginPageNestedRoute,
   regionsRoute,
