@@ -96,7 +96,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.29.0", features = ["v7", "serde"] }
 
-fastcart-ai = { path = "crates/ai" }
 fastcart-api = { path = "crates/api" }
 fastcart-http = { path = "crates/http" }
 fastcart-infrastructure = { path = "crates/infrastructure" }

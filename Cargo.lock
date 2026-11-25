@@ -995,7 +995,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
- "tower-http 0.7.1",
  "tracing",
  "utoipa",
  "uuid 1.29.0",
