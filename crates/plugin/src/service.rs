@@ -18,6 +18,38 @@ use crate::secrets::{MAX_SECRET_BYTES, SecretCipher, valid_secret_name};
 const COLUMNS: &str = "id, plugin_id, digest, version, manifest_json, enabled, settings_json, \
      settings_revision, granted_scopes, previous_digest, installed_by, installed_at, updated_at";
 
+/// Rejects an upgrade or rollback that would invalidate enabled bindings.
+///
+/// The check runs inside the caller's `BEGIN IMMEDIATE` transaction so an
+/// admin binding cannot be created between validation and the manifest swap.
+async fn ensure_bindings_supported(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    plugin_id: &str,
+    manifest: &PluginManifest,
+) -> Result<(), PluginError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT capability_id, version FROM store_capability_bindings \
+         WHERE plugin_id = ? AND enabled = 1 ORDER BY capability_id ASC",
+    )
+    .bind(plugin_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let stale: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(capability_id, version)| {
+            let version = u32::try_from(version).ok()?;
+            manifest
+                .storefront_capability(&capability_id, version)
+                .is_none()
+                .then(|| format!("{capability_id}@{version}"))
+        })
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    Err(PluginError::BindingsIncompatible(stale.join(", ")))
+}
+
 #[derive(Debug, FromRow)]
 struct InstallationRow {
     id: String,
@@ -263,6 +295,7 @@ impl PluginService {
         let now = now_timestamp();
 
         let mut tx = self.db.begin().await?;
+        ensure_bindings_supported(&mut tx, plugin_id, &stored.manifest).await?;
         sqlx::query(
             "UPDATE plugin_installations SET digest = ?, version = ?, manifest_json = ?, \
              granted_scopes = ?, previous_digest = ?, updated_at = ? WHERE plugin_id = ?",
@@ -547,6 +580,7 @@ impl PluginService {
             .map_err(|error| PluginError::Database(error.to_string()))?;
         let now = now_timestamp();
         let mut tx = self.db.begin().await?;
+        ensure_bindings_supported(&mut tx, plugin_id, &artifact.manifest).await?;
         sqlx::query(
             "UPDATE plugin_installations SET digest = ?, version = ?, manifest_json = ?, \
              previous_digest = ?, updated_at = ? WHERE plugin_id = ?",

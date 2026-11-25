@@ -65,6 +65,9 @@ pub enum PluginError {
     /// An upgrade adds capabilities without explicit acceptance.
     #[error("the new version requests additional capabilities: {0}")]
     ScopesNotAccepted(String),
+    /// An upgrade or rollback would invalidate enabled capability bindings.
+    #[error("the plugin version no longer provides bound capabilities: {0}")]
+    BindingsIncompatible(String),
     /// Filesystem or artifact storage failure.
     #[error("artifact storage error: {0}")]
     Storage(String),
@@ -100,6 +103,7 @@ impl PluginError {
             Self::Crypto(_) => "secret_error",
             Self::DigestMismatch(_) => "digest_mismatch",
             Self::ScopesNotAccepted(_) => "scopes_not_accepted",
+            Self::BindingsIncompatible(_) => "bindings_incompatible",
             Self::Storage(_) => "storage",
             Self::Database(_) => "database",
             Self::Runtime(_) => "plugin_runtime",
@@ -151,6 +155,9 @@ impl From<PluginError> for AppError {
             }
             PluginError::ScopesNotAccepted(scopes) => AppError::Conflict(format!(
                 "additional capabilities require acceptance: {scopes}"
+            )),
+            PluginError::BindingsIncompatible(bindings) => AppError::Conflict(format!(
+                "the plugin version no longer provides bound capabilities: {bindings}"
             )),
             PluginError::SecretNotFound(name) => AppError::not_found("plugin secret", name),
             PluginError::CapabilityNotFound(value) => {
