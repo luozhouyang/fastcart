@@ -174,6 +174,7 @@ function describeHistory(order: Order): OrderHistoryView[] {
 
 function orderItems(order: Order): OrderItemView[] {
   return order.items.map((item) => ({
+    id: item.id,
     title: item.product_title,
     variant: item.variant_title ?? "Default",
     sku: item.sku ?? "—",

@@ -470,6 +470,7 @@ export function OrdersPage() {
         onClose={() => setSelected(null)}
         onFulfill={handleFulfill}
         onRefund={handleRefund}
+        onChanged={() => reload()}
       />
     </div>
   );

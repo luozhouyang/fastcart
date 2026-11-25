@@ -4,6 +4,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Loader2, X } from "lucide-react";
 import { toast } from "sonner";
 
+import { OrderAfterSalesPanel } from "@/components/order-after-sales";
 import { PaymentPill, OrderPill, FulfillmentPill } from "@/components/status-pill";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { errorMessage } from "@/lib/api";
 import { initials, money, monthDay, timeOfDay } from "@/lib/format";
+import { loadOrderAfterSales, type OrderAfterSalesData } from "@/lib/order-after-sales";
 import type { OrderView } from "@/lib/models";
 import { cn } from "@/lib/utils";
 
@@ -41,20 +43,27 @@ export function OrderDrawer({
   onClose,
   onFulfill,
   onRefund,
+  onChanged,
 }: {
   order: OrderView | null;
   onClose: () => void;
   onFulfill: (order: OrderView, tracking: string) => Promise<void>;
   onRefund: (order: OrderView, amount: number, reason: string) => Promise<void>;
+  /** Called after a post-purchase action so the surrounding page can refetch. */
+  onChanged?: () => void;
 }) {
-  const { can } = useAuth();
+  const { can, client, mode } = useAuth();
   const [action, setAction] = useState<Action | null>(null);
   const [tracking, setTracking] = useState("");
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const [afterSales, setAfterSales] = useState<OrderAfterSalesData | null>(null);
+  const [afterSalesError, setAfterSalesError] = useState<string | null>(null);
+  const [refreshToken, setRefreshToken] = useState(0);
 
   const remaining = order ? Math.max(0, order.total - order.refundedTotal) : 0;
+  const canWrite = can(PERMISSIONS.orders.write);
 
   useEffect(() => {
     setAction(null);
@@ -62,6 +71,26 @@ export function OrderDrawer({
     setReason("");
     setAmount(remaining > 0 ? remaining.toFixed(2) : "");
   }, [order?.id, remaining]);
+
+  useEffect(() => {
+    setAfterSales(null);
+    setAfterSalesError(null);
+    if (!order || !client || mode === "demo") return;
+    const controller = new AbortController();
+    loadOrderAfterSales(client, order.id, controller.signal)
+      .then((data) => {
+        if (!controller.signal.aborted) setAfterSales(data);
+      })
+      .catch((cause: unknown) => {
+        if (!controller.signal.aborted) setAfterSalesError(errorMessage(cause));
+      });
+    return () => controller.abort();
+  }, [order?.id, client, mode, refreshToken]);
+
+  const refreshAfterSales = () => {
+    setRefreshToken((token) => token + 1);
+    onChanged?.();
+  };
 
   const submitFulfill = async () => {
     if (!order || busy) return;
@@ -113,7 +142,7 @@ export function OrderDrawer({
           >
             <DialogPrimitive.Title className="sr-only">Order #{order.number}</DialogPrimitive.Title>
             <DialogPrimitive.Description className="sr-only">
-              Order details, timeline and fulfillment actions
+              Order details, timeline, payment summary and post-purchase actions
             </DialogPrimitive.Description>
 
             <header className="flex items-center justify-between gap-4 border-b border-border px-6 py-4">
@@ -262,6 +291,22 @@ export function OrderDrawer({
                 </div>
               </section>
 
+              {client && mode !== "demo" ? (
+                <OrderAfterSalesPanel
+                  order={order}
+                  client={client}
+                  data={afterSales}
+                  error={afterSalesError}
+                  onRetry={refreshAfterSales}
+                  onChanged={refreshAfterSales}
+                  canWrite={canWrite}
+                />
+              ) : (
+                <p className="text-[11.5px] text-muted-foreground">
+                  After-sales records are available when the admin is connected to a store.
+                </p>
+              )}
+
               {order.note ? (
                 <section>
                   <DetailLabel>Customer note</DetailLabel>
@@ -278,14 +323,14 @@ export function OrderDrawer({
               <Button
                 variant="outline"
                 className="flex-1"
-                disabled={!order.canRefund || !can(PERMISSIONS.orders.write)}
+                disabled={!order.canRefund || !canWrite}
                 onClick={() => setAction("refund")}
               >
                 Refund
               </Button>
               <Button
                 className="flex-1"
-                disabled={!order.canFulfill || !can(PERMISSIONS.orders.write)}
+                disabled={!order.canFulfill || !canWrite}
                 onClick={() => setAction("fulfill")}
               >
                 {order.canFulfill ? "Fulfill order" : "Fulfilled"}

@@ -36,6 +36,7 @@ describe("orderToView", () => {
     expect(view.customer).toBe("Ava Whitfield");
     expect(view.number).toBe(1042);
     expect(view.total).toBe(220);
+    expect(view.items[0]?.id).toBe("item-1");
     expect(view.items[0]?.price).toBe(184);
     expect(view.address).toContain("88 Greenpoint Ave");
     expect(view.address).toContain("Brooklyn");

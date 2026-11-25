@@ -1030,6 +1030,347 @@ export interface RefundOrderRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Order after-sales
+// ---------------------------------------------------------------------------
+
+/** Batch state of an order return. */
+export type ReturnStatus =
+  "draft" | "requested" | "partially_received" | "received" | "written_off" | "canceled";
+
+/** Per-line state of an order return. */
+export type ReturnItemStatus = "requested" | "received" | "written_off" | "canceled";
+
+export interface OrderReturnItem {
+  id: string;
+  return_id: string;
+  order_item_id: string;
+  quantity: number;
+  received_quantity: number;
+  written_off_quantity: number;
+  reason: string | null;
+  status: ReturnItemStatus;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface OrderReturn {
+  id: string;
+  order_id: string;
+  status: ReturnStatus;
+  reason: string | null;
+  refund_id: string | null;
+  metadata: Metadata;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  requested_at: Timestamp | null;
+  received_at: Timestamp | null;
+  written_off_at: Timestamp | null;
+  canceled_at: Timestamp | null;
+  items: OrderReturnItem[];
+}
+
+export interface ReturnItemRequest {
+  order_item_id: string;
+  quantity: number;
+  reason?: string | null;
+}
+
+export interface CreateReturnRequest {
+  reason?: string | null;
+  refund_id?: string | null;
+  metadata?: Metadata;
+  items: ReturnItemRequest[];
+}
+
+export interface ReceiveReturnItemRequest {
+  order_item_id: string;
+  quantity: number;
+}
+
+/**
+ * Receive body for a return.
+ *
+ * An empty `items` list receives every outstanding quantity.
+ */
+export interface ReceiveReturnRequest {
+  items?: ReceiveReturnItemRequest[];
+}
+
+/** Write-off body for a return; an empty list writes off every received unit. */
+export interface WriteOffReturnRequest {
+  items?: ReceiveReturnItemRequest[];
+}
+
+/** Body for canceling or refunding a post-purchase record. */
+export interface CancelAfterSaleRequest {
+  reason?: string | null;
+}
+
+/** Batch state of a claim. */
+export type ClaimStatus = "requested" | "accepted" | "canceled";
+
+/** Per-line state of a claim item. */
+export type ClaimItemStatus = "requested" | "accepted" | "canceled";
+
+/** Resolution a claim line applies to the returned item. */
+export type ClaimItemType = "refund" | "replace";
+
+export interface OrderClaimItem {
+  id: string;
+  claim_id: string;
+  order_item_id: string;
+  quantity: number;
+  item_type: ClaimItemType;
+  replacement_variant_id: string | null;
+  reason: string | null;
+  /** Replacement price difference settled on acceptance; positive is owed by the customer. */
+  difference: number | null;
+  status: ClaimItemStatus;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface OrderClaim {
+  id: string;
+  order_id: string;
+  status: ClaimStatus;
+  reason: string | null;
+  refund_id: string | null;
+  /** Price difference of the replacement lines; `null` until the claim is accepted. */
+  difference_total: number | null;
+  metadata: Metadata;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  accepted_at: Timestamp | null;
+  canceled_at: Timestamp | null;
+  items: OrderClaimItem[];
+}
+
+export interface ClaimItemRequest {
+  order_item_id: string;
+  quantity: number;
+  item_type: ClaimItemType;
+  replacement_variant_id?: string | null;
+  reason?: string | null;
+}
+
+export interface CreateClaimRequest {
+  reason?: string | null;
+  metadata?: Metadata;
+  items: ClaimItemRequest[];
+}
+
+/** Batch state of an exchange. */
+export type ExchangeStatus = "requested" | "accepted" | "canceled";
+
+/** Direction of an exchange line. */
+export type ExchangeItemDirection = "inbound" | "outbound";
+
+/** Per-line state of an exchange item. */
+export type ExchangeItemStatus = "requested" | "accepted" | "canceled";
+
+export interface OrderExchangeItem {
+  id: string;
+  exchange_id: string;
+  order_item_id: string;
+  direction: ExchangeItemDirection;
+  quantity: number;
+  replacement_variant_id: string | null;
+  reason: string | null;
+  /** Replacement price difference settled on acceptance; positive is owed by the customer. */
+  difference: number | null;
+  status: ExchangeItemStatus;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface OrderExchange {
+  id: string;
+  order_id: string;
+  status: ExchangeStatus;
+  reason: string | null;
+  /** Price difference of the outbound lines; `null` until the exchange is accepted. */
+  difference_total: number | null;
+  metadata: Metadata;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  accepted_at: Timestamp | null;
+  canceled_at: Timestamp | null;
+  inbound_items: OrderExchangeItem[];
+  outbound_items: OrderExchangeItem[];
+}
+
+export interface ExchangeItemRequest {
+  order_item_id: string;
+  quantity: number;
+  replacement_variant_id?: string | null;
+  reason?: string | null;
+}
+
+export interface CreateExchangeRequest {
+  reason?: string | null;
+  metadata?: Metadata;
+  inbound_items: ExchangeItemRequest[];
+  outbound_items: ExchangeItemRequest[];
+}
+
+/** Lifecycle state of an order edit. */
+export type OrderEditStatus = "draft" | "confirmed" | "canceled";
+
+/** Kind of change an edit line applies. */
+export type OrderEditAction = "add" | "remove" | "update";
+
+/** Per-line state of an order edit. */
+export type OrderEditItemStatus = "draft" | "confirmed" | "canceled";
+
+export interface OrderEditItem {
+  id: string;
+  edit_id: string;
+  order_item_id: string | null;
+  action: OrderEditAction;
+  product_id: string | null;
+  variant_id: string | null;
+  product_title: string;
+  variant_title: string | null;
+  sku: string | null;
+  unit_price: number;
+  before_quantity: number;
+  after_quantity: number;
+  requires_shipping: boolean;
+  status: OrderEditItemStatus;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface OrderEdit {
+  id: string;
+  order_id: string;
+  status: OrderEditStatus;
+  reason: string | null;
+  metadata: Metadata;
+  before_subtotal: number;
+  after_subtotal: number;
+  before_total: number;
+  after_total: number;
+  /** Actual change the confirmation made; `null` until the edit is confirmed. */
+  difference_total: number | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  confirmed_at: Timestamp | null;
+  canceled_at: Timestamp | null;
+  items: OrderEditItem[];
+}
+
+export interface OrderEditItemRequest {
+  order_item_id?: string | null;
+  action: OrderEditAction;
+  product_id?: string | null;
+  variant_id?: string | null;
+  product_title?: string | null;
+  variant_title?: string | null;
+  sku?: string | null;
+  unit_price?: number | null;
+  before_quantity?: number | null;
+  after_quantity: number;
+  requires_shipping?: boolean | null;
+}
+
+export interface CreateOrderEditRequest {
+  reason?: string | null;
+  metadata?: Metadata;
+  items: OrderEditItemRequest[];
+}
+
+export interface AfterSalesFulfillmentItem {
+  id: string;
+  fulfillment_id: string;
+  variant_id: string;
+  quantity: number;
+  created_at: Timestamp;
+}
+
+/** Provider-side shipment created for an accepted claim or exchange. */
+export interface AfterSalesFulfillment {
+  id: string;
+  order_id: string;
+  claim_id: string | null;
+  exchange_id: string | null;
+  status: string;
+  provider_id: string;
+  provider_fulfillment_id: string | null;
+  provider_data: JsonValue;
+  tracking_numbers: string[];
+  metadata: Metadata;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  items: AfterSalesFulfillmentItem[];
+}
+
+export interface FulfillAfterSalesRequest {
+  provider_id?: string | null;
+  tracking_numbers?: string[];
+}
+
+/** Body for opening a payable for an after-sales difference. */
+export interface CollectDifferenceRequest {
+  provider: string;
+}
+
+export interface DifferenceCollectionResponse {
+  order: Order;
+  payment_collection: PaymentCollection;
+  payment_session: PaymentSession;
+}
+
+export interface DifferenceRefundResponse {
+  order: Order;
+  order_refund: OrderRefund | null;
+  provider_refund: Refund | null;
+}
+
+export interface ReturnRefundResponse {
+  order: Order;
+  order_return: OrderReturn;
+  order_refund: OrderRefund | null;
+  provider_refund: Refund | null;
+}
+
+export interface ClaimRefundResponse {
+  order: Order;
+  claim: OrderClaim;
+  order_refund: OrderRefund | null;
+  provider_refund: Refund | null;
+}
+
+export interface ClaimFulfillmentResponse {
+  order: Order;
+  claim: OrderClaim;
+  fulfillment: AfterSalesFulfillment | null;
+  consumed_units: number;
+}
+
+export interface ExchangeFulfillmentResponse {
+  order: Order;
+  exchange: OrderExchange;
+  fulfillment: AfterSalesFulfillment | null;
+  consumed_units: number;
+}
+
+/** Captured, refunded and outstanding money for one order. */
+export interface OrderPaymentSummary {
+  order_id: string;
+  currency_code: CurrencyCode;
+  total: number;
+  captured_total: number;
+  refunded_total: number;
+  net_paid: number;
+  /** Order total minus net paid; positive is owed by the customer. */
+  outstanding: number;
+  /** Money owed back to the customer, when `outstanding` is negative. */
+  refund_due: number;
+}
+
+// ---------------------------------------------------------------------------
 // Customers
 // ---------------------------------------------------------------------------
 
@@ -1698,6 +2039,20 @@ export type PaymentStatus =
 export type PaymentRefundStatus = "pending" | "succeeded" | "failed";
 
 export type PaymentWebhookStatus = "received" | "processed" | "failed";
+
+export type PaymentCollectionStatus = "open" | "partially_captured" | "captured";
+
+/** The money a checkout or order owes, paid by one or more payment sessions. */
+export interface PaymentCollection {
+  id: string;
+  checkout_id: string | null;
+  order_id: string | null;
+  amount: number;
+  currency_code: CurrencyCode;
+  status: PaymentCollectionStatus;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
 
 export interface Payment {
   id: string;

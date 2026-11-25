@@ -53,6 +53,8 @@ export interface AttentionItemView {
 }
 
 export interface OrderItemView {
+  /** Historical order line identifier; absent in demo data. */
+  id?: string;
   title: string;
   variant: string;
   sku: string;

@@ -8,26 +8,34 @@ import type {
   Asset,
   AssetListQuery,
   AvailabilityResponse,
+  CancelAfterSaleRequest,
   CancelOrderRequest,
   Category,
+  ClaimFulfillmentResponse,
+  ClaimRefundResponse,
   Collection,
   CollectionProductsRequest,
+  CollectDifferenceRequest,
   CommittedResponse,
   Coupon,
   CouponListQuery,
   CouponValidationResponse,
   CreateCategoryRequest,
+  CreateClaimRequest,
   CreateCollectionRequest,
   CreateCouponRequest,
+  CreateExchangeRequest,
   CreateImageRequest,
   CreateInventoryItemRequest,
   CreateInventoryLocationRequest,
+  CreateOrderEditRequest,
   CreatePageRequest,
   CreatePriceListRequest,
   CreatePriceRequest,
   CreateProductRequest,
   CreatePromotionRequest,
   CreateReservationsRequest,
+  CreateReturnRequest,
   CreateShippingOptionRequest,
   CreateShippingProfileRequest,
   CreateShippingRateRequest,
@@ -49,6 +57,10 @@ import type {
   Domain,
   DomainRequest,
   DestinationOptionsQuery,
+  DifferenceCollectionResponse,
+  DifferenceRefundResponse,
+  ExchangeFulfillmentResponse,
+  FulfillAfterSalesRequest,
   FulfillOrderRequest,
   ImageReorderRequest,
   InventoryAdjustmentRequest,
@@ -68,7 +80,12 @@ import type {
   Metadata,
   MeResponse,
   Order,
+  OrderClaim,
+  OrderEdit,
+  OrderExchange,
   OrderListQuery,
+  OrderPaymentSummary,
+  OrderReturn,
   OrderStatusHistory,
   Page,
   PageListQuery,
@@ -94,10 +111,12 @@ import type {
   ProvisioningResponse,
   PublishThemeSettingsRequest,
   PreviewTokenResponse,
+  ReceiveReturnRequest,
   Refund,
   Region,
   RegisterThemeRequest,
   ReleasedResponse,
+  ReturnRefundResponse,
   ResolvedShippingOption,
   RestorePageVersionQuery,
   RestoreThemeSettingsRequest,
@@ -153,6 +172,7 @@ import type {
   WebhookDeliveriesQuery,
   WebhookDelivery,
   WebhookEndpoint,
+  WriteOffReturnRequest,
   CreateInquiryFormRequest,
   CreateNotificationChannelRequest,
   Inquiry,
@@ -507,6 +527,140 @@ export interface AdminClient {
         body: { payment_id: string; amount: number; currency: string; reason?: string | null },
         options?: AdminRequestOptions,
       ): Promise<Order>;
+    };
+    paymentSummary(id: string, options?: AdminRequestOptions): Promise<OrderPaymentSummary>;
+    returns: {
+      list(id: string, options?: AdminRequestOptions): Promise<OrderReturn[]>;
+      get(id: string, returnId: string, options?: AdminRequestOptions): Promise<OrderReturn>;
+      create(
+        id: string,
+        body: CreateReturnRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderReturn>;
+      request(id: string, returnId: string, options?: AdminRequestOptions): Promise<OrderReturn>;
+      receive(
+        id: string,
+        returnId: string,
+        body?: ReceiveReturnRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderReturn>;
+      refund(
+        id: string,
+        returnId: string,
+        body?: CancelAfterSaleRequest,
+        options?: AdminRequestOptions,
+      ): Promise<ReturnRefundResponse>;
+      writeOff(
+        id: string,
+        returnId: string,
+        body?: WriteOffReturnRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderReturn>;
+      cancel(
+        id: string,
+        returnId: string,
+        body?: CancelAfterSaleRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderReturn>;
+    };
+    claims: {
+      list(id: string, options?: AdminRequestOptions): Promise<OrderClaim[]>;
+      get(id: string, claimId: string, options?: AdminRequestOptions): Promise<OrderClaim>;
+      create(
+        id: string,
+        body: CreateClaimRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderClaim>;
+      accept(id: string, claimId: string, options?: AdminRequestOptions): Promise<OrderClaim>;
+      fulfill(
+        id: string,
+        claimId: string,
+        body?: FulfillAfterSalesRequest,
+        options?: AdminRequestOptions,
+      ): Promise<ClaimFulfillmentResponse>;
+      refund(
+        id: string,
+        claimId: string,
+        body?: CancelAfterSaleRequest,
+        options?: AdminRequestOptions,
+      ): Promise<ClaimRefundResponse>;
+      collectDifference(
+        id: string,
+        claimId: string,
+        body: CollectDifferenceRequest,
+        options?: AdminRequestOptions,
+      ): Promise<DifferenceCollectionResponse>;
+      refundDifference(
+        id: string,
+        claimId: string,
+        options?: AdminRequestOptions,
+      ): Promise<DifferenceRefundResponse>;
+      cancel(
+        id: string,
+        claimId: string,
+        body?: CancelAfterSaleRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderClaim>;
+    };
+    exchanges: {
+      list(id: string, options?: AdminRequestOptions): Promise<OrderExchange[]>;
+      get(id: string, exchangeId: string, options?: AdminRequestOptions): Promise<OrderExchange>;
+      create(
+        id: string,
+        body: CreateExchangeRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderExchange>;
+      accept(id: string, exchangeId: string, options?: AdminRequestOptions): Promise<OrderExchange>;
+      fulfill(
+        id: string,
+        exchangeId: string,
+        body?: FulfillAfterSalesRequest,
+        options?: AdminRequestOptions,
+      ): Promise<ExchangeFulfillmentResponse>;
+      collectDifference(
+        id: string,
+        exchangeId: string,
+        body: CollectDifferenceRequest,
+        options?: AdminRequestOptions,
+      ): Promise<DifferenceCollectionResponse>;
+      refundDifference(
+        id: string,
+        exchangeId: string,
+        options?: AdminRequestOptions,
+      ): Promise<DifferenceRefundResponse>;
+      cancel(
+        id: string,
+        exchangeId: string,
+        body?: CancelAfterSaleRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderExchange>;
+    };
+    edits: {
+      list(id: string, options?: AdminRequestOptions): Promise<OrderEdit[]>;
+      get(id: string, editId: string, options?: AdminRequestOptions): Promise<OrderEdit>;
+      create(
+        id: string,
+        body: CreateOrderEditRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderEdit>;
+      confirm(id: string, editId: string, options?: AdminRequestOptions): Promise<OrderEdit>;
+      collectDifference(
+        id: string,
+        editId: string,
+        body: CollectDifferenceRequest,
+        options?: AdminRequestOptions,
+      ): Promise<DifferenceCollectionResponse>;
+      refundDifference(
+        id: string,
+        editId: string,
+        options?: AdminRequestOptions,
+      ): Promise<DifferenceRefundResponse>;
+      cancel(
+        id: string,
+        editId: string,
+        body?: CancelAfterSaleRequest,
+        options?: AdminRequestOptions,
+      ): Promise<OrderEdit>;
     };
   };
 
@@ -1594,6 +1748,173 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
             ...requestOptions,
             method: "POST",
             body,
+          }),
+      },
+      paymentSummary: (orderId, requestOptions) =>
+        request<OrderPaymentSummary>(
+          `/api/v1/admin/orders/${id(orderId)}/payment-summary`,
+          requestOptions,
+        ),
+      returns: {
+        list: (orderId, requestOptions) =>
+          request<OrderReturn[]>(`/api/v1/admin/orders/${id(orderId)}/returns`, requestOptions),
+        get: (orderId, returnId, requestOptions) =>
+          request<OrderReturn>(
+            `/api/v1/admin/orders/${id(orderId)}/returns/${id(returnId)}`,
+            requestOptions,
+          ),
+        create: (orderId, body, requestOptions) =>
+          request<OrderReturn>(`/api/v1/admin/orders/${id(orderId)}/returns`, {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        request: (orderId, returnId, requestOptions) =>
+          request<OrderReturn>(
+            `/api/v1/admin/orders/${id(orderId)}/returns/${id(returnId)}/request`,
+            { ...requestOptions, method: "POST" },
+          ),
+        receive: (orderId, returnId, body, requestOptions) =>
+          request<OrderReturn>(
+            `/api/v1/admin/orders/${id(orderId)}/returns/${id(returnId)}/receive`,
+            { ...requestOptions, method: "POST", body: body ?? {} },
+          ),
+        refund: (orderId, returnId, body, requestOptions) =>
+          request<ReturnRefundResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/returns/${id(returnId)}/refund`,
+            { ...requestOptions, method: "POST", body: body ?? {} },
+          ),
+        writeOff: (orderId, returnId, body, requestOptions) =>
+          request<OrderReturn>(
+            `/api/v1/admin/orders/${id(orderId)}/returns/${id(returnId)}/write-off`,
+            { ...requestOptions, method: "POST", body: body ?? {} },
+          ),
+        cancel: (orderId, returnId, body, requestOptions) =>
+          request<OrderReturn>(
+            `/api/v1/admin/orders/${id(orderId)}/returns/${id(returnId)}/cancel`,
+            { ...requestOptions, method: "POST", body: body ?? {} },
+          ),
+      },
+      claims: {
+        list: (orderId, requestOptions) =>
+          request<OrderClaim[]>(`/api/v1/admin/orders/${id(orderId)}/claims`, requestOptions),
+        get: (orderId, claimId, requestOptions) =>
+          request<OrderClaim>(
+            `/api/v1/admin/orders/${id(orderId)}/claims/${id(claimId)}`,
+            requestOptions,
+          ),
+        create: (orderId, body, requestOptions) =>
+          request<OrderClaim>(`/api/v1/admin/orders/${id(orderId)}/claims`, {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        accept: (orderId, claimId, requestOptions) =>
+          request<OrderClaim>(`/api/v1/admin/orders/${id(orderId)}/claims/${id(claimId)}/accept`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+        fulfill: (orderId, claimId, body, requestOptions) =>
+          request<ClaimFulfillmentResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/claims/${id(claimId)}/fulfill`,
+            { ...requestOptions, method: "POST", body: body ?? {} },
+          ),
+        refund: (orderId, claimId, body, requestOptions) =>
+          request<ClaimRefundResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/claims/${id(claimId)}/refund`,
+            { ...requestOptions, method: "POST", body: body ?? {} },
+          ),
+        collectDifference: (orderId, claimId, body, requestOptions) =>
+          request<DifferenceCollectionResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/claims/${id(claimId)}/collect-difference`,
+            { ...requestOptions, method: "POST", body },
+          ),
+        refundDifference: (orderId, claimId, requestOptions) =>
+          request<DifferenceRefundResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/claims/${id(claimId)}/refund-difference`,
+            { ...requestOptions, method: "POST" },
+          ),
+        cancel: (orderId, claimId, body, requestOptions) =>
+          request<OrderClaim>(`/api/v1/admin/orders/${id(orderId)}/claims/${id(claimId)}/cancel`, {
+            ...requestOptions,
+            method: "POST",
+            body: body ?? {},
+          }),
+      },
+      exchanges: {
+        list: (orderId, requestOptions) =>
+          request<OrderExchange[]>(`/api/v1/admin/orders/${id(orderId)}/exchanges`, requestOptions),
+        get: (orderId, exchangeId, requestOptions) =>
+          request<OrderExchange>(
+            `/api/v1/admin/orders/${id(orderId)}/exchanges/${id(exchangeId)}`,
+            requestOptions,
+          ),
+        create: (orderId, body, requestOptions) =>
+          request<OrderExchange>(`/api/v1/admin/orders/${id(orderId)}/exchanges`, {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        accept: (orderId, exchangeId, requestOptions) =>
+          request<OrderExchange>(
+            `/api/v1/admin/orders/${id(orderId)}/exchanges/${id(exchangeId)}/accept`,
+            { ...requestOptions, method: "POST" },
+          ),
+        fulfill: (orderId, exchangeId, body, requestOptions) =>
+          request<ExchangeFulfillmentResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/exchanges/${id(exchangeId)}/fulfill`,
+            { ...requestOptions, method: "POST", body: body ?? {} },
+          ),
+        collectDifference: (orderId, exchangeId, body, requestOptions) =>
+          request<DifferenceCollectionResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/exchanges/${id(exchangeId)}/collect-difference`,
+            { ...requestOptions, method: "POST", body },
+          ),
+        refundDifference: (orderId, exchangeId, requestOptions) =>
+          request<DifferenceRefundResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/exchanges/${id(exchangeId)}/refund-difference`,
+            { ...requestOptions, method: "POST" },
+          ),
+        cancel: (orderId, exchangeId, body, requestOptions) =>
+          request<OrderExchange>(
+            `/api/v1/admin/orders/${id(orderId)}/exchanges/${id(exchangeId)}/cancel`,
+            { ...requestOptions, method: "POST", body: body ?? {} },
+          ),
+      },
+      edits: {
+        list: (orderId, requestOptions) =>
+          request<OrderEdit[]>(`/api/v1/admin/orders/${id(orderId)}/edits`, requestOptions),
+        get: (orderId, editId, requestOptions) =>
+          request<OrderEdit>(
+            `/api/v1/admin/orders/${id(orderId)}/edits/${id(editId)}`,
+            requestOptions,
+          ),
+        create: (orderId, body, requestOptions) =>
+          request<OrderEdit>(`/api/v1/admin/orders/${id(orderId)}/edits`, {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        confirm: (orderId, editId, requestOptions) =>
+          request<OrderEdit>(`/api/v1/admin/orders/${id(orderId)}/edits/${id(editId)}/confirm`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+        collectDifference: (orderId, editId, body, requestOptions) =>
+          request<DifferenceCollectionResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/edits/${id(editId)}/collect-difference`,
+            { ...requestOptions, method: "POST", body },
+          ),
+        refundDifference: (orderId, editId, requestOptions) =>
+          request<DifferenceRefundResponse>(
+            `/api/v1/admin/orders/${id(orderId)}/edits/${id(editId)}/refund-difference`,
+            { ...requestOptions, method: "POST" },
+          ),
+        cancel: (orderId, editId, body, requestOptions) =>
+          request<OrderEdit>(`/api/v1/admin/orders/${id(orderId)}/edits/${id(editId)}/cancel`, {
+            ...requestOptions,
+            method: "POST",
+            body: body ?? {},
           }),
       },
     },
