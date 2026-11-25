@@ -80,17 +80,17 @@ async fn list_capabilities(
         .map_err(ApiError::new)?;
     let contributions = catalog
         .registry()
-        .capabilities()
-        .iter()
-        .filter_map(|provider| match &provider.contribution {
+        .into_capabilities()
+        .into_iter()
+        .filter_map(|provider| match provider.contribution {
             Contribution::StorefrontCapability(capability) => Some(CapabilityContributionView {
-                plugin_id: provider.plugin_id.clone(),
-                plugin_name: provider.plugin_name.clone(),
-                plugin_version: provider.plugin_version.clone(),
-                id: capability.id.clone(),
+                plugin_id: provider.plugin_id,
+                plugin_name: provider.plugin_name,
+                plugin_version: provider.plugin_version,
+                id: capability.id,
                 version: capability.version,
-                title: capability.title.clone(),
-                config_schema: capability.config_schema.clone(),
+                title: capability.title,
+                config_schema: capability.config_schema,
             }),
             Contribution::StorefrontComponent(_) => None,
         })

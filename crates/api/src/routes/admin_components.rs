@@ -82,8 +82,8 @@ async fn list_components(
         .await
         .map_err(ApiError::new)?;
     let mut components = Vec::new();
-    for provider in catalog.registry().components() {
-        let Contribution::StorefrontComponent(component) = &provider.contribution else {
+    for provider in catalog.registry().into_components() {
+        let Contribution::StorefrontComponent(component) = provider.contribution else {
             continue;
         };
         let Some(plugin) = catalog.plugin(&provider.plugin_id) else {
@@ -97,25 +97,26 @@ async fn list_components(
                 entry.trim_start_matches('/'),
             )
         });
+        let digest = plugin.digest.clone();
         components.push(ComponentContributionView {
-            plugin_id: provider.plugin_id.clone(),
-            plugin_name: provider.plugin_name.clone(),
-            plugin_version: provider.plugin_version.clone(),
-            digest: plugin.digest.clone(),
-            id: component.id.clone(),
-            title: component.title.clone(),
-            category: component.category.clone(),
-            editor_manifest: component.editor_manifest.clone(),
-            entry,
+            plugin_id: provider.plugin_id,
+            plugin_name: provider.plugin_name,
+            plugin_version: provider.plugin_version,
+            digest,
             requires: component
                 .requires
-                .iter()
+                .into_iter()
                 .map(|requirement| ComponentRequirementView {
-                    id: requirement.id.clone(),
+                    id: requirement.id,
                     version: requirement.version,
                     optional: requirement.optional,
                 })
                 .collect(),
+            id: component.id,
+            title: component.title,
+            category: component.category,
+            editor_manifest: component.editor_manifest,
+            entry,
         });
     }
     Ok(Json(ComponentsResponse { components }))

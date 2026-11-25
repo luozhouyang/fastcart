@@ -187,6 +187,21 @@ impl ContributionRegistry {
         &self.components
     }
 
+    /// Consumes the registry, returning its component contributions.
+    ///
+    /// Callers building an owned response can move provider metadata and the
+    /// contribution's JSON payloads instead of cloning them.
+    #[must_use]
+    pub fn into_components(self) -> Vec<ContributionProvider> {
+        self.components
+    }
+
+    /// Consumes the registry, returning its capability contributions.
+    #[must_use]
+    pub fn into_capabilities(self) -> Vec<ContributionProvider> {
+        self.capabilities
+    }
+
     /// Providers matching an exact id and, when supplied, version.
     #[must_use]
     pub fn find_capability(&self, id: &str, version: Option<u32>) -> Vec<&ContributionProvider> {
