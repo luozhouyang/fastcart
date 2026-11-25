@@ -154,6 +154,80 @@ pub struct CreateOrderEditRequest {
     pub items: Vec<OrderEditItemRequest>,
 }
 
+/// One line of a draft order creation request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DraftOrderItemRequest {
+    /// Product identifier snapshot.
+    pub product_id: Option<String>,
+    /// Variant identifier snapshot.
+    pub variant_id: Option<String>,
+    /// Product title snapshot.
+    pub product_title: String,
+    /// Variant title snapshot.
+    pub variant_title: Option<String>,
+    /// SKU snapshot.
+    pub sku: Option<String>,
+    /// Thumbnail URL snapshot.
+    pub thumbnail: Option<String>,
+    /// Unit price in minor units.
+    pub unit_price: i64,
+    /// Quantity to buy.
+    pub quantity: i64,
+    /// Whether the unit price already contains tax.
+    #[serde(default)]
+    pub is_tax_inclusive: bool,
+    /// Whether the line requires shipping; defaults to true.
+    #[serde(default = "default_true")]
+    pub requires_shipping: bool,
+    /// Free-form metadata.
+    #[serde(default)]
+    pub metadata: Metadata,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Request body for creating an admin-authored draft order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreateDraftOrderRequest {
+    /// Optional customer the order is for.
+    pub customer_id: Option<String>,
+    /// Contact email.
+    pub email: String,
+    /// ISO-style currency code.
+    pub currency_code: String,
+    /// Store region the order belongs to.
+    pub region_id: Option<String>,
+    /// Sales channel the order belongs to.
+    pub sales_channel_id: Option<String>,
+    /// Lines to buy.
+    pub items: Vec<DraftOrderItemRequest>,
+    /// Shipping address snapshot; a country_code enables tax pricing.
+    #[serde(default)]
+    pub shipping_address: serde_json::Value,
+    /// Billing address snapshot.
+    #[serde(default)]
+    pub billing_address: serde_json::Value,
+    /// Shipping amount in minor units.
+    #[serde(default)]
+    pub shipping_total: i64,
+    /// Free-form metadata.
+    #[serde(default)]
+    pub metadata: Metadata,
+    /// Optional idempotency key for retried creations.
+    pub idempotency_key: Option<String>,
+}
+
+/// Request body for changing a draft order's destination.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct UpdateDraftAddressRequest {
+    /// New shipping address snapshot; its country_code drives tax.
+    pub shipping_address: serde_json::Value,
+    /// New billing address snapshot, left unchanged when omitted.
+    pub billing_address: Option<serde_json::Value>,
+}
+
 /// A page of the authenticated customer's orders.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct OrderListResponse {

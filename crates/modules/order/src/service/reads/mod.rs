@@ -382,6 +382,9 @@ fn build_filter(filter: &OrderFilter) -> (String, Vec<FilterBind>) {
         conditions.push("created_at <= ?");
         binds.push(FilterBind::Integer(to));
     }
+    if filter.exclude_drafts {
+        conditions.push("status != 'draft'");
+    }
 
     if conditions.is_empty() {
         (String::new(), binds)

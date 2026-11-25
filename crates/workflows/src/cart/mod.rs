@@ -121,6 +121,8 @@ mod lifecycle;
 mod recalculation;
 mod tax;
 
+pub(crate) use tax::resolve_tax_provider;
+
 impl CartWorkflow {
     /// Creates a workflow bound to one store database.
     #[must_use]
@@ -200,7 +202,7 @@ fn tax_destination(context: &CartContext) -> TaxDestination<'_> {
 /// The name has to fit the cart's 160-character limit even when a merchant
 /// chose a long region name, and a rejection here would fail the whole
 /// recalculation over a label.
-fn no_rate_label(region_name: &str) -> String {
+pub(crate) fn no_rate_label(region_name: &str) -> String {
     let label = format!("No tax rate for {region_name}");
     if label.chars().count() > 160 {
         "No matching tax rate".to_owned()

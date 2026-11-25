@@ -6,6 +6,7 @@
 pub mod after_sales;
 pub mod cart;
 pub mod checkout;
+pub mod drafts;
 pub mod engine;
 pub mod maintenance;
 
@@ -16,6 +17,7 @@ pub use after_sales::{
 };
 pub use cart::{CartContext, CartWorkflow};
 pub use checkout::{CheckoutWorkflow, CompleteCheckoutResult, CreateCheckoutRequest};
+pub use drafts::{CreateDraftOrderRequest, DraftOrderLine, DraftOrderWorkflow};
 pub use engine::{
     EngineConfig, StepContext, StepError, WorkflowDefinition, WorkflowEngine, WorkflowExecution,
     WorkflowExecutionDetail, WorkflowExecutionFilter, WorkflowStep, WorkflowStepRecord, status,

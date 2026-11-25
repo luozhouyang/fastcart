@@ -30,8 +30,8 @@ use utoipa_axum::routes;
 
 use super::StoreDb;
 use crate::dto::{
-    CreateClaimRequest, CreateExchangeRequest, CreateOrderEditRequest, CreateReturnRequest,
-    ReceiveReturnRequest, WriteOffReturnRequest,
+    CreateClaimRequest, CreateDraftOrderRequest, CreateExchangeRequest, CreateOrderEditRequest,
+    CreateReturnRequest, ReceiveReturnRequest, WriteOffReturnRequest,
 };
 use crate::state::AppContext;
 
@@ -46,11 +46,19 @@ mod returns;
 
 pub fn router() -> Router<Arc<AppContext>> {
     Router::new()
-        .route("/orders", get(orders::list_orders))
+        .route(
+            "/orders",
+            get(orders::list_orders).post(orders::create_draft_order),
+        )
         .route("/orders/{id}", get(orders::get_order))
         .route(
             "/orders/by-number/{display_number}",
             get(orders::get_order_by_number),
+        )
+        .route("/orders/{id}/convert", post(orders::convert_draft_order))
+        .route(
+            "/orders/{id}/shipping-address",
+            post(orders::update_draft_address),
         )
         .route("/orders/{id}/confirm", post(orders::confirm_order))
         .route("/orders/{id}/process", post(orders::process_order))
@@ -154,9 +162,11 @@ pub fn router() -> Router<Arc<AppContext>> {
 /// Builds the documented routes for this namespace.
 pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
     OpenApiRouter::new()
-        .routes(routes!(orders::list_orders))
+        .routes(routes!(orders::list_orders, orders::create_draft_order))
         .routes(routes!(orders::get_order))
         .routes(routes!(orders::get_order_by_number))
+        .routes(routes!(orders::convert_draft_order))
+        .routes(routes!(orders::update_draft_address))
         .routes(routes!(orders::confirm_order))
         .routes(routes!(orders::process_order))
         .routes(routes!(orders::cancel_order))
@@ -336,6 +346,7 @@ fn map_order_filter(query: OrderListQuery) -> OrderFilter {
         email: query.email.filter(|email| !email.trim().is_empty()),
         from: None,
         to: None,
+        exclude_drafts: false,
     }
 }
 
@@ -547,6 +558,40 @@ fn map_exchange_input(request: CreateExchangeRequest) -> CreateExchangeInput {
         metadata: request.metadata,
         inbound_items,
         outbound_items,
+    }
+}
+
+fn map_draft_order_input(
+    request: CreateDraftOrderRequest,
+) -> fastcart_workflows::CreateDraftOrderRequest {
+    fastcart_workflows::CreateDraftOrderRequest {
+        customer_id: request.customer_id.map(CustomerId::from_string),
+        email: request.email,
+        currency_code: request.currency_code,
+        region_id: request.region_id,
+        sales_channel_id: request.sales_channel_id,
+        lines: request
+            .items
+            .into_iter()
+            .map(|item| fastcart_workflows::DraftOrderLine {
+                product_id: item.product_id.map(ProductId::from_string),
+                variant_id: item.variant_id.map(VariantId::from_string),
+                product_title: item.product_title,
+                variant_title: item.variant_title,
+                sku: item.sku,
+                thumbnail: item.thumbnail,
+                unit_price: item.unit_price,
+                quantity: item.quantity,
+                is_tax_inclusive: item.is_tax_inclusive,
+                requires_shipping: item.requires_shipping,
+                metadata: item.metadata,
+            })
+            .collect(),
+        shipping_address: request.shipping_address,
+        billing_address: request.billing_address,
+        shipping_total: request.shipping_total,
+        metadata: request.metadata,
+        idempotency_key: request.idempotency_key,
     }
 }
 

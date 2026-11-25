@@ -6,6 +6,7 @@ use fastcart_kernel::{AppError, EventId, OrderId, Timestamp};
 use crate::domain::{OrderStatus, OrderStatusHistory};
 
 mod creation;
+mod drafts;
 mod fulfillment;
 mod reads;
 mod refunds;
@@ -123,6 +124,8 @@ pub(crate) async fn insert_history(
     })
 }
 
+#[cfg(test)]
+mod draft_tests;
 #[cfg(test)]
 mod line_discount_tests;
 #[cfg(test)]

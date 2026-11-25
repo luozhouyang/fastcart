@@ -9,6 +9,77 @@ use super::reads::HistoryRow;
 use super::{OrderService, insert_history};
 
 impl OrderService {
+    /// Converts an admin-authored draft into a pending order.
+    ///
+    /// The draft enters the same lifecycle as a checkout-placed order:
+    /// `confirm`, `start_processing` and `fulfill` apply afterwards. No stock
+    /// is taken here — a draft, like a manually recorded order, owns no
+    /// reservation until an operator commits stock explicitly.
+    pub async fn convert_draft_order(&self, id: &OrderId) -> Result<Order, AppError> {
+        let order = self.load_order(id).await?;
+        if order.status != OrderStatus::Draft {
+            return Err(AppError::conflict(format!(
+                "only draft orders can be converted, found {}",
+                order.status.as_str()
+            )));
+        }
+        if order.items.iter().all(|item| item.quantity <= 0) {
+            return Err(AppError::conflict(
+                "a draft order must contain at least one unit before it can be converted",
+            ));
+        }
+
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let updated =
+            sqlx::query("UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                .bind(OrderStatus::Pending.as_str())
+                .bind(now)
+                .bind(id.as_str())
+                .bind(OrderStatus::Draft.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict("order status changed concurrently"));
+        }
+        insert_history(
+            &mut tx,
+            id,
+            OrderStatus::Pending,
+            Some(OrderStatus::Draft),
+            Some("draft order converted"),
+            now,
+        )
+        .await?;
+        let event = DomainEventEnvelope::new(
+            "order.placed",
+            Some(self.db.store_id().clone()),
+            serde_json::json!({
+                "order_id": id.as_str(),
+                "display_number": order.display_number,
+                "email": order.email,
+                "currency_code": order.currency_code,
+                "total": order.total,
+                "converted_from_draft": true,
+            }),
+        );
+        append_outbox_event(&mut *tx, &event)
+            .await
+            .map_err(database_error)?;
+        self.append_audit(
+            &mut tx,
+            "order.draft_converted",
+            "order",
+            id.as_str(),
+            serde_json::json!({"display_number": order.display_number}),
+        )
+        .await?;
+        tx.commit().await.map_err(database_error)?;
+        self.load_order(id).await
+    }
+
     /// Moves a pending order to `confirmed`.
     pub async fn confirm(&self, id: &OrderId) -> Result<Order, AppError> {
         let order = self.load_order(id).await?;

@@ -79,6 +79,11 @@ impl OrderService {
                 "cannot exchange items from a canceled order",
             ));
         }
+        if order.is_draft_order() {
+            return Err(AppError::conflict(
+                "cannot exchange items from a draft order; convert it first",
+            ));
+        }
         validate_metadata(&input.metadata)?;
         if input.inbound_items.is_empty() {
             return Err(AppError::validation(

@@ -16,6 +16,8 @@ use serde_json::Value;
 #[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
+    /// Admin-authored order that has not entered the fulfillment lifecycle.
+    Draft,
     /// Order captured but not yet confirmed.
     Pending,
     /// Order confirmed by the store.
@@ -35,6 +37,7 @@ impl OrderStatus {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Draft => "draft",
             Self::Pending => "pending",
             Self::Confirmed => "confirmed",
             Self::Processing => "processing",
@@ -47,6 +50,7 @@ impl OrderStatus {
     /// Parses a stored status, rejecting unknown values.
     pub fn from_stored(value: &str) -> Result<Self, fastcart_kernel::AppError> {
         match value {
+            "draft" => Ok(Self::Draft),
             "pending" => Ok(Self::Pending),
             "confirmed" => Ok(Self::Confirmed),
             "processing" => Ok(Self::Processing),
@@ -59,10 +63,19 @@ impl OrderStatus {
         }
     }
 
+    /// Returns true when the order is still an editable draft.
+    #[must_use]
+    pub fn is_draft(self) -> bool {
+        matches!(self, Self::Draft)
+    }
+
     /// Returns true when the order may still be canceled.
     #[must_use]
     pub fn is_cancelable(self) -> bool {
-        matches!(self, Self::Pending | Self::Confirmed | Self::Processing)
+        matches!(
+            self,
+            Self::Draft | Self::Pending | Self::Confirmed | Self::Processing
+        )
     }
 
     /// Returns true when the order is in a terminal state.
@@ -286,6 +299,15 @@ pub struct Order {
     pub refunds: Vec<OrderRefund>,
 }
 
+impl Order {
+    /// Returns true when the order is an admin-authored draft that has not
+    /// entered the fulfillment lifecycle.
+    #[must_use]
+    pub fn is_draft_order(&self) -> bool {
+        self.status.is_draft()
+    }
+}
+
 /// A tax line as it was levied when the order was placed.
 ///
 /// Collapsing tax into `orders.tax_total` made the collected amount impossible
@@ -313,6 +335,25 @@ pub struct OrderTaxLine {
     pub is_tax_inclusive: bool,
     /// Creation timestamp in Unix seconds.
     pub created_at: Timestamp,
+}
+
+/// One recalculated tax line for a draft order line.
+///
+/// Draft orders can be re-taxed when their destination changes. The caller
+/// resolves the rate from the tax service and rewrites the item-scoped tax
+/// lines in one transaction, so the order and its breakdown stay in step.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DraftOrderTaxLineInput {
+    /// Order line the tax is levied on.
+    pub order_item_id: LineItemId,
+    /// Human-readable rate name.
+    pub name: String,
+    /// Rate in basis points.
+    pub rate_bps: i64,
+    /// Tax amount in minor units.
+    pub amount: i64,
+    /// Whether the amount is already contained in the line price.
+    pub is_tax_inclusive: bool,
 }
 
 /// One line item of an order.
@@ -663,6 +704,11 @@ pub struct OrderFilter {
     pub from: Option<Timestamp>,
     /// Inclusive upper bound on creation time.
     pub to: Option<Timestamp>,
+    /// Excludes admin-authored draft orders from the result.
+    ///
+    /// Customer-facing lists set this so an unfinished draft never appears as
+    /// a purchase; the admin list leaves it off.
+    pub exclude_drafts: bool,
 }
 
 #[cfg(test)]

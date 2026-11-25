@@ -128,14 +128,17 @@ use crate::state::AppContext;
     crate::dto::CancelAfterSaleRequest,
     crate::dto::ClaimItemRequest,
     crate::dto::CreateClaimRequest,
+    crate::dto::CreateDraftOrderRequest,
     crate::dto::CreateExchangeRequest,
     crate::dto::CreateOrderEditRequest,
     crate::dto::CreateReturnRequest,
+    crate::dto::DraftOrderItemRequest,
     crate::dto::ExchangeItemRequest,
     crate::dto::OrderEditItemRequest,
     crate::dto::ReceiveReturnItemRequest,
     crate::dto::ReceiveReturnRequest,
     crate::dto::ReturnItemRequest,
+    crate::dto::UpdateDraftAddressRequest,
     crate::dto::WriteOffReturnRequest,
     fastcart_module_payment::Payment,
     fastcart_module_payment::PaymentAttempt,
@@ -948,11 +951,11 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 200);
+        assert_eq!(count("/api/v1/admin"), 202);
         assert_eq!(count("/api/v1/store"), 48);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 273);
+        assert_eq!(paths.len(), 275);
 
         for key in [
             "/api/v1/platform/stores",
@@ -1064,7 +1067,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 382);
+        assert_eq!(operation_count, 385);
     }
 
     #[test]

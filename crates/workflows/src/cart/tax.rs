@@ -15,26 +15,37 @@ impl CartWorkflow {
     /// is returned rather than activated on the registry: the selection belongs
     /// to the pass that read the setting, not to the process.
     pub(crate) async fn tax_provider(&self) -> Result<Arc<dyn TaxProvider>, AppError> {
-        let providers = self.tax.providers();
-        let Some(configured) = self.store.get_setting(TAX_PROVIDER_SETTING_KEY).await? else {
-            return providers.active();
-        };
-        if let Some(provider) = providers.get(&configured) {
-            return Ok(provider);
-        }
-        let registered: Vec<String> = providers
-            .list()
-            .iter()
-            .map(|provider| provider.id().to_owned())
-            .collect();
-        Err(AppError::conflict(format!(
-            "{TAX_PROVIDER_SETTING_KEY} is set to \"{configured}\", which is not a registered tax \
-             provider; registered providers: {}",
-            if registered.is_empty() {
-                "none".to_owned()
-            } else {
-                registered.join(", ")
-            }
-        )))
+        resolve_tax_provider(&self.tax, &self.store).await
     }
+}
+
+/// Resolves the tax provider a store selected for calculations.
+///
+/// Shared by every workflow that prices tax, so a draft order is taxed by the
+/// same provider as the cart it was authored from.
+pub(crate) async fn resolve_tax_provider(
+    tax: &TaxService,
+    store: &StoreService,
+) -> Result<Arc<dyn TaxProvider>, AppError> {
+    let providers = tax.providers();
+    let Some(configured) = store.get_setting(TAX_PROVIDER_SETTING_KEY).await? else {
+        return providers.active();
+    };
+    if let Some(provider) = providers.get(&configured) {
+        return Ok(provider);
+    }
+    let registered: Vec<String> = providers
+        .list()
+        .iter()
+        .map(|provider| provider.id().to_owned())
+        .collect();
+    Err(AppError::conflict(format!(
+        "{TAX_PROVIDER_SETTING_KEY} is set to \"{configured}\", which is not a registered tax \
+         provider; registered providers: {}",
+        if registered.is_empty() {
+            "none".to_owned()
+        } else {
+            registered.join(", ")
+        }
+    )))
 }

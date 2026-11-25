@@ -18,6 +18,7 @@ pub(super) async fn list_orders(
     let pagination = PaginationQuery { limit, offset }.pagination()?;
     let filter = OrderFilter {
         customer_id: Some(customer_id),
+        exclude_drafts: true,
         ..OrderFilter::default()
     };
     let page = OrderService::new(db).list(filter, pagination).await?;
@@ -41,7 +42,7 @@ pub(super) async fn get_own_order(
     let order = OrderService::new(db)
         .get(&OrderId::from_string(order_id))
         .await?;
-    if order.customer_id.as_ref() != Some(customer_id) {
+    if order.customer_id.as_ref() != Some(customer_id) || order.is_draft_order() {
         return Err(ApiError::new(AppError::not_found("order", &order.id)));
     }
     Ok(Json(OrderResponse { order }))

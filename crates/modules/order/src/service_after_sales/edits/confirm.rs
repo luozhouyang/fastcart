@@ -291,9 +291,15 @@ impl OrderService {
         // this transaction, so a line rewrite and its stock movement commit or
         // roll back together, and each movement carries a reference unique per
         // edit line so a retry converges instead of moving stock twice.
-        let stock_lines = edit_stock_lines(&edit);
-        if !stock_lines.is_empty() {
-            InventoryService::apply_order_edit_stock(&mut tx, order_id, &stock_lines).await?;
+        //
+        // A draft order has not taken stock yet, so rewriting its lines must
+        // not move any: the whole quantity is committed when the order leaves
+        // the draft lifecycle through an explicit stock operation.
+        if current_status != OrderStatus::Draft {
+            let stock_lines = edit_stock_lines(&edit);
+            if !stock_lines.is_empty() {
+                InventoryService::apply_order_edit_stock(&mut tx, order_id, &stock_lines).await?;
+            }
         }
 
         // The edit changes the units below the existing shipments, so the

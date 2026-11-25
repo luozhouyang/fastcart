@@ -83,6 +83,11 @@ impl OrderService {
                 "cannot claim items from a canceled order",
             ));
         }
+        if order.is_draft_order() {
+            return Err(AppError::conflict(
+                "cannot claim items from a draft order; convert it first",
+            ));
+        }
         validate_metadata(&input.metadata)?;
         if input.items.is_empty() {
             return Err(AppError::validation(

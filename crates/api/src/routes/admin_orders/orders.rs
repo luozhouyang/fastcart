@@ -7,13 +7,15 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiQuery, ApiResult, PaginationQuery};
 use fastcart_kernel::OrderId;
 use fastcart_module_inventory::InventoryService;
 use fastcart_module_order::{Order, OrderService, OrderStatus, OrderStatusHistory};
+use fastcart_workflows::DraftOrderWorkflow;
 
 use super::StoreDb;
-use crate::dto::PageResponse;
+use crate::dto::{CreateDraftOrderRequest, PageResponse, UpdateDraftAddressRequest};
 use crate::state::AppContext;
 
 /// Builds the routes for this namespace.
@@ -88,6 +90,88 @@ pub(super) async fn get_order_by_number(
             .get_by_display_number(display_number)
             .await?,
     ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/orders",
+    tag = "Admin",
+    summary = "Create a draft order",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateDraftOrderRequest,
+    responses((status = 201, body = Order))
+)]
+pub(super) async fn create_draft_order(
+    State(_context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    ApiJson(request): ApiJson<CreateDraftOrderRequest>,
+) -> ApiResult<(StatusCode, Json<Order>)> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let workflow = DraftOrderWorkflow::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let order = workflow
+        .create_draft_order(map_draft_order_input(request))
+        .await?;
+    Ok((StatusCode::CREATED, Json(order)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/convert",
+    tag = "Admin",
+    summary = "Convert a draft order and enter the fulfillment lifecycle",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Order))
+)]
+pub(super) async fn convert_draft_order(
+    State(_context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Order>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let workflow = DraftOrderWorkflow::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let order = workflow
+        .convert_draft_order(&OrderId::from_string(id))
+        .await?;
+    Ok(Json(order))
+}
+
+#[utoipa::path(
+    post,
+    path = "/orders/{id}/shipping-address",
+    tag = "Admin",
+    summary = "Change a draft order's destination and recalculate its tax",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = UpdateDraftAddressRequest,
+    responses((status = 200, body = Order))
+)]
+pub(super) async fn update_draft_address(
+    State(_context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<UpdateDraftAddressRequest>,
+) -> ApiResult<Json<Order>> {
+    actor
+        .require_permission("orders.write")
+        .map_err(ApiError::new)?;
+    let workflow = DraftOrderWorkflow::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string));
+    let order = workflow
+        .update_draft_destination(
+            &OrderId::from_string(id),
+            request.shipping_address,
+            request.billing_address,
+        )
+        .await?;
+    Ok(Json(order))
 }
 
 #[utoipa::path(

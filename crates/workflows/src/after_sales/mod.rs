@@ -341,6 +341,11 @@ impl AfterSalesWorkflow {
             )));
         }
         let order = self.order.get(order_id).await?;
+        if order.is_draft_order() {
+            return Err(AppError::conflict(
+                "a draft order has no settled difference; convert it before collecting money",
+            ));
+        }
         let marker = format!("{prefix}:{source_id}");
         let (collection, opened) = match self.payment.collection_for_order(order_id).await? {
             Some(existing) => (existing, false),
@@ -421,6 +426,11 @@ impl AfterSalesWorkflow {
             )));
         }
         let order = self.order.get(order_id).await?;
+        if order.is_draft_order() {
+            return Err(AppError::conflict(
+                "a draft order has no settled difference; convert it before refunding money",
+            ));
+        }
         let key = format!("{prefix}:{source_id}");
         let local = local_key(&key);
         if let Some(existing) = self.order.refund_id_by_idempotency_key(&local).await? {

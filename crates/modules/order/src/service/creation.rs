@@ -89,6 +89,27 @@ impl OrderService {
     /// Item `subtotal` and `total` inputs are optional and are derived from
     /// `unit_price * quantity`, discount and tax when omitted.
     pub async fn create_order(&self, input: CreateOrderInput) -> Result<Order, AppError> {
+        self.create_order_with_status(input, OrderStatus::Pending)
+            .await
+    }
+
+    /// Creates an admin-authored draft order.
+    ///
+    /// A draft is an order that has not entered the fulfillment lifecycle: it
+    /// takes no stock, holds no payment and publishes `order.draft_created`
+    /// instead of `order.placed`. Its lines can still be changed through the
+    /// order-edit flow, and [`Self::convert_draft_order`] turns it into a
+    /// pending order.
+    pub async fn create_draft_order(&self, input: CreateOrderInput) -> Result<Order, AppError> {
+        self.create_order_with_status(input, OrderStatus::Draft)
+            .await
+    }
+
+    async fn create_order_with_status(
+        &self,
+        input: CreateOrderInput,
+        status: OrderStatus,
+    ) -> Result<Order, AppError> {
         if let Some(key) = input.idempotency_key.as_deref()
             && let Some(existing) = self.find_order_id_by_key(key).await?
         {
@@ -98,7 +119,7 @@ impl OrderService {
         let resolved = resolve_order(input)?;
         let mut retried = false;
         loop {
-            match self.insert_order(&resolved).await {
+            match self.insert_order(&resolved, status).await {
                 Ok(order_id) => return self.load_order(&order_id).await,
                 Err(CreateAttemptError::DisplayNumberConflict) if !retried => retried = true,
                 Err(CreateAttemptError::DisplayNumberConflict) => {
@@ -111,7 +132,11 @@ impl OrderService {
         }
     }
 
-    async fn insert_order(&self, order: &ResolvedOrder) -> Result<OrderId, CreateAttemptError> {
+    async fn insert_order(
+        &self,
+        order: &ResolvedOrder,
+        status: OrderStatus,
+    ) -> Result<OrderId, CreateAttemptError> {
         let mut tx = self
             .db
             .begin()
@@ -157,7 +182,7 @@ impl OrderService {
         .bind(order.customer_id.as_ref().map(|value| value.as_str()))
         .bind(&order.email)
         .bind(&order.currency_code)
-        .bind(OrderStatus::Pending.as_str())
+        .bind(status.as_str())
         .bind(PaymentStatus::Awaiting.as_str())
         .bind(FulfillmentStatus::NotFulfilled.as_str())
         .bind(RefundStatus::NotRefunded.as_str())
@@ -289,16 +314,14 @@ impl OrderService {
             .map_err(|error| CreateAttemptError::Failed(database_error(error)))?;
         }
 
-        insert_history(
-            &mut tx,
-            &order_id,
-            OrderStatus::Pending,
-            None,
-            Some("order created"),
-            now,
-        )
-        .await
-        .map_err(CreateAttemptError::Failed)?;
+        let history_note = if status.is_draft() {
+            "draft order created"
+        } else {
+            "order created"
+        };
+        insert_history(&mut tx, &order_id, status, None, Some(history_note), now)
+            .await
+            .map_err(CreateAttemptError::Failed)?;
 
         if let Some(key) = order.idempotency_key.as_deref() {
             let response = serde_json::json!({"order_id": order_id.as_str()}).to_string();
@@ -335,8 +358,13 @@ impl OrderService {
             }
         }
 
+        let event_name = if status.is_draft() {
+            "order.draft_created"
+        } else {
+            "order.placed"
+        };
         let event = DomainEventEnvelope::new(
-            "order.placed",
+            event_name,
             Some(self.db.store_id().clone()),
             serde_json::json!({
                 "order_id": order_id.as_str(),
