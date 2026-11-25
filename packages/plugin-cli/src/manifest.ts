@@ -166,18 +166,13 @@ export function validateManifest(manifest: PluginManifest): void {
   validateContributions(manifest, fail);
 }
 
-function validateContributions(
-  manifest: PluginManifest,
-  fail: (message: string) => never,
-): void {
+function validateContributions(manifest: PluginManifest, fail: (message: string) => never): void {
   const provides: unknown = manifest.provides ?? [];
   if (!Array.isArray(provides)) fail("provides must be an array");
   if (provides.length > MAX_CONTRIBUTIONS) {
     fail(`at most ${MAX_CONTRIBUTIONS} contributions are allowed`);
   }
-  const componentScope = (manifest.capabilities?.storefront ?? []).includes(
-    "storefront.component",
-  );
+  const componentScope = (manifest.capabilities?.storefront ?? []).includes("storefront.component");
   const seen = new Set<string>();
   for (const raw of provides as unknown[]) {
     if (!isJsonObject(raw)) fail("contribution must be an object");
@@ -203,10 +198,7 @@ function validateContributions(
       seen.add(key);
       continue;
     }
-    if (
-      contribution.editor_manifest !== undefined &&
-      !isJsonObject(contribution.editor_manifest)
-    ) {
+    if (contribution.editor_manifest !== undefined && !isJsonObject(contribution.editor_manifest)) {
       fail(`component ${contribution.id} editor_manifest must be a JSON object`);
     }
     if (

@@ -13,9 +13,7 @@
     "path": "worker/index.js"
   },
   "capabilities": {
-    "admin": [
-      "admin.ui"
-    ]
+    "admin": ["admin.ui"]
   },
   "extensions": {
     "admin": [
@@ -44,9 +42,7 @@
       "additionalProperties": false
     }
   },
-  "rpc": [
-    "panel.info"
-  ],
+  "rpc": ["panel.info"],
   "rpc_permissions": {
     "panel.info": "plugins.read"
   }

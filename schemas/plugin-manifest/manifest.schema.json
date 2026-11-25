@@ -5,15 +5,7 @@
   "description": "Versioned contract between a plugin bundle and the FastCart plugin host.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "id",
-    "name",
-    "version",
-    "api_version",
-    "runtime",
-    "entry"
-  ],
+  "required": ["schema_version", "id", "name", "version", "api_version", "runtime", "entry"],
   "properties": {
     "schema_version": {
       "const": "1"
@@ -38,9 +30,7 @@
     "author": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "name"
-      ],
+      "required": ["name"],
       "properties": {
         "name": {
           "type": "string",
@@ -58,10 +48,7 @@
     "runtime": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "engine",
-        "compatibility_date"
-      ],
+      "required": ["engine", "compatibility_date"],
       "properties": {
         "engine": {
           "const": "workerd"
@@ -73,9 +60,7 @@
         "compatibility_flags": {
           "type": "array",
           "items": {
-            "enum": [
-              "nodejs_compat"
-            ]
+            "enum": ["nodejs_compat"]
           },
           "uniqueItems": true,
           "default": []
@@ -85,10 +70,7 @@
     "entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "path"
-      ],
+      "required": ["type", "path"],
       "properties": {
         "type": {
           "const": "worker"
@@ -110,32 +92,21 @@
         "data": {
           "type": "array",
           "items": {
-            "enum": [
-              "catalog.read",
-              "orders.read",
-              "customers.read",
-              "content.read",
-              "carts.read"
-            ]
+            "enum": ["catalog.read", "orders.read", "customers.read", "content.read", "carts.read"]
           },
           "uniqueItems": true
         },
         "storage": {
           "type": "array",
           "items": {
-            "enum": [
-              "kv.read",
-              "kv.write"
-            ]
+            "enum": ["kv.read", "kv.write"]
           },
           "uniqueItems": true
         },
         "secrets": {
           "type": "array",
           "items": {
-            "enum": [
-              "secrets.read"
-            ]
+            "enum": ["secrets.read"]
           },
           "uniqueItems": true
         },
@@ -160,21 +131,14 @@
         "admin": {
           "type": "array",
           "items": {
-            "enum": [
-              "admin.ui",
-              "plugins.settings"
-            ]
+            "enum": ["admin.ui", "plugins.settings"]
           },
           "uniqueItems": true
         },
         "storefront": {
           "type": "array",
           "items": {
-            "enum": [
-              "store.read",
-              "customer.read",
-              "storefront.component"
-            ]
+            "enum": ["store.read", "customer.read", "storefront.component"]
           },
           "uniqueItems": true
         },
@@ -198,9 +162,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "target"
-            ],
+            "required": ["target"],
             "properties": {
               "target": {
                 "enum": [
@@ -251,22 +213,13 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "kind",
-              "placement",
-              "entry"
-            ],
+            "required": ["kind", "placement", "entry"],
             "properties": {
               "kind": {
                 "const": "embed"
               },
               "placement": {
-                "enum": [
-                  "head:start",
-                  "head:end",
-                  "body:start",
-                  "body:end"
-                ]
+                "enum": ["head:start", "head:end", "body:start", "body:end"]
               },
               "entry": {
                 "type": "string",
@@ -308,12 +261,7 @@
           {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "kind",
-              "id",
-              "version",
-              "title"
-            ],
+            "required": ["kind", "id", "version", "title"],
             "properties": {
               "kind": {
                 "const": "storefront_capability"
@@ -338,11 +286,7 @@
           {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "kind",
-              "id",
-              "title"
-            ],
+            "required": ["kind", "id", "title"],
             "properties": {
               "kind": {
                 "const": "storefront_component"
@@ -369,9 +313,7 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": [
-                    "id"
-                  ],
+                  "required": ["id"],
                   "properties": {
                     "id": {
                       "type": "string",
@@ -395,9 +337,7 @@
     "settings": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "schema"
-      ],
+      "required": ["schema"],
       "properties": {
         "schema": {
           "type": "object"
@@ -433,9 +373,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "name"
-        ],
+        "required": ["name"],
         "properties": {
           "name": {
             "type": "string",
@@ -454,9 +392,7 @@
     "build": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "build_id"
-      ],
+      "required": ["build_id"],
       "properties": {
         "build_id": {
           "type": "string",

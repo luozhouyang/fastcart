@@ -8,36 +8,19 @@
   "runtime": {
     "engine": "workerd",
     "compatibility_date": "2026-11-01",
-    "compatibility_flags": [
-      "nodejs_compat"
-    ]
+    "compatibility_flags": ["nodejs_compat"]
   },
   "entry": {
     "type": "worker",
     "path": "worker/index.js"
   },
   "capabilities": {
-    "data": [
-      "catalog.read",
-      "orders.read",
-      "customers.read"
-    ],
-    "storage": [
-      "kv.read",
-      "kv.write"
-    ],
-    "events": [
-      "order.placed"
-    ],
-    "network": [
-      "api.openai.com"
-    ],
-    "admin": [
-      "admin.ui"
-    ],
-    "storefront": [
-      "store.read"
-    ]
+    "data": ["catalog.read", "orders.read", "customers.read"],
+    "storage": ["kv.read", "kv.write"],
+    "events": ["order.placed"],
+    "network": ["api.openai.com"],
+    "admin": ["admin.ui"],
+    "storefront": ["store.read"]
   },
   "extensions": {
     "admin": [
@@ -65,9 +48,7 @@
         "placement": "body:end",
         "entry": "storefront/boot.js",
         "css": "storefront/boot.css",
-        "pages": [
-          "*"
-        ]
+        "pages": ["*"]
       }
     ]
   },
@@ -88,10 +69,7 @@
     },
     "ui": "ui/settings.html"
   },
-  "rpc": [
-    "conversations.list",
-    "conversations.reply"
-  ],
+  "rpc": ["conversations.list", "conversations.reply"],
   "rpc_permissions": {
     "conversations.list": "plugins.read",
     "conversations.reply": "plugins.write"

@@ -18,9 +18,6 @@ export default {
     if (request.method !== "GET" && request.method !== "HEAD") {
       init.body = request.body;
     }
-    return env.UPSTREAM.fetch(
-      new URL(url.pathname + url.search, "http://commerce"),
-      init,
-    );
+    return env.UPSTREAM.fetch(new URL(url.pathname + url.search, "http://commerce"), init);
   },
 };

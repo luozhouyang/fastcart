@@ -38,23 +38,23 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 
 ### Commerce modules
 
-| Module    | Capabilities                                                                                             |
-| --------- | -------------------------------------------------------------------------------------------------------- |
-| store     | Store settings and sales channels                                                                        |
-| catalog   | Products, variants, options, media, categories, collections, tags, FTS5 search, publication              |
-| pricing   | Price lists, scoped prices and deterministic price selection                                             |
+| Module    | Capabilities                                                                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| store     | Store settings and sales channels                                                                                              |
+| catalog   | Products, variants, options, media, categories, collections, tags, FTS5 search, publication                                    |
+| pricing   | Price lists, scoped prices and deterministic price selection                                                                   |
 | promotion | Percentage/fixed/free-shipping promotions, order/items/shipping targets, coupons, rules, usage limits, proportional allocation |
-| inventory | Locations, levels, atomic reservations, release/commit, expiry and movement history                      |
-| shipping  | Profiles, options and region/weight-aware flat rate selection                                            |
-| tax       | Categories, regions, rates, inclusive/exclusive tax calculation, and a provider port for external engines |
-| customer  | Profiles, addresses, groups, Argon2id credentials and store-scoped sessions                              |
-| cart      | Snapshot line items and server-derived totals                                                            |
-| checkout  | Persisted state machine with transition history                                                          |
-| order     | Immutable commercial snapshots, idempotent placement, fulfillment, refunds, exchange/claim price differences |
-| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events, collections  |
-| content   | Pages, versions, navigation trees and redirects                                                          |
-| webhook   | Endpoint subscriptions, HMAC-signed deliveries, retries, replay and delivery history                     |
-| theme     | Theme settings registry (themes are deployment artifacts), JSON Schema settings, activation and rollback |
+| inventory | Locations, levels, atomic reservations, release/commit, expiry and movement history                                            |
+| shipping  | Profiles, options and region/weight-aware flat rate selection                                                                  |
+| tax       | Categories, regions, rates, inclusive/exclusive tax calculation, and a provider port for external engines                      |
+| customer  | Profiles, addresses, groups, Argon2id credentials and store-scoped sessions                                                    |
+| cart      | Snapshot line items and server-derived totals                                                                                  |
+| checkout  | Persisted state machine with transition history                                                                                |
+| order     | Immutable commercial snapshots, idempotent placement, fulfillment, refunds, exchange/claim price differences                   |
+| payment   | Provider registry, sandbox provider with HMAC webhooks, capture, refunds, idempotent events, collections                       |
+| content   | Pages, versions, navigation trees and redirects                                                                                |
+| webhook   | Endpoint subscriptions, HMAC-signed deliveries, retries, replay and delivery history                                           |
+| theme     | Theme settings registry (themes are deployment artifacts), JSON Schema settings, activation and rollback                       |
 
 ### Cross-cutting
 
@@ -135,6 +135,7 @@ Alternatively, start the server first and bootstrap through `POST /api/v1/platfo
 - `FASTCART_SMTP_HOST`, `FASTCART_SMTP_PORT`, `FASTCART_SMTP_USERNAME`,
   `FASTCART_SMTP_PASSWORD`, `FASTCART_SMTP_SECURITY` — SMTP delivery
 - `FASTCART_RESEND_API_KEY` — Resend delivery
+
 ### Store settings
 
 Per-store settings live in the store database and are changed through the admin

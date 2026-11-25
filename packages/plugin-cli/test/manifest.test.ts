@@ -96,7 +96,10 @@ function contributions(): PluginManifest {
       category: "marketing",
       editor_manifest: { fields: ["title"] },
       entry: "components/hero.js",
-      requires: [{ id: "search", version: 1 }, { id: "recommendations", optional: true }],
+      requires: [
+        { id: "search", version: 1 },
+        { id: "recommendations", optional: true },
+      ],
     },
   ];
   return manifest;

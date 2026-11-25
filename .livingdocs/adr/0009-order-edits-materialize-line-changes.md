@@ -57,7 +57,7 @@ rows and the scaled tax lines. The acceptance tests in
 `crates/modules/order/tests/order_edit_line_consistency.rs` pass.
 
 The tax-line rounding question is settled without placing a remainder on a
-chosen line: because `orders.tax_total` *is* the sum of the scaled tax lines,
+chosen line: because `orders.tax_total` _is_ the sum of the scaled tax lines,
 the identity `Σ order_tax_lines == orders.tax_total` that `create_order`
 enforces cannot drift, whatever per-line flooring does. The rule is covered by
 `order_tax_lines_follow_their_base_and_keep_adding_up` in the service tests,
