@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use fastcart_plugin::manifest::{PluginManifest, validate_settings};
-use fastcart_plugin::{ContributionRegistry, PluginError};
+use fastcart_plugin::{Contribution, ContributionRegistry, PluginError};
 use serde_json::{Value, json};
 
 fn base() -> Value {
@@ -220,6 +220,25 @@ fn the_chat_template_manifest_is_valid() {
     assert!(manifest.extensions.admin.len() == 3);
     assert!(manifest.extensions.storefront.len() == 1);
     assert!(manifest.rpc.contains(&"conversations.list".to_owned()));
+    assert!(
+        manifest.storefront_capability("livechat", 1).is_some(),
+        "template declares the livechat capability"
+    );
+    let component = manifest
+        .provides
+        .iter()
+        .find_map(|contribution| match contribution {
+            Contribution::StorefrontComponent(component) => Some(component),
+            Contribution::StorefrontCapability(_) => None,
+        })
+        .expect("template declares a storefront component");
+    assert_eq!(component.id, "livechat-button");
+    assert_eq!(
+        component.entry.as_deref(),
+        Some("storefront/livechat-button.js")
+    );
+    assert_eq!(component.requires.len(), 1);
+    assert!(component.requires[0].optional);
 }
 
 fn capability_contribution() -> Value {
