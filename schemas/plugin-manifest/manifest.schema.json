@@ -130,6 +130,15 @@
           },
           "uniqueItems": true
         },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "secrets.read"
+            ]
+          },
+          "uniqueItems": true
+        },
         "events": {
           "type": "array",
           "maxItems": 20,
@@ -315,6 +324,14 @@
         "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
       },
       "uniqueItems": true
+    },
+    "rpc_permissions": {
+      "type": "object",
+      "maxProperties": 50,
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+$"
+      }
     },
     "jobs": {
       "type": "array",

@@ -637,3 +637,38 @@ pub async fn prune_logs(database: &StoreDatabase, now: i64) -> Result<u64, Plugi
         .await?;
     Ok(result.rows_affected())
 }
+
+/// Deletes KV entries whose TTL has elapsed.
+pub async fn prune_expired_kv(database: &StoreDatabase, now: i64) -> Result<u64, PluginError> {
+    let result =
+        sqlx::query("DELETE FROM plugin_kv WHERE expires_at IS NOT NULL AND expires_at <= ?")
+            .bind(now)
+            .execute(database.pool())
+            .await?;
+    Ok(result.rows_affected())
+}
+
+/// Deletes terminal deliveries and jobs older than thirty days.
+///
+/// Pending and running rows are kept so a slow retry is never dropped.
+pub async fn prune_dispatch_state(
+    database: &StoreDatabase,
+    now: i64,
+) -> Result<(u64, u64), PluginError> {
+    let cutoff = now.saturating_sub(30 * 86_400);
+    let deliveries = sqlx::query(
+        "DELETE FROM plugin_deliveries \
+         WHERE status IN ('done', 'dead') AND created_at < ?",
+    )
+    .bind(cutoff)
+    .execute(database.pool())
+    .await?;
+    let jobs = sqlx::query(
+        "DELETE FROM plugin_jobs \
+         WHERE status IN ('completed', 'failed') AND updated_at < ?",
+    )
+    .bind(cutoff)
+    .execute(database.pool())
+    .await?;
+    Ok((deliveries.rows_affected(), jobs.rows_affected()))
+}

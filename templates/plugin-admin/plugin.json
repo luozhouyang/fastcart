@@ -46,5 +46,8 @@
   },
   "rpc": [
     "panel.info"
-  ]
+  ],
+  "rpc_permissions": {
+    "panel.info": "plugins.read"
+  }
 }

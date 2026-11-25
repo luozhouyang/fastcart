@@ -18,6 +18,16 @@
       console.error("[fastcart] plugin boot failed", item.id, error);
     });
   }
+  const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
+
+  function readCookie(name) {
+    const prefix = name + "=";
+    for (const part of document.cookie.split("; ")) {
+      if (part.startsWith(prefix)) return decodeURIComponent(part.slice(prefix.length));
+    }
+    return null;
+  }
+
   window.FastCartExtensions = {
     register(tag, define) {
       if (!customElements.get(tag)) customElements.define(tag, define);
@@ -25,8 +35,14 @@
     config(id) {
       return config.items.find((item) => item.id === id);
     },
-    api(path, init) {
-      return fetch(path, { credentials: "same-origin", ...init });
+    api(path, init = {}) {
+      const headers = new Headers(init.headers);
+      const method = (init.method ?? "GET").toUpperCase();
+      if (!SAFE_METHODS.has(method)) {
+        const csrf = readCookie("fc_customer_csrf");
+        if (csrf) headers.set("x-csrf-token", csrf);
+      }
+      return fetch(path, { ...init, credentials: "same-origin", headers });
     },
   };
 })();

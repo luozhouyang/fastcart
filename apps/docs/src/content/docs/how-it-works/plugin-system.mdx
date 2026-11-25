@@ -79,6 +79,7 @@ The digest is computed over the canonical file tree. Artifact storage is idempot
   "capabilities": {
     "data": ["catalog.read", "orders.read"],
     "storage": ["kv.read", "kv.write"],
+    "secrets": ["secrets.read"],
     "events": ["order.placed"],
     "network": ["api.example.com"],
     "admin": ["admin.ui"],
@@ -116,6 +117,10 @@ The digest is computed over the canonical file tree. Artifact storage is idempot
     }
   },
   "rpc": ["conversations.list", "conversations.reply"],
+  "rpc_permissions": {
+    "conversations.list": "plugins.read",
+    "conversations.reply": "plugins.write"
+  },
   "jobs": [{ "name": "sync-conversations", "schedule": "*/5 * * * *" }]
 }
 ```
@@ -130,6 +135,7 @@ Capabilities are grouped by area, and the group constrains which scope is valid.
 | --- | --- | --- |
 | `data` | `catalog.read`, `orders.read`, `customers.read`, `content.read`, `carts.read` | Read scoped business data through the host API |
 | `storage` | `kv.read`, `kv.write` | Per-plugin, per-store key-value storage |
+| `secrets` | `secrets.read` | Read named secrets through the host API; values are encrypted at rest and write-only through the admin API |
 | `storefront` | `store.read`, `customer.read` | Storefront context; the storefront token is restricted to a small read-only scope set |
 | `events` | Event names such as `order.placed` | Subscribe to outbox events; at most 20 |
 | `network` | Lowercase hostnames (at most 10) | Call allowlisted HTTPS hosts through the egress proxy |
@@ -188,14 +194,14 @@ Enabling validates the current settings against the manifest's JSON Schema, then
 ### Upgrade
 
 - The archive must contain the same plugin id; the same digest is rejected as a duplicate.
-- If the new version adds a scope, the upgrade fails unless `accept_new_scopes` is passed. The admin UI shows the capability diff before consenting.
+- If the new version adds a scope, the upgrade fails unless `accept_new_scopes` is passed. The API enforces that consent; the admin UI does not yet render a capability diff, so review the manifest before upgrading.
 - The old digest is stored as `previous_digest`; event subscriptions are rebuilt from the new manifest.
 - The new digest gets a new loader id, so the next request compiles the new version. No process restart and no configuration regeneration.
 
 ### Rollback and remove
 
 - Rollback swaps the active and previous digests and revalidates settings against the older manifest. With no previous digest, the call fails.
-- Disable stops routing immediately. Remove requires the plugin to be disabled first; it deletes installation, subscriptions, deliveries and jobs rows. Artifacts stay in the content-addressed store until garbage collection finds no references.
+- Disable stops routing immediately. Remove requires the plugin to be disabled first; it deletes the installation, subscriptions, deliveries, jobs, KV, secrets and logs. Artifacts stay in the content-addressed store until garbage collection finds no references.
 
 ## Execution paths
 
@@ -223,15 +229,34 @@ GET  /internal/plugins/v1/products/{id}
 GET  /internal/plugins/v1/orders
 GET  /internal/plugins/v1/orders/{id}
 GET  /internal/plugins/v1/customers/{id}
+GET  /internal/plugins/v1/customer/me
 GET  /internal/plugins/v1/pages/{handle}
+GET  /internal/plugins/v1/secrets/{name}
 GET  /internal/plugins/v1/kv/{namespace}/{key}
-PUT  /internal/plugins/v1/kv/{namespace}/{key}
+PUT  /internal/plugins/v1/kv/{namespace}/{key}?ttl=seconds
 DELETE /internal/plugins/v1/kv/{namespace}/{key}
 POST /internal/plugins/v1/egress
 POST /internal/plugins/v1/log
 ```
 
-Business endpoints check the required scope on the context token; `/context` only requires a valid token. The token is an HMAC-SHA256 value with a 30-second expiry, bound to the plugin, store, digest, actor and scopes, and carries a `jti`. Calls may include a `x-fastcart-call-id`; the host records it to reject a replay of the same call.
+`/customer/me` returns the signed-in storefront customer bound to the context
+token; the storefront token carries the customer id once the session
+middleware has authenticated it. The browser extension runtime adds the
+double-submit CSRF header for unsafe `/apps` calls, so plugin POSTs work for
+signed-in customers without exposing their session to the worker.
+
+Plugin secrets are encrypted with an authenticated cipher under a key derived
+from `[plugins] context_secret`. The admin API lists names and replaces or
+deletes values, but never returns them; the worker reads a value only through
+`/secrets/{name}` with the `secrets.read` scope. Store credentials with this
+API rather than in `settings`, which are returned to the worker and rendered in
+the admin extension manifest. Secret writes are refused when `context_secret`
+is unset, because a generated key would change on restart and make stored
+values unreadable. KV writes accept a `ttl` in seconds (up to 30
+days); expired rows are ignored immediately and pruned by the maintenance
+sweep.
+
+Business endpoints check the required scope on the context token; `/context` and `/log` require the always-granted `core.context` scope, so a UI mount token cannot call the host API. The token is an HMAC-SHA256 value with a 30-second expiry, bound to the plugin, store, digest, actor and scopes, and carries a `jti`. Calls may include a `x-fastcart-call-id`; the host records it to reject a replay of the same call. Admin RPC tokens carry only the intersection of the manifest scopes and the acting user's permissions, so a plugin cannot widen a read-only admin's access to orders or customers.
 
 ### Events and jobs
 
@@ -248,7 +273,7 @@ Admin extensions are iframe pages, not React components compiled into the admin 
 1. The admin fetches `/api/v1/admin/plugins/extensions`, which flattens every enabled plugin's admin targets and adds a signed `src` for HTML entries.
 2. `<PluginSlot target="...">` filters by target and by the current user's permission, sorts by priority, and renders at most three frames. An empty slot renders nothing, so there is no layout shift.
 3. The iframe uses `sandbox="allow-scripts allow-forms"` **without** `allow-same-origin`, so it has an opaque origin and cannot read admin cookies or `localStorage`.
-4. HTML responses carry `connect-src 'none'`; the plugin cannot call the network directly. Assets are digest-scoped and cached immutably.
+4. HTML responses disable `connect-src` and `form-action`, and allow only same-origin or data images, so the page cannot call the network or exfiltrate through a form. Assets are digest-scoped and cached immutably.
 5. The host and frame exchange `postMessage` envelopes with a per-mount channel. The frame sends `ready`, `resize`, `navigate`, `toast`, `open:external` and `rpc`; the host replies with `init`, `rpc:result` and context/theme updates.
 6. An `rpc` call is proxied to `POST /api/v1/admin/plugins/{id}/rpc`, which checks the admin session, CSRF, the acting user's permissions and the declared method list. The plugin never receives the session cookie.
 
@@ -289,7 +314,7 @@ This model is additive and client-side. A plugin can add a chat bubble, analytic
 | Call arbitrary internal APIs | The bridge hard-codes `/internal/plugins/v1/`, and Rust checks scopes per endpoint | None; the prefix cannot be repointed by the plugin |
 | Exfiltrate data | `globalOutbound: null`, egress allowlist, private-address blocking, quotas | An allowlisted host can still be abused; review is required |
 | DoS the host | Per-plugin concurrency, deadlines, response caps, watchdog restart | No hard CPU kill; a synchronous loop can stall other plugins and trigger a whole-host restart |
-| XSS the admin | iframe sandbox, CSP, channel validation, no `allow-same-origin` | Full-screen/overlay targets are intentionally not offered |
+| XSS the admin | iframe sandbox, CSP with `connect-src` and `form-action` disabled, same-origin/data-only images, channel validation, no `allow-same-origin` | Full-screen/overlay targets are intentionally not offered |
 | Inject malicious storefront script | Same-origin hosting, CSP, operator review | Client embeds share the page's privileges; this is inherent to the app-embed model |
 | Forge identity | HMAC token, store/digest/actor binding, single-use call ids | A plugin that holds its own token can replay within 30 s unless it sends a call id |
 | Supply-chain compromise | Immutable digest, install consent, review | No publisher signature or revocation feed in v1 |
@@ -307,6 +332,7 @@ Two rules follow from the table:
 | --- | --- |
 | Request deadlines | Admin 10 s · storefront 30 s · event 30 s · job 60 s |
 | Concurrency | 8 in-flight requests per plugin; 30 s queue deadline |
+| Public traffic | 120 `/apps` requests per minute per store, plugin and client address |
 | Response size | 512 KB admin · 8 MB storefront/event/job |
 | Watchdog | 5 s grace after a timeout, then restart the whole plugin host |
 | Restarts | At most 5 consecutive start failures |
@@ -314,9 +340,10 @@ Two rules follow from the table:
 | Module | 4 MB per JavaScript module by default |
 | Egress | 1,000 requests/day · 100 MB/day · 5 MB response · 1 MB request · 10 hosts |
 | Egress URL rules | HTTPS only, port 443, no IP literals, no userinfo, redirects disabled |
-| KV | 256 KB per value · 10 MB per plugin/store · 100,000 keys |
-| Events | 20 subscriptions · 5 delivery attempts · exponential backoff |
-| Jobs | 10 jobs · 5 attempts · five-field UTC cron, one-minute resolution |
+| KV | 256 KB per value · 10 MB per plugin/store · 100,000 keys · 30-day maximum TTL |
+| Secrets | 16 KB per value · 64-byte names · encrypted at rest · write-only admin API |
+| Events | 20 subscriptions · 5 delivery attempts · exponential backoff · 30-day terminal retention |
+| Jobs | 10 jobs · 5 attempts · five-field UTC cron, one-minute resolution · 30-day terminal retention |
 | Logs | 4 KB message · retained 7 days |
 | Admin UI | 10 extensions · 3 rendered per slot · height 80–1,200 px |
 

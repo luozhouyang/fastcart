@@ -26,6 +26,8 @@ const RUNTIME_TOKEN: &str = "runtime-secret";
 mod installation;
 #[path = "admin_plugins/runtime.rs"]
 mod runtime;
+#[path = "admin_plugins/secrets.rs"]
+mod secrets;
 #[path = "admin_plugins/support.rs"]
 mod support;
 #[path = "admin_plugins/websocket.rs"]

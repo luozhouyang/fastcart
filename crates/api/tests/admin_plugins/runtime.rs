@@ -1,15 +1,21 @@
+use fastcart_module_customer::{CreateCustomerInput, CustomerService, RegisterCustomerInput};
+
 use super::support::*;
 use super::*;
 
 const APP_PLUGIN_JS: &str = r#"
 export default {
   async fetch(request) {
-    return Response.json({ ok: true, path: new URL(request.url).pathname });
+    return Response.json({
+      ok: true,
+      path: new URL(request.url).pathname,
+      token: request.headers.get("x-fastcart-context-token"),
+    });
   },
 };
 "#;
 
-fn context_token(plugin: &str, store: &str, digest: &str, scopes: &[String]) -> String {
+pub(crate) fn context_token(plugin: &str, store: &str, digest: &str, scopes: &[String]) -> String {
     let claims = ContextClaims::new(
         plugin,
         store,
@@ -27,7 +33,30 @@ fn context_token(plugin: &str, store: &str, digest: &str, scopes: &[String]) -> 
         .unwrap()
 }
 
-async fn raw(
+fn storefront_token(
+    plugin: &str,
+    store: &str,
+    digest: &str,
+    scopes: &[String],
+    customer: Option<&str>,
+) -> String {
+    let claims = ContextClaims::new(
+        plugin,
+        store,
+        digest,
+        scopes.to_vec(),
+        TokenActor::Storefront {
+            id: customer.map(str::to_owned),
+        },
+        fastcart_kernel::now_timestamp(),
+    );
+    TokenSigner::new(b"test-secret")
+        .derive(store, plugin, digest)
+        .mint(&claims)
+        .unwrap()
+}
+
+pub(crate) async fn raw(
     app: &Router,
     method: &str,
     uri: &str,
@@ -616,4 +645,362 @@ async fn event_subscriptions_fan_out_and_jobs_are_manageable() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn customer_me_requires_a_signed_in_storefront_customer() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let bytes = archive(&manifest("demo", "1.0.0", &[]), "export default {};");
+    let (status, installed) = upload(
+        &fixture.app,
+        "/api/v1/admin/plugins/install",
+        &headers,
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{installed}");
+    let digest = installed["digest"].as_str().unwrap().to_owned();
+    let (status, _, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/enable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let database = fixture
+        .databases
+        .database(&StoreId::from_string(fixture.store_id.clone()))
+        .await
+        .unwrap();
+    let customer = CustomerService::new(database)
+        .create_customer(CreateCustomerInput::new("ada@example.com"))
+        .await
+        .unwrap();
+    let customer_id = customer.id.as_str().to_owned();
+    let scopes = vec!["customer.read".to_owned()];
+    let token = storefront_token(
+        "demo",
+        &fixture.store_id,
+        &digest,
+        &scopes,
+        Some(&customer_id),
+    );
+
+    let (status, body) = raw(
+        &fixture.app,
+        "GET",
+        "/internal/plugins/v1/customer/me",
+        vec![],
+        &[("authorization", format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["id"], customer_id);
+
+    let anonymous = storefront_token("demo", &fixture.store_id, &digest, &scopes, None);
+    let (status, _) = raw(
+        &fixture.app,
+        "GET",
+        "/internal/plugins/v1/customer/me",
+        vec![],
+        &[("authorization", format!("Bearer {anonymous}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let unprivileged =
+        storefront_token("demo", &fixture.store_id, &digest, &[], Some(&customer_id));
+    let (status, _) = raw(
+        &fixture.app,
+        "GET",
+        "/internal/plugins/v1/customer/me",
+        vec![],
+        &[("authorization", format!("Bearer {unprivileged}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let admin = context_token("demo", &fixture.store_id, &digest, &scopes);
+    let (status, _) = raw(
+        &fixture.app,
+        "GET",
+        "/internal/plugins/v1/customer/me",
+        vec![],
+        &[("authorization", format!("Bearer {admin}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn apps_forwards_the_customer_identity_and_enforces_csrf() {
+    let binary = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../experiments/workerd/bin/workerd");
+    if !binary.is_file() {
+        eprintln!("skipping: pinned workerd binary is absent");
+        return;
+    }
+    let commerce = start_plugin_commerce().await;
+    let fixture = fixture_options(true, Some(commerce)).await;
+    let headers = fixture.headers();
+    let bytes = archive(&manifest("demo", "1.0.0", &[]), APP_PLUGIN_JS);
+    let (status, installed) = upload(
+        &fixture.app,
+        "/api/v1/admin/plugins/install",
+        &headers,
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{installed}");
+    let digest = installed["digest"].as_str().unwrap().to_owned();
+    let (status, _, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/enable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let database = fixture
+        .databases
+        .database(&StoreId::from_string(fixture.store_id.clone()))
+        .await
+        .unwrap();
+    let session = CustomerService::new(database)
+        .register_with_session(RegisterCustomerInput::new(
+            "ada@example.com",
+            "correct-horse-123",
+        ))
+        .await
+        .unwrap();
+    let cookie = format!(
+        "fc_customer_session={}; fc_customer_csrf={}",
+        session.token, session.csrf_token
+    );
+
+    let (status, body) = raw(
+        &fixture.app,
+        "POST",
+        "/apps/demo/ping",
+        b"{}".to_vec(),
+        &[("host", HOST.to_owned()), ("cookie", cookie.clone())],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let (status, body) = raw(
+        &fixture.app,
+        "POST",
+        "/apps/demo/ping",
+        b"{}".to_vec(),
+        &[
+            ("host", HOST.to_owned()),
+            ("cookie", cookie),
+            ("x-csrf-token", session.csrf_token.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    let token = value["token"].as_str().expect("context token");
+    let claims = TokenSigner::new(b"test-secret")
+        .derive(&fixture.store_id, "demo", &digest)
+        .verify(token, fastcart_kernel::now_timestamp())
+        .unwrap();
+    assert_eq!(
+        claims.actor,
+        TokenActor::Storefront {
+            id: Some(session.customer.id.as_str().to_owned()),
+        }
+    );
+}
+
+#[tokio::test]
+async fn ui_mount_tokens_cannot_call_the_host_api() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let bytes = archive(&manifest("demo", "1.0.0", &[]), "export default {};");
+    let (status, installed) = upload(
+        &fixture.app,
+        "/api/v1/admin/plugins/install",
+        &headers,
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{installed}");
+    let digest = installed["digest"].as_str().unwrap().to_owned();
+    let (status, _, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/enable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let claims = ContextClaims::new(
+        "demo",
+        &fixture.store_id,
+        &digest,
+        vec!["ui.mount".to_owned()],
+        TokenActor::Admin {
+            id: "user_1".to_owned(),
+            permissions: Vec::new(),
+        },
+        fastcart_kernel::now_timestamp(),
+    );
+    let token = TokenSigner::new(b"test-secret")
+        .derive(&fixture.store_id, "demo", &digest)
+        .mint(&claims)
+        .unwrap();
+
+    let (status, _) = raw(
+        &fixture.app,
+        "GET",
+        "/internal/plugins/v1/context",
+        vec![],
+        &[("authorization", format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = raw(
+        &fixture.app,
+        "POST",
+        "/internal/plugins/v1/log",
+        serde_json::to_vec(&json!({ "message": "should not be logged" })).unwrap(),
+        &[
+            ("authorization", format!("Bearer {token}")),
+            ("content-type", "application/json".to_owned()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn kv_ttl_is_persisted_and_validated() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let bytes = archive(&manifest("demo", "1.0.0", &[]), "export default {};");
+    let (status, installed) = upload(
+        &fixture.app,
+        "/api/v1/admin/plugins/install",
+        &headers,
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{installed}");
+    let digest = installed["digest"].as_str().unwrap().to_owned();
+    let scopes: Vec<String> = installed["granted_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect();
+    let (status, _, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/enable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let token = context_token("demo", &fixture.store_id, &digest, &scopes);
+    let (status, _) = raw(
+        &fixture.app,
+        "PUT",
+        "/internal/plugins/v1/kv/chat/key?ttl=60",
+        b"value".to_vec(),
+        &[("authorization", format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let database = fixture
+        .databases
+        .database(&StoreId::from_string(fixture.store_id.clone()))
+        .await
+        .unwrap();
+    let expires_at: Option<i64> = sqlx::query_scalar(
+        "SELECT expires_at FROM plugin_kv WHERE plugin_id = 'demo' AND namespace = 'chat' AND key = 'key'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    let now = fastcart_kernel::now_timestamp();
+    assert!(expires_at.is_some_and(|value| value > now && value <= now + 61));
+
+    for ttl in ["0", "-1", "999999999"] {
+        let token = context_token("demo", &fixture.store_id, &digest, &scopes);
+        let (status, _) = raw(
+            &fixture.app,
+            "PUT",
+            &format!("/internal/plugins/v1/kv/chat/key?ttl={ttl}"),
+            b"value".to_vec(),
+            &[("authorization", format!("Bearer {token}"))],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "ttl={ttl}");
+    }
+}
+
+#[tokio::test]
+async fn apps_rate_limit_stops_a_storefront_flood() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let bytes = archive(&manifest("demo", "1.0.0", &[]), "export default {};");
+    let (status, _) = upload(
+        &fixture.app,
+        "/api/v1/admin/plugins/install",
+        &headers,
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/enable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for _ in 0..120 {
+        let (status, _) = raw(
+            &fixture.app,
+            "GET",
+            "/apps/demo/ping",
+            vec![],
+            &[("host", HOST.to_owned())],
+        )
+        .await;
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+    let (status, _) = raw(
+        &fixture.app,
+        "GET",
+        "/apps/demo/ping",
+        vec![],
+        &[("host", HOST.to_owned())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }

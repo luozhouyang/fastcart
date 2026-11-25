@@ -73,5 +73,9 @@
     }
   },
   "rpc": ["conversations.list", "conversations.reply"],
+  "rpc_permissions": {
+    "conversations.list": "plugins.read",
+    "conversations.reply": "plugins.write"
+  },
   "jobs": []
 }

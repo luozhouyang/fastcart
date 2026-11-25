@@ -18,6 +18,7 @@ fn base() -> Value {
         "capabilities": {
             "data": ["catalog.read", "orders.read"],
             "storage": ["kv.read", "kv.write"],
+            "secrets": ["secrets.read"],
             "events": ["order.placed"],
             "network": ["api.example.com"],
             "admin": ["admin.ui"],
@@ -40,6 +41,7 @@ fn base() -> Value {
             }
         },
         "rpc": ["conversations.list", "conversations.reply"],
+        "rpc_permissions": { "conversations.reply": "orders.write" },
         "jobs": [{ "name": "sync", "schedule": "*/5 * * * *" }]
     })
 }
@@ -69,6 +71,7 @@ fn accepts_a_valid_manifest() {
     for expected in [
         "catalog.read",
         "kv.write",
+        "secrets.read",
         "events.subscribe",
         "network.egress",
         "admin.ui",
@@ -108,6 +111,19 @@ fn rejects_unknown_and_reserved_targets() {
 fn rejects_write_scopes() {
     let mut value = base();
     value["capabilities"]["data"] = json!(["catalog.write"]);
+    expect_invalid(&value);
+}
+
+#[test]
+fn rejects_secret_write_and_unknown_secret_scopes() {
+    for scope in ["secrets.write", "secrets.read.all"] {
+        let mut value = base();
+        value["capabilities"]["secrets"] = json!([scope]);
+        expect_invalid(&value);
+    }
+
+    let mut value = base();
+    value["capabilities"]["secrets"] = json!(["kv.read"]);
     expect_invalid(&value);
 }
 
@@ -176,6 +192,21 @@ fn rejects_invalid_or_duplicate_rpc_methods() {
 
     let mut value = base();
     value["rpc"] = json!(["a", "a"]);
+    expect_invalid(&value);
+}
+
+#[test]
+fn rejects_rpc_permissions_for_undeclared_or_malformed_methods() {
+    let mut value = base();
+    value["rpc_permissions"] = json!({ "conversations.archive": "orders.write" });
+    expect_invalid(&value);
+
+    let mut value = base();
+    value["rpc_permissions"] = json!({ "conversations.reply": "Orders.Write" });
+    expect_invalid(&value);
+
+    let mut value = base();
+    value["rpc_permissions"] = json!({ "conversations.reply": "orders" });
     expect_invalid(&value);
 }
 

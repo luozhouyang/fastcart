@@ -2,13 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import {
   deletePlugin,
+  deletePluginSecret,
   disablePlugin,
   enablePlugin,
   installPlugin,
+  listPluginSecrets,
   listPlugins,
+  setPluginSecret,
   updatePluginSettings,
   type InstalledPlugin,
   type PluginListResponse,
+  type PluginSecretName,
 } from "@/lib/plugins";
 
 function formatDate(timestamp: number): string {
@@ -132,6 +136,7 @@ export function PluginsPage() {
           <PluginCard
             key={plugin.id}
             plugin={plugin}
+            storeId={store?.id ?? ""}
             busy={busy === plugin.id}
             editing={editing === plugin.id}
             draft={settingsDraft}
@@ -197,6 +202,7 @@ export function PluginsPage() {
 
 interface PluginCardProps {
   plugin: InstalledPlugin;
+  storeId: string;
   busy: boolean;
   editing: boolean;
   draft: string;
@@ -212,6 +218,7 @@ interface PluginCardProps {
 
 function PluginCard({
   plugin,
+  storeId,
   busy,
   editing,
   draft,
@@ -224,6 +231,7 @@ function PluginCard({
   onSave,
   onDelete,
 }: PluginCardProps) {
+  const [secretsOpen, setSecretsOpen] = useState(false);
   return (
     <article className="rounded-xl border border-border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -266,6 +274,16 @@ function PluginCard({
               className="h-8 rounded-lg border border-border px-3 text-[12px] hover:bg-accent disabled:opacity-50"
             >
               Settings
+            </button>
+          ) : null}
+          {canWrite ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setSecretsOpen((open) => !open)}
+              className="h-8 rounded-lg border border-border px-3 text-[12px] hover:bg-accent disabled:opacity-50"
+            >
+              Secrets
             </button>
           ) : null}
           {canInstall ? (
@@ -320,6 +338,125 @@ function PluginCard({
           </div>
         </div>
       ) : null}
+
+      {secretsOpen && storeId ? (
+        <PluginSecrets storeId={storeId} pluginId={plugin.id} />
+      ) : null}
     </article>
+  );
+}
+
+function PluginSecrets({ storeId, pluginId }: { storeId: string; pluginId: string }) {
+  const [secrets, setSecrets] = useState<PluginSecretName[] | null>(null);
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setSecrets(await listPluginSecrets(storeId, pluginId));
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not load secrets");
+    }
+  }, [storeId, pluginId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function save() {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError("Enter a secret name.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await setPluginSecret(storeId, pluginId, trimmed, value);
+      setName("");
+      setValue("");
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save the secret");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(secretName: string) {
+    setBusy(true);
+    try {
+      await deletePluginSecret(storeId, pluginId, secretName);
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not delete the secret");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 space-y-2 rounded-lg border border-border bg-background p-3">
+      <p className="text-[12px] font-medium text-foreground">Secrets</p>
+      <p className="text-[11.5px] text-muted-foreground">
+        Values are encrypted at rest and never shown again after saving.
+      </p>
+      {error ? <p className="text-[11.5px] text-destructive">{error}</p> : null}
+      {secrets === null ? (
+        <p className="text-[11.5px] text-muted-foreground">Loading…</p>
+      ) : secrets.length === 0 ? (
+        <p className="text-[11.5px] text-muted-foreground">No secrets stored.</p>
+      ) : (
+        <ul className="divide-y divide-border">
+          {secrets.map((secret) => (
+            <li
+              key={secret.name}
+              className="flex items-center justify-between gap-2 py-1.5 text-[12px]"
+            >
+              <span className="font-mono">{secret.name}</span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void remove(secret.name)}
+                className="text-[11.5px] text-destructive underline-offset-4 hover:underline disabled:opacity-50"
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex-1 text-[11.5px] text-muted-foreground">
+          Name
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="mt-1 h-8 w-full rounded-lg border border-border bg-card px-2 font-mono text-[12px]"
+            placeholder="api_key"
+          />
+        </label>
+        <label className="flex-[2] text-[11.5px] text-muted-foreground">
+          Value
+          <input
+            type="password"
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            className="mt-1 h-8 w-full rounded-lg border border-border bg-card px-2 font-mono text-[12px]"
+            autoComplete="new-password"
+          />
+        </label>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void save()}
+          className="h-8 rounded-lg bg-foreground px-3 text-[12px] font-medium text-background disabled:opacity-50"
+        >
+          Save secret
+        </button>
+      </div>
+    </div>
   );
 }

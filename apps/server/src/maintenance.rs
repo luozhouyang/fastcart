@@ -118,13 +118,14 @@ pub async fn plugin_dispatch_loop(context: Arc<AppContext>) {
         interval.tick().await;
         run_plugin_dispatch(&context).await;
         if tick.is_multiple_of(300) {
-            retain_plugin_logs(&context).await;
+            retain_plugin_state(&context).await;
         }
         tick = tick.wrapping_add(1);
     }
 }
 
-async fn retain_plugin_logs(context: &AppContext) {
+/// Prunes plugin logs, expired KV rows and terminal dispatch rows.
+async fn retain_plugin_state(context: &AppContext) {
     let mut offset = 0_i64;
     loop {
         let Ok(page) = context
@@ -138,11 +139,38 @@ async fn retain_plugin_logs(context: &AppContext) {
             let Ok(database) = context.databases.database(&store.id).await else {
                 continue;
             };
-            if let Err(error) =
-                fastcart_plugin::dispatch::prune_logs(&database, fastcart_kernel::now_timestamp())
-                    .await
-            {
-                tracing::warn!(store = %store.id, error = %error, "plugin log retention failed");
+            let now = fastcart_kernel::now_timestamp();
+            match fastcart_plugin::dispatch::prune_logs(&database, now).await {
+                Ok(0) => {}
+                Ok(pruned) => {
+                    tracing::debug!(store = %store.id, pruned, "plugin logs pruned");
+                }
+                Err(error) => {
+                    tracing::warn!(store = %store.id, error = %error, "plugin log retention failed");
+                }
+            }
+            match fastcart_plugin::dispatch::prune_expired_kv(&database, now).await {
+                Ok(0) => {}
+                Ok(pruned) => {
+                    tracing::debug!(store = %store.id, pruned, "expired plugin KV pruned");
+                }
+                Err(error) => {
+                    tracing::warn!(store = %store.id, error = %error, "plugin KV retention failed");
+                }
+            }
+            match fastcart_plugin::dispatch::prune_dispatch_state(&database, now).await {
+                Ok((0, 0)) => {}
+                Ok((deliveries, jobs)) => {
+                    tracing::debug!(
+                        store = %store.id,
+                        deliveries,
+                        jobs,
+                        "plugin dispatch retention applied"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(store = %store.id, error = %error, "plugin dispatch retention failed");
+                }
             }
         }
         if page.data.len() < 100 {
@@ -176,12 +204,6 @@ async fn run_plugin_dispatch(context: &AppContext) {
                 continue;
             };
             let report = dispatcher.run(&database, 25).await;
-            if let Err(error) =
-                fastcart_plugin::dispatch::prune_logs(&database, fastcart_kernel::now_timestamp())
-                    .await
-            {
-                tracing::warn!(store = %store.id, error = %error, "plugin log retention failed");
-            }
             if report != fastcart_plugin::DispatchReport::default() {
                 tracing::info!(
                     store = %store.id,

@@ -20,6 +20,28 @@ test("accepts a valid manifest", () => {
   validateManifest(base());
 });
 
+test("validates secret scopes and RPC permissions", () => {
+  const valid = base();
+  valid.capabilities = { secrets: ["secrets.read"] };
+  valid.rpc = ["conversations.list"];
+  valid.rpc_permissions = { "conversations.list": "plugins.write" };
+  validateManifest(valid);
+
+  const badScope = base();
+  badScope.capabilities = { secrets: ["secrets.write"] };
+  assert.throws(() => validateManifest(badScope), PluginValidationError);
+
+  const undeclared = base();
+  undeclared.rpc = ["conversations.list"];
+  undeclared.rpc_permissions = { "conversations.reply": "plugins.write" };
+  assert.throws(() => validateManifest(undeclared), PluginValidationError);
+
+  const badPermission = base();
+  badPermission.rpc = ["conversations.list"];
+  badPermission.rpc_permissions = { "conversations.list": "Plugins.Write" };
+  assert.throws(() => validateManifest(badPermission), PluginValidationError);
+});
+
 test("rejects traversal, unknown targets and bad versions", () => {
   const traversal = base();
   traversal.entry.path = "../index.js";

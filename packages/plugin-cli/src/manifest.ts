@@ -46,6 +46,7 @@ export interface PluginManifest {
   extensions?: { admin?: AdminExtension[]; storefront?: StorefrontExtension[] };
   settings?: { schema: Record<string, unknown>; ui?: string };
   rpc?: string[];
+  rpc_permissions?: Record<string, string>;
   jobs?: Array<{ name: string; schedule?: string }>;
 }
 
@@ -121,8 +122,19 @@ export function validateManifest(manifest: PluginManifest): void {
   if (manifest.settings?.ui && !safePath(manifest.settings.ui)) {
     fail(`unsafe settings UI path: ${manifest.settings.ui}`);
   }
+  for (const scope of manifest.capabilities?.secrets ?? []) {
+    if (scope !== "secrets.read") fail(`unsupported secret scope: ${scope}`);
+  }
   for (const method of manifest.rpc ?? []) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(method)) fail(`invalid RPC method: ${method}`);
+  }
+  for (const [method, permission] of Object.entries(manifest.rpc_permissions ?? {})) {
+    if (!(manifest.rpc ?? []).includes(method)) {
+      fail(`RPC permission names an undeclared method: ${method}`);
+    }
+    if (!/^[a-z0-9_]+(\.[a-z0-9_]+)+$/.test(permission)) {
+      fail(`invalid permission for RPC method ${method}: ${permission}`);
+    }
   }
 }
 

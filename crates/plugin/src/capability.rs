@@ -31,6 +31,9 @@ pub enum Scope {
     /// Write plugin key-value storage.
     #[serde(rename = "kv.write")]
     KvWrite,
+    /// Read plugin secrets through the host API.
+    #[serde(rename = "secrets.read")]
+    SecretsRead,
     /// Subscribe to platform events.
     #[serde(rename = "events.subscribe")]
     EventsSubscribe,
@@ -67,6 +70,7 @@ impl Scope {
             Self::CartsRead => "carts.read",
             Self::KvRead => "kv.read",
             Self::KvWrite => "kv.write",
+            Self::SecretsRead => "secrets.read",
             Self::EventsSubscribe => "events.subscribe",
             Self::NetworkEgress => "network.egress",
             Self::JobsEnqueue => "jobs.enqueue",
@@ -89,6 +93,7 @@ impl Scope {
             "carts.read" => Self::CartsRead,
             "kv.read" => Self::KvRead,
             "kv.write" => Self::KvWrite,
+            "secrets.read" => Self::SecretsRead,
             "events.subscribe" => Self::EventsSubscribe,
             "network.egress" => Self::NetworkEgress,
             "jobs.enqueue" => Self::JobsEnqueue,
@@ -117,6 +122,7 @@ pub const RESERVED_WRITE_SCOPES: &[&str] = &[
     "settings.write",
     "themes.write",
     "payments.write",
+    "secrets.write",
 ];
 
 /// Parses a scope declared in one capability group.
@@ -143,6 +149,7 @@ pub fn parse_scope(group: &str, value: &str) -> Result<Scope, PluginError> {
                 | Scope::CartsRead
         ),
         "storage" => matches!(scope, Scope::KvRead | Scope::KvWrite),
+        "secrets" => matches!(scope, Scope::SecretsRead),
         "storefront" => matches!(scope, Scope::StorefrontRead | Scope::CustomerRead),
         _ => false,
     };

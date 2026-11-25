@@ -20,6 +20,11 @@ export interface PluginListResponse {
   artifacts: Array<{ digest: string; id: string; name: string; version: string }>;
 }
 
+export interface PluginSecretName {
+  name: string;
+  updated_at: number;
+}
+
 function csrfToken(): string | null {
   const match = document.cookie.match(/(?:^|; )fc_csrf=([^;]*)/);
   return match ? decodeURIComponent(match[1] ?? "") : null;
@@ -85,5 +90,35 @@ export function updatePluginSettings(storeId: string, pluginId: string, settings
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ settings }),
+  });
+}
+
+export function listPluginSecrets(
+  storeId: string,
+  pluginId: string,
+  signal?: AbortSignal,
+): Promise<PluginSecretName[]> {
+  return pluginRequest<PluginSecretName[]>(
+    storeId,
+    `/${pluginId}/secrets`,
+    signal ? { signal } : {},
+  );
+}
+
+export function setPluginSecret(storeId: string, pluginId: string, name: string, value: string) {
+  return pluginRequest<void>(
+    storeId,
+    `/${pluginId}/secrets/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value }),
+    },
+  );
+}
+
+export function deletePluginSecret(storeId: string, pluginId: string, name: string) {
+  return pluginRequest<void>(storeId, `/${pluginId}/secrets/${encodeURIComponent(name)}`, {
+    method: "DELETE",
   });
 }

@@ -23,7 +23,9 @@ use fastcart_module_catalog::{CatalogService, ProductFilter, ProductStatus};
 use fastcart_module_content::{ContentService, PageStatus};
 use fastcart_module_customer::CustomerService;
 use fastcart_module_order::{OrderFilter, OrderService};
-use fastcart_plugin::{ContextClaims, EgressRequest, PluginManifest};
+use fastcart_plugin::{
+    ContextClaims, EgressRequest, PluginError, PluginManifest, PluginService, TokenActor,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -32,6 +34,7 @@ use crate::state::AppContext;
 const MAX_KV_VALUE: usize = 256 * 1024;
 const MAX_KV_TOTAL: u64 = 10 * 1024 * 1024;
 const MAX_KV_KEYS: i64 = 100_000;
+const MAX_KV_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// Builds the internal plugin API router.
 pub fn router() -> Router<Arc<AppContext>> {
@@ -42,11 +45,13 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/orders", get(list_orders))
         .route("/orders/{id}", get(get_order))
         .route("/customers/{id}", get(get_customer))
+        .route("/customer/me", get(get_current_customer))
         .route("/pages/{handle}", get(get_page))
         .route(
             "/kv/{namespace}/{key}",
             get(kv_get).put(kv_put).delete(kv_delete),
         )
+        .route("/secrets/{name}", get(get_secret))
         .route("/egress", post(egress))
         .route("/log", post(log))
 }
@@ -155,6 +160,7 @@ async fn get_context(
     State(context): State<Arc<AppContext>>,
     Extension(claims): Extension<ContextClaims>,
 ) -> Result<Json<Value>, ApiError> {
+    require_scope(&claims, "core.context")?;
     let database = database(&context, &claims).await?;
     let (_manifest, settings) = installation_manifest(&database, &claims.sub).await?;
     let store_id = StoreId::from_string(claims.store.clone());
@@ -245,6 +251,18 @@ async fn get_order(
     Ok(Json(order_summary(&order)))
 }
 
+fn customer_summary(customer: &fastcart_module_customer::Customer) -> Value {
+    json!({
+        "id": customer.id.as_str(),
+        "first_name": customer.first_name,
+        "last_name": customer.last_name,
+        "has_account": customer.has_account,
+        "status": customer.status.as_str(),
+        "created_at": customer.created_at,
+        "updated_at": customer.updated_at,
+    })
+}
+
 async fn get_customer(
     State(context): State<Arc<AppContext>>,
     Extension(claims): Extension<ContextClaims>,
@@ -256,15 +274,26 @@ async fn get_customer(
         .get_customer(&CustomerId::from_string(id))
         .await
         .map_err(ApiError::new)?;
-    Ok(Json(json!({
-        "id": customer.id.as_str(),
-        "first_name": customer.first_name,
-        "last_name": customer.last_name,
-        "has_account": customer.has_account,
-        "status": customer.status.as_str(),
-        "created_at": customer.created_at,
-        "updated_at": customer.updated_at,
-    })))
+    Ok(Json(customer_summary(&customer)))
+}
+
+async fn get_current_customer(
+    State(context): State<Arc<AppContext>>,
+    Extension(claims): Extension<ContextClaims>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&claims, "customer.read")?;
+    let TokenActor::Storefront {
+        id: Some(customer_id),
+    } = &claims.actor
+    else {
+        return Err(ApiError::new(AppError::Unauthorized));
+    };
+    let database = database(&context, &claims).await?;
+    let customer = CustomerService::new(database)
+        .get_customer(&CustomerId::from_string(customer_id.clone()))
+        .await
+        .map_err(ApiError::new)?;
+    Ok(Json(customer_summary(&customer)))
 }
 
 async fn get_page(
@@ -385,10 +414,19 @@ async fn kv_get(
     Ok(response)
 }
 
+/// Optional expiry for one KV write.
+#[derive(Clone, Debug, Deserialize)]
+pub struct KvPutQuery {
+    /// Time to live in seconds.
+    #[serde(default)]
+    pub ttl: Option<i64>,
+}
+
 async fn kv_put(
     State(context): State<Arc<AppContext>>,
     Extension(claims): Extension<ContextClaims>,
     Path((namespace, key)): Path<(String, String)>,
+    Query(query): Query<KvPutQuery>,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
     require_scope(&claims, "kv.write")?;
@@ -400,14 +438,26 @@ async fn kv_put(
             "KV value exceeds {MAX_KV_VALUE} bytes"
         )));
     }
+    let now = now_timestamp();
+    let expires_at = match query.ttl {
+        None => None,
+        Some(ttl) if (1..=MAX_KV_TTL_SECONDS).contains(&ttl) => Some(now + ttl),
+        Some(_) => {
+            return Err(ApiError::validation(format!(
+                "KV ttl must be between 1 and {MAX_KV_TTL_SECONDS} seconds"
+            )));
+        }
+    };
     let database = database(&context, &claims).await?;
     let (count, total): (i64, i64) = sqlx::query_as(
         "SELECT COUNT(*), COALESCE(SUM(LENGTH(value)), 0) FROM plugin_kv \
-         WHERE plugin_id = ? AND NOT (namespace = ? AND key = ?)",
+         WHERE plugin_id = ? AND NOT (namespace = ? AND key = ?) \
+         AND (expires_at IS NULL OR expires_at > ?)",
     )
     .bind(&claims.sub)
     .bind(&namespace)
     .bind(&key)
+    .bind(now)
     .fetch_one(database.pool())
     .await
     .map_err(|error| ApiError::new(AppError::database(error.to_string())))?;
@@ -418,15 +468,16 @@ async fn kv_put(
     }
     sqlx::query(
         "INSERT INTO plugin_kv (plugin_id, namespace, key, value, expires_at, updated_at) \
-         VALUES (?, ?, ?, ?, NULL, ?) \
+         VALUES (?, ?, ?, ?, ?, ?) \
          ON CONFLICT(plugin_id, namespace, key) DO UPDATE SET value = excluded.value, \
-         expires_at = NULL, updated_at = excluded.updated_at",
+         expires_at = excluded.expires_at, updated_at = excluded.updated_at",
     )
     .bind(&claims.sub)
     .bind(&namespace)
     .bind(&key)
     .bind(body.to_vec())
-    .bind(now_timestamp())
+    .bind(expires_at)
+    .bind(now)
     .execute(database.pool())
     .await
     .map_err(|error| ApiError::new(AppError::database(error.to_string())))?;
@@ -454,6 +505,32 @@ async fn kv_delete(
         .await
         .map_err(|error| ApiError::new(AppError::database(error.to_string())))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_secret(
+    State(context): State<Arc<AppContext>>,
+    Extension(claims): Extension<ContextClaims>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    require_scope(&claims, "secrets.read")?;
+    let database = database(&context, &claims).await?;
+    let service = PluginService::new(database, context.plugin_artifacts.clone())
+        .with_secret_cipher(context.plugin_secret_cipher.clone());
+    let value = service
+        .secret(&claims.sub, &name)
+        .await
+        .map_err(|error| match error {
+            PluginError::SecretNotFound(_) => {
+                ApiError::new(AppError::not_found("plugin secret", name.clone()))
+            }
+            other => ApiError::new(other.into()),
+        })?;
+    let mut response = Response::new(axum::body::Body::from(value));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/octet-stream"),
+    );
+    Ok(response)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -542,6 +619,7 @@ async fn log(
     Extension(claims): Extension<ContextClaims>,
     Json(body): Json<LogBody>,
 ) -> Result<StatusCode, ApiError> {
+    require_scope(&claims, "core.context")?;
     let level = match body.level.as_str() {
         "debug" | "info" | "warn" | "error" => body.level,
         _ => return Err(ApiError::validation("invalid log level")),

@@ -34,6 +34,17 @@ pub struct InstalledPlugin {
     pub updated_at: i64,
 }
 
+/// Metadata for one stored plugin secret.
+///
+/// Values are never returned by the admin API.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PluginSecretName {
+    /// Secret name.
+    pub name: String,
+    /// Unix timestamp of the last update.
+    pub updated_at: i64,
+}
+
 /// Installation plus the full manifest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PluginDetail {

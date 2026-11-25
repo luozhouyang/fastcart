@@ -11,13 +11,13 @@ use axum::Router;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use fastcart_http::{AdminActor, ApiError, ApiError as ApiFailure, ApiResult};
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{ActorContext, AppError, now_timestamp};
 use fastcart_plugin::{
     ArtifactSummary, ContextClaims, InstalledPlugin, PluginDetail, PluginError, PluginManifest,
-    PluginService, RequestKind, RuntimeRequest, TokenActor,
+    PluginSecretName, PluginService, RequestKind, RuntimeRequest, TokenActor,
 };
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -35,6 +35,11 @@ pub fn router() -> Router<Arc<AppContext>> {
         .route("/plugins/{id}/enable", post(enable_plugin))
         .route("/plugins/{id}/disable", post(disable_plugin))
         .route("/plugins/{id}/settings", patch(update_settings))
+        .route("/plugins/{id}/secrets", get(list_secrets))
+        .route(
+            "/plugins/{id}/secrets/{name}",
+            put(set_secret).delete(delete_secret),
+        )
         .route("/plugins/{id}/rollback", post(rollback_plugin))
         .route("/plugins/{id}/rpc", post(plugin_rpc))
         .route("/plugins/{id}/deliveries", get(list_deliveries))
@@ -115,6 +120,7 @@ fn require_runtime(context: &AppContext) -> ApiResult<()> {
 
 fn service(context: &AppContext, db: StoreDatabase, actor: &ActorContext) -> PluginService {
     PluginService::new(db, context.plugin_artifacts.clone())
+        .with_secret_cipher(context.plugin_secret_cipher.clone())
         .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
 }
 
@@ -255,6 +261,62 @@ async fn update_settings(
     ))
 }
 
+/// Secret replacement payload.
+#[derive(Clone, Debug, serde::Deserialize, ToSchema)]
+pub struct SetSecretRequest {
+    /// Plaintext secret value. It is never returned by the API.
+    pub value: String,
+}
+
+/// Lists stored secret names for one plugin.
+///
+/// Values are write-only and never included.
+async fn list_secrets(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<PluginSecretName>>> {
+    require(&actor, "plugins.write")?;
+    let service = service(&context, db, &actor);
+    Ok(Json(service.list_secret_names(&id).await.map_err(api)?))
+}
+
+/// Creates or replaces one plugin secret.
+async fn set_secret(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, name)): Path<(String, String)>,
+    Json(request): Json<SetSecretRequest>,
+) -> ApiResult<StatusCode> {
+    require(&actor, "plugins.write")?;
+    if !context.plugin_secrets_durable {
+        return Err(ApiError::new(AppError::conflict(
+            "plugin secrets require [plugins] context_secret in the server configuration",
+        )));
+    }
+    let service = service(&context, db, &actor);
+    service
+        .set_secret(&id, &name, request.value.as_bytes())
+        .await
+        .map_err(api)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deletes one plugin secret.
+async fn delete_secret(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    require(&actor, "plugins.write")?;
+    let service = service(&context, db, &actor);
+    service.delete_secret(&id, &name).await.map_err(api)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[utoipa::path(
     post,
     path = "/plugins/{id}/rollback",
@@ -382,9 +444,8 @@ async fn plugin_rpc(
             request.method,
         )));
     }
-    if let Some(permission) = rpc_permission(&request.method)
-        && !actor.permissions.contains(permission)
-    {
+    let required = rpc_permission(&manifest, &request.method).unwrap_or("plugins.write");
+    if !actor.has_permission(required) {
         return Err(ApiError::new(AppError::Forbidden));
     }
     let Some(host) = context.plugin_host.as_ref() else {
@@ -397,7 +458,11 @@ async fn plugin_rpc(
         )
             .into_response());
     };
-    let scopes: Vec<String> = serde_json::from_str(&scopes_json).unwrap_or_default();
+    let scopes: Vec<String> = serde_json::from_str::<Vec<String>>(&scopes_json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|scope| admin_scope_allowed(scope, &actor))
+        .collect();
     let user_id = actor
         .user_id
         .as_ref()
@@ -438,7 +503,15 @@ async fn plugin_rpc(
     super::plugin_runtime::forward_outcome(response)
 }
 
-fn rpc_permission(method: &str) -> Option<&'static str> {
+/// Returns the permission required to invoke one declared RPC method.
+///
+/// A manifest may declare the permission explicitly. Otherwise the method
+/// prefix supplies a conservative default, and an undeclared method falls back
+/// to `plugins.write` so `plugins.read` alone cannot trigger plugin code.
+fn rpc_permission<'a>(manifest: &'a PluginManifest, method: &str) -> Option<&'a str> {
+    if let Some(permission) = manifest.rpc_permissions.get(method) {
+        return Some(permission.as_str());
+    }
     match method.split('.').next().unwrap_or_default() {
         "orders" => Some("orders.read"),
         "products" => Some("products.read"),
@@ -446,6 +519,27 @@ fn rpc_permission(method: &str) -> Option<&'static str> {
         "settings" => Some("settings.read"),
         "plugins" => Some("plugins.read"),
         _ => None,
+    }
+}
+
+/// Returns whether the acting admin may exercise one plugin scope.
+///
+/// The context token carries the intersection of the plugin's granted scopes
+/// and the user's permissions, so a plugin method cannot read orders or
+/// customers on behalf of an admin who lacks those permissions.
+fn admin_scope_allowed(scope: &str, actor: &ActorContext) -> bool {
+    let has = |permissions: &[&str]| {
+        permissions
+            .iter()
+            .any(|permission| actor.has_permission(permission))
+    };
+    match scope {
+        "catalog.read" => has(&["products.read", "products.write"]),
+        "orders.read" | "carts.read" => has(&["orders.read", "orders.write"]),
+        "customers.read" => has(&["customers.read", "customers.write"]),
+        "content.read" => has(&["themes.read", "themes.write"]),
+        "secrets.read" => has(&["plugins.write", "plugins.install"]),
+        _ => true,
     }
 }
 
@@ -720,4 +814,89 @@ async fn clear_logs(
         .await
         .map_err(|error| ApiError::new(AppError::database(error.to_string())))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fastcart_kernel::ActorContext;
+    use serde_json::json;
+
+    fn manifest() -> PluginManifest {
+        PluginManifest::parse(
+            json!({
+                "schema_version": "1",
+                "id": "demo",
+                "name": "Demo",
+                "version": "1.0.0",
+                "api_version": 2,
+                "runtime": { "engine": "workerd", "compatibility_date": "2026-11-01" },
+                "entry": { "type": "worker", "path": "worker/index.js" },
+                "capabilities": {
+                    "data": ["catalog.read", "orders.read", "customers.read", "content.read"],
+                    "storage": ["kv.read", "kv.write"],
+                    "secrets": ["secrets.read"]
+                },
+                "rpc": ["conversations.list", "orders.refund"],
+                "rpc_permissions": { "conversations.list": "plugins.write" }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn actor(permissions: &[&str]) -> ActorContext {
+        ActorContext {
+            permissions: permissions
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            ..ActorContext::default()
+        }
+    }
+
+    #[test]
+    fn rpc_permissions_prefer_declarations_then_prefixes() {
+        let manifest = manifest();
+        assert_eq!(
+            rpc_permission(&manifest, "conversations.list"),
+            Some("plugins.write")
+        );
+        assert_eq!(
+            rpc_permission(&manifest, "orders.refund"),
+            Some("orders.read")
+        );
+        assert_eq!(rpc_permission(&manifest, "unknown.method"), None);
+    }
+
+    #[test]
+    fn admin_scopes_follow_the_acting_users_permissions() {
+        let limited = actor(&["plugins.read"]);
+        assert!(!admin_scope_allowed("catalog.read", &limited));
+        assert!(!admin_scope_allowed("orders.read", &limited));
+        assert!(!admin_scope_allowed("customers.read", &limited));
+        assert!(!admin_scope_allowed("content.read", &limited));
+        assert!(!admin_scope_allowed("secrets.read", &limited));
+        assert!(admin_scope_allowed("kv.read", &limited));
+
+        let full = actor(&[
+            "products.read",
+            "orders.read",
+            "customers.read",
+            "themes.read",
+            "plugins.write",
+        ]);
+        for scope in [
+            "catalog.read",
+            "orders.read",
+            "carts.read",
+            "customers.read",
+            "content.read",
+            "secrets.read",
+            "kv.read",
+        ] {
+            assert!(admin_scope_allowed(scope, &full), "{scope}");
+        }
+    }
 }

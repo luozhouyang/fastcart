@@ -12,7 +12,8 @@ use crate::artifact::{ArtifactStore, ArtifactSummary};
 use crate::bundle::RuntimeBundle;
 use crate::error::PluginError;
 use crate::manifest::{PluginManifest, validate_settings};
-use crate::model::InstalledPlugin;
+use crate::model::{InstalledPlugin, PluginSecretName};
+use crate::secrets::{MAX_SECRET_BYTES, SecretCipher, valid_secret_name};
 
 const COLUMNS: &str = "id, plugin_id, digest, version, manifest_json, enabled, settings_json, \
      settings_revision, granted_scopes, previous_digest, installed_by, installed_at, updated_at";
@@ -64,6 +65,7 @@ impl InstallationRow {
 pub struct PluginService {
     db: StoreDatabase,
     artifacts: Arc<ArtifactStore>,
+    secrets: Option<Arc<SecretCipher>>,
     audit: Option<AuditActor>,
 }
 
@@ -74,8 +76,16 @@ impl PluginService {
         Self {
             db,
             artifacts,
+            secrets: None,
             audit: None,
         }
+    }
+
+    /// Enables secret storage for this service.
+    #[must_use]
+    pub fn with_secret_cipher(mut self, cipher: Arc<SecretCipher>) -> Self {
+        self.secrets = Some(cipher);
+        self
     }
 
     /// Records plugin mutations in the store audit outbox.
@@ -390,6 +400,134 @@ impl PluginService {
         self.get(plugin_id).await
     }
 
+    fn cipher(&self) -> Result<&SecretCipher, PluginError> {
+        self.secrets
+            .as_deref()
+            .ok_or_else(|| PluginError::Crypto("secret storage is not configured".to_owned()))
+    }
+
+    /// Encrypts and stores one secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::InvalidSecret`] for a bad name or oversized
+    /// value, and [`PluginError::NotFound`] when the plugin is not installed.
+    pub async fn set_secret(
+        &self,
+        plugin_id: &str,
+        name: &str,
+        value: &[u8],
+    ) -> Result<(), PluginError> {
+        self.row(plugin_id).await?;
+        if !valid_secret_name(name) {
+            return Err(PluginError::InvalidSecret(format!(
+                "invalid secret name: {name}"
+            )));
+        }
+        if value.len() > MAX_SECRET_BYTES {
+            return Err(PluginError::InvalidSecret(format!(
+                "secret exceeds {MAX_SECRET_BYTES} bytes"
+            )));
+        }
+        let (ciphertext, nonce) = self.cipher()?.encrypt(value)?;
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await?;
+        sqlx::query(
+            "INSERT INTO plugin_secrets (plugin_id, name, ciphertext, nonce, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(plugin_id, name) DO UPDATE SET ciphertext = excluded.ciphertext, \
+             nonce = excluded.nonce, updated_at = excluded.updated_at",
+        )
+        .bind(plugin_id)
+        .bind(name)
+        .bind(ciphertext)
+        .bind(nonce)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        self.append_audit(
+            &mut tx,
+            "plugin.secret_set",
+            plugin_id,
+            json!({ "name": name }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Lists stored secret names without their values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::NotFound`] when the plugin is not installed.
+    pub async fn list_secret_names(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Vec<PluginSecretName>, PluginError> {
+        self.row(plugin_id).await?;
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT name, updated_at FROM plugin_secrets WHERE plugin_id = ? ORDER BY name ASC",
+        )
+        .bind(plugin_id)
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, updated_at)| PluginSecretName { name, updated_at })
+            .collect())
+    }
+
+    /// Decrypts one secret for the plugin host API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::SecretNotFound`] when absent and
+    /// [`PluginError::Crypto`] when the stored value cannot be decrypted.
+    pub async fn secret(&self, plugin_id: &str, name: &str) -> Result<Vec<u8>, PluginError> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "SELECT ciphertext, nonce FROM plugin_secrets WHERE plugin_id = ? AND name = ?",
+        )
+        .bind(plugin_id)
+        .bind(name)
+        .fetch_optional(self.db.pool())
+        .await?;
+        let Some((ciphertext, nonce)) = row else {
+            return Err(PluginError::SecretNotFound(name.to_owned()));
+        };
+        self.cipher()?.decrypt(&nonce, &ciphertext)
+    }
+
+    /// Deletes one secret if it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::NotFound`] when the plugin is not installed.
+    pub async fn delete_secret(&self, plugin_id: &str, name: &str) -> Result<(), PluginError> {
+        self.row(plugin_id).await?;
+        if !valid_secret_name(name) {
+            return Err(PluginError::InvalidSecret(format!(
+                "invalid secret name: {name}"
+            )));
+        }
+        let mut tx = self.db.begin().await?;
+        sqlx::query("DELETE FROM plugin_secrets WHERE plugin_id = ? AND name = ?")
+            .bind(plugin_id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        self.append_audit(
+            &mut tx,
+            "plugin.secret_deleted",
+            plugin_id,
+            json!({ "name": name }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Swaps the active and previous digests.
     ///
     /// # Errors
@@ -432,7 +570,11 @@ impl PluginService {
         self.get(plugin_id).await
     }
 
-    /// Removes a disabled plugin installation. Artifacts are kept for GC.
+    /// Removes a disabled plugin installation and its store-scoped state.
+    ///
+    /// Event subscriptions, deliveries, jobs, KV, secrets and logs are deleted
+    /// with the installation. Artifacts are kept for the shared garbage
+    /// collector.
     ///
     /// # Errors
     ///
@@ -452,6 +594,18 @@ impl PluginService {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM plugin_jobs WHERE plugin_id = ?")
+            .bind(plugin_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM plugin_kv WHERE plugin_id = ?")
+            .bind(plugin_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM plugin_secrets WHERE plugin_id = ?")
+            .bind(plugin_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM plugin_logs WHERE plugin_id = ?")
             .bind(plugin_id)
             .execute(&mut *tx)
             .await?;

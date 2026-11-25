@@ -47,6 +47,15 @@ pub enum PluginError {
     /// Settings do not match the manifest schema.
     #[error("settings do not match the plugin schema: {0}")]
     InvalidSettings(String),
+    /// A secret name or value violates a rule.
+    #[error("invalid plugin secret: {0}")]
+    InvalidSecret(String),
+    /// A stored secret is absent.
+    #[error("plugin secret not found: {0}")]
+    SecretNotFound(String),
+    /// Secret encryption or decryption failed.
+    #[error("plugin secret error: {0}")]
+    Crypto(String),
     /// The stored artifact does not match its digest.
     #[error("artifact digest mismatch: {0}")]
     DigestMismatch(String),
@@ -82,6 +91,9 @@ impl PluginError {
             Self::Disabled(_) => "plugin_disabled",
             Self::NoPreviousDigest => "no_previous_digest",
             Self::InvalidSettings(_) => "settings_invalid",
+            Self::InvalidSecret(_) => "secret_invalid",
+            Self::SecretNotFound(_) => "secret_not_found",
+            Self::Crypto(_) => "secret_error",
             Self::DigestMismatch(_) => "digest_mismatch",
             Self::ScopesNotAccepted(_) => "scopes_not_accepted",
             Self::Storage(_) => "storage",
@@ -110,7 +122,8 @@ impl From<PluginError> for AppError {
             | PluginError::InvalidArchive(message)
             | PluginError::ArchiveTooLarge(message)
             | PluginError::UnsafePath(message)
-            | PluginError::InvalidSettings(message) => AppError::Validation(message),
+            | PluginError::InvalidSettings(message)
+            | PluginError::InvalidSecret(message) => AppError::Validation(message),
             PluginError::UnsupportedApi(version) => {
                 AppError::Validation(format!("unsupported plugin API version: {version}"))
             }
@@ -135,9 +148,11 @@ impl From<PluginError> for AppError {
             PluginError::ScopesNotAccepted(scopes) => AppError::Conflict(format!(
                 "additional capabilities require acceptance: {scopes}"
             )),
+            PluginError::SecretNotFound(name) => AppError::not_found("plugin secret", name),
             PluginError::Storage(message) | PluginError::Runtime(message) => {
                 AppError::internal(message)
             }
+            PluginError::Crypto(message) => AppError::internal(message),
             PluginError::Database(message) => AppError::database(message),
         }
     }

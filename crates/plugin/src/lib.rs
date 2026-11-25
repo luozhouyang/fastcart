@@ -14,6 +14,7 @@ pub mod inject;
 pub mod manifest;
 pub mod model;
 pub mod runtime;
+pub mod secrets;
 pub mod service;
 pub mod targets;
 
@@ -23,10 +24,11 @@ pub use capability::Scope;
 pub use dispatch::{DispatchReport, PluginDispatch};
 pub use error::PluginError;
 pub use manifest::{HOST_API_VERSION, PluginManifest};
-pub use model::{InstalledPlugin, PluginDetail};
+pub use model::{InstalledPlugin, PluginDetail, PluginSecretName};
 pub use runtime::{
     ContextClaims, EgressError, EgressLimiter, EgressRequest, EgressResponse, PluginHost,
     RequestKind, RuntimeConfig, RuntimeRequest, RuntimeResponse, StreamingResponse, TokenActor,
     TokenSigner,
 };
+pub use secrets::{MAX_SECRET_BYTES, MAX_SECRET_NAME, SecretCipher};
 pub use service::PluginService;

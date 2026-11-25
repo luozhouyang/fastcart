@@ -36,5 +36,6 @@
       "additionalProperties": false
     }
   },
-  "rpc": ["panel.info"]
+  "rpc": ["panel.info"],
+  "rpc_permissions": { "panel.info": "plugins.read" }
 }

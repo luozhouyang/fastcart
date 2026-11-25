@@ -18,6 +18,15 @@ use serde::Deserialize;
 
 use crate::state::AppContext;
 
+/// Content policy for plugin HTML entries.
+///
+/// The iframe has an opaque origin, so `connect-src` and `form-action` are the
+/// remaining exfiltration paths. Images are limited to same-origin assets and
+/// data URLs; no https origin is allowed to receive a request.
+const PLUGIN_UI_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+     img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; \
+     frame-ancestors 'self'; base-uri 'none'";
+
 /// Builds the plugin UI asset routes.
 pub fn router() -> Router<Arc<AppContext>> {
     Router::new().route(
@@ -114,11 +123,7 @@ async fn serve(
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(
-                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data: https:; font-src 'self'; connect-src 'none'; \
-                 frame-ancestors 'self'; base-uri 'none'",
-            ),
+            HeaderValue::from_static(PLUGIN_UI_CSP),
         );
     } else {
         headers.insert(
@@ -179,4 +184,17 @@ pub fn mount_token(
 #[allow(dead_code)]
 fn _into_response(response: Response) -> Response {
     response.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PLUGIN_UI_CSP;
+
+    #[test]
+    fn plugin_ui_csp_blocks_network_and_forms() {
+        assert!(PLUGIN_UI_CSP.contains("connect-src 'none'"));
+        assert!(PLUGIN_UI_CSP.contains("form-action 'none'"));
+        assert!(PLUGIN_UI_CSP.contains("img-src 'self' data:"));
+        assert!(!PLUGIN_UI_CSP.contains("img-src 'self' data: https:"));
+    }
 }

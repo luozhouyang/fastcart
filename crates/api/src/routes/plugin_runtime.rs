@@ -9,8 +9,8 @@ use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use fastcart_http::ApiError;
-use fastcart_kernel::{AppError, StoreContext, now_timestamp};
+use fastcart_http::{ApiError, ClientIp};
+use fastcart_kernel::{ActorContext, AppError, StoreContext, now_timestamp};
 use fastcart_plugin::{
     ContextClaims, PluginError, PluginManifest, RequestKind, RuntimeRequest, RuntimeResponse,
     StreamingResponse, TokenActor,
@@ -31,6 +31,8 @@ pub fn apps_router() -> Router<Arc<AppContext>> {
 async fn forward(
     State(context): State<Arc<AppContext>>,
     Extension(store): Extension<StoreContext>,
+    Extension(actor): Extension<ActorContext>,
+    client_ip: Option<Extension<ClientIp>>,
     StoreDb(database): StoreDb,
     Path(params): Path<std::collections::HashMap<String, String>>,
     mut request: axum::extract::Request,
@@ -58,6 +60,15 @@ async fn forward(
     }
     let manifest = PluginManifest::parse(manifest_json.as_bytes())
         .map_err(|error| ApiError::new(error.into()))?;
+    let limiter_key = format!(
+        "{}:{}:{}",
+        store.store_id.as_str(),
+        plugin_id,
+        client_key(client_ip.as_ref())
+    );
+    if !context.plugin_apps_limiter.check(&limiter_key) {
+        return Err(ApiError::new(AppError::RateLimited));
+    }
     let Some(host) = context.plugin_host.as_ref() else {
         return Ok((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -76,7 +87,7 @@ async fn forward(
         store.store_id.as_str(),
         digest_for_token.clone(),
         scopes,
-        TokenActor::Storefront { id: None },
+        storefront_actor(&actor),
         now_timestamp(),
     );
     let token = context
@@ -184,8 +195,25 @@ pub(crate) fn record_forward(context: &AppContext, result: &Result<RuntimeRespon
     }
 }
 
+/// Binds the storefront actor to the plugin context token.
+///
+/// The customer session middleware has already resolved the signed-in
+/// customer; dropping the identifier here would leave every plugin request
+/// anonymous.
+fn storefront_actor(actor: &ActorContext) -> TokenActor {
+    TokenActor::Storefront {
+        id: actor.customer_id.as_ref().map(|id| id.as_str().to_owned()),
+    }
+}
+
 fn storefront_scopes(manifest: &PluginManifest) -> Vec<String> {
-    const ALLOWED: [&str; 4] = ["catalog.read", "store.read", "customer.read", "carts.read"];
+    const ALLOWED: [&str; 5] = [
+        "core.context",
+        "catalog.read",
+        "store.read",
+        "customer.read",
+        "carts.read",
+    ];
     manifest
         .scopes()
         .unwrap_or_default()
@@ -193,6 +221,16 @@ fn storefront_scopes(manifest: &PluginManifest) -> Vec<String> {
         .map(|scope| scope.as_str().to_owned())
         .filter(|scope| ALLOWED.contains(&scope.as_str()))
         .collect()
+}
+
+/// Stable rate-limit key for a public plugin call.
+///
+/// Direct router tests have no socket peer; they share the `unknown` bucket
+/// rather than trusting request headers.
+fn client_key(client_ip: Option<&Extension<ClientIp>>) -> String {
+    client_ip
+        .map(|Extension(ip)| ip.as_key())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn forward_headers(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -326,5 +364,59 @@ pub(crate) async fn status(context: &AppContext) -> RuntimeStatus {
             last_error: Some("plugin runtime is disabled or misconfigured".to_owned()),
             uptime_seconds: 0,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn storefront_scopes_stay_read_only() {
+        let manifest = PluginManifest::parse(
+            json!({
+                "schema_version": "1",
+                "id": "demo",
+                "name": "Demo",
+                "version": "1.0.0",
+                "api_version": 2,
+                "runtime": { "engine": "workerd", "compatibility_date": "2026-11-01" },
+                "entry": { "type": "worker", "path": "worker/index.js" },
+                "capabilities": {
+                    "data": ["catalog.read", "orders.read"],
+                    "storage": ["kv.read", "kv.write"],
+                    "secrets": ["secrets.read"],
+                    "storefront": ["store.read", "customer.read"]
+                }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let scopes = storefront_scopes(&manifest);
+        assert!(scopes.contains(&"core.context".to_owned()));
+        assert!(scopes.contains(&"catalog.read".to_owned()));
+        assert!(scopes.contains(&"customer.read".to_owned()));
+        assert!(!scopes.contains(&"orders.read".to_owned()));
+        assert!(!scopes.contains(&"kv.read".to_owned()));
+        assert!(!scopes.contains(&"secrets.read".to_owned()));
+    }
+
+    #[test]
+    fn storefront_actor_keeps_the_customer_identity() {
+        let store = fastcart_kernel::StoreId::from_string("store_1".to_owned());
+        let customer = fastcart_kernel::CustomerId::from_string("cus_1".to_owned());
+        assert_eq!(
+            storefront_actor(&ActorContext::customer(customer, store)),
+            TokenActor::Storefront {
+                id: Some("cus_1".to_owned())
+            }
+        );
+        assert_eq!(
+            storefront_actor(&ActorContext::anonymous()),
+            TokenActor::Storefront { id: None }
+        );
     }
 }

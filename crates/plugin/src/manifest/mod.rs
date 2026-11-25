@@ -67,6 +67,14 @@ pub struct PluginManifest {
     /// Declared admin RPC methods.
     #[serde(default)]
     pub rpc: Vec<String>,
+    /// Admin permission required to invoke one declared RPC method.
+    ///
+    /// Methods without an entry require `plugins.write` when no prefix rule
+    /// applies. The permission is checked in addition to `plugins.read`, so a
+    /// plugin cannot expose order or customer data to a user who may only see
+    /// plugin metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rpc_permissions: BTreeMap<String, String>,
     /// Declared jobs.
     #[serde(default)]
     pub jobs: Vec<JobSpec>,
@@ -126,6 +134,9 @@ pub struct Capabilities {
     /// Storage scopes.
     #[serde(default)]
     pub storage: Vec<String>,
+    /// Secret read scopes.
+    #[serde(default)]
+    pub secrets: Vec<String>,
     /// Subscribed event types.
     #[serde(default)]
     pub events: Vec<String>,
@@ -273,6 +284,9 @@ impl PluginManifest {
         }
         for value in &self.capabilities.storage {
             scopes.insert(parse_scope("storage", value)?);
+        }
+        for value in &self.capabilities.secrets {
+            scopes.insert(parse_scope("secrets", value)?);
         }
         for value in &self.capabilities.storefront {
             scopes.insert(parse_scope("storefront", value)?);
@@ -445,6 +459,22 @@ fn valid_date(value: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
+fn valid_permission(value: &str) -> bool {
+    let mut segments = value.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    if first.is_empty() || segments.clone().count() == 0 {
+        return false;
+    }
+    value.split('.').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    })
 }
 
 fn valid_js_identifier(value: &str) -> bool {

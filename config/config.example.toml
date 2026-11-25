@@ -134,5 +134,8 @@ max_module_bytes = 4194304
 # runtime_token = "replace-with-a-random-secret" # generated when omitted
 # workerd_binary = "experiments/workerd/bin/workerd"
 # runtime_dir = "./data/plugins/runtime"
+# Signs plugin context tokens and derives the plugin secret encryption key.
+# Required before the admin can store plugin secrets; a generated key would
+# change on every restart and make stored secrets unreadable.
 # context_secret = "replace-with-a-random-secret"
 # self_address = "127.0.0.1:8080"

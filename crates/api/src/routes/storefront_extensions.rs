@@ -42,9 +42,11 @@ fn js_response(body: &'static str) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/javascript; charset=utf-8"),
     );
+    // The runtime is not digest-scoped, so a short cache keeps CSRF and boot
+    // fixes from waiting an hour behind a cached copy.
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600"),
+        HeaderValue::from_static("public, max-age=300"),
     );
     response
 }

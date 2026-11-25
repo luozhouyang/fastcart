@@ -117,6 +117,9 @@ impl PluginManifest {
         for value in &self.capabilities.storage {
             parse_scope("storage", value)?;
         }
+        for value in &self.capabilities.secrets {
+            parse_scope("secrets", value)?;
+        }
         for value in &self.capabilities.storefront {
             parse_scope("storefront", value)?;
         }
@@ -321,6 +324,18 @@ impl PluginManifest {
             if !seen_rpc.insert(method) {
                 return Err(PluginError::InvalidManifest(format!(
                     "duplicate RPC method: {method}"
+                )));
+            }
+        }
+        for (method, permission) in &self.rpc_permissions {
+            if !self.rpc.iter().any(|declared| declared == method) {
+                return Err(PluginError::InvalidManifest(format!(
+                    "RPC permission names an undeclared method: {method}"
+                )));
+            }
+            if !valid_permission(permission) {
+                return Err(PluginError::InvalidManifest(format!(
+                    "invalid permission for RPC method {method}: {permission}"
                 )));
             }
         }
