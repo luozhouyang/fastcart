@@ -89,6 +89,7 @@ The gateway forwards the request over loopback HTTP and rewrites the trust bound
 | `x-fastcart-internal-token` | Short-lived per-store bearer token                 |
 | `x-fastcart-preview`        | `1` only for a preview deployment                  |
 | `x-fastcart-assets-prefix`  | `/_fastcart/assets` or `/_fastcart/preview-assets` |
+| `x-fastcart-capabilities`   | Base64url grant envelope, when a binding resolves  |
 | `x-forwarded-host`          | The original public `Host`                         |
 | `x-forwarded-proto`         | The public scheme                                  |
 
@@ -172,6 +173,66 @@ The HTTP response tells you what happened:
 | `x-fastcart-cache: HIT`  | Served from the route cache; never reached `workerd` |
 | `x-fastcart-cache: MISS` | Reached `workerd` and the response was stored        |
 | (absent)                 | The request or response was not cacheable            |
+
+## Bound capability grants
+
+A plugin manifest can declare storefront capabilities. When a merchant binds one to the store, the theme can discover it at render time instead of hard-coding an endpoint or asking the browser for configuration.
+
+A binding becomes a grant for a render only when all three conditions hold:
+
+- the binding is enabled;
+- the providing plugin is installed and enabled;
+- the plugin's current manifest still declares the exact bound capability version.
+
+Invalid or stale bindings are skipped rather than failing the render. If at least one grant resolves, the gateway injects a trusted request header; if none do, the header is absent. Grants are store-level and resolved for each render. Binding or plugin changes invalidate the store's SSR response cache, so do not assume a grant is embedded in the browser HTML or that it stays fixed for the life of a client session.
+
+| Header | Value |
+| --- | --- |
+| `x-fastcart-capabilities` | `1.` followed by unpadded base64url of UTF-8 JSON for `{"v":1,"grants":{...}}` |
+
+Each grant is keyed by capability id:
+
+```json
+{
+  "v": 1,
+  "grants": {
+    "chat": {
+      "version": 1,
+      "endpoint": "/store/capabilities/chat",
+      "config": { "title": "Live chat", "locale": "zh-CN" }
+    }
+  }
+}
+```
+
+The payload is base64url so non-ASCII configuration remains a valid HTTP header value. Client-supplied `x-fastcart-*` headers are stripped before injection, so a browser cannot forge a grant.
+
+Parse the header with the storefront SDK. The helper returns `{}` for an absent or empty header and throws on malformed input:
+
+```ts title="worker entry"
+import { CAPABILITY_HEADER, parseCapabilityGrants } from "@fastcart/storefront-sdk/capabilities";
+
+export default {
+  async fetch(request: Request): Promise<Response> {
+    const grants = parseCapabilityGrants(request.headers.get(CAPABILITY_HEADER));
+    const chat = grants.chat;
+    if (!chat) {
+      return new Response("chat is not bound", { status: 404 });
+    }
+    const { version, endpoint, config } = chat;
+    // version is the bound version; config is store configuration.
+    return new Response(JSON.stringify({ version, endpoint, config }), {
+      headers: { "content-type": "application/json" },
+    });
+  },
+};
+```
+
+`endpoint` is site-relative. Resolve it against the storefront's own public origin (the original `x-forwarded-host` and `x-forwarded-proto`) and only call it on that origin; never combine it with an origin supplied by the browser or forward it to another host.
+
+A theme manifest can declare capability requirements. A required capability (`optional: false`, the default) must have a binding that resolves under the rules above when the theme is activated or rolled back; otherwise activation fails with a conflict. An optional requirement does not block activation, so the theme must handle the grant being absent.
+
+Grant `config` is store configuration that the merchant controls. It is not a secret store: keep API keys, tokens and other credentials in the plugin's secret configuration rather than in a capability binding.
 
 ## Static assets
 

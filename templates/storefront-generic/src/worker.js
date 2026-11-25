@@ -18,6 +18,7 @@ export default {
         method: request.method,
         store: request.headers.get("x-fastcart-store-id"),
         deployment: request.headers.get("x-fastcart-deployment-id"),
+        capabilities: request.headers.get("x-fastcart-capabilities"),
         requestId: request.headers.get("x-fastcart-request-id"),
         proto: request.headers.get("x-forwarded-proto"),
         preview: request.headers.get("x-fastcart-preview"),
