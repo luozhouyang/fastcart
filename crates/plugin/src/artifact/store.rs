@@ -229,6 +229,20 @@ impl ArtifactStore {
         std::fs::read(&path).map_err(|error| PluginError::Storage(error.to_string()))
     }
 
+    /// Reads the manifest of a stored artifact for a listing.
+    ///
+    /// The directory name is the digest assigned when the artifact was
+    /// imported, and its contents were verified then. A listing therefore
+    /// reads `plugin.json` instead of re-hashing every file; a missing or
+    /// unreadable manifest falls back to full verification.
+    fn summary_manifest(&self, digest: &str) -> Result<PluginManifest, PluginError> {
+        let path = self.artifact_dir(digest).join(MANIFEST_FILE);
+        match fs::read(&path) {
+            Ok(bytes) => PluginManifest::parse(&bytes),
+            Err(_) => self.load(digest).map(|stored| stored.manifest),
+        }
+    }
+
     /// Loads an artifact by digest and verifies its content.
     ///
     /// # Errors
@@ -312,18 +326,18 @@ impl ArtifactStore {
                 continue;
             }
             let digest = entry.file_name().to_string_lossy().to_string();
-            let stored = match self.load(&digest) {
-                Ok(stored) => stored,
+            let manifest = match self.summary_manifest(&digest) {
+                Ok(manifest) => manifest,
                 Err(error) => {
                     tracing::warn!(digest = %digest, error = %error, "skipping unreadable plugin artifact");
                     continue;
                 }
             };
             summaries.push(ArtifactSummary {
-                digest: stored.digest,
-                id: stored.manifest.id,
-                name: stored.manifest.name,
-                version: stored.manifest.version,
+                digest,
+                id: manifest.id,
+                name: manifest.name,
+                version: manifest.version,
             });
         }
         summaries.sort_by(|left, right| left.digest.cmp(&right.digest));
