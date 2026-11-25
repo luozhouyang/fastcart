@@ -1,10 +1,14 @@
-import type { ThemeEditorManifest } from "@fastcart/shared-types";
+import type { PageBlock, ThemeEditorManifest } from "@fastcart/shared-types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { API_BASE_URL } from "@/lib/api";
 import {
+  isPluginBlockType,
   listPluginComponents,
   mergePluginComponents,
+  missingPluginBlocks,
+  parsePluginBlockType,
+  pluginBlockType,
   type PluginComponentContribution,
 } from "@/lib/plugin-components";
 
@@ -155,8 +159,11 @@ describe("plugin component merge", () => {
       }),
     ]);
 
-    expect(merged.categories?.commerce?.components).toEqual(["ProductGrid", "livechat-button"]);
-    expect(merged.components?.["livechat-button"]).toEqual({
+    expect(merged.categories?.commerce?.components).toEqual([
+      "ProductGrid",
+      "plugin:chat-widget:livechat-button",
+    ]);
+    expect(merged.components?.["plugin:chat-widget:livechat-button"]).toEqual({
       title: "Live chat",
       category: "commerce",
       description: "Answers shopper questions.",
@@ -182,18 +189,24 @@ describe("plugin component merge", () => {
       }),
     ]);
 
-    const component = merged.components?.["livechat-button"];
+    const component = merged.components?.["plugin:chat-widget:livechat-button"];
     expect(component?.title).toBe("Inline chat");
     expect(component?.description).toBeUndefined();
     expect(component?.icon).toBe("chat");
-    expect(merged.categories?.hero?.components).toEqual(["Hero", "livechat-button"]);
+    expect(merged.categories?.hero?.components).toEqual([
+      "Hero",
+      "plugin:chat-widget:livechat-button",
+    ]);
   });
 
   it("uses a category declared by the contribution", () => {
     const merged = mergePluginComponents(baseManifest(), [contribution({ category: "commerce" })]);
 
-    expect(merged.categories?.commerce?.components).toEqual(["ProductGrid", "livechat-button"]);
-    expect(merged.components?.["livechat-button"]?.category).toBe("commerce");
+    expect(merged.categories?.commerce?.components).toEqual([
+      "ProductGrid",
+      "plugin:chat-widget:livechat-button",
+    ]);
+    expect(merged.components?.["plugin:chat-widget:livechat-button"]?.category).toBe("commerce");
   });
 
   it("creates a plugin category for unknown categories", () => {
@@ -201,9 +214,9 @@ describe("plugin component merge", () => {
 
     expect(merged.categories?.plugins).toEqual({
       title: "Plugin components",
-      components: ["livechat-button"],
+      components: ["plugin:chat-widget:livechat-button"],
     });
-    expect(merged.components?.["livechat-button"]?.category).toBe("plugins");
+    expect(merged.components?.["plugin:chat-widget:livechat-button"]?.category).toBe("plugins");
     expect(Object.keys(merged.categories ?? {})).toEqual(["hero", "commerce", "plugins"]);
   });
 
@@ -218,34 +231,52 @@ describe("plugin component merge", () => {
 
     expect(merged.categories?.plugins).toEqual({
       title: "Extensions",
-      components: ["Widget", "livechat-button"],
+      components: ["Widget", "plugin:chat-widget:livechat-button"],
     });
   });
 
-  it("skips ids that collide with built-in components", () => {
+  it("namespaces a component id that matches a built-in one", () => {
     const base = baseManifest();
     const merged = mergePluginComponents(base, [
-      contribution({ id: "Hero", title: "Impostor", editor_manifest: { title: "Impostor" } }),
+      contribution({
+        plugin_id: "builtin",
+        id: "Hero",
+        title: "Plugin hero",
+        editor_manifest: { title: "Plugin hero" },
+      }),
     ]);
 
     expect(merged.components?.Hero?.title).toBe("Hero banner");
-    expect(merged.categories?.plugins).toBeUndefined();
-    expect(merged).toEqual(base);
+    expect(merged.components?.["plugin:builtin:Hero"]?.title).toBe("Plugin hero");
+    expect(base.components?.["plugin:builtin:Hero"]).toBeUndefined();
   });
 
-  it("skips contributions without an id", () => {
+  it("skips contributions without an id or plugin id", () => {
     const base = baseManifest();
     expect(mergePluginComponents(base, [contribution({ id: "" })])).toEqual(base);
+    expect(mergePluginComponents(base, [contribution({ plugin_id: "" })])).toEqual(base);
   });
 
-  it("keeps the first component for duplicate ids", () => {
+  it("lets two plugins declare the same component id", () => {
+    const merged = mergePluginComponents(baseManifest(), [
+      contribution({ plugin_id: "alpha", id: "chat", title: "Alpha chat", category: "hero" }),
+      contribution({ plugin_id: "beta", id: "chat", title: "Beta chat", category: "commerce" }),
+    ]);
+
+    expect(merged.components?.["plugin:alpha:chat"]?.title).toBe("Alpha chat");
+    expect(merged.components?.["plugin:beta:chat"]?.title).toBe("Beta chat");
+    expect(merged.categories?.hero?.components).toEqual(["Hero", "plugin:alpha:chat"]);
+    expect(merged.categories?.commerce?.components).toEqual(["ProductGrid", "plugin:beta:chat"]);
+  });
+
+  it("keeps the first component for a duplicated namespaced type", () => {
     const merged = mergePluginComponents(baseManifest(), [
       contribution({ id: "chat", title: "First", category: "hero" }),
       contribution({ id: "chat", title: "Second", category: "commerce" }),
     ]);
 
-    expect(merged.components?.chat?.title).toBe("First");
-    expect(merged.categories?.hero?.components).toEqual(["Hero", "chat"]);
+    expect(merged.components?.["plugin:chat-widget:chat"]?.title).toBe("First");
+    expect(merged.categories?.hero?.components).toEqual(["Hero", "plugin:chat-widget:chat"]);
     expect(merged.categories?.commerce?.components).toEqual(["ProductGrid"]);
   });
 
@@ -271,7 +302,7 @@ describe("plugin component merge", () => {
       }),
     ]);
 
-    const component = merged.components?.["livechat-button"];
+    const component = merged.components?.["plugin:chat-widget:livechat-button"];
     expect(Object.keys(component?.fields ?? {})).toEqual(["good", "bad_options"]);
     expect(component?.fields?.good).toEqual({
       type: "text",
@@ -291,7 +322,7 @@ describe("plugin component merge", () => {
       contribution({ editor_manifest: { title: "Chat", defaultProps: defaults } }),
     ]);
 
-    const result = merged.components?.["livechat-button"]?.defaultProps;
+    const result = merged.components?.["plugin:chat-widget:livechat-button"]?.defaultProps;
     expect(result).toEqual(defaults);
     expect(result).not.toBe(defaults);
     const resultDefaults = result as { nested: { enabled: boolean } };
@@ -314,5 +345,58 @@ describe("plugin component merge", () => {
   it("returns an equivalent manifest for empty input", () => {
     const base = baseManifest();
     expect(mergePluginComponents(base, [])).toEqual(base);
+  });
+});
+
+describe("plugin block types", () => {
+  it("round-trips a namespaced type", () => {
+    expect(pluginBlockType({ plugin_id: "chat-widget", id: "button" })).toBe(
+      "plugin:chat-widget:button",
+    );
+    expect(isPluginBlockType("plugin:chat-widget:button")).toBe(true);
+    expect(isPluginBlockType("Hero")).toBe(false);
+    expect(parsePluginBlockType("plugin:chat-widget:button")).toEqual({
+      pluginId: "chat-widget",
+      componentId: "button",
+    });
+  });
+
+  it("rejects malformed plugin types", () => {
+    expect(parsePluginBlockType("Hero")).toBeNull();
+    expect(parsePluginBlockType("plugin:")).toBeNull();
+    expect(parsePluginBlockType("plugin:only-plugin")).toBeNull();
+    expect(parsePluginBlockType("plugin::missing-plugin")).toBeNull();
+    expect(parsePluginBlockType("plugin:missing-component:")).toBeNull();
+    expect(parsePluginBlockType("plugin:plugin:component:extra")).toEqual({
+      pluginId: "plugin",
+      componentId: "component:extra",
+    });
+  });
+});
+
+describe("missing plugin blocks", () => {
+  function block(type: string, children?: Record<string, PageBlock[]>): PageBlock {
+    return { type, props: {}, slots: children ?? {} };
+  }
+
+  it("finds plugin blocks the catalog cannot render", () => {
+    const content = [
+      block("Hero"),
+      block("plugin:chat-widget:button"),
+      block("plugin:gone:widget", { inner: [block("plugin:gone:border")] }),
+    ];
+    const zones = [[block("plugin:chat-widget:button")]];
+
+    const missing = missingPluginBlocks(content, zones, ["Hero", "plugin:chat-widget:button"]);
+
+    expect(missing).toEqual([
+      { type: "plugin:gone:widget", pluginId: "gone", componentId: "widget" },
+      { type: "plugin:gone:border", pluginId: "gone", componentId: "border" },
+    ]);
+  });
+
+  it("ignores built-in blocks and present plugin blocks", () => {
+    const content = [block("Hero"), block("plugin:chat-widget:button")];
+    expect(missingPluginBlocks(content, [], ["Hero", "plugin:chat-widget:button"])).toEqual([]);
   });
 });

@@ -1,5 +1,6 @@
 import type {
   JsonValue,
+  PageBlock,
   ThemeEditorCategory,
   ThemeEditorComponent,
   ThemeEditorField,
@@ -42,6 +43,36 @@ export interface PluginComponentsResponse {
 /** Category key and title used when a component declares no known category. */
 const PLUGIN_CATEGORY_KEY = "plugins";
 const PLUGIN_CATEGORY_TITLE = "Plugin components";
+/** Prefix of a page block type owned by a plugin. */
+const PLUGIN_BLOCK_PREFIX = "plugin:";
+
+/**
+ * Block type stored in page JSON for a plugin component.
+ *
+ * Namespacing keeps two plugins free to declare the same component id and
+ * makes a saved block self-describing when the plugin is gone.
+ */
+export function pluginBlockType(
+  contribution: Pick<PluginComponentContribution, "plugin_id" | "id">,
+): string {
+  return `${PLUGIN_BLOCK_PREFIX}${contribution.plugin_id}:${contribution.id}`;
+}
+
+/** True when a page block type belongs to a plugin. */
+export function isPluginBlockType(type: string): boolean {
+  return type.startsWith(PLUGIN_BLOCK_PREFIX);
+}
+
+/** Parses a plugin block type back into its provider and component ids. */
+export function parsePluginBlockType(
+  type: string,
+): { pluginId: string; componentId: string } | null {
+  if (!isPluginBlockType(type)) return null;
+  const rest = type.slice(PLUGIN_BLOCK_PREFIX.length);
+  const separator = rest.indexOf(":");
+  if (separator <= 0 || separator === rest.length - 1) return null;
+  return { pluginId: rest.slice(0, separator), componentId: rest.slice(separator + 1) };
+}
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -137,9 +168,11 @@ function resolveCategory(
 /**
  * Appends plugin components to the page editor manifest.
  *
- * Built-in components win every id collision, plugin contributions are merged
- * in input order, and the base manifest is never mutated. Components whose
- * category is unknown are grouped under "Plugin components".
+ * Each plugin component becomes a namespaced block type
+ * (`plugin:{plugin}:{component}`), so declaration ids never collide across
+ * plugins. A contribution whose namespaced type is already present is skipped;
+ * contributions merge in input order and the base manifest is never mutated.
+ * Components whose category is unknown are grouped under "Plugin components".
  */
 export function mergePluginComponents(
   base: ThemeEditorManifest,
@@ -155,10 +188,13 @@ export function mergePluginComponents(
   let merged = false;
 
   for (const contribution of contributions) {
-    const id = contribution.id;
-    if (typeof id !== "string" || id.length === 0) continue;
-    if (claimed.has(id)) continue;
-    claimed.add(id);
+    if (typeof contribution.id !== "string" || contribution.id.length === 0) continue;
+    if (typeof contribution.plugin_id !== "string" || contribution.plugin_id.length === 0) {
+      continue;
+    }
+    const type = pluginBlockType(contribution);
+    if (claimed.has(type)) continue;
+    claimed.add(type);
 
     const manifest: JsonObject = isJsonObject(contribution.editor_manifest)
       ? contribution.editor_manifest
@@ -178,7 +214,7 @@ export function mergePluginComponents(
 
     const category = resolveCategory(baseCategories, manifest, contribution);
     component.category = category;
-    components[id] = component;
+    components[type] = component;
 
     const existing = categories[category];
     categories[category] = {
@@ -186,11 +222,59 @@ export function mergePluginComponents(
         existing !== undefined && typeof existing.title === "string"
           ? existing.title
           : PLUGIN_CATEGORY_TITLE,
-      components: [...(Array.isArray(existing?.components) ? existing.components : []), id],
+      components: [...(Array.isArray(existing?.components) ? existing.components : []), type],
     };
     merged = true;
   }
 
   if (!merged) return base;
   return { ...base, categories, components };
+}
+
+/** A saved page block whose plugin component is no longer contributed. */
+export interface MissingPluginBlock {
+  /** Saved block type, for example `plugin:chat-widget:livechat-button`. */
+  type: string;
+  /** Providing plugin id parsed from the type. */
+  pluginId: string;
+  /** Component id parsed from the type. */
+  componentId: string;
+}
+
+function collectMissingBlocks(
+  blocks: readonly PageBlock[],
+  available: ReadonlySet<string>,
+  missing: Map<string, MissingPluginBlock>,
+): void {
+  for (const block of blocks) {
+    if (isPluginBlockType(block.type) && !available.has(block.type)) {
+      const parsed = parsePluginBlockType(block.type);
+      if (parsed && !missing.has(block.type)) {
+        missing.set(block.type, { type: block.type, ...parsed });
+      }
+    }
+    for (const children of Object.values(block.slots ?? {})) {
+      collectMissingBlocks(children, available, missing);
+    }
+  }
+}
+
+/**
+ * Finds plugin blocks saved in a page that the current catalog cannot render.
+ *
+ * A plugin component disappears when the plugin is disabled, removed or
+ * upgraded without the contribution. The page data stays untouched; the
+ * editor uses this list to explain the placeholder instead of failing to load
+ * the page.
+ */
+export function missingPluginBlocks(
+  content: readonly PageBlock[],
+  zones: readonly PageBlock[][],
+  available: readonly string[],
+): MissingPluginBlock[] {
+  const renderable = new Set(available);
+  const missing = new Map<string, MissingPluginBlock>();
+  for (const block of content) collectMissingBlocks([block], renderable, missing);
+  for (const blocks of zones) collectMissingBlocks(blocks, renderable, missing);
+  return [...missing.values()];
 }

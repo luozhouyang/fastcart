@@ -268,9 +268,11 @@ A `storefront_component` contribution describes a page block a theme can render.
 ```
 
 - Only enabled plugins are listed, and an invalid manifest is skipped instead of failing the response.
-- `editor_manifest` is editor metadata shaped like a theme editor component. The page editor merges it into its built-in catalog: built-in component ids win a collision, plugin components join a matching built-in category or the **Plugin components** category, and malformed field or slot metadata is dropped before it reaches the palette.
+- `editor_manifest` is editor metadata shaped like a theme editor component. The page editor registers the contribution as the namespaced block type `plugin:{plugin_id}:{id}`, so two plugins may declare the same component id. Built-in block types always win, plugin components join a matching built-in category or the **Plugin components** category, and malformed field or slot metadata is dropped before it reaches the palette.
 - `entry` is a storefront-relative URL. The file is served from the plugin archive by the same digest-scoped, immutable route as storefront extensions (`/_fastcart/extensions/{plugin}/{digest}/{path}`); a disabled plugin or a digest mismatch returns `404`. It is a same-origin ES module, so the theme decides how to mount it.
 - `requires` is component metadata. A non-optional requirement means the component is meant to be used only while the bound capability is available; mark it `optional` when the component degrades gracefully. Runtime availability comes from the theme's capability grants in `x-fastcart-capabilities`, not from this endpoint.
+
+A saved page block names its provider in the type. When the plugin is disabled, removed or upgraded without the contribution, the page data is left untouched: the editor lists the affected blocks as unavailable and the storefront renders a placeholder. Removing the block is an explicit editor action.
 
 Plugin components are additive: if the catalog request fails, the page editor keeps the built-in catalog and remains usable.
 

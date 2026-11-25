@@ -2,14 +2,17 @@
 
 A complete storefront capability example:
 
-- `plugin.json` declares one `livechat@1` storefront capability, one nav entry,
-  two admin slots, and one storefront embed.
+- `plugin.json` declares one `livechat@1` storefront capability, one
+  `storefront_component`, one nav entry, two admin slots, and one storefront embed.
 - `worker/index.js` serves the capability routes under
   `/capabilities/livechat` and keeps the existing admin RPC method
   `conversations.list`.
 - `storefront/boot.js` probes
   `/store/capabilities/livechat/session` with same-origin credentials and falls
   back to the legacy embed when the capability is unbound.
+- `storefront/livechat-button.js` is the component entry. The admin exposes it
+  as the `plugin:chat-widget:livechat-button` block, and a theme mounts it with
+  `<fc-livechat-button label="Chat with us" position="bottom-right">`.
 - `ui/settings.html` is the sandboxed iframe page; it speaks the `postMessage`
   protocol.
 - `test/worker.test.mjs` exercises the worker handlers with `node:test`; it
@@ -24,7 +27,9 @@ plugin-chat/
 ├── ui/settings.html
 ├── storefront/boot.js
 ├── storefront/boot.css
-└── test/worker.test.mjs
+├── storefront/livechat-button.js
+├── test/worker.test.mjs
+└── test/component.test.mjs
 ```
 
 ## Declare the capability
@@ -181,6 +186,42 @@ context token.
 The bundled `storefront/boot.js` always uses the site-relative endpoint
 (`/store/capabilities/livechat/...`), never an absolute third-party origin.
 
+## The component contribution
+
+The second contribution lets a page author place the chat button as a block
+instead of relying on the embed:
+
+```json
+{
+  "kind": "storefront_component",
+  "id": "livechat-button",
+  "title": "Live chat button",
+  "category": "commerce",
+  "entry": "storefront/livechat-button.js",
+  "editor_manifest": {
+    "title": "Live chat button",
+    "fields": {
+      "label": { "type": "text", "default": "Chat with us" },
+      "position": { "type": "select", "default": "bottom-right" }
+    },
+    "defaultProps": { "label": "Chat with us", "position": "bottom-right" }
+  },
+  "requires": [{ "id": "livechat", "version": 1, "optional": true }]
+}
+```
+
+Declaring a component requires the `storefront.component` storefront scope,
+which the manifest requests. `GET /api/v1/admin/components` returns the entry as
+a digest-scoped URL served by the plugin archive route, and the page editor
+registers it as the namespaced block type
+`plugin:chat-widget:livechat-button`. The saved block type names its provider,
+so the page stays valid when the plugin is disabled; the editor then flags the
+block as unavailable and the storefront renders a placeholder.
+
+Because the component only _requires_ the capability optionally, a store
+without a bound `livechat` capability still gets a button that explains chat is
+unavailable rather than a broken block.
+
 ## What a theme receives
 
 The storefront runtime resolves enabled bindings into capability grants and
@@ -225,6 +266,6 @@ the panel is open, the first failed message falls back to the same legacy mode.
 ```bash
 node --check templates/plugin-chat/worker/index.js
 node --check templates/plugin-chat/storefront/boot.js
-node --test templates/plugin-chat/test/worker.test.mjs
+node --test templates/plugin-chat/test/
 node --experimental-strip-types packages/plugin-cli/src/cli.ts doctor templates/plugin-chat
 ```

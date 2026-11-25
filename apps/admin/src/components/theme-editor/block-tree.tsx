@@ -2,7 +2,9 @@ import { useState } from "react";
 import { ChevronDown, ChevronUp, Layers, Plus, Trash2 } from "lucide-react";
 import type { PageBlock, ThemeEditorManifest, ThemeEditorSlot } from "@fastcart/shared-types";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { isPluginBlockType } from "@/lib/plugin-components";
 import { cn } from "@/lib/utils";
 import { blockId, componentSlots, componentTitle, slotEntries } from "@/lib/theme-editor";
 
@@ -86,6 +88,13 @@ function BlockList({
         const id = blockId(block);
         const active = id !== null && id === selectedId;
         const slots = componentSlots(manifest, block.type);
+        const known = manifest?.components?.[block.type] !== undefined;
+        const unknownPlugin = !known && isPluginBlockType(block.type);
+        const title = known
+          ? componentTitle(manifest, block.type)
+          : isPluginBlockType(block.type)
+            ? "Plugin component"
+            : block.type;
         return (
           <div key={id ?? `${block.type}-${index}`} className="space-y-1">
             <div
@@ -108,7 +117,12 @@ function BlockList({
               />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[12px] font-medium text-foreground">
-                  {componentTitle(manifest, block.type)}
+                  {title}
+                  {unknownPlugin ? (
+                    <Badge variant="warning" className="ml-1.5 text-[9.5px]">
+                      Unavailable
+                    </Badge>
+                  ) : null}
                 </p>
                 <p className="truncate font-mono text-[10px] text-faint">
                   {id ?? "missing id"} · {block.type}

@@ -17,7 +17,7 @@
     "storage": ["kv.read", "kv.write"],
     "network": ["api.example.com"],
     "admin": ["admin.ui"],
-    "storefront": ["store.read"]
+    "storefront": ["store.read", "storefront.component"]
   },
   "provides": [
     {
@@ -34,6 +34,33 @@
         },
         "additionalProperties": false
       }
+    },
+    {
+      "kind": "storefront_component",
+      "id": "livechat-button",
+      "title": "Live chat button",
+      "category": "commerce",
+      "entry": "storefront/livechat-button.js",
+      "editor_manifest": {
+        "title": "Live chat button",
+        "description": "A floating button that opens the chat panel.",
+        "icon": "message-circle",
+        "fields": {
+          "label": { "type": "text", "label": "Button label", "default": "Chat with us" },
+          "position": {
+            "type": "select",
+            "label": "Position",
+            "options": [
+              { "value": "bottom-right", "label": "Bottom right" },
+              { "value": "bottom-left", "label": "Bottom left" }
+            ],
+            "default": "bottom-right"
+          }
+        },
+        "defaultProps": { "label": "Chat with us", "position": "bottom-right" },
+        "slots": []
+      },
+      "requires": [{ "id": "livechat", "version": 1, "optional": true }]
     }
   ],
   "extensions": {

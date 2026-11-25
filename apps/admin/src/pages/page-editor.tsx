@@ -64,6 +64,7 @@ import { fromUnixSeconds, shortDate, timeOfDay } from "@/lib/format";
 import {
   listPluginComponents,
   mergePluginComponents,
+  missingPluginBlocks,
   type PluginComponentContribution,
 } from "@/lib/plugin-components";
 import {
@@ -194,6 +195,22 @@ export function PageEditorPage() {
   const zones = useMemo(() => Object.entries(body.zones ?? {}), [body.zones]);
   const selectedBlock = selectedId ? findBlockInBody(content, zones, selectedId) : null;
   const parsedJson = useMemo(() => parseJsonText(jsonText), [jsonText]);
+
+  // A saved plugin block survives a disabled or removed plugin. Keep the data
+  // and explain the placeholder instead of dropping the block silently.
+  const renderableTypes = useMemo(
+    () => Object.keys(editorManifest.components ?? {}),
+    [editorManifest],
+  );
+  const missingBlocks = useMemo(
+    () =>
+      missingPluginBlocks(
+        content,
+        zones.map(([, blocks]) => blocks),
+        renderableTypes,
+      ),
+    [content, zones, renderableTypes],
+  );
 
   const dirty = structured ? JSON.stringify(body) !== baseline : jsonText !== jsonBaseline;
 
@@ -552,6 +569,31 @@ export function PageEditorPage() {
                 The built-in editor component registry is empty. You can still edit the raw JSON
                 body below.
               </p>
+            </div>
+          </div>
+        </Card>
+      ) : null}
+
+      {missingBlocks.length > 0 ? (
+        <Card className="border-warning/25 bg-warning-soft/30 p-4">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden="true" />
+            <div>
+              <p className="text-[12.5px] font-medium text-foreground">
+                {missingBlocks.length === 1
+                  ? "One plugin block is unavailable"
+                  : `${missingBlocks.length} plugin blocks are unavailable`}
+              </p>
+              <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+                The providing plugin is disabled, removed, or no longer declares these components.
+                Saved content is preserved, but the storefront renders a placeholder until the
+                plugin is enabled again. Remove the blocks if they are no longer wanted.
+              </p>
+              <ul className="mt-2 space-y-0.5 font-mono text-[10.5px] text-ink-soft">
+                {missingBlocks.map((block) => (
+                  <li key={block.type}>{block.type}</li>
+                ))}
+              </ul>
             </div>
           </div>
         </Card>
