@@ -71,7 +71,7 @@ pub struct RuntimeRequest {
     /// Short-lived context token.
     pub context_token: String,
     /// Request body.
-    pub body: Vec<u8>,
+    pub body: Bytes,
     /// Request class.
     pub kind: RequestKind,
     /// Test or tuning override for the request deadline.
@@ -86,7 +86,7 @@ pub struct RuntimeResponse {
     /// Response headers.
     pub headers: Vec<(String, String)>,
     /// Response body.
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 /// A streaming response from the plugin gateway.
@@ -199,7 +199,7 @@ impl PluginHost {
         Ok(RuntimeResponse {
             status,
             headers,
-            body: body.to_vec(),
+            body,
         })
     }
 

@@ -4,7 +4,6 @@
 //! Entry modules are served by the public storefront extension route, so the
 //! response only exposes generated storefront URLs.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -13,7 +12,7 @@ use axum::extract::State;
 use axum::routing::get;
 use fastcart_http::{AdminActor, ApiError, ApiResult};
 use fastcart_kernel::ActorContext;
-use fastcart_plugin::{Contribution, ContributionRegistry, PluginManifest};
+use fastcart_plugin::Contribution;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -74,67 +73,50 @@ pub struct ComponentsResponse {
 }
 
 async fn list_components(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
 ) -> ApiResult<Json<ComponentsResponse>> {
     require(&actor, "plugins.read")?;
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT plugin_id, digest, manifest_json FROM plugin_installations \
-         WHERE enabled = 1 ORDER BY plugin_id ASC",
-    )
-    .fetch_all(db.pool())
-    .await
-    .map_err(|error| ApiError::new(fastcart_kernel::AppError::database(error.to_string())))?;
-
-    let mut plugins = Vec::with_capacity(rows.len());
-    let mut digests = BTreeMap::new();
-    for (plugin_id, digest, manifest_json) in rows {
-        let Ok(manifest) = PluginManifest::parse(manifest_json.as_bytes()) else {
+    let catalog = super::plugin_catalog::load(&context, &db)
+        .await
+        .map_err(ApiError::new)?;
+    let mut components = Vec::new();
+    for provider in catalog.registry().components() {
+        let Contribution::StorefrontComponent(component) = &provider.contribution else {
             continue;
         };
-        digests.insert(plugin_id.clone(), digest);
-        plugins.push((plugin_id, manifest));
+        let Some(plugin) = catalog.plugin(&provider.plugin_id) else {
+            continue;
+        };
+        let entry = component.entry.as_ref().map(|entry| {
+            format!(
+                "/_fastcart/extensions/{}/{}/{}",
+                plugin.plugin_id,
+                plugin.digest,
+                entry.trim_start_matches('/'),
+            )
+        });
+        components.push(ComponentContributionView {
+            plugin_id: provider.plugin_id.clone(),
+            plugin_name: provider.plugin_name.clone(),
+            plugin_version: provider.plugin_version.clone(),
+            digest: plugin.digest.clone(),
+            id: component.id.clone(),
+            title: component.title.clone(),
+            category: component.category.clone(),
+            editor_manifest: component.editor_manifest.clone(),
+            entry,
+            requires: component
+                .requires
+                .iter()
+                .map(|requirement| ComponentRequirementView {
+                    id: requirement.id.clone(),
+                    version: requirement.version,
+                    optional: requirement.optional,
+                })
+                .collect(),
+        });
     }
-
-    let registry = ContributionRegistry::from_plugins(plugins);
-    let components = registry
-        .components()
-        .into_iter()
-        .filter_map(|provider| {
-            let Contribution::StorefrontComponent(component) = &provider.contribution else {
-                return None;
-            };
-            let digest = digests.get(&provider.plugin_id)?.clone();
-            let entry = component.entry.as_ref().map(|entry| {
-                format!(
-                    "/_fastcart/extensions/{}/{}/{}",
-                    provider.plugin_id,
-                    digest,
-                    entry.trim_start_matches('/'),
-                )
-            });
-            Some(ComponentContributionView {
-                plugin_id: provider.plugin_id.clone(),
-                plugin_name: provider.plugin_name.clone(),
-                plugin_version: provider.plugin_version.clone(),
-                digest,
-                id: component.id.clone(),
-                title: component.title.clone(),
-                category: component.category.clone(),
-                editor_manifest: component.editor_manifest.clone(),
-                entry,
-                requires: component
-                    .requires
-                    .iter()
-                    .map(|requirement| ComponentRequirementView {
-                        id: requirement.id.clone(),
-                        version: requirement.version,
-                        optional: requirement.optional,
-                    })
-                    .collect(),
-            })
-        })
-        .collect();
     Ok(Json(ComponentsResponse { components }))
 }

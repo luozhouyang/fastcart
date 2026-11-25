@@ -171,3 +171,73 @@ async fn storefront_injects_enabled_plugin_embeds() {
     assert!(body.contains("/_fastcart/extensions/chat/"));
     assert!(body.contains("boot.css"));
 }
+
+#[tokio::test]
+async fn extension_items_are_served_from_the_cached_catalog() {
+    let fixture = fixture(None).await;
+    let manifest = |pages: serde_json::Value| {
+        serde_json::json!({
+            "schema_version": "1",
+            "id": "chat",
+            "name": "Chat",
+            "version": "1.0.0",
+            "api_version": 2,
+            "runtime": { "engine": "workerd", "compatibility_date": "2026-11-01" },
+            "entry": { "type": "worker", "path": "index.js" },
+            "capabilities": { "storefront": ["store.read"] },
+            "extensions": {
+                "storefront": [{
+                    "kind": "embed",
+                    "placement": "body:end",
+                    "entry": "storefront/boot.js",
+                    "pages": pages
+                }]
+            }
+        })
+        .to_string()
+    };
+    let insert = |manifest: String| {
+        let pool = fixture.database.pool().clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO plugin_installations \
+                 (id, plugin_id, digest, version, manifest_json, enabled, settings_json, \
+                  settings_revision, granted_scopes, installed_at, updated_at) \
+                 VALUES ('pli_cache', 'chat', ?, '1.0.0', ?, 1, '{}', 1, '[]', 0, 0)",
+            )
+            .bind("b".repeat(64))
+            .bind(manifest)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+
+    insert(manifest(serde_json::json!(["/products/*"]))).await;
+
+    let store_id = fastcart_kernel::StoreId::from_string(fixture.store_id.clone());
+    let manifest_of = async || {
+        let catalog =
+            fastcart_api::routes::plugin_catalog::load(&fixture.context, &fixture.database)
+                .await
+                .expect("catalog loads");
+        catalog
+            .plugin("chat")
+            .and_then(|plugin| plugin.manifest.extensions.storefront.first())
+            .and_then(|extension| extension.pages.first())
+            .cloned()
+    };
+
+    assert_eq!(manifest_of().await.as_deref(), Some("/products/*"));
+
+    // A direct database write is invisible until the cached generation moves.
+    sqlx::query("UPDATE plugin_installations SET manifest_json = ? WHERE plugin_id = 'chat'")
+        .bind(manifest(serde_json::json!(["/collections/*"])))
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+    assert_eq!(manifest_of().await.as_deref(), Some("/products/*"));
+
+    fixture.context.cache.invalidate_store(&store_id);
+    assert_eq!(manifest_of().await.as_deref(), Some("/collections/*"));
+}

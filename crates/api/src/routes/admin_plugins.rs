@@ -124,9 +124,9 @@ fn service(context: &AppContext, db: StoreDatabase, actor: &ActorContext) -> Plu
         .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
 }
 
-/// Plugin lifecycle changes alter resolved grants, so cached renders must go.
+/// Plugin lifecycle changes alter the catalog and the resolved grants.
 async fn invalidate_after_plugin_change(context: &AppContext, db: &StoreDatabase) {
-    super::invalidate_storefront_cache(context, db.store_id().as_str()).await;
+    super::plugin_catalog::invalidate(context, db.store_id()).await;
 }
 
 async fn read_archive(multipart: &mut Multipart, max_bytes: usize) -> ApiResult<Vec<u8>> {
@@ -261,13 +261,14 @@ async fn update_settings(
     Json(request): Json<UpdateSettingsRequest>,
 ) -> ApiResult<Json<InstalledPlugin>> {
     require(&actor, "plugins.write")?;
-    let service = service(&context, db, &actor);
-    Ok(Json(
-        service
-            .update_settings(&id, request.settings)
-            .await
-            .map_err(api)?,
-    ))
+    let service = service(&context, db.clone(), &actor);
+    let plugin = service
+        .update_settings(&id, request.settings)
+        .await
+        .map_err(api)?;
+    // The cached catalog carries settings for the admin extension payload.
+    invalidate_after_plugin_change(&context, &db).await;
+    Ok(Json(plugin))
 }
 
 /// Secret replacement payload.
@@ -509,7 +510,7 @@ async fn plugin_rpc(
             method: "POST".to_owned(),
             headers: vec![("content-type".to_owned(), "application/json".to_owned())],
             context_token: token,
-            body: request.params.to_string().into_bytes(),
+            body: bytes::Bytes::from(request.params.to_string()),
             kind: RequestKind::Admin,
             deadline_override: None,
         })
@@ -628,24 +629,20 @@ async fn list_extensions(
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_default();
-    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT plugin_id, digest, manifest_json, settings_json FROM plugin_installations          WHERE enabled = 1 ORDER BY plugin_id",
-    )
-    .fetch_all(db.pool())
-    .await
-    .map_err(|error| ApiError::new(AppError::database(error.to_string())))?;
-
+    let catalog = super::plugin_catalog::load(&context, &db)
+        .await
+        .map_err(ApiError::new)?;
     let mut extensions = Vec::new();
-    for (plugin_id, digest, manifest_json, settings_json) in rows {
-        let Ok(manifest) = PluginManifest::parse(manifest_json.as_bytes()) else {
-            continue;
-        };
-        let settings: Value = serde_json::from_str(&settings_json).unwrap_or(Value::Null);
+    for plugin in &catalog.plugins {
+        let plugin_id = &plugin.plugin_id;
+        let digest = &plugin.digest;
+        let manifest = &plugin.manifest;
+        let settings: Value = serde_json::from_str(&plugin.settings_json).unwrap_or(Value::Null);
         let token = super::plugin_ui::mount_token(
             &context,
             db.store_id().as_str(),
-            &plugin_id,
-            &digest,
+            plugin_id,
+            digest,
             &actor_id,
         );
         for extension in &manifest.extensions.admin {

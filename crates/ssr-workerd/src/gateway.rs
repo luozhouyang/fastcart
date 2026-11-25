@@ -293,18 +293,24 @@ impl SsrGateway {
     }
 }
 
-fn filtered_headers(source: &HeaderMap) -> reqwest::header::HeaderMap {
-    let mut headers = reqwest::header::HeaderMap::new();
+/// Copies the headers that may cross the gateway boundary.
+///
+/// Header values are reference-counted `Bytes`, so the copy shares the
+/// underlying buffer instead of duplicating it.
+fn filtered_headers(source: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::with_capacity(source.len());
     for (name, value) in source {
-        if is_hop_by_hop(name.as_str()) || name == axum::http::header::HOST {
+        if is_hop_by_hop(name.as_str()) || name == header::HOST {
             continue;
         }
-        headers.append(name, value.clone());
+        headers.append(name.clone(), value.clone());
     }
     headers
 }
 
 fn strip_gateway_headers(headers: &mut HeaderMap) {
+    // `HeaderMap` exposes no `retain`, so collect the names first. Both the
+    // names and the removals are cheap: `HeaderName` is interned.
     let remove: Vec<HeaderName> = headers
         .keys()
         .filter(|name| {

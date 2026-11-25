@@ -304,10 +304,11 @@ pub(crate) async fn render(
             currency,
             timezone: store.timezone.clone(),
         };
-        let capabilities = match super::store_capabilities::resolve_grants(&database).await {
-            Ok(capabilities) => capabilities,
-            Err(error) => return ApiError::new(error).into_response(),
-        };
+        let capabilities =
+            match super::store_capabilities::resolve_grants(&context, &database).await {
+                Ok(capabilities) => capabilities,
+                Err(error) => return ApiError::new(error).into_response(),
+            };
         let response = universal
             .render_preview(
                 preview_request,

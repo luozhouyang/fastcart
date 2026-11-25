@@ -225,6 +225,9 @@ pub struct AppContext {
     /// Public `/apps/{plugin}` traffic limiter, keyed by store, plugin and
     /// client address.
     pub plugin_apps_limiter: RateLimiter,
+    /// Parsed enabled-plugin catalog, keyed by store cache generation.
+    pub plugin_catalogs:
+        moka::future::Cache<String, Arc<crate::routes::plugin_catalog::PluginCatalog>>,
 }
 
 impl AppContext {
@@ -452,6 +455,10 @@ impl AppContext {
                 .time_to_live(Duration::from_secs(60))
                 .build(),
             plugin_apps_limiter: RateLimiter::new(120, Duration::from_secs(60)),
+            plugin_catalogs: moka::future::Cache::builder()
+                .max_capacity(256)
+                .time_to_live(Duration::from_secs(300))
+                .build(),
         }
     }
 

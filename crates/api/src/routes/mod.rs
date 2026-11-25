@@ -27,6 +27,7 @@ pub mod health;
 pub mod internal_plugin_runtime;
 pub mod platform;
 pub mod plugin_api;
+pub mod plugin_catalog;
 pub mod plugin_runtime;
 pub mod plugin_ui;
 pub mod plugin_ws;

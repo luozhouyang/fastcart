@@ -10,10 +10,7 @@ use axum::routing::{get, put};
 use fastcart_http::{AdminActor, ApiError, ApiResult};
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::ActorContext;
-use fastcart_plugin::{
-    CapabilityBinding, CapabilityBindingService, Contribution, ContributionRegistry, PluginError,
-    PluginManifest,
-};
+use fastcart_plugin::{CapabilityBinding, CapabilityBindingService, Contribution, PluginError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -73,28 +70,18 @@ pub struct CapabilitiesResponse {
 }
 
 async fn list_capabilities(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
 ) -> ApiResult<Json<CapabilitiesResponse>> {
     require(&actor, "plugins.read")?;
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT plugin_id, manifest_json FROM plugin_installations \
-         WHERE enabled = 1 ORDER BY plugin_id ASC",
-    )
-    .fetch_all(db.pool())
-    .await
-    .map_err(|error| ApiError::new(fastcart_kernel::AppError::database(error.to_string())))?;
-    let mut plugins = Vec::new();
-    for (plugin_id, manifest_json) in rows {
-        if let Ok(manifest) = PluginManifest::parse(manifest_json.as_bytes()) {
-            plugins.push((plugin_id, manifest));
-        }
-    }
-    let registry = ContributionRegistry::from_plugins(plugins);
-    let contributions = registry
+    let catalog = super::plugin_catalog::load(&context, &db)
+        .await
+        .map_err(ApiError::new)?;
+    let contributions = catalog
+        .registry()
         .capabilities()
-        .into_iter()
+        .iter()
         .filter_map(|provider| match &provider.contribution {
             Contribution::StorefrontCapability(capability) => Some(CapabilityContributionView {
                 plugin_id: provider.plugin_id.clone(),
@@ -168,7 +155,7 @@ async fn unbind_capability(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Drops cached SSR responses so a binding change is visible immediately.
+/// A binding change moves the catalog generation and cached renders with it.
 async fn invalidate_storefront(context: &AppContext, db: &StoreDatabase) {
-    super::invalidate_storefront_cache(context, db.store_id().as_str()).await;
+    super::plugin_catalog::invalidate(context, db.store_id()).await;
 }

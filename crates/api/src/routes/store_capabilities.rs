@@ -206,7 +206,7 @@ async fn forward(
             method: parts.method.as_str().to_owned(),
             headers,
             context_token: token,
-            body: body.to_vec(),
+            body,
             kind: RequestKind::Storefront,
             deadline_override: None,
         })
@@ -229,22 +229,25 @@ async fn forward(
 /// enabled, and the plugin's current manifest still declares the bound
 /// capability version. Invalid or stale rows are skipped so one bad binding
 /// cannot break storefront rendering.
-pub(crate) async fn resolve_grants(database: &StoreDatabase) -> Result<CapabilityGrants, AppError> {
-    let rows: Vec<(String, i64, String, String, String)> = sqlx::query_as(
-        "SELECT b.capability_id, b.version, b.plugin_id, b.config_json, i.manifest_json \
-         FROM store_capability_bindings b \
-         JOIN plugin_installations i \
-           ON i.plugin_id = b.plugin_id AND i.enabled = 1 \
-         WHERE b.enabled = 1 \
-         ORDER BY b.capability_id ASC",
+pub(crate) async fn resolve_grants(
+    context: &AppContext,
+    database: &StoreDatabase,
+) -> Result<CapabilityGrants, AppError> {
+    let bindings: Vec<(String, i64, String, String)> = sqlx::query_as(
+        "SELECT capability_id, version, plugin_id, config_json \
+         FROM store_capability_bindings WHERE enabled = 1 \
+         ORDER BY capability_id ASC",
     )
     .fetch_all(database.pool())
     .await
     .map_err(database_error)?;
+    if bindings.is_empty() {
+        return Ok(CapabilityGrants::new());
+    }
 
-    let mut manifests: HashMap<String, Option<PluginManifest>> = HashMap::new();
+    let catalog = super::plugin_catalog::load(context, database).await?;
     let mut grants = CapabilityGrants::new();
-    for (capability_id, version, plugin_id, config_json, manifest_json) in rows {
+    for (capability_id, version, plugin_id, config_json) in bindings {
         let Ok(version) = u32::try_from(version) else {
             tracing::warn!(
                 capability_id,
@@ -253,17 +256,12 @@ pub(crate) async fn resolve_grants(database: &StoreDatabase) -> Result<Capabilit
             );
             continue;
         };
-        let manifest = manifests
-            .entry(plugin_id.clone())
-            .or_insert_with(|| PluginManifest::parse(manifest_json.as_bytes()).ok());
-        let Some(manifest) = manifest.as_ref() else {
-            tracing::warn!(
-                plugin_id,
-                "ignoring capability binding: invalid plugin manifest"
-            );
+        let Some(plugin) = catalog.plugin(&plugin_id) else {
+            // The binding outlived a disabled or removed plugin.
             continue;
         };
-        if manifest
+        if plugin
+            .manifest
             .storefront_capability(&capability_id, version)
             .is_none()
         {
@@ -282,11 +280,12 @@ pub(crate) async fn resolve_grants(database: &StoreDatabase) -> Result<Capabilit
                 serde_json::Value::Object(serde_json::Map::new())
             }
         };
+        let endpoint = format!("/store/capabilities/{capability_id}");
         grants.insert(
-            capability_id.clone(),
+            capability_id,
             CapabilityGrant {
                 version,
-                endpoint: format!("/store/capabilities/{capability_id}"),
+                endpoint,
                 config,
             },
         );

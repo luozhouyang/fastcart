@@ -9,6 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use bytes::Bytes;
 use reqwest::Url;
 use thiserror::Error;
 
@@ -31,7 +32,7 @@ pub struct EgressRequest {
     /// Request headers from the plugin.
     pub headers: Vec<(String, String)>,
     /// Request body.
-    pub body: Vec<u8>,
+    pub body: Bytes,
     /// Manifest host allowlist.
     pub allowlist: Vec<String>,
     /// Hosts allowed to receive the plugin's Authorization header.
@@ -46,7 +47,7 @@ pub struct EgressResponse {
     /// Content type, when present.
     pub content_type: Option<String>,
     /// Response body.
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 /// Egress failures.
@@ -202,7 +203,7 @@ impl EgressLimiter {
         Ok(EgressResponse {
             status,
             content_type,
-            body: body.to_vec(),
+            body,
         })
     }
 

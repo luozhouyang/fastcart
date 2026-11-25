@@ -11,7 +11,6 @@ use axum::routing::get;
 use bytes::Bytes;
 use fastcart_http::ApiError;
 use fastcart_kernel::{AppError, StoreContext};
-use fastcart_plugin::PluginManifest;
 use fastcart_plugin::inject::{InjectionConfig, StreamInjector};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -132,40 +131,32 @@ async fn storefront_items(
     db: &fastcart_infrastructure::StoreDatabase,
     path: &str,
 ) -> Result<Vec<Value>, ApiError> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT plugin_id, digest, manifest_json FROM plugin_installations WHERE enabled = 1",
-    )
-    .fetch_all(db.pool())
-    .await
-    .map_err(|error| ApiError::new(AppError::database(error.to_string())))?;
+    let catalog = super::plugin_catalog::load(context, db)
+        .await
+        .map_err(ApiError::new)?;
     let mut items = Vec::new();
-    for (plugin_id, digest, manifest_json) in rows {
-        let Ok(manifest) = PluginManifest::parse(manifest_json.as_bytes()) else {
-            continue;
-        };
-        for extension in &manifest.extensions.storefront {
+    for plugin in &catalog.plugins {
+        let prefix = format!(
+            "/_fastcart/extensions/{}/{}/",
+            plugin.plugin_id, plugin.digest
+        );
+        for extension in &plugin.manifest.extensions.storefront {
             if !matches_path(extension, path) {
                 continue;
             }
-            let entry = format!(
-                "/_fastcart/extensions/{plugin_id}/{digest}/{}",
-                extension.entry.trim_start_matches('/')
-            );
             items.push(json!({
-                "id": plugin_id,
-                "digest": digest,
+                "id": plugin.plugin_id,
+                "digest": plugin.digest,
                 "kind": extension.kind,
                 "placement": extension.placement,
-                "entry": entry,
-                "css": extension.css.as_ref().map(|css| format!(
-                    "/_fastcart/extensions/{plugin_id}/{digest}/{}",
-                    css.trim_start_matches('/')
-                )),
+                "entry": format!("{prefix}{}", extension.entry.trim_start_matches('/')),
+                "css": extension.css.as_ref().map(|css| {
+                    format!("{prefix}{}", css.trim_start_matches('/'))
+                }),
                 "height_hint": extension.height_hint,
             }));
         }
     }
-    let _ = context;
     Ok(items)
 }
 
@@ -178,12 +169,13 @@ fn matches_path(extension: &fastcart_plugin::manifest::StorefrontExtension, path
     {
         return false;
     }
-    let pages = if extension.pages.is_empty() {
-        vec!["*".to_owned()]
-    } else {
-        extension.pages.clone()
-    };
-    pages.iter().any(|pattern| pattern_matches(pattern, path))
+    if extension.pages.is_empty() {
+        return pattern_matches("*", path);
+    }
+    extension
+        .pages
+        .iter()
+        .any(|pattern| pattern_matches(pattern, path))
 }
 
 fn pattern_matches(pattern: &str, path: &str) -> bool {

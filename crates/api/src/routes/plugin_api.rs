@@ -567,11 +567,13 @@ async fn egress(
             method: request.method,
             headers: request.headers,
             body: match (request.body_base64, request.body) {
-                (Some(encoded), _) => BASE64
-                    .decode(encoded)
-                    .map_err(|_| ApiError::validation("invalid base64 body"))?,
-                (None, Some(body)) => body.into_bytes(),
-                (None, None) => Vec::new(),
+                (Some(encoded), _) => bytes::Bytes::from(
+                    BASE64
+                        .decode(encoded)
+                        .map_err(|_| ApiError::validation("invalid base64 body"))?,
+                ),
+                (None, Some(body)) => bytes::Bytes::from(body),
+                (None, None) => bytes::Bytes::new(),
             },
             allowlist: manifest.capabilities.network,
             forward_auth: manifest.capabilities.network_auth,

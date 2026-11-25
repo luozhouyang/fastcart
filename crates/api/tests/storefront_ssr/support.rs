@@ -107,6 +107,7 @@ impl UniversalStorefront for RecordingUniversal {
 
 pub(crate) struct Fixture {
     pub(crate) app: Router,
+    pub(crate) context: Arc<AppContext>,
     pub(crate) database: fastcart_infrastructure::StoreDatabase,
     pub(crate) platform: PlatformStore,
     pub(crate) preview_asset_authorizations: moka::future::Cache<String, ()>,
@@ -185,6 +186,7 @@ pub(crate) async fn fixture(universal: Option<Arc<dyn UniversalStorefront>>) -> 
     );
     Fixture {
         app: build_router(context.clone()),
+        context: context.clone(),
         database: database.clone(),
         platform: fixture_platform,
         preview_asset_authorizations: context.preview_asset_authorizations.clone(),

@@ -116,6 +116,9 @@ pub struct ContributionRegistry {
 
 impl ContributionRegistry {
     /// Builds a registry from plugin manifests keyed by plugin id.
+    ///
+    /// The manifests are consumed, so contributions move into the index
+    /// instead of being cloned.
     #[must_use]
     pub fn from_plugins(plugins: impl IntoIterator<Item = (String, PluginManifest)>) -> Self {
         let mut capabilities = Vec::new();
@@ -128,38 +131,60 @@ impl ContributionRegistry {
                 ..
             } = manifest;
             for contribution in provides {
-                let is_capability = matches!(contribution, Contribution::StorefrontCapability(_));
-                let provider = ContributionProvider {
-                    plugin_id: plugin_id.clone(),
-                    plugin_name: name.clone(),
-                    plugin_version: version.clone(),
-                    contribution,
-                };
-                if is_capability {
-                    capabilities.push(provider);
-                } else {
-                    components.push(provider);
-                }
+                push_provider(
+                    &mut capabilities,
+                    &mut components,
+                    ContributionProvider {
+                        plugin_id: plugin_id.clone(),
+                        plugin_name: name.clone(),
+                        plugin_version: version.clone(),
+                        contribution,
+                    },
+                );
             }
         }
-        sort_providers(&mut capabilities);
-        sort_providers(&mut components);
-        Self {
-            capabilities,
-            components,
+        finish(capabilities, components)
+    }
+
+    /// Builds a registry from borrowed manifests.
+    ///
+    /// Only the contributions and their provider metadata are cloned; the
+    /// manifest stays owned by the caller. Callers that already hold parsed
+    /// manifests, such as the cached plugin catalog, use this instead of
+    /// cloning every manifest just to build the index.
+    #[must_use]
+    pub fn from_borrowed_plugins<'a>(
+        plugins: impl IntoIterator<Item = (&'a str, &'a PluginManifest)>,
+    ) -> Self {
+        let mut capabilities = Vec::new();
+        let mut components = Vec::new();
+        for (plugin_id, manifest) in plugins {
+            for contribution in &manifest.provides {
+                push_provider(
+                    &mut capabilities,
+                    &mut components,
+                    ContributionProvider {
+                        plugin_id: plugin_id.to_owned(),
+                        plugin_name: manifest.name.clone(),
+                        plugin_version: manifest.version.clone(),
+                        contribution: contribution.clone(),
+                    },
+                );
+            }
         }
+        finish(capabilities, components)
     }
 
-    /// All capability contributions.
+    /// All capability contributions, ordered by plugin then id.
     #[must_use]
-    pub fn capabilities(&self) -> Vec<&ContributionProvider> {
-        self.capabilities.iter().collect()
+    pub fn capabilities(&self) -> &[ContributionProvider] {
+        &self.capabilities
     }
 
-    /// All component contributions.
+    /// All component contributions, ordered by plugin then id.
     #[must_use]
-    pub fn components(&self) -> Vec<&ContributionProvider> {
-        self.components.iter().collect()
+    pub fn components(&self) -> &[ContributionProvider] {
+        &self.components
     }
 
     /// Providers matching an exact id and, when supplied, version.
@@ -197,6 +222,30 @@ impl ContributionRegistry {
             .into_values()
             .filter(|providers| providers.len() > 1)
             .collect()
+    }
+}
+
+fn finish(
+    mut capabilities: Vec<ContributionProvider>,
+    mut components: Vec<ContributionProvider>,
+) -> ContributionRegistry {
+    sort_providers(&mut capabilities);
+    sort_providers(&mut components);
+    ContributionRegistry {
+        capabilities,
+        components,
+    }
+}
+
+fn push_provider(
+    capabilities: &mut Vec<ContributionProvider>,
+    components: &mut Vec<ContributionProvider>,
+    provider: ContributionProvider,
+) {
+    if matches!(provider.contribution, Contribution::StorefrontCapability(_)) {
+        capabilities.push(provider);
+    } else {
+        components.push(provider);
     }
 }
 

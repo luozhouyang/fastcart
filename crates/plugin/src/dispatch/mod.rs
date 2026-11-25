@@ -219,7 +219,7 @@ impl PluginDispatch {
                     method: "POST".to_owned(),
                     headers: vec![("content-type".to_owned(), "application/json".to_owned())],
                     context_token: token,
-                    body,
+                    body: body.into(),
                     kind: RequestKind::Event,
                     deadline_override: None,
                 })
@@ -395,7 +395,7 @@ impl PluginDispatch {
                     method: "POST".to_owned(),
                     headers: vec![("content-type".to_owned(), "application/json".to_owned())],
                     context_token: token,
-                    body,
+                    body: body.into(),
                     kind: RequestKind::Job,
                     deadline_override: None,
                 })

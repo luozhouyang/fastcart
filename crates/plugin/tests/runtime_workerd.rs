@@ -151,7 +151,7 @@ fn request(path: &str, deadline: Duration) -> RuntimeRequest {
         method: "GET".to_owned(),
         headers: vec![],
         context_token: "ctx-token".to_owned(),
-        body: vec![],
+        body: bytes::Bytes::new(),
         kind: RequestKind::Admin,
         deadline_override: Some(deadline),
     }

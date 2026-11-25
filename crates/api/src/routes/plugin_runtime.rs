@@ -13,7 +13,7 @@ use fastcart_http::{ApiError, ClientIp};
 use fastcart_kernel::{ActorContext, AppError, StoreContext, now_timestamp};
 use fastcart_plugin::{
     ContextClaims, PluginError, PluginManifest, RequestKind, RuntimeRequest, RuntimeResponse,
-    StreamingResponse, TokenActor,
+    Scope, StreamingResponse, TokenActor,
 };
 
 use super::StoreDb;
@@ -150,7 +150,7 @@ async fn forward(
             method: method.as_str().to_owned(),
             headers: forward_headers(&headers),
             context_token: token,
-            body: body.to_vec(),
+            body,
             kind: RequestKind::Storefront,
             deadline_override: None,
         })
@@ -207,19 +207,21 @@ pub(crate) fn storefront_actor(actor: &ActorContext) -> TokenActor {
 }
 
 pub(crate) fn storefront_scopes(manifest: &PluginManifest) -> Vec<String> {
-    const ALLOWED: [&str; 5] = [
-        "core.context",
-        "catalog.read",
-        "store.read",
-        "customer.read",
-        "carts.read",
-    ];
     manifest
         .scopes()
         .unwrap_or_default()
         .into_iter()
+        .filter(|scope| {
+            matches!(
+                scope,
+                Scope::Context
+                    | Scope::CatalogRead
+                    | Scope::StorefrontRead
+                    | Scope::CustomerRead
+                    | Scope::CartsRead
+            )
+        })
         .map(|scope| scope.as_str().to_owned())
-        .filter(|scope| ALLOWED.contains(&scope.as_str()))
         .collect()
 }
 
