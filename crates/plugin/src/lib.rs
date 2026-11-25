@@ -6,6 +6,7 @@
 //! supervises the shared workerd process that executes enabled plugins.
 
 pub mod artifact;
+pub mod bindings;
 pub mod bundle;
 pub mod capability;
 pub mod contribution;
@@ -20,6 +21,7 @@ pub mod service;
 pub mod targets;
 
 pub use artifact::{ArchiveLimits, ArtifactStore, ArtifactSummary, StoredArtifact};
+pub use bindings::{CapabilityBinding, CapabilityBindingService};
 pub use bundle::RuntimeBundle;
 pub use capability::Scope;
 pub use contribution::{

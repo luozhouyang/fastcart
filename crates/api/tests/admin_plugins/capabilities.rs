@@ -111,3 +111,138 @@ async fn capability_route_requires_a_bound_enabled_plugin() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "disabled binding");
 }
+
+#[tokio::test]
+async fn admin_binds_capabilities_to_enabled_providers() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let mut document = manifest("demo", "1.0.0", &[]);
+    document["provides"] = json!([{
+        "kind": "storefront_capability",
+        "id": "chat",
+        "version": 1,
+        "title": "Live chat",
+        "config_schema": {
+            "type": "object",
+            "properties": { "greeting": { "type": "string" } },
+            "additionalProperties": false
+        }
+    }]);
+    let bytes = archive(&document, "export default {};");
+    let (status, installed) = upload(
+        &fixture.app,
+        "/api/v1/admin/plugins/install",
+        &headers,
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{installed}");
+    let (status, _, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/enable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, catalog, _) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/capabilities",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let contributions = catalog["contributions"].as_array().unwrap();
+    assert_eq!(contributions.len(), 1);
+    assert_eq!(contributions[0]["id"], "chat");
+    assert_eq!(contributions[0]["version"], 1);
+    assert_eq!(contributions[0]["plugin_id"], "demo");
+    assert!(catalog["bindings"].as_array().unwrap().is_empty());
+
+    let (status, binding, _) = request(
+        &fixture.app,
+        "PUT",
+        "/api/v1/admin/capabilities/chat/binding",
+        Some(json!({
+            "plugin_id": "demo",
+            "version": 1,
+            "config": { "greeting": "Hi" }
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{binding}");
+    assert_eq!(binding["capability_id"], "chat");
+    assert_eq!(binding["plugin_id"], "demo");
+    assert_eq!(binding["config"]["greeting"], "Hi");
+    assert_eq!(binding["enabled"], true);
+
+    let (status, catalog, _) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/capabilities",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(catalog["bindings"].as_array().unwrap().len(), 1);
+
+    let (status, _, _) = request(
+        &fixture.app,
+        "PUT",
+        "/api/v1/admin/capabilities/chat/binding",
+        Some(json!({
+            "plugin_id": "demo",
+            "version": 1,
+            "config": { "unknown": true }
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _, _) = request(
+        &fixture.app,
+        "PUT",
+        "/api/v1/admin/capabilities/chat/binding",
+        Some(json!({ "plugin_id": "demo", "version": 2 })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = request(
+        &fixture.app,
+        "PUT",
+        "/api/v1/admin/capabilities/chat/binding",
+        Some(json!({ "plugin_id": "missing", "version": 1 })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = request(
+        &fixture.app,
+        "DELETE",
+        "/api/v1/admin/capabilities/chat/binding",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, catalog, _) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/capabilities",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(catalog["bindings"].as_array().unwrap().is_empty());
+}

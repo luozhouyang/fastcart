@@ -53,6 +53,9 @@ pub enum PluginError {
     /// A stored secret is absent.
     #[error("plugin secret not found: {0}")]
     SecretNotFound(String),
+    /// No installed plugin provides the requested capability version.
+    #[error("capability not provided: {0}")]
+    CapabilityNotFound(String),
     /// Secret encryption or decryption failed.
     #[error("plugin secret error: {0}")]
     Crypto(String),
@@ -93,6 +96,7 @@ impl PluginError {
             Self::InvalidSettings(_) => "settings_invalid",
             Self::InvalidSecret(_) => "secret_invalid",
             Self::SecretNotFound(_) => "secret_not_found",
+            Self::CapabilityNotFound(_) => "capability_not_found",
             Self::Crypto(_) => "secret_error",
             Self::DigestMismatch(_) => "digest_mismatch",
             Self::ScopesNotAccepted(_) => "scopes_not_accepted",
@@ -149,6 +153,9 @@ impl From<PluginError> for AppError {
                 "additional capabilities require acceptance: {scopes}"
             )),
             PluginError::SecretNotFound(name) => AppError::not_found("plugin secret", name),
+            PluginError::CapabilityNotFound(value) => {
+                AppError::not_found("plugin capability", value)
+            }
             PluginError::Storage(message) | PluginError::Runtime(message) => {
                 AppError::internal(message)
             }

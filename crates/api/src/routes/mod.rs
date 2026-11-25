@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod admin_assets;
 pub mod admin_campaigns;
+pub mod admin_capabilities;
 pub mod admin_catalog;
 pub mod admin_content;
 pub mod admin_customers;

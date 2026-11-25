@@ -1,0 +1,167 @@
+//! Admin capability catalog and store bindings.
+
+use std::sync::Arc;
+
+use axum::Json;
+use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{get, put};
+use fastcart_http::{AdminActor, ApiError, ApiResult};
+use fastcart_infrastructure::StoreDatabase;
+use fastcart_kernel::ActorContext;
+use fastcart_plugin::{
+    CapabilityBinding, CapabilityBindingService, Contribution, ContributionRegistry, PluginError,
+    PluginManifest,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::StoreDb;
+use crate::state::AppContext;
+
+/// Builds the admin capability routes.
+pub fn router() -> Router<Arc<AppContext>> {
+    Router::new()
+        .route("/capabilities", get(list_capabilities))
+        .route(
+            "/capabilities/{id}/binding",
+            put(bind_capability).delete(unbind_capability),
+        )
+}
+
+fn require(actor: &ActorContext, permission: &str) -> ApiResult<()> {
+    actor.require_user().map_err(ApiError::new)?;
+    actor.require_permission(permission).map_err(ApiError::new)
+}
+
+fn api(error: PluginError) -> ApiError {
+    ApiError::new(error.into())
+}
+
+fn service(db: StoreDatabase, actor: &ActorContext) -> CapabilityBindingService {
+    CapabilityBindingService::new(db)
+        .with_audit_actor(actor.user_id.as_ref().map(ToString::to_string))
+}
+
+/// One capability contribution exposed to administrators.
+#[derive(Clone, Debug, Serialize)]
+pub struct CapabilityContributionView {
+    /// Providing plugin.
+    pub plugin_id: String,
+    /// Plugin display name.
+    pub plugin_name: String,
+    /// Plugin version.
+    pub plugin_version: String,
+    /// Capability identifier.
+    pub id: String,
+    /// Capability version.
+    pub version: u32,
+    /// Human-readable title.
+    pub title: String,
+    /// Optional config schema.
+    pub config_schema: Option<Value>,
+}
+
+/// Capability catalog and current bindings.
+#[derive(Clone, Debug, Serialize)]
+pub struct CapabilitiesResponse {
+    /// Capabilities provided by enabled plugins.
+    pub contributions: Vec<CapabilityContributionView>,
+    /// Bindings configured for this store.
+    pub bindings: Vec<CapabilityBinding>,
+}
+
+async fn list_capabilities(
+    State(_context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+) -> ApiResult<Json<CapabilitiesResponse>> {
+    require(&actor, "plugins.read")?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT plugin_id, manifest_json FROM plugin_installations \
+         WHERE enabled = 1 ORDER BY plugin_id ASC",
+    )
+    .fetch_all(db.pool())
+    .await
+    .map_err(|error| ApiError::new(fastcart_kernel::AppError::database(error.to_string())))?;
+    let mut plugins = Vec::new();
+    for (plugin_id, manifest_json) in rows {
+        if let Ok(manifest) = PluginManifest::parse(manifest_json.as_bytes()) {
+            plugins.push((plugin_id, manifest));
+        }
+    }
+    let registry = ContributionRegistry::from_plugins(plugins);
+    let contributions = registry
+        .capabilities()
+        .into_iter()
+        .filter_map(|provider| match &provider.contribution {
+            Contribution::StorefrontCapability(capability) => Some(CapabilityContributionView {
+                plugin_id: provider.plugin_id.clone(),
+                plugin_name: provider.plugin_name.clone(),
+                plugin_version: provider.plugin_version.clone(),
+                id: capability.id.clone(),
+                version: capability.version,
+                title: capability.title.clone(),
+                config_schema: capability.config_schema.clone(),
+            }),
+            Contribution::StorefrontComponent(_) => None,
+        })
+        .collect();
+    let bindings = service(db, &actor).list().await.map_err(api)?;
+    Ok(Json(CapabilitiesResponse {
+        contributions,
+        bindings,
+    }))
+}
+
+/// Binding replacement payload.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BindCapabilityRequest {
+    /// Providing plugin.
+    pub plugin_id: String,
+    /// Provided capability version.
+    pub version: u32,
+    /// Store configuration for the capability.
+    #[serde(default)]
+    pub config: Option<Value>,
+    /// Whether the route resolves the binding.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+async fn bind_capability(
+    State(_context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+    Json(request): Json<BindCapabilityRequest>,
+) -> ApiResult<Json<CapabilityBinding>> {
+    require(&actor, "plugins.write")?;
+    let binding = service(db, &actor)
+        .bind(
+            &request.plugin_id,
+            &id,
+            request.version,
+            request.config.unwrap_or_else(|| serde_json::json!({})),
+            request.enabled,
+        )
+        .await
+        .map_err(api)?;
+    Ok(Json(binding))
+}
+
+async fn unbind_capability(
+    State(_context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    require(&actor, "plugins.write")?;
+    service(db, &actor).unbind(&id).await.map_err(api)?;
+    Ok(StatusCode::NO_CONTENT)
+}
