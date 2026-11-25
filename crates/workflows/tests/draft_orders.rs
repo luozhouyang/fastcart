@@ -2,7 +2,9 @@
 
 use fastcart_infrastructure::StoreDatabase;
 use fastcart_kernel::{CountryCode, CurrencyCode, Metadata, StoreId};
-use fastcart_module_order::OrderStatus;
+use fastcart_module_order::{
+    CreateOrderEditInput, OrderEditAction, OrderEditItemInput, OrderStatus,
+};
 use fastcart_module_store::StoreService;
 use fastcart_module_tax::{CreateTaxRateInput, CreateTaxRegionInput, TaxService};
 use fastcart_workflows::{CreateDraftOrderRequest, DraftOrderLine, DraftOrderWorkflow};
@@ -173,6 +175,52 @@ async fn re_taxing_a_placed_order_is_refused() {
         matches!(error, fastcart_kernel::AppError::Conflict(_)),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn conversion_re_prices_lines_added_by_an_edit() {
+    let (workflow, _db) = workflow_with_tax().await;
+    let draft = workflow
+        .create_draft_order(request(json!({"country_code": "DE"}), 0))
+        .await
+        .unwrap();
+    assert_eq!(draft.tax_total, 380);
+
+    let edit = workflow
+        .order_service()
+        .create_order_edit(
+            &draft.id,
+            CreateOrderEditInput {
+                reason: None,
+                metadata: Metadata::empty(),
+                items: vec![OrderEditItemInput {
+                    order_item_id: None,
+                    action: OrderEditAction::Add,
+                    product_id: None,
+                    variant_id: None,
+                    product_title: Some("Extra".to_owned()),
+                    variant_title: None,
+                    sku: None,
+                    unit_price: Some(500),
+                    before_quantity: None,
+                    after_quantity: 1,
+                    requires_shipping: Some(false),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    workflow
+        .order_service()
+        .confirm_order_edit(&draft.id, &edit.id)
+        .await
+        .unwrap();
+
+    let converted = workflow.convert_draft_order(&draft.id).await.unwrap();
+    assert_eq!(converted.status, OrderStatus::Pending);
+    assert_eq!(converted.items.len(), 2);
+    assert_eq!(converted.tax_total, 475);
+    assert_eq!(converted.total, 2_975);
 }
 
 #[tokio::test]

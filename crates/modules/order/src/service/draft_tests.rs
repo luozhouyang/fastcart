@@ -165,10 +165,15 @@ async fn a_draft_edit_does_not_move_stock() {
         .create_order_edit(&draft.id, quantity_edit(draft.items[0].id.as_str(), 5))
         .await
         .unwrap();
-    orders
+    let confirmed = orders
         .confirm_order_edit(&draft.id, &edit.id)
         .await
         .unwrap();
+    assert_eq!(
+        confirmed.difference_total,
+        Some(0),
+        "a draft edit changes the whole amount due later, not a settled difference"
+    );
 
     assert_eq!(
         inventory.variant_availability(&variant).await.unwrap(),
@@ -178,6 +183,33 @@ async fn a_draft_edit_does_not_move_stock() {
     let reloaded = orders.get(&draft.id).await.unwrap();
     assert_eq!(reloaded.items[0].quantity, 5);
     assert_eq!(reloaded.total, 5_000);
+}
+
+#[tokio::test]
+async fn an_empty_draft_cannot_be_converted() {
+    let (orders, _db) = service().await;
+    let draft = orders
+        .create_draft_order(draft_input(None, 2))
+        .await
+        .unwrap();
+    let edit = orders
+        .create_order_edit(&draft.id, quantity_edit(draft.items[0].id.as_str(), 0))
+        .await
+        .unwrap();
+    orders
+        .confirm_order_edit(&draft.id, &edit.id)
+        .await
+        .unwrap();
+
+    let error = orders.convert_draft_order(&draft.id).await.unwrap_err();
+    assert!(
+        matches!(error, fastcart_kernel::AppError::Conflict(_)),
+        "{error:?}"
+    );
+    assert_eq!(
+        orders.get(&draft.id).await.unwrap().status,
+        OrderStatus::Draft
+    );
 }
 
 #[tokio::test]

@@ -231,6 +231,8 @@ export function OrderAfterSalesPanel({
   const records = data
     ? data.edits.length + data.returns.length + data.claims.length + data.exchanges.length
     : 0;
+  const draft = order.status === "draft";
+  const creationKinds: CreationKind[] = draft ? ["edit"] : ["edit", "return", "claim", "exchange"];
 
   return (
     <>
@@ -293,7 +295,7 @@ export function OrderAfterSalesPanel({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-[11px] font-medium text-muted-foreground">After-sales</p>
           <div className="flex flex-wrap gap-1.5">
-            {(["edit", "return", "claim", "exchange"] as CreationKind[]).map((kind) => (
+            {creationKinds.map((kind) => (
               <Button
                 key={kind}
                 size="sm"

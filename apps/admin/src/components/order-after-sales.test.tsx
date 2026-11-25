@@ -253,6 +253,15 @@ describe("OrderAfterSalesPanel", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it("offers only order edits while the order is still a draft", () => {
+    renderPanel({ order: { ...order, status: "draft" } });
+
+    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Return" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Claim" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Exchange" })).not.toBeInTheDocument();
+  });
+
   it("disables record creation without the orders.write permission", () => {
     renderPanel({ canWrite: false });
 

@@ -387,9 +387,19 @@ impl OrderService {
         // landed after the edit was prepared). It is recorded once, here, so
         // collecting or refunding it afterwards is the same idempotent call
         // the claim and exchange flows use.
-        let difference_total = next_total
-            .checked_sub(current_total)
-            .ok_or_else(|| AppError::validation("edit difference overflow"))?;
+        //
+        // A draft has no money to settle: changing its lines changes the whole
+        // amount the customer will owe once it is placed, not a difference
+        // against a payment. Recording zero keeps the record honest and stops
+        // the settlement routes from collecting a delta that was never billed
+        // separately.
+        let difference_total = if current_status == OrderStatus::Draft {
+            0
+        } else {
+            next_total
+                .checked_sub(current_total)
+                .ok_or_else(|| AppError::validation("edit difference overflow"))?
+        };
         let updated_edit = sqlx::query(
             "UPDATE order_edits
              SET status = ?, after_subtotal = ?, after_total = ?, difference_total = ?,

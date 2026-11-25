@@ -333,7 +333,40 @@ impl DraftOrderWorkflow {
                 "a shipping_address with a country_code is required to recalculate tax",
             ));
         };
-        let destination = (country, province);
+        let tax_lines = self.item_tax_lines(&order, &(country, province)).await?;
+
+        self.orders
+            .recalculate_draft_taxes(order_id, Some(shipping_address), billing_address, tax_lines)
+            .await
+    }
+
+    /// Converts a draft order into a pending order.
+    ///
+    /// The goods are re-priced once more for the draft's current destination,
+    /// so lines added or changed through order edits enter the lifecycle with
+    /// the tax they should carry. No stock or payment is taken here.
+    pub async fn convert_draft_order(&self, order_id: &OrderId) -> Result<Order, AppError> {
+        let order = self.orders.get(order_id).await?;
+        if !order.is_draft_order() {
+            return Err(AppError::conflict(
+                "only draft orders can be converted, found a placed order",
+            ));
+        }
+        if let Some(destination) = destination(&order.shipping_address)? {
+            let tax_lines = self.item_tax_lines(&order, &destination).await?;
+            self.orders
+                .recalculate_draft_taxes(order_id, None, None, tax_lines)
+                .await?;
+        }
+        self.orders.convert_draft_order(order_id).await
+    }
+
+    /// Prices every active item line of a draft for one destination.
+    async fn item_tax_lines(
+        &self,
+        order: &Order,
+        destination: &(CountryCode, Option<String>),
+    ) -> Result<Vec<DraftOrderTaxLineInput>, AppError> {
         let provider = resolve_tax_provider(&self.tax, &self.store).await?;
         let variant_ids: Vec<String> = order
             .items
@@ -349,7 +382,7 @@ impl DraftOrderWorkflow {
             let tax = self
                 .line_tax(
                     &provider,
-                    &destination,
+                    destination,
                     item.variant_id
                         .as_ref()
                         .and_then(|variant| variants.get(variant.as_str()))
@@ -368,18 +401,7 @@ impl DraftOrderWorkflow {
                 });
             }
         }
-
-        self.orders
-            .recalculate_draft_taxes(order_id, Some(shipping_address), billing_address, tax_lines)
-            .await
-    }
-
-    /// Converts a draft order into a pending order.
-    ///
-    /// A converted draft enters the normal lifecycle; no stock or payment is
-    /// taken here.
-    pub async fn convert_draft_order(&self, order_id: &OrderId) -> Result<Order, AppError> {
-        self.orders.convert_draft_order(order_id).await
+        Ok(tax_lines)
     }
 
     async fn variant_categories(
