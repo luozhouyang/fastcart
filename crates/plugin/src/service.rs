@@ -70,6 +70,16 @@ struct InstallationRow {
 impl InstallationRow {
     fn into_plugin(self) -> Result<InstalledPlugin, PluginError> {
         let manifest = PluginManifest::parse(self.manifest_json.as_bytes())?;
+        self.into_plugin_with(manifest)
+    }
+
+    fn manifest(&self) -> Result<PluginManifest, PluginError> {
+        PluginManifest::parse(self.manifest_json.as_bytes())
+    }
+
+    /// Builds the plugin view from an already parsed manifest, so callers that
+    /// need both do not deserialize it twice.
+    fn into_plugin_with(self, manifest: PluginManifest) -> Result<InstalledPlugin, PluginError> {
         let settings: Value = serde_json::from_str(&self.settings_json)
             .map_err(|error| PluginError::Database(error.to_string()))?;
         let granted_scopes: Vec<String> = serde_json::from_str(&self.granted_scopes)
@@ -175,8 +185,8 @@ impl PluginService {
         plugin_id: &str,
     ) -> Result<(InstalledPlugin, PluginManifest), PluginError> {
         let row = self.row(plugin_id).await?;
-        let manifest = PluginManifest::parse(row.manifest_json.as_bytes())?;
-        let plugin = row.into_plugin()?;
+        let manifest = row.manifest()?;
+        let plugin = row.into_plugin_with(manifest.clone())?;
         Ok((plugin, manifest))
     }
 
