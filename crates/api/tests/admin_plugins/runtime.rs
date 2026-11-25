@@ -994,13 +994,26 @@ async fn apps_rate_limit_stops_a_storefront_flood() {
         .await;
         assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
     }
-    let (status, _) = raw(
-        &fixture.app,
-        "GET",
-        "/apps/demo/ping",
-        vec![],
-        &[("host", HOST.to_owned())],
-    )
-    .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // The limiter replenishes permits continuously, so a slow suite can free a
+    // slot between the burst and the next request. Keep issuing requests until
+    // the limiter rejects one instead of assuming the exact burst boundary.
+    let mut limited = false;
+    for _ in 0..600 {
+        let (status, _) = raw(
+            &fixture.app,
+            "GET",
+            "/apps/demo/ping",
+            vec![],
+            &[("host", HOST.to_owned())],
+        )
+        .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            limited = true;
+            break;
+        }
+    }
+    assert!(
+        limited,
+        "the storefront app flood must eventually be rate limited"
+    );
 }
