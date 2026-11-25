@@ -107,6 +107,7 @@ pub fn build_router(context: Arc<AppContext>) -> Router {
     }
     router = router
         .merge(routes::store::apps_router(&context))
+        .merge(routes::store::capabilities_router(&context))
         .merge(routes::store::extensions_router(&context))
         .merge(routes::plugin_ui::router());
 

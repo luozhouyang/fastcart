@@ -22,6 +22,8 @@ use tower::ServiceExt;
 const HOST: &str = "shop.example.com";
 const RUNTIME_TOKEN: &str = "runtime-secret";
 
+#[path = "admin_plugins/capabilities.rs"]
+mod capabilities;
 #[path = "admin_plugins/installation.rs"]
 mod installation;
 #[path = "admin_plugins/runtime.rs"]

@@ -35,6 +35,11 @@ pub fn apps_router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
     store_layers(context, super::plugin_runtime::apps_router())
 }
 
+/// Builds the `/store/capabilities/{id}` router with storefront store layers.
+pub fn capabilities_router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
+    store_layers(context, super::store_capabilities::router())
+}
+
 /// Builds the attachment upload router mounted with its own body limit.
 ///
 /// The route carries its full path because it is merged into the root router

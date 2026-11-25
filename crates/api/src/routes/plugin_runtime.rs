@@ -167,7 +167,7 @@ async fn forward(
     }
 }
 
-fn is_websocket(method: &Method, headers: &HeaderMap) -> bool {
+pub(crate) fn is_websocket(method: &Method, headers: &HeaderMap) -> bool {
     if method != Method::GET {
         return false;
     }
@@ -200,13 +200,13 @@ pub(crate) fn record_forward(context: &AppContext, result: &Result<RuntimeRespon
 /// The customer session middleware has already resolved the signed-in
 /// customer; dropping the identifier here would leave every plugin request
 /// anonymous.
-fn storefront_actor(actor: &ActorContext) -> TokenActor {
+pub(crate) fn storefront_actor(actor: &ActorContext) -> TokenActor {
     TokenActor::Storefront {
         id: actor.customer_id.as_ref().map(|id| id.as_str().to_owned()),
     }
 }
 
-fn storefront_scopes(manifest: &PluginManifest) -> Vec<String> {
+pub(crate) fn storefront_scopes(manifest: &PluginManifest) -> Vec<String> {
     const ALLOWED: [&str; 5] = [
         "core.context",
         "catalog.read",
@@ -227,13 +227,13 @@ fn storefront_scopes(manifest: &PluginManifest) -> Vec<String> {
 ///
 /// Direct router tests have no socket peer; they share the `unknown` bucket
 /// rather than trusting request headers.
-fn client_key(client_ip: Option<&Extension<ClientIp>>) -> String {
+pub(crate) fn client_key(client_ip: Option<&Extension<ClientIp>>) -> String {
     client_ip
         .map(|Extension(ip)| ip.as_key())
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn forward_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+pub(crate) fn forward_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     const ALLOWED: [&str; 5] = [
         "content-type",
         "accept",

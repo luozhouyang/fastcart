@@ -77,7 +77,7 @@ pub(crate) async fn raw(
     (status, bytes.to_vec())
 }
 
-async fn start_plugin_commerce() -> SocketAddr {
+pub(crate) async fn start_plugin_commerce() -> SocketAddr {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await

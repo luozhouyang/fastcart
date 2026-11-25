@@ -31,6 +31,7 @@ pub mod plugin_ws;
 pub mod preview;
 pub mod store;
 pub mod store_assets;
+pub mod store_capabilities;
 pub mod store_cart;
 pub mod store_catalog;
 pub mod store_content;
