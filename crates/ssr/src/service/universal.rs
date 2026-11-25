@@ -15,6 +15,7 @@ impl UniversalStorefront for SsrService {
         &self,
         request: axum::http::Request<Body>,
         store: StoreContext,
+        capabilities: CapabilityGrants,
         request_id: Option<String>,
         scheme: String,
     ) -> Response {
@@ -37,6 +38,7 @@ impl UniversalStorefront for SsrService {
             internal_token: self
                 .credentials
                 .token_for_store(store.store_id.as_str(), false),
+            capabilities,
         };
         self.metrics.record_ssr_request();
         let cache_key = cache_key(&request, store.store_id.as_str());
@@ -154,6 +156,7 @@ impl UniversalStorefront for SsrService {
         &self,
         request: axum::http::Request<Body>,
         store: StoreContext,
+        capabilities: CapabilityGrants,
         request_id: Option<String>,
         scheme: String,
     ) -> Response {
@@ -177,6 +180,7 @@ impl UniversalStorefront for SsrService {
             internal_token: self
                 .credentials
                 .token_for_store(store.store_id.as_str(), true),
+            capabilities,
         };
         match deployment
             .gateway

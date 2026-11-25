@@ -1,13 +1,31 @@
 //! HTTP gateway between the commerce server and workerd.
 
+use std::collections::BTreeMap;
+
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::SsrError;
+
+/// One store-bound plugin capability available to the theme runtime.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CapabilityGrant {
+    /// Bound capability version.
+    pub version: u32,
+    /// Public endpoint the theme calls.
+    pub endpoint: String,
+    /// Store configuration for the capability.
+    #[serde(default)]
+    pub config: Value,
+}
 
 /// A streamed response body.
 pub type SsrStream = BoxStream<'static, Result<Bytes, SsrError>>;
@@ -71,6 +89,8 @@ pub struct SsrRequestContext {
     pub preview: bool,
     /// Per-request internal token; overrides the gateway default.
     pub internal_token: Option<String>,
+    /// Store-bound plugin capabilities available to the theme.
+    pub capabilities: BTreeMap<String, CapabilityGrant>,
 }
 
 /// Forwards storefront requests to one workerd service.
@@ -196,6 +216,13 @@ impl SsrGateway {
         if context.preview {
             insert_header(&mut parts.headers, "x-fastcart-preview", "1")?;
         }
+        if !context.capabilities.is_empty() {
+            insert_header(
+                &mut parts.headers,
+                "x-fastcart-capabilities",
+                &Self::capabilities_header(&context.capabilities)?,
+            )?;
+        }
         insert_header(
             &mut parts.headers,
             "x-fastcart-assets-prefix",
@@ -208,6 +235,25 @@ impl SsrGateway {
         let body = reqwest::Body::wrap_stream(body.into_data_stream());
         self.forward_parts(parts.method, parts.uri, parts.headers, body)
             .await
+    }
+
+    /// Encodes the capability grants as a versioned base64url JSON header.
+    ///
+    /// Base64 keeps non-ASCII configuration valid as an HTTP header value.
+    fn capabilities_header(
+        capabilities: &BTreeMap<String, CapabilityGrant>,
+    ) -> Result<String, SsrError> {
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            v: u8,
+            grants: &'a BTreeMap<String, CapabilityGrant>,
+        }
+        let encoded = serde_json::to_vec(&Envelope {
+            v: 1,
+            grants: capabilities,
+        })
+        .map_err(|error| SsrError::InvalidRequest(format!("encode capabilities: {error}")))?;
+        Ok(format!("1.{}", URL_SAFE_NO_PAD.encode(encoded)))
     }
 
     async fn forward_parts(
@@ -326,6 +372,32 @@ mod tests {
         assert!(!headers.contains_key("x-fastcart-store-id"));
         assert!(!headers.contains_key("x-forwarded-host"));
         assert_eq!(headers.get(header::COOKIE).unwrap(), "session=ok");
+    }
+
+    #[test]
+    fn capabilities_header_encodes_versioned_grants() {
+        let mut capabilities = BTreeMap::new();
+        capabilities.insert(
+            "search".to_owned(),
+            CapabilityGrant {
+                version: 2,
+                endpoint: "/store/capabilities/search".to_owned(),
+                config: serde_json::json!({"title": "Search", "locale": "zh-CN"}),
+            },
+        );
+        let value = SsrGateway::capabilities_header(&capabilities).expect("encode");
+        assert!(value.is_ascii(), "header values must stay ASCII");
+        let (version, encoded) = value.split_once('.').expect("version prefix");
+        assert_eq!(version, "1");
+        let decoded = URL_SAFE_NO_PAD.decode(encoded).expect("base64url");
+        let envelope: serde_json::Value = serde_json::from_slice(&decoded).expect("json");
+        assert_eq!(envelope["v"], 1);
+        assert_eq!(envelope["grants"]["search"]["version"], 2);
+        assert_eq!(
+            envelope["grants"]["search"]["endpoint"],
+            "/store/capabilities/search"
+        );
+        assert_eq!(envelope["grants"]["search"]["config"]["locale"], "zh-CN");
     }
 
     #[test]

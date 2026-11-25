@@ -15,5 +15,5 @@ mod contract;
 mod service;
 
 pub use config::{SsrConfig, SsrCredentialsConfig, SsrDeploymentConfig};
-pub use contract::UniversalStorefront;
+pub use contract::{CapabilityGrant, CapabilityGrants, UniversalStorefront};
 pub use service::SsrService;

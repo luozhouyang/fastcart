@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::contribution::Contribution;
 use crate::error::PluginError;
 use crate::manifest::PluginManifest;
 
@@ -206,18 +205,7 @@ impl CapabilityBindingService {
             return Err(PluginError::NotFound(plugin_id.to_owned()));
         };
         let manifest = PluginManifest::parse(manifest_json.as_bytes())?;
-        let contribution = manifest
-            .provides
-            .iter()
-            .find_map(|contribution| match contribution {
-                Contribution::StorefrontCapability(capability)
-                    if capability.id == capability_id && capability.version == version =>
-                {
-                    Some(capability)
-                }
-                _ => None,
-            });
-        let Some(contribution) = contribution else {
+        let Some(contribution) = manifest.storefront_capability(capability_id, version) else {
             return Err(PluginError::CapabilityNotFound(format!(
                 "{capability_id}@{version}"
             )));

@@ -277,6 +277,27 @@ impl PluginManifest {
 }
 
 impl PluginManifest {
+    /// Returns the declared storefront capability matching `id` and `version`.
+    #[must_use]
+    pub fn storefront_capability(
+        &self,
+        id: &str,
+        version: u32,
+    ) -> Option<&crate::contribution::CapabilityContribution> {
+        self.provides
+            .iter()
+            .find_map(|contribution| match contribution {
+                crate::contribution::Contribution::StorefrontCapability(capability)
+                    if capability.id == id && capability.version == version =>
+                {
+                    Some(capability)
+                }
+                _ => None,
+            })
+    }
+}
+
+impl PluginManifest {
     /// Effective capabilities granted by this manifest.
     ///
     /// # Errors

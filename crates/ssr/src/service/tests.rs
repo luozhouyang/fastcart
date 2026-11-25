@@ -86,6 +86,7 @@ export default {
       requestId: request.headers.get("x-fastcart-request-id"),
       proto: request.headers.get("x-forwarded-proto"),
       token: request.headers.get("x-fastcart-internal-token"),
+      capabilities: request.headers.get("x-fastcart-capabilities"),
     });
   },
 };
@@ -168,6 +169,7 @@ async fn initialize_render_and_shutdown() {
         .render(
             request,
             store,
+            Default::default(),
             Some("req_server".to_owned()),
             "https".to_owned(),
         )
@@ -213,6 +215,7 @@ async fn initialize_render_and_shutdown() {
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             Some("rotated".to_owned()),
             "https".to_owned(),
         )
@@ -237,6 +240,7 @@ async fn initialize_render_and_shutdown() {
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             Some("cache_1".to_owned()),
             "https".to_owned(),
         )
@@ -259,6 +263,7 @@ async fn initialize_render_and_shutdown() {
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             Some("cache_2".to_owned()),
             "https".to_owned(),
         )
@@ -288,6 +293,7 @@ async fn initialize_render_and_shutdown() {
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             Some("cache_3".to_owned()),
             "https".to_owned(),
         )
@@ -395,6 +401,7 @@ async fn render_store(runtime: &SsrService, store_id: &str) -> serde_json::Value
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             Some(format!("req_{store_id}")),
             "https".to_owned(),
         )
@@ -420,6 +427,7 @@ async fn render_preview_store(runtime: &SsrService, store_id: &str) -> serde_jso
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             Some(format!("preview_{store_id}")),
             "https".to_owned(),
         )
@@ -528,6 +536,7 @@ async fn routes_stores_to_isolated_deployments_and_assets() {
             .render(
                 request,
                 store,
+                Default::default(),
                 Some(format!("req_{store_id}")),
                 "https".to_owned(),
             )
@@ -554,6 +563,7 @@ async fn routes_stores_to_isolated_deployments_and_assets() {
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             None,
             "https".to_owned(),
         )
@@ -657,6 +667,7 @@ async fn routes_stores_to_isolated_deployments_and_assets() {
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             None,
             "https".to_owned(),
         )
@@ -735,6 +746,7 @@ async fn activation_state_survives_restart() {
                 currency: CurrencyCode::new("USD").expect("currency"),
                 timezone: "UTC".to_owned(),
             },
+            Default::default(),
             None,
             "https".to_owned(),
         )

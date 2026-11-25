@@ -1,8 +1,15 @@
 //! The HTTP-facing contract between the commerce server and the SSR service.
 
+use std::collections::BTreeMap;
+
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use fastcart_kernel::StoreContext;
+
+pub use fastcart_ssr_workerd::CapabilityGrant;
+
+/// Store-bound plugin capabilities keyed by capability id.
+pub type CapabilityGrants = BTreeMap<String, CapabilityGrant>;
 
 /// Process-wide storefront SSR contract.
 ///
@@ -15,6 +22,7 @@ pub trait UniversalStorefront: Send + Sync {
         &self,
         request: axum::http::Request<axum::body::Body>,
         store: StoreContext,
+        capabilities: CapabilityGrants,
         request_id: Option<String>,
         scheme: String,
     ) -> axum::response::Response;
@@ -46,6 +54,7 @@ pub trait UniversalStorefront: Send + Sync {
         &self,
         _request: axum::http::Request<axum::body::Body>,
         _store: StoreContext,
+        _capabilities: CapabilityGrants,
         _request_id: Option<String>,
         _scheme: String,
     ) -> axum::response::Response {

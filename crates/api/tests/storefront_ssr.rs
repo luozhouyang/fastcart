@@ -7,7 +7,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fastcart_api::routes::preview::issue_preview_token;
-use fastcart_api::state::{InternalSsrCredentials, InternalSsrToken, UniversalStorefront};
+use fastcart_api::state::{
+    CapabilityGrants, InternalSsrCredentials, InternalSsrToken, UniversalStorefront,
+};
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::{Metadata, StoreContext, now_timestamp};

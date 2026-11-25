@@ -11,7 +11,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use fastcart_api::state::{InternalSsrCredentials, InternalSsrToken, UniversalStorefront};
+use fastcart_api::state::{
+    CapabilityGrants, InternalSsrCredentials, InternalSsrToken, UniversalStorefront,
+};
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::StoreContext;
@@ -41,6 +43,7 @@ impl UniversalStorefront for RecordingUniversal {
         &self,
         _request: Request<Body>,
         _store: StoreContext,
+        _capabilities: CapabilityGrants,
         _request_id: Option<String>,
         _scheme: String,
     ) -> Response {

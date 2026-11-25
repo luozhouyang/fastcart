@@ -135,14 +135,14 @@ fn default_enabled() -> bool {
 }
 
 async fn bind_capability(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
     Json(request): Json<BindCapabilityRequest>,
 ) -> ApiResult<Json<CapabilityBinding>> {
     require(&actor, "plugins.write")?;
-    let binding = service(db, &actor)
+    let binding = service(db.clone(), &actor)
         .bind(
             &request.plugin_id,
             &id,
@@ -152,16 +152,25 @@ async fn bind_capability(
         )
         .await
         .map_err(api)?;
+    invalidate_storefront(&context, &db).await;
     Ok(Json(binding))
 }
 
 async fn unbind_capability(
-    State(_context): State<Arc<AppContext>>,
+    State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     require(&actor, "plugins.write")?;
-    service(db, &actor).unbind(&id).await.map_err(api)?;
+    service(db.clone(), &actor).unbind(&id).await.map_err(api)?;
+    invalidate_storefront(&context, &db).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Drops cached SSR responses so a binding change is visible immediately.
+async fn invalidate_storefront(context: &AppContext, db: &StoreDatabase) {
+    if let Some(universal) = context.universal_storefront.as_ref() {
+        universal.invalidate_cache(db.store_id().as_str()).await;
+    }
 }

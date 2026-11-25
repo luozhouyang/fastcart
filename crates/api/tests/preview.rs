@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use fastcart_api::routes::preview::issue_preview_token;
-use fastcart_api::state::UniversalStorefront;
+use fastcart_api::state::{CapabilityGrants, UniversalStorefront};
 use fastcart_api::{ApiConfig, AppContext, build_router};
 use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
 use fastcart_kernel::{Metadata, StoreContext, StoreId, now_timestamp};
@@ -29,6 +29,7 @@ struct PreviewCall {
     uri: String,
     host: Option<String>,
     store: StoreContext,
+    capabilities: CapabilityGrants,
     request_id: Option<String>,
     scheme: String,
 }
@@ -39,6 +40,7 @@ impl UniversalStorefront for RecordingUniversal {
         &self,
         _request: Request<Body>,
         _store: StoreContext,
+        _capabilities: CapabilityGrants,
         _request_id: Option<String>,
         _scheme: String,
     ) -> Response {
@@ -71,6 +73,7 @@ impl UniversalStorefront for RecordingUniversal {
         &self,
         request: Request<Body>,
         store: StoreContext,
+        capabilities: CapabilityGrants,
         request_id: Option<String>,
         scheme: String,
     ) -> Response {
@@ -82,6 +85,7 @@ impl UniversalStorefront for RecordingUniversal {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned),
             store,
+            capabilities,
             request_id,
             scheme,
         });
@@ -341,6 +345,10 @@ async fn preview_token_renders_through_the_universal_deployment() {
     assert_eq!(call.store.domain, HOST);
     assert!(call.request_id.is_some());
     assert_eq!(call.scheme, "https");
+    assert!(
+        call.capabilities.is_empty(),
+        "this store has no capability bindings"
+    );
 }
 
 #[tokio::test]

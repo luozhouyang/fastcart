@@ -19,7 +19,7 @@ use fastcart_plugin::{
     TokenSigner,
 };
 
-pub use fastcart_ssr::UniversalStorefront;
+pub use fastcart_ssr::{CapabilityGrant, CapabilityGrants, UniversalStorefront};
 
 pub use fastcart_ssr_credentials::{
     CredentialManager as InternalSsrCredentials, CredentialMode,

@@ -14,8 +14,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use fastcart_http::{ApiError, ClientIp};
+use fastcart_infrastructure::{StoreDatabase, database_error};
 use fastcart_kernel::{ActorContext, AppError, StoreContext, now_timestamp};
 use fastcart_plugin::{ContextClaims, PluginError, PluginManifest, RequestKind, RuntimeRequest};
+use fastcart_ssr::{CapabilityGrant, CapabilityGrants};
 
 use super::StoreDb;
 use super::plugin_runtime::{
@@ -86,8 +88,24 @@ async fn forward(
     if installed == 0 {
         return Err(ApiError::new(AppError::not_found("plugin", plugin_id)));
     }
+    let Ok(version) = u32::try_from(version) else {
+        return Err(ApiError::new(AppError::not_found(
+            "capability",
+            capability_id,
+        )));
+    };
     let manifest = PluginManifest::parse(manifest_json.as_bytes())
         .map_err(|error| ApiError::new(error.into()))?;
+    // The binding may outlive a plugin update that removed the contribution.
+    if manifest
+        .storefront_capability(&capability_id, version)
+        .is_none()
+    {
+        return Err(ApiError::new(AppError::not_found(
+            "capability",
+            capability_id,
+        )));
+    }
 
     let limiter_key = format!(
         "{}:capability:{}:{}",
@@ -203,6 +221,77 @@ async fn forward(
             forward_error(error)
         }
     }
+}
+
+/// Resolves the capability grants available to a store's storefront.
+///
+/// A binding is exposed only when it is enabled, its plugin is installed and
+/// enabled, and the plugin's current manifest still declares the bound
+/// capability version. Invalid or stale rows are skipped so one bad binding
+/// cannot break storefront rendering.
+pub(crate) async fn resolve_grants(database: &StoreDatabase) -> Result<CapabilityGrants, AppError> {
+    let rows: Vec<(String, i64, String, String, String)> = sqlx::query_as(
+        "SELECT b.capability_id, b.version, b.plugin_id, b.config_json, i.manifest_json \
+         FROM store_capability_bindings b \
+         JOIN plugin_installations i \
+           ON i.plugin_id = b.plugin_id AND i.enabled = 1 \
+         WHERE b.enabled = 1 \
+         ORDER BY b.capability_id ASC",
+    )
+    .fetch_all(database.pool())
+    .await
+    .map_err(database_error)?;
+
+    let mut manifests: HashMap<String, Option<PluginManifest>> = HashMap::new();
+    let mut grants = CapabilityGrants::new();
+    for (capability_id, version, plugin_id, config_json, manifest_json) in rows {
+        let Ok(version) = u32::try_from(version) else {
+            tracing::warn!(
+                capability_id,
+                version,
+                "ignoring capability binding with an invalid version"
+            );
+            continue;
+        };
+        let manifest = manifests
+            .entry(plugin_id.clone())
+            .or_insert_with(|| PluginManifest::parse(manifest_json.as_bytes()).ok());
+        let Some(manifest) = manifest.as_ref() else {
+            tracing::warn!(
+                plugin_id,
+                "ignoring capability binding: invalid plugin manifest"
+            );
+            continue;
+        };
+        if manifest
+            .storefront_capability(&capability_id, version)
+            .is_none()
+        {
+            tracing::warn!(
+                plugin_id,
+                capability_id,
+                version,
+                "ignoring capability binding: manifest no longer provides it"
+            );
+            continue;
+        }
+        let config = match serde_json::from_str(&config_json) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(capability_id, error = %error, "invalid capability config");
+                serde_json::Value::Object(serde_json::Map::new())
+            }
+        };
+        grants.insert(
+            capability_id.clone(),
+            CapabilityGrant {
+                version,
+                endpoint: format!("/store/capabilities/{capability_id}"),
+                config,
+            },
+        );
+    }
+    Ok(grants)
 }
 
 fn valid_capability_id(value: &str) -> bool {

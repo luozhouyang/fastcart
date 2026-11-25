@@ -23,6 +23,84 @@ async fn universal_runtime_receives_trusted_context() {
 }
 
 #[tokio::test]
+async fn storefront_receives_only_resolvable_capability_grants() {
+    let universal = Arc::new(RecordingUniversal::default());
+    let fixture = fixture(Some(universal.clone())).await;
+    let plugin_manifest = serde_json::json!({
+        "schema_version": "1",
+        "id": "chat",
+        "name": "Live chat",
+        "version": "1.0.0",
+        "api_version": 2,
+        "runtime": { "engine": "workerd", "compatibility_date": "2026-11-01" },
+        "entry": { "type": "worker", "path": "worker/index.js" },
+        "provides": [{
+            "kind": "storefront_capability",
+            "id": "chat",
+            "version": 1,
+            "title": "Live chat"
+        }]
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO plugin_installations \
+         (id, plugin_id, digest, version, manifest_json, enabled, installed_at, updated_at) \
+         VALUES ('install_chat', 'chat', 'digest_chat', '1.0.0', ?, 1, 1, 1)",
+    )
+    .bind(&plugin_manifest)
+    .execute(fixture.database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO plugin_installations \
+         (id, plugin_id, digest, version, manifest_json, enabled, installed_at, updated_at) \
+         VALUES ('install_disabled', 'disabled', 'digest_disabled', '1.0.0', ?, 0, 1, 1)",
+    )
+    .bind(&plugin_manifest)
+    .execute(fixture.database.pool())
+    .await
+    .unwrap();
+    for (capability_id, plugin_id) in [("chat", "chat"), ("reviews", "chat"), ("media", "disabled")]
+    {
+        sqlx::query(
+            "INSERT INTO store_capability_bindings \
+             (capability_id, version, plugin_id, config_json, enabled, created_at, updated_at) \
+             VALUES (?, 1, ?, '{\"greeting\":\"hi\"}', 1, 1, 1)",
+        )
+        .bind(capability_id)
+        .bind(plugin_id)
+        .execute(fixture.database.pool())
+        .await
+        .unwrap();
+    }
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/products/example")
+                .header("host", "shop.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let seen = universal.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let grant = seen[0].capabilities.get("chat").expect("chat grant");
+    assert_eq!(grant.version, 1);
+    assert_eq!(grant.endpoint, "/store/capabilities/chat");
+    assert_eq!(grant.config["greeting"], "hi");
+    // The plugin manifest does not provide `reviews`, and `media`'s plugin is
+    // disabled, so neither binding reaches the theme.
+    assert!(!seen[0].capabilities.contains_key("reviews"));
+    assert!(!seen[0].capabilities.contains_key("media"));
+}
+
+#[tokio::test]
 async fn internal_ssr_namespace_requires_token_and_uses_path_store() {
     let fixture = fixture(None).await;
     let context_path = format!("/internal/ssr/v1/stores/{}/context", fixture.store_id);

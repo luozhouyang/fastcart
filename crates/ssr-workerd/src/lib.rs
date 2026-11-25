@@ -20,6 +20,6 @@ pub mod runtime;
 pub use artifact::{Artifact, ArtifactError, ArtifactLimits, ArtifactManifest, ArtifactStore};
 pub use config::WorkerdConfig;
 pub use error::SsrError;
-pub use gateway::{SsrBody, SsrGateway, SsrRequestContext, SsrResponse};
+pub use gateway::{CapabilityGrant, SsrBody, SsrGateway, SsrRequestContext, SsrResponse};
 pub use process::{RuntimeHealth, RuntimeStatus, WorkerdProcess};
 pub use runtime::{RuntimeGroupId, RuntimeManager, RuntimeManagerConfig};

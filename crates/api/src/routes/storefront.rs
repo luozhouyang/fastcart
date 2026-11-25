@@ -87,9 +87,19 @@ pub async fn render(State(context): State<Arc<AppContext>>, request: Request) ->
             currency,
             timezone: store.timezone.clone(),
         };
+        let capabilities = match super::store_capabilities::resolve_grants(&database).await {
+            Ok(capabilities) => capabilities,
+            Err(error) => return ApiError::new(error).into_response(),
+        };
         let path_for_injection = path.to_owned();
         let response = universal
-            .render(request, store_context, request_id, scheme.to_owned())
+            .render(
+                request,
+                store_context,
+                capabilities,
+                request_id,
+                scheme.to_owned(),
+            )
             .await;
         return super::storefront_extensions::inject_response(
             &context,

@@ -179,6 +179,7 @@ const mainWorker :Workerd.Worker = (
         scheme: "https".to_owned(),
         preview: false,
         internal_token: None,
+        capabilities: Default::default(),
     };
     let streaming_gateway = gateway.clone().with_internal_token("internal-secret");
     let streaming_request = Request::builder()

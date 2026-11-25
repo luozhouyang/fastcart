@@ -7,7 +7,14 @@ async fn capability_route_requires_a_bound_enabled_plugin() {
     let commerce = start_plugin_commerce().await;
     let fixture = fixture_options(true, Some(commerce)).await;
     let headers = fixture.headers();
-    let bytes = archive(&manifest("demo", "1.0.0", &[]), "export default {};");
+    let mut document = manifest("demo", "1.0.0", &[]);
+    document["provides"] = json!([{
+        "kind": "storefront_capability",
+        "id": "chat",
+        "version": 1,
+        "title": "Live chat"
+    }]);
+    let bytes = archive(&document, "export default {};");
     let (status, installed) = upload(
         &fixture.app,
         "/api/v1/admin/plugins/install",

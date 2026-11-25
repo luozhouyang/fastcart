@@ -30,7 +30,7 @@ use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
 
 use super::config::SsrConfig;
-use crate::contract::UniversalStorefront;
+use crate::contract::{CapabilityGrants, UniversalStorefront};
 
 mod cache;
 mod lifecycle;

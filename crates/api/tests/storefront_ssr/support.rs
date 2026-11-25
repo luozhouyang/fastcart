@@ -9,6 +9,7 @@ pub(crate) struct RecordingUniversal {
 
 pub(crate) struct RecordedContext {
     pub(crate) store: StoreContext,
+    pub(crate) capabilities: CapabilityGrants,
     pub(crate) request_id: Option<String>,
     pub(crate) scheme: String,
 }
@@ -19,11 +20,13 @@ impl UniversalStorefront for RecordingUniversal {
         &self,
         _request: Request<Body>,
         store: StoreContext,
+        capabilities: CapabilityGrants,
         request_id: Option<String>,
         scheme: String,
     ) -> Response {
         self.seen.lock().unwrap().push(RecordedContext {
             store,
+            capabilities,
             request_id,
             scheme,
         });
@@ -63,6 +66,7 @@ impl UniversalStorefront for RecordingUniversal {
         &self,
         _request: Request<Body>,
         _store: StoreContext,
+        _capabilities: CapabilityGrants,
         _request_id: Option<String>,
         _scheme: String,
     ) -> Response {
