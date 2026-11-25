@@ -241,3 +241,58 @@ async fn extension_items_are_served_from_the_cached_catalog() {
     fixture.context.cache.invalidate_store(&store_id);
     assert_eq!(manifest_of().await.as_deref(), Some("/collections/*"));
 }
+
+#[tokio::test]
+async fn extension_items_respect_pages_and_exclude_paths() {
+    let fixture = fixture(None).await;
+    let manifest = serde_json::json!({
+        "schema_version": "1",
+        "id": "chat",
+        "name": "Chat",
+        "version": "1.0.0",
+        "api_version": 2,
+        "runtime": { "engine": "workerd", "compatibility_date": "2026-11-01" },
+        "entry": { "type": "worker", "path": "index.js" },
+        "capabilities": { "storefront": ["store.read"] },
+        "extensions": {
+            "storefront": [{
+                "kind": "embed",
+                "placement": "body:end",
+                "entry": "storefront/boot.js",
+                "pages": ["/products/*", "/"],
+                "exclude_paths": ["/products/hidden/*"]
+            }]
+        }
+    });
+    sqlx::query(
+        "INSERT INTO plugin_installations \
+         (id, plugin_id, digest, version, manifest_json, enabled, settings_json, \
+          settings_revision, granted_scopes, installed_at, updated_at) \
+         VALUES ('pli_pages', 'chat', ?, '1.0.0', ?, 1, '{}', 1, '[]', 0, 0)",
+    )
+    .bind("c".repeat(64))
+    .bind(manifest.to_string())
+    .execute(fixture.database.pool())
+    .await
+    .unwrap();
+
+    let items = async |path: &str| {
+        let items = fastcart_api::routes::storefront_extensions::items_for_path(
+            &fixture.context,
+            &fixture.database,
+            path,
+        )
+        .await
+        .expect("items resolve");
+        items.len()
+    };
+
+    assert_eq!(items("/").await, 1, "an exact page match loads the embed");
+    assert_eq!(
+        items("/products/linen-shirt").await,
+        1,
+        "the prefix matches"
+    );
+    assert_eq!(items("/products/hidden/draft").await, 0, "exclusions win");
+    assert_eq!(items("/collections/all").await, 0, "unlisted paths skip it");
+}

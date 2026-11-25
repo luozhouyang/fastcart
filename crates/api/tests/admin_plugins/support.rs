@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) struct Fixture {
     pub(crate) app: Router,
+    pub(crate) context: Arc<AppContext>,
     pub(crate) store_id: String,
     pub(crate) session: String,
     pub(crate) csrf: String,
@@ -112,7 +113,7 @@ pub(crate) async fn fixture_full(
         )
         .with_universal_storefront(universal),
     );
-    let app = build_router(context);
+    let app = build_router(context.clone());
 
     let setup = request(
         &app,
@@ -147,6 +148,7 @@ pub(crate) async fn fixture_full(
 
     Fixture {
         app,
+        context,
         store_id,
         session,
         csrf,

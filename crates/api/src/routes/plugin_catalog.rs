@@ -115,7 +115,7 @@ async fn build(database: &StoreDatabase) -> Result<PluginCatalog, AppError> {
 ///
 /// Bumps the store cache generation and invalidates cached SSR renders, which
 /// embed the resolved grants.
-pub(crate) async fn invalidate(context: &AppContext, store_id: &StoreId) {
+pub async fn invalidate(context: &AppContext, store_id: &StoreId) {
     context.cache.invalidate_store(store_id);
     super::invalidate_storefront_cache(context, store_id.as_str()).await;
 }

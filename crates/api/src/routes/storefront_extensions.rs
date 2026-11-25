@@ -140,6 +140,18 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
+/// Storefront extension items matching one path.
+///
+/// Public so integration tests can exercise the page and exclusion matching
+/// without rendering a full storefront response.
+pub async fn items_for_path(
+    context: &AppContext,
+    db: &fastcart_infrastructure::StoreDatabase,
+    path: &str,
+) -> Result<Vec<Value>, ApiError> {
+    storefront_items(context, db, path).await
+}
+
 async fn storefront_items(
     context: &AppContext,
     db: &fastcart_infrastructure::StoreDatabase,

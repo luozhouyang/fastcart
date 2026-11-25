@@ -338,3 +338,111 @@ async fn component_entry_is_served_by_the_storefront_extension_route() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn two_enabled_plugins_can_declare_the_same_component_id() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    for plugin_id in ["alpha", "beta"] {
+        let document = component_manifest(
+            plugin_id,
+            json!([{
+                "kind": "storefront_component",
+                "id": "hero",
+                "title": format!("{plugin_id} hero")
+            }]),
+        );
+        let (status, installed) = upload(
+            &fixture.app,
+            "/api/v1/admin/plugins/install",
+            &headers,
+            &component_archive(&document),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{installed}");
+        let (status, _, _) = request(
+            &fixture.app,
+            "POST",
+            &format!("/api/v1/admin/plugins/{plugin_id}/enable"),
+            None,
+            &headers,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, body, _) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/components",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let components = body["components"].as_array().expect("components array");
+    assert_eq!(components.len(), 2, "{body}");
+    // Both plugins own a component with the same declared id; the catalog
+    // reports each provider and the editor namespaces them per plugin.
+    assert_eq!(components[0]["plugin_id"], "alpha");
+    assert_eq!(components[0]["id"], "hero");
+    assert_eq!(components[1]["plugin_id"], "beta");
+    assert_eq!(components[1]["id"], "hero");
+}
+
+#[tokio::test]
+async fn components_catalog_skips_a_plugin_whose_manifest_stops_parsing() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let document = component_manifest(
+        "demo",
+        json!([{ "kind": "storefront_component", "id": "hero", "title": "Hero" }]),
+    );
+    let (status, installed) = upload(
+        &fixture.app,
+        "/api/v1/admin/plugins/install",
+        &headers,
+        &component_archive(&document),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{installed}");
+    let (status, _, _) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/plugins/demo/enable",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let database = fixture
+        .databases
+        .database(&StoreId::from_string(fixture.store_id.clone()))
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE plugin_installations SET manifest_json = '{not json' WHERE plugin_id = 'demo'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    // The catalog is cached per generation, so simulate the change the way a
+    // real mutation would: bump the generation before reading again.
+    fastcart_api::routes::plugin_catalog::invalidate(
+        &fixture.context,
+        &StoreId::from_string(fixture.store_id.clone()),
+    )
+    .await;
+
+    let (status, body, _) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/components",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["components"].as_array().unwrap().is_empty());
+}
