@@ -26,6 +26,8 @@ use fastcart_workflows::AfterSalesWorkflow;
 
 const STOCK: i64 = 20;
 
+#[path = "order_edit_settlement/events.rs"]
+mod events;
 #[path = "order_edit_settlement/money.rs"]
 mod money;
 #[path = "order_edit_settlement/stock.rs"]

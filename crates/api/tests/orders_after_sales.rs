@@ -622,3 +622,140 @@ async fn a_cheaper_edit_refunds_its_difference_once() {
     assert_eq!(summary["outstanding"], 0);
     assert_eq!(summary["refund_due"], 0);
 }
+
+#[tokio::test]
+async fn a_positive_difference_is_collectable_but_not_refundable() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let edits = format!("/api/v1/admin/orders/{}/edits", fixture.order_id);
+    let (status, edit, _) = send(
+        &fixture.app,
+        "POST",
+        &edits,
+        Some(json!({
+            "reason": "customer added a gift card",
+            "items": [{
+                "action": "add",
+                "product_title": "Gift card",
+                "unit_price": 1_000,
+                "after_quantity": 1,
+                "requires_shipping": false
+            }]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{edit}");
+    let edit_id = edit["id"].as_str().unwrap().to_owned();
+    let (status, confirmed, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{edits}/{edit_id}/confirm"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    assert_eq!(confirmed["difference_total"], 1_000);
+
+    let (status, error, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{edits}/{edit_id}/refund-difference"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+
+    let (status, collected, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{edits}/{edit_id}/collect-difference"),
+        Some(json!({"provider": "manual"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{collected}");
+    assert_eq!(collected["payment_session"]["amount"], 1_000);
+
+    let (status, summary, _) = send(
+        &fixture.app,
+        "GET",
+        &format!("/api/v1/admin/orders/{}/payment-summary", fixture.order_id),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["total"], 5_000);
+    assert_eq!(summary["captured_total"], 4_000);
+    assert_eq!(summary["outstanding"], 1_000);
+    assert_eq!(summary["refund_due"], 0);
+}
+
+#[tokio::test]
+async fn a_zero_difference_edit_needs_no_settlement() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let edits = format!("/api/v1/admin/orders/{}/edits", fixture.order_id);
+    let (status, edit, _) = send(
+        &fixture.app,
+        "POST",
+        &edits,
+        Some(json!({
+            "items": [{
+                "action": "add",
+                "product_title": "Free sample",
+                "unit_price": 0,
+                "after_quantity": 1,
+                "requires_shipping": false
+            }]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{edit}");
+    let edit_id = edit["id"].as_str().unwrap().to_owned();
+    let (status, confirmed, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{edits}/{edit_id}/confirm"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    assert_eq!(confirmed["difference_total"], 0);
+
+    let (status, error, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{edits}/{edit_id}/collect-difference"),
+        Some(json!({"provider": "manual"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    let (status, error, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{edits}/{edit_id}/refund-difference"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+
+    let (status, summary, _) = send(
+        &fixture.app,
+        "GET",
+        &format!("/api/v1/admin/orders/{}/payment-summary", fixture.order_id),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["outstanding"], 0);
+    assert_eq!(summary["refund_due"], 0);
+}

@@ -385,3 +385,57 @@ async fn stock_demand_is_summed_across_edit_lines() {
     let reloaded = fixture.orders.get(&order.id).await.unwrap();
     assert_eq!(reloaded.items.len(), 1, "no part of the batch may apply");
 }
+
+#[tokio::test]
+async fn a_mixed_edit_nets_stock_within_one_transaction() {
+    let fixture = fixture().await;
+    let order = order(&fixture, 2, 1_000).await;
+    commit_stock(&fixture, &order, 2).await;
+    let baseline = level(&fixture).await;
+
+    let edit = fixture
+        .orders
+        .create_order_edit(
+            &order.id,
+            CreateOrderEditInput {
+                reason: None,
+                metadata: Metadata::default(),
+                items: vec![
+                    edit(
+                        OrderEditAction::Update,
+                        Some(order.items[0].id.clone()),
+                        Some(2),
+                        1,
+                    ),
+                    OrderEditItemInput {
+                        order_item_id: None,
+                        action: OrderEditAction::Add,
+                        product_id: None,
+                        variant_id: Some(fixture.variant_id.clone()),
+                        product_title: Some("Extra".to_owned()),
+                        variant_title: None,
+                        sku: None,
+                        unit_price: Some(500),
+                        before_quantity: None,
+                        after_quantity: 1,
+                        requires_shipping: Some(true),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    let confirmed = fixture
+        .workflow
+        .confirm_order_edit(&order.id, &edit.id)
+        .await
+        .unwrap();
+
+    assert_eq!(confirmed.order_edit.difference_total, Some(-500));
+    assert_eq!(confirmed.order.total, 1_500);
+    assert_eq!(
+        level(&fixture).await,
+        baseline,
+        "the restocked unit and the consumed unit must cancel out"
+    );
+}

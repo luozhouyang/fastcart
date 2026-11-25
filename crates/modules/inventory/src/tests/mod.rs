@@ -9,9 +9,9 @@ use fastcart_kernel::{
 };
 
 use crate::domain::{
-    CreateInventoryItemInput, CreateLocationInput, ExchangeRestockLine, Reference, ReservationLine,
-    ReservationStatus, ReturnRestockLine, StockConsumption, exchange_restock_reference,
-    return_restock_reference,
+    CreateInventoryItemInput, CreateLocationInput, ExchangeRestockLine, OrderEditStockLine,
+    Reference, ReservationLine, ReservationStatus, ReturnRestockLine, StockConsumption,
+    exchange_restock_reference, order_edit_stock_reference, return_restock_reference,
 };
 use crate::service::InventoryService;
 
@@ -48,6 +48,7 @@ async fn item_with_variant(service: &InventoryService, variant: &VariantId) -> I
 mod catalog;
 mod exchanges;
 mod fulfillments;
+mod order_edits;
 mod reservations;
 mod returns;
 mod stock;

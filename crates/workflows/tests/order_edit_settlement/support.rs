@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) struct Fixture {
+    pub(crate) db: StoreDatabase,
     pub(crate) workflow: AfterSalesWorkflow,
     pub(crate) orders: OrderService,
     pub(crate) inventory: InventoryService,
@@ -39,6 +40,7 @@ pub(crate) async fn fixture() -> Fixture {
         .await
         .unwrap();
     Fixture {
+        db: db.clone(),
         workflow: AfterSalesWorkflow::new(
             db.clone(),
             PaymentService::with_registry(db.clone(), providers.clone()),
