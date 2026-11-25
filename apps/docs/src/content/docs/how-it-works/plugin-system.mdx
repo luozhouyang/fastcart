@@ -195,6 +195,53 @@ Contribution ids follow the plugin id rules. `(kind, id, version)` must be uniqu
 
 The host builds a contribution index keyed by `(kind, id, version)` and reports providers that collide across plugins. Themes and store bindings consume that index; contributions grant no execution rights on their own.
 
+### Storefront capability example
+
+A plugin can expose a store-scoped HTTP capability instead of, or alongside, an embed. The chat template declares one `storefront_capability` contribution and the configuration an administrator may bind:
+
+```json
+"capabilities": { "storefront": ["store.read"] },
+"provides": [
+  {
+    "kind": "storefront_capability",
+    "id": "livechat",
+    "version": 1,
+    "title": "Live chat",
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "greeting": { "type": "string" },
+        "accent": { "type": "string" },
+        "position": { "type": "string", "enum": ["bottom-right", "bottom-left"] }
+      },
+      "additionalProperties": false
+    }
+  }
+]
+```
+
+An administrator binds the contribution to one enabled provider:
+
+1. `GET /api/v1/admin/capabilities` returns every contribution from enabled plugins plus the store's current bindings (`plugins.read`).
+2. `PUT /api/v1/admin/capabilities/livechat/binding` with `{"plugin_id":"chat-widget","version":1,"enabled":true,"config":{"greeting":"Hi! How can we help?"}}` upserts the binding. The manifest must declare the exact id and version, and the config is validated against `config_schema`; unknown properties are rejected (`plugins.write`).
+3. `DELETE /api/v1/admin/capabilities/livechat/binding` unbinds the capability.
+
+The Admin UI offers the same catalog and binding under **Configuration → Capabilities**. An upgrade or rollback that no longer provides an enabled binding is rejected, and removing a plugin purges its bindings, so a stored binding always matches the installed manifest.
+
+While the binding and its provider plugin are enabled, `/store/capabilities/livechat` and `/store/capabilities/livechat/{*path}` forward to the plugin worker at `/capabilities/livechat...` with the store resolved from `Host`. A short-lived storefront context token replaces the caller's credentials, client-supplied `x-fastcart-*` headers are stripped, and the request is rate limited per capability and client. An unbound capability, a disabled binding or plugin, or a binding whose updated manifest no longer provides the version returns `404`, so callers must treat the route as optional.
+
+The storefront runtime resolves enabled bindings into grants and passes them to the theme in the trusted `x-fastcart-capabilities` request header. That header carries each capability's version, public endpoint and bound config; the [Storefront SSR](/how-it-works/storefront-ssr/) page documents the encoding, trusted-header rules and the SDK parser. A theme declares what it needs in its manifest:
+
+```json
+{
+  "requires": {
+    "capabilities": [{ "id": "livechat", "version": 1 }]
+  }
+}
+```
+
+Activation and rollback fail with a conflict while a non-optional requirement has no enabled binding backed by an enabled provider; mark the requirement `"optional": true` when the theme can render without it. The chat template's `storefront/boot.js` illustrates graceful degradation: it probes `/store/capabilities/livechat/session` with same-origin credentials, and on a `404` keeps its built-in greeting and accent and falls back to the plugin's legacy `/apps/chat-widget/*` path instead of calling the unbound capability.
+
 ## Lifecycle
 
 <PluginLifecycle />

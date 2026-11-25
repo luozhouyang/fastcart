@@ -19,6 +19,23 @@
     "admin": ["admin.ui"],
     "storefront": ["store.read"]
   },
+  "provides": [
+    {
+      "kind": "storefront_capability",
+      "id": "livechat",
+      "version": 1,
+      "title": "Live chat",
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "greeting": { "type": "string" },
+          "accent": { "type": "string" },
+          "position": { "type": "string", "enum": ["bottom-right", "bottom-left"] }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
   "extensions": {
     "admin": [
       { "target": "admin.nav.section", "label": "Live Chat", "route": "/apps/chat-widget" },
