@@ -2,7 +2,7 @@
 
 use fastcart_infrastructure::{StoreDatabase, fetch_pending_audits};
 use fastcart_kernel::{AppError, Pagination, StoreId, ThemeId};
-use fastcart_storefront::ThemeManifest;
+use fastcart_storefront::{ThemeCapabilityRequirement, ThemeManifest, ThemeRequirements};
 use serde_json::{Value, json};
 
 use crate::{
@@ -34,6 +34,7 @@ fn manifest(id: &str) -> ThemeManifest {
         id: id.to_owned(),
         name: format!("Theme {id}"),
         version: "1.0.0".to_owned(),
+        requires: None,
     }
 }
 
@@ -79,6 +80,35 @@ async fn registers_lists_and_reads_themes() {
     assert!(listed.data.iter().any(|theme| theme.id == second.id));
 
     assert!(service.active().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn persists_capability_requirements() {
+    let service = service().await;
+    let requires = ThemeRequirements {
+        data_api: Some(1),
+        capabilities: vec![
+            ThemeCapabilityRequirement {
+                id: "catalog.search".to_owned(),
+                version: Some(2),
+                optional: false,
+            },
+            ThemeCapabilityRequirement {
+                id: "reviews".to_owned(),
+                version: None,
+                optional: true,
+            },
+        ],
+    };
+    let mut register = input("requires");
+    register.manifest.requires = Some(requires.clone());
+
+    let theme = service.register(register).await.unwrap();
+    assert_eq!(theme.manifest.requires, Some(requires.clone()));
+
+    let fetched = service.get(&theme.id).await.unwrap();
+    assert_eq!(fetched.manifest, theme.manifest);
+    assert_eq!(fetched.manifest.requires, Some(requires));
 }
 
 #[tokio::test]

@@ -40,13 +40,17 @@ impl ThemeService {
             None => None,
         };
         let settings_json = serialize_json(&settings, "settings")?;
+        let requires_json = match manifest.requires.as_ref() {
+            Some(requires) => Some(serialize_json(requires, "requires")?),
+            None => None,
+        };
 
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         sqlx::query(
             "INSERT INTO themes \
-             (id, manifest_id, name, version, settings_schema, settings, is_active, \
+             (id, manifest_id, name, version, settings_schema, settings, requires_json, is_active, \
               created_at, updated_at, draft_settings, settings_revision) \
-             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, 1)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, 1)",
         )
         .bind(id.as_str())
         .bind(&manifest.id)
@@ -54,6 +58,7 @@ impl ThemeService {
         .bind(&manifest.version)
         .bind(settings_schema_json.as_deref())
         .bind(&settings_json)
+        .bind(requires_json.as_deref())
         .bind(now)
         .bind(now)
         .execute(&mut *tx)

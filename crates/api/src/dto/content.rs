@@ -10,6 +10,10 @@ pub struct ThemeManifestDto {
     pub name: String,
     /// Theme version.
     pub version: String,
+    /// Platform and plugin capabilities the theme requires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub requires: Option<ThemeRequirements>,
 }
 
 impl From<ThemeManifest> for ThemeManifestDto {
@@ -18,6 +22,7 @@ impl From<ThemeManifest> for ThemeManifestDto {
             id: manifest.id,
             name: manifest.name,
             version: manifest.version,
+            requires: manifest.requires,
         }
     }
 }
@@ -28,6 +33,7 @@ impl From<ThemeManifestDto> for ThemeManifest {
             id: manifest.id,
             name: manifest.name,
             version: manifest.version,
+            requires: manifest.requires,
         }
     }
 }

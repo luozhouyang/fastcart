@@ -129,6 +129,7 @@ pub(crate) async fn fixture(universal: Option<Arc<dyn UniversalStorefront>>) -> 
                 id: "default".to_owned(),
                 name: "Default".to_owned(),
                 version: "1.0.0".to_owned(),
+                requires: None,
             },
             settings_schema: None,
             settings: Some(serde_json::json!({"brand_color": "#111111"})),

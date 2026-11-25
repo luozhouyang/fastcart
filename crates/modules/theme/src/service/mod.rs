@@ -4,7 +4,7 @@ use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, PageResult, Pagination, ThemeActivationId, ThemeId, Timestamp, now_timestamp,
 };
-use fastcart_storefront::{StorefrontError, ThemeManifest};
+use fastcart_storefront::{StorefrontError, ThemeManifest, ThemeRequirements};
 use serde_json::Value;
 use sqlx::{FromRow, Sqlite, Transaction};
 
@@ -14,7 +14,7 @@ use crate::domain::{
 };
 
 const THEME_COLUMNS: &str = "id, manifest_id, name, version, settings_schema, settings, \
-     draft_settings, settings_revision, is_active, created_at, updated_at";
+     requires_json, draft_settings, settings_revision, is_active, created_at, updated_at";
 
 const SETTINGS_REVISION_COLUMNS: &str = "id, theme_id, revision, settings, status, \
      created_by, created_at";
@@ -243,6 +243,7 @@ struct ThemeRow {
     version: String,
     settings_schema: Option<String>,
     settings: String,
+    requires_json: Option<String>,
     draft_settings: Option<String>,
     settings_revision: i64,
     is_active: i64,
@@ -252,10 +253,17 @@ struct ThemeRow {
 
 impl ThemeRow {
     fn into_theme(self) -> Result<Theme, AppError> {
+        let requires: Option<ThemeRequirements> = match self.requires_json {
+            Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
+                AppError::internal(format!("invalid stored theme requirements: {error}"))
+            })?),
+            None => None,
+        };
         let manifest = ThemeManifest {
             id: self.manifest_id,
             name: self.name,
             version: self.version,
+            requires,
         };
         let settings_schema: Option<Value> = match self.settings_schema {
             Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {

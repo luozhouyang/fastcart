@@ -15,7 +15,10 @@ pub use editor::{
     ThemeEditorManifest,
 };
 pub use page::{PageBlock, PageBody, PageRoot, PageThemeRef};
-pub use theme::{SUPPORTED_EDITOR_SCHEMA_VERSION, ThemeManifest};
+pub use theme::{
+    AvailableCapability, SUPPORTED_DATA_API_VERSION, SUPPORTED_EDITOR_SCHEMA_VERSION,
+    ThemeCapabilityRequirement, ThemeManifest, ThemeRequirements,
+};
 
 /// Validation errors raised by storefront contracts.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
