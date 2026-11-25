@@ -24,6 +24,8 @@ const RUNTIME_TOKEN: &str = "runtime-secret";
 
 #[path = "admin_plugins/capabilities.rs"]
 mod capabilities;
+#[path = "admin_plugins/components.rs"]
+mod components;
 #[path = "admin_plugins/installation.rs"]
 mod installation;
 #[path = "admin_plugins/runtime.rs"]
