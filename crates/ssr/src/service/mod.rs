@@ -88,7 +88,12 @@ pub struct SsrService {
     asset_roots: Arc<RwLock<Vec<PathBuf>>>,
     preview_asset_roots: Arc<RwLock<Vec<PathBuf>>>,
     artifact_refs: Arc<RwLock<HashMap<PathBuf, usize>>>,
-    response_cache: RwLock<HashMap<String, CachedResponse>>,
+    /// Buffered route-cache entries.
+    ///
+    /// `moka` bounds the entry count and serves concurrent hits without a
+    /// shared write lock. Entries carry their own TTL because the policy comes
+    /// from each response's `Cache-Control`, so expiry is checked on read.
+    response_cache: moka::future::Cache<String, CachedResponse>,
     default: Option<Arc<Deployment>>,
     metrics: Arc<Metrics>,
     credentials: CredentialManager,
@@ -111,13 +116,9 @@ struct DeploymentSpec<'a> {
 impl SsrService {
     async fn cached_response(&self, key: &str) -> Option<Response> {
         let entry = {
-            let cache = self.response_cache.read().await;
-            let entry = cache.get(key)?.clone();
+            let entry = self.response_cache.get(key).await?;
             if entry.stored.elapsed() > entry.ttl {
-                drop(cache);
-                // An expired entry is only removed on the slow path, so the
-                // common hit never takes the write lock.
-                self.response_cache.write().await.remove(key);
+                self.response_cache.invalidate(key).await;
                 return None;
             }
             entry

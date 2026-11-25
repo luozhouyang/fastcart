@@ -21,25 +21,34 @@ impl ContentService {
         let mut issues = Vec::new();
         let mut offset = 0_i64;
         loop {
-            let pagination = Pagination::new(Some(Pagination::MAX_LIMIT), Some(offset))?;
-            let page = self.list_pages(None, false, pagination).await?;
-            let batch_len = page.data.len();
-            for record in page.data {
-                // Archived pages are withdrawn from every storefront surface,
-                // so they must not block theme activation.
-                if record.status == PageStatus::Archived || is_empty_body(&record.body) {
+            // Only the columns validation reads: `list_pages` would also load
+            // every published snapshot and run an unused `COUNT(*)` per batch.
+            let rows: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT id, handle, body FROM pages \
+                 WHERE deleted_at IS NULL AND status != 'archived' \
+                 ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            )
+            .bind(Pagination::MAX_LIMIT)
+            .bind(offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
+            let batch_len = rows.len();
+            for (id, handle, body) in rows {
+                let body = parse_json(&body);
+                if is_empty_body(&body) {
                     continue;
                 }
-                if let Err(error) = validate_page_body_for_theme(&record.body, editor_manifest) {
+                if let Err(error) = validate_page_body_for_theme(&body, editor_manifest) {
                     issues.push(PageValidationIssue {
-                        page_id: record.id,
-                        handle: record.handle,
+                        page_id: PageId::from_string(id),
+                        handle,
                         error,
                     });
                 }
             }
-            offset = offset.saturating_add(pagination.limit);
-            if batch_len < usize::try_from(pagination.limit).unwrap_or(usize::MAX) {
+            offset = offset.saturating_add(Pagination::MAX_LIMIT);
+            if batch_len < usize::try_from(Pagination::MAX_LIMIT).unwrap_or(usize::MAX) {
                 break;
             }
         }

@@ -234,3 +234,40 @@ async fn system_pages_are_seeded_and_idempotent() {
     let again = service.get_published_page_by_handle("cart").await.unwrap();
     assert_eq!(again.id, cart.id);
 }
+
+#[tokio::test]
+async fn validate_all_pages_reads_every_batch() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let themed = ContentService::new(db);
+    let manifest = editor_manifest();
+    let batch = usize::try_from(Pagination::MAX_LIMIT).unwrap_or(100);
+
+    // One invalid page past the first batch proves the scan continues after a
+    // full batch instead of stopping at the first page of results.
+    let mut bad_id = None;
+    for index in 0..=batch {
+        if index == batch {
+            let page = themed
+                .create_page(CreatePageInput {
+                    body: json!({
+                        "schema_version": 1,
+                        "content": [{ "type": "Unknown", "props": { "id": "x" } }]
+                    }),
+                    ..page_input("Bad")
+                })
+                .await
+                .unwrap();
+            bad_id = Some(page.id);
+        } else {
+            let input = CreatePageInput {
+                handle: Some(format!("page-{index}")),
+                ..page_input("Page")
+            };
+            themed.create_page(input).await.unwrap();
+        }
+    }
+
+    let issues = themed.validate_all_pages(&manifest).await.unwrap();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(Some(&issues[0].page_id), bad_id.as_ref());
+}

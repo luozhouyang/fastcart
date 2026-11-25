@@ -1465,6 +1465,7 @@ dependencies = [
  "fastcart-ssr-credentials",
  "fastcart-ssr-workerd",
  "futures",
+ "moka",
  "serde",
  "serde_json",
  "tempfile",

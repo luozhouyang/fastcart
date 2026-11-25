@@ -81,11 +81,7 @@ impl UniversalStorefront for SsrService {
                         stored: Instant::now(),
                         ttl,
                     };
-                    let mut cache = self.response_cache.write().await;
-                    if cache.len() >= MAX_CACHE_ENTRIES {
-                        cache.clear();
-                    }
-                    cache.insert(key, cached);
+                    self.response_cache.insert(key, cached).await;
                     response.body = SsrBody::Full(body);
                     response.headers.insert(
                         "x-fastcart-cache",

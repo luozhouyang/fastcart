@@ -122,7 +122,10 @@ impl SsrService {
             asset_roots: Arc::new(RwLock::new(asset_roots)),
             preview_asset_roots: Arc::new(RwLock::new(preview_asset_roots)),
             artifact_refs: Arc::new(RwLock::new(artifact_refs)),
-            response_cache: RwLock::new(HashMap::new()),
+            response_cache: moka::future::Cache::builder()
+                .max_capacity(MAX_CACHE_ENTRIES as u64)
+                .support_invalidation_closures()
+                .build(),
             default,
             metrics,
             credentials,
