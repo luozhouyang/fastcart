@@ -111,10 +111,13 @@ struct DeploymentSpec<'a> {
 impl SsrService {
     async fn cached_response(&self, key: &str) -> Option<Response> {
         let entry = {
-            let mut cache = self.response_cache.write().await;
-            let entry = cache.get(key).cloned()?;
+            let cache = self.response_cache.read().await;
+            let entry = cache.get(key)?.clone();
             if entry.stored.elapsed() > entry.ttl {
-                cache.remove(key);
+                drop(cache);
+                // An expired entry is only removed on the slow path, so the
+                // common hit never takes the write lock.
+                self.response_cache.write().await.remove(key);
                 return None;
             }
             entry
