@@ -64,6 +64,7 @@ import {
 } from "@/lib/models";
 
 const STATUSES: OrderStatus[] = [
+  "draft",
   "pending",
   "confirmed",
   "processing",
@@ -196,12 +197,14 @@ export function orderToView(
 
   const refundedTotal = toMajor(order.refunds.reduce((total, refund) => total + refund.amount, 0));
   const canFulfill =
+    order.status !== "draft" &&
     order.status !== "canceled" &&
     order.status !== "completed" &&
     order.status !== "fulfilled" &&
     order.fulfillment_status !== "fulfilled" &&
     order.fulfillment_status !== "returned";
   const canRefund =
+    order.status !== "draft" &&
     (order.payment_status === "captured" || order.payment_status === "partially_refunded") &&
     refundedTotal < toMajor(order.total);
 
@@ -456,6 +459,7 @@ export async function loadOverview(
     "processing",
     "confirmed",
     "pending",
+    "draft",
     "canceled",
   ];
   const sliceColors: Record<OrderStatus, string> = {
@@ -464,6 +468,7 @@ export async function loadOverview(
     processing: "var(--chart-3)",
     confirmed: "var(--chart-2)",
     pending: "var(--chart-5)",
+    draft: "var(--chart-4)",
     canceled: "var(--chart-4)",
   };
   const statusSlices = sliceOrder

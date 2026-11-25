@@ -50,6 +50,13 @@ describe("orderToView", () => {
     ]);
   });
 
+  it("does not offer fulfillment or refunds for an unplaced draft", () => {
+    const view = orderToView(order({ status: "draft" }), new Map(), new Map());
+
+    expect(view.canFulfill).toBe(false);
+    expect(view.canRefund).toBe(false);
+  });
+
   it("stops offering refunds once the full total is refunded", () => {
     const view = orderToView(
       order({

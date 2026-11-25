@@ -11,7 +11,7 @@ import type {
 } from "@fastcart/shared-types";
 
 export type OrderStatusView =
-  "pending" | "confirmed" | "processing" | "fulfilled" | "completed" | "canceled";
+  "draft" | "pending" | "confirmed" | "processing" | "fulfilled" | "completed" | "canceled";
 
 export type PaymentStatusView =
   "awaiting" | "authorized" | "captured" | "partially_refunded" | "refunded" | "failed";
@@ -255,6 +255,7 @@ export interface NotificationsPageView {
 }
 
 export const ORDER_STATUS_LABELS: Record<OrderStatusView, string> = {
+  draft: "Draft",
   pending: "Pending",
   confirmed: "Confirmed",
   processing: "Processing",

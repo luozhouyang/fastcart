@@ -5,12 +5,14 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  Plus,
   RefreshCw,
   Search,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { NewDraftOrderDialog } from "@/components/new-draft-order-dialog";
 import { OrderDrawer } from "@/components/order-drawer";
 import { PageHeader } from "@/components/page-header";
 import { Pagination } from "@/components/pagination";
@@ -65,6 +67,7 @@ const PAGE_SIZE = 10;
 
 const STATUS_TABS: Array<{ value: OrderStatusView | "all"; label: string }> = [
   { value: "all", label: "All" },
+  { value: "draft", label: "Draft" },
   { value: "pending", label: "Pending" },
   { value: "confirmed", label: "Confirmed" },
   { value: "processing", label: "Processing" },
@@ -96,10 +99,12 @@ export function OrdersPage() {
   const [sort, setSort] = useState<OrderSort>("newest");
   const [selected, setSelected] = useState<OrderView | null>(null);
   const [patched, setPatched] = useState<Record<string, OrderView>>({});
+  const [draftOpen, setDraftOpen] = useState(false);
 
   useEffect(() => {
     setPatched({});
     setSelected(null);
+    setDraftOpen(false);
     setPage(1);
   }, [store?.id, mode, dataKey]);
 
@@ -139,7 +144,11 @@ export function OrdersPage() {
   ]);
 
   const rows = (data?.orders ?? []).map((order) => patched[order.id] ?? order);
-  const selectedOrder = selected ? (patched[selected.id] ?? selected) : null;
+  const selectedOrder = selected
+    ? (patched[selected.id] ??
+      (data?.orders ?? []).find((order) => order.id === selected.id) ??
+      selected)
+    : null;
   const total = data?.total ?? 0;
   const pages =
     mode === "demo"
@@ -226,6 +235,12 @@ export function OrdersPage() {
         description={`${formatCount(total)} orders · ${formatCount(data.counts.pending ?? 0)} awaiting payment · ${formatCount(data.counts.processing ?? 0)} processing`}
         actions={
           <>
+            {mode === "demo" ? null : (
+              <Button variant="outline" onClick={() => setDraftOpen(true)}>
+                <Plus className="size-4" aria-hidden="true" />
+                New draft
+              </Button>
+            )}
             <Button variant="outline" onClick={exportOrders} disabled={rows.length === 0}>
               <Download className="size-4" aria-hidden="true" />
               Export
@@ -471,6 +486,15 @@ export function OrdersPage() {
         onFulfill={handleFulfill}
         onRefund={handleRefund}
         onChanged={() => reload()}
+      />
+      <NewDraftOrderDialog
+        open={draftOpen}
+        onOpenChange={setDraftOpen}
+        onCreated={() => {
+          setStatus("draft");
+          setPage(1);
+          reload();
+        }}
       />
     </div>
   );

@@ -61,6 +61,7 @@ export function OrderDrawer({
   const [afterSales, setAfterSales] = useState<OrderAfterSalesData | null>(null);
   const [afterSalesError, setAfterSalesError] = useState<string | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [converting, setConverting] = useState(false);
 
   const remaining = order ? Math.max(0, order.total - order.refundedTotal) : 0;
   const canWrite = can(PERMISSIONS.orders.write);
@@ -70,6 +71,7 @@ export function OrderDrawer({
     setTracking("");
     setReason("");
     setAmount(remaining > 0 ? remaining.toFixed(2) : "");
+    setConverting(false);
   }, [order?.id, remaining]);
 
   useEffect(() => {
@@ -90,6 +92,21 @@ export function OrderDrawer({
   const refreshAfterSales = () => {
     setRefreshToken((token) => token + 1);
     onChanged?.();
+  };
+
+  const submitConvert = async () => {
+    if (!order || !client || converting) return;
+    setConverting(true);
+    try {
+      await client.orders.convertDraft(order.id);
+      toast.success(`Order #${order.number} converted.`);
+      onChanged?.();
+      onClose();
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      setConverting(false);
+    }
   };
 
   const submitFulfill = async () => {
@@ -320,21 +337,36 @@ export function OrderDrawer({
             </div>
 
             <footer className="flex gap-2.5 border-t border-border bg-card px-6 py-4">
-              <Button
-                variant="outline"
-                className="flex-1"
-                disabled={!order.canRefund || !canWrite}
-                onClick={() => setAction("refund")}
-              >
-                Refund
-              </Button>
-              <Button
-                className="flex-1"
-                disabled={!order.canFulfill || !canWrite}
-                onClick={() => setAction("fulfill")}
-              >
-                {order.canFulfill ? "Fulfill order" : "Fulfilled"}
-              </Button>
+              {order.status === "draft" ? (
+                <Button
+                  className="flex-1"
+                  disabled={!canWrite || converting}
+                  onClick={() => void submitConvert()}
+                >
+                  {converting ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  ) : null}
+                  Convert to order
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    disabled={!order.canRefund || !canWrite}
+                    onClick={() => setAction("refund")}
+                  >
+                    Refund
+                  </Button>
+                  <Button
+                    className="flex-1"
+                    disabled={!order.canFulfill || !canWrite}
+                    onClick={() => setAction("fulfill")}
+                  >
+                    {order.canFulfill ? "Fulfill order" : "Fulfilled"}
+                  </Button>
+                </>
+              )}
             </footer>
           </DialogPrimitive.Content>
         ) : null}

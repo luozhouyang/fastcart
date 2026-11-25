@@ -58,6 +58,7 @@ function itemsFor(order: MockOrder): OrderItemView[] {
 
 export function orderView(order: MockOrder): OrderView {
   const canFulfill =
+    order.status !== "draft" &&
     order.status !== "canceled" &&
     order.status !== "completed" &&
     order.status !== "fulfilled" &&
@@ -90,7 +91,9 @@ export function orderView(order: MockOrder): OrderView {
     items: itemsFor(order),
     history: historyFor(order),
     canFulfill,
-    canRefund: order.paymentStatus === "captured" || order.paymentStatus === "partially_refunded",
+    canRefund:
+      order.status !== "draft" &&
+      (order.paymentStatus === "captured" || order.paymentStatus === "partially_refunded"),
   };
 }
 
@@ -144,6 +147,7 @@ export function demoOverview(): OverviewView {
 function countsForOrders(): Record<string, number> {
   const counts: Record<string, number> = {
     all: totalOrders,
+    draft: 0,
     pending: 164,
     confirmed: 0,
     processing: 214,

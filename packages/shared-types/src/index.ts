@@ -885,7 +885,7 @@ export type CompleteCheckoutResponse = CheckoutCompleteResponse;
 // ---------------------------------------------------------------------------
 
 export type OrderStatus =
-  "pending" | "confirmed" | "processing" | "fulfilled" | "completed" | "canceled";
+  "draft" | "pending" | "confirmed" | "processing" | "fulfilled" | "completed" | "canceled";
 
 /** Payment progress as exposed on an order. */
 export type OrderPaymentStatus =
@@ -1014,6 +1014,48 @@ export interface OrderListQuery extends PaginationQuery {
 
 export interface CancelOrderRequest {
   reason?: string | null;
+}
+
+/** One line of an admin-authored draft order. */
+export interface DraftOrderItemInput {
+  product_id?: string | null;
+  variant_id?: string | null;
+  product_title: string;
+  variant_title?: string | null;
+  sku?: string | null;
+  thumbnail?: string | null;
+  unit_price: number;
+  quantity: number;
+  is_tax_inclusive?: boolean;
+  requires_shipping?: boolean;
+  metadata?: Metadata;
+}
+
+/**
+ * Body for creating a draft order.
+ *
+ * `shipping_address.country_code` enables tax pricing at creation; without it
+ * the draft is created untaxed and can be re-priced when the destination is
+ * known.
+ */
+export interface CreateDraftOrderRequest {
+  customer_id?: string | null;
+  email: string;
+  currency_code: CurrencyCode;
+  region_id?: string | null;
+  sales_channel_id?: string | null;
+  items: DraftOrderItemInput[];
+  shipping_address?: JsonValue;
+  billing_address?: JsonValue;
+  shipping_total?: number;
+  metadata?: Metadata;
+  idempotency_key?: string | null;
+}
+
+/** Body for changing a draft order's destination and re-pricing its tax. */
+export interface UpdateDraftAddressRequest {
+  shipping_address: JsonValue;
+  billing_address?: JsonValue | null;
 }
 
 export interface FulfillOrderRequest {

@@ -29,6 +29,7 @@ function Pill({ tone, label }: { tone: Tone; label: string }) {
 }
 
 const ORDER: Record<OrderStatus, { label: string; tone: Tone }> = {
+  draft: { label: "Draft", tone: "secondary" },
   pending: { label: "Pending", tone: "secondary" },
   confirmed: { label: "Confirmed", tone: "info" },
   processing: { label: "Processing", tone: "warning" },
@@ -161,6 +162,7 @@ export function StatusRail({ tone, className }: { tone: Tone; className?: string
 }
 
 export const orderRailTone: Record<OrderStatus, Tone> = {
+  draft: "secondary",
   pending: "secondary",
   confirmed: "info",
   processing: "warning",

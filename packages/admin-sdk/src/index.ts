@@ -24,6 +24,7 @@ import type {
   CreateClaimRequest,
   CreateCollectionRequest,
   CreateCouponRequest,
+  CreateDraftOrderRequest,
   CreateExchangeRequest,
   CreateImageRequest,
   CreateInventoryItemRequest,
@@ -151,6 +152,7 @@ import type {
   UpdateCollectionRequest,
   UpdateCouponRequest,
   UpdateCustomerRequest,
+  UpdateDraftAddressRequest,
   UpdateInventoryLocationRequest,
   UpdatePageRequest,
   UpdatePriceListRequest,
@@ -515,6 +517,13 @@ export interface AdminClient {
     list(query?: OrderListQuery, options?: AdminRequestOptions): Promise<PageResult<Order>>;
     get(id: string, options?: AdminRequestOptions): Promise<Order>;
     getByNumber(displayNumber: number, options?: AdminRequestOptions): Promise<Order>;
+    createDraft(body: CreateDraftOrderRequest, options?: AdminRequestOptions): Promise<Order>;
+    convertDraft(id: string, options?: AdminRequestOptions): Promise<Order>;
+    updateDraftAddress(
+      id: string,
+      body: UpdateDraftAddressRequest,
+      options?: AdminRequestOptions,
+    ): Promise<Order>;
     confirm(id: string, options?: AdminRequestOptions): Promise<Order>;
     process(id: string, options?: AdminRequestOptions): Promise<Order>;
     cancel(id: string, body?: CancelOrderRequest, options?: AdminRequestOptions): Promise<Order>;
@@ -1713,6 +1722,23 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
         request<Order>(`/api/v1/admin/orders/${id(orderId)}`, requestOptions),
       getByNumber: (displayNumber, requestOptions) =>
         request<Order>(`/api/v1/admin/orders/by-number/${displayNumber}`, requestOptions),
+      createDraft: (body, requestOptions) =>
+        request<Order>("/api/v1/admin/orders", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      convertDraft: (orderId, requestOptions) =>
+        request<Order>(`/api/v1/admin/orders/${id(orderId)}/convert`, {
+          ...requestOptions,
+          method: "POST",
+        }),
+      updateDraftAddress: (orderId, body, requestOptions) =>
+        request<Order>(`/api/v1/admin/orders/${id(orderId)}/shipping-address`, {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
       confirm: (orderId, requestOptions) =>
         request<Order>(`/api/v1/admin/orders/${id(orderId)}/confirm`, {
           ...requestOptions,
