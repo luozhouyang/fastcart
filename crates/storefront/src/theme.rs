@@ -41,12 +41,12 @@ pub struct ThemeRequirements {
 
 impl ThemeRequirements {
     fn validate(&self) -> Result<(), StorefrontError> {
-        if let Some(version) = self.data_api {
-            if !(1..=SUPPORTED_DATA_API_VERSION).contains(&version) {
-                return Err(StorefrontError::Invalid(format!(
-                    "unsupported data API version: {version}"
-                )));
-            }
+        if let Some(version) = self.data_api
+            && !(1..=SUPPORTED_DATA_API_VERSION).contains(&version)
+        {
+            return Err(StorefrontError::Invalid(format!(
+                "unsupported data API version: {version}"
+            )));
         }
 
         let mut seen = HashSet::new();

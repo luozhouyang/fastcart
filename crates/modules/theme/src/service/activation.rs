@@ -12,6 +12,7 @@ impl ThemeService {
             tx.commit().await.map_err(database_error)?;
             return Ok(target);
         }
+        self.ensure_requirements(&mut tx, &target.manifest).await?;
 
         let previous_id: Option<String> =
             sqlx::query_scalar("SELECT id FROM themes WHERE is_active = 1 LIMIT 1")
@@ -150,17 +151,18 @@ impl ThemeService {
             })?;
         let previous_id = ThemeId::from_string(previous_id);
 
-        let previous_manifest_id: Option<String> =
-            sqlx::query_scalar("SELECT manifest_id FROM themes WHERE id = ?")
-                .bind(previous_id.as_str())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(database_error)?;
-        let Some(previous_manifest_id) = previous_manifest_id else {
-            return Err(AppError::conflict(format!(
-                "previous theme no longer exists: {previous_id}"
-            )));
+        let previous_theme = match self.fetch_row_in(&mut tx, &previous_id).await {
+            Ok(row) => row.into_theme()?,
+            Err(error) if error.is_not_found() => {
+                return Err(AppError::conflict(format!(
+                    "previous theme no longer exists: {previous_id}"
+                )));
+            }
+            Err(error) => return Err(error),
         };
+        self.ensure_requirements(&mut tx, &previous_theme.manifest)
+            .await?;
+        let previous_manifest_id = previous_theme.manifest.id;
 
         let current_id: Option<String> =
             sqlx::query_scalar("SELECT id FROM themes WHERE is_active = 1 LIMIT 1")
@@ -202,5 +204,50 @@ impl ThemeService {
 
         tx.commit().await.map_err(database_error)?;
         self.get(&previous_id).await
+    }
+
+    /// Fails when the theme requires a capability this store has not bound.
+    async fn ensure_requirements(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        manifest: &ThemeManifest,
+    ) -> Result<(), AppError> {
+        let Some(requirements) = manifest.requires.as_ref() else {
+            return Ok(());
+        };
+        if requirements.capabilities.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT b.capability_id, b.version FROM store_capability_bindings b \
+             JOIN plugin_installations i ON i.plugin_id = b.plugin_id AND i.enabled = 1 \
+             WHERE b.enabled = 1",
+        )
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        let available: Vec<AvailableCapability> = rows
+            .into_iter()
+            .filter_map(|(id, version)| {
+                u32::try_from(version)
+                    .ok()
+                    .map(|version| AvailableCapability { id, version })
+            })
+            .collect();
+        let missing = manifest.missing_capabilities(&available);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let list = missing
+            .iter()
+            .map(|requirement| match requirement.version {
+                Some(version) => format!("{}@{version}", requirement.id),
+                None => requirement.id.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(AppError::conflict(format!(
+            "theme requires capabilities that are not bound: {list}"
+        )))
     }
 }

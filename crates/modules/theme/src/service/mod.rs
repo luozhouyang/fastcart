@@ -4,7 +4,7 @@ use fastcart_infrastructure::{AuditActor, StoreDatabase, database_error};
 use fastcart_kernel::{
     AppError, PageResult, Pagination, ThemeActivationId, ThemeId, Timestamp, now_timestamp,
 };
-use fastcart_storefront::{StorefrontError, ThemeManifest, ThemeRequirements};
+use fastcart_storefront::{AvailableCapability, StorefrontError, ThemeManifest, ThemeRequirements};
 use serde_json::Value;
 use sqlx::{FromRow, Sqlite, Transaction};
 

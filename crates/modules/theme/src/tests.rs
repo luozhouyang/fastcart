@@ -510,3 +510,75 @@ async fn missing_themes_return_not_found_errors() {
             .is_not_found()
     );
 }
+
+fn required_theme(id: &str, optional: bool) -> RegisterThemeInput {
+    let mut input = input(id);
+    input.manifest.requires = Some(ThemeRequirements {
+        data_api: None,
+        capabilities: vec![ThemeCapabilityRequirement {
+            id: "chat".to_owned(),
+            version: Some(1),
+            optional,
+        }],
+    });
+    input
+}
+
+#[tokio::test]
+async fn activation_requires_bound_capabilities() {
+    let db = StoreDatabase::in_memory(StoreId::new()).await.unwrap();
+    let service = ThemeService::new(db.clone());
+    let theme = service
+        .register(required_theme("chat-store", false))
+        .await
+        .unwrap();
+
+    let error = service.activate(&theme.id).await.unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)), "{error:?}");
+
+    sqlx::query(
+        "INSERT INTO plugin_installations \
+         (id, plugin_id, digest, version, manifest_json, enabled, settings_json, \
+          settings_revision, granted_scopes, installed_at, updated_at) \
+         VALUES ('pli_chat', 'chat-plugin', \
+                 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', \
+                 '1.0.0', '{}', 1, '{}', 1, '[]', 1, 1)",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO store_capability_bindings \
+         (capability_id, version, plugin_id, config_json, enabled, created_at, updated_at) \
+         VALUES ('chat', 1, 'chat-plugin', '{}', 1, 1, 1)",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let active = service.activate(&theme.id).await.unwrap();
+    assert!(active.is_active);
+
+    sqlx::query("UPDATE plugin_installations SET enabled = 0 WHERE plugin_id = 'chat-plugin'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let second = service
+        .register(required_theme("chat-store-2", false))
+        .await
+        .unwrap();
+    let error = service.activate(&second.id).await.unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)), "{error:?}");
+
+    let optional = service
+        .register(required_theme("chat-optional", true))
+        .await
+        .unwrap();
+    assert!(service.activate(&optional.id).await.unwrap().is_active);
+
+    let error = service.rollback().await.unwrap_err();
+    assert!(
+        matches!(error, AppError::Conflict(_)),
+        "rollback must re-check requirements: {error:?}"
+    );
+}
