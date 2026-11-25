@@ -87,17 +87,7 @@ async fn asset(
     if enabled == 0 || installed != digest {
         return Err(ApiError::new(AppError::not_found("plugin asset", path)));
     }
-    let bytes =
-        context
-            .plugin_artifacts
-            .read_file(&digest, &path)
-            .map_err(|error| match error {
-                fastcart_plugin::PluginError::NotFound(_) => {
-                    ApiError::new(AppError::not_found("plugin asset", path.clone()))
-                }
-                fastcart_plugin::PluginError::UnsafePath(_) => ApiError::new(AppError::Forbidden),
-                other => ApiError::new(other.into()),
-            })?;
+    let bytes = read_plugin_file(context.as_ref(), &digest, &path).await?;
     let mut response = Response::new(Body::from(bytes));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -112,6 +102,30 @@ async fn asset(
         HeaderValue::from_static("nosniff"),
     );
     Ok(response)
+}
+
+/// Reads one archive file off the async worker thread.
+///
+/// Plugin archives live on the local filesystem; a synchronous read would
+/// block a Tokio worker for the duration of the disk operation.
+pub(crate) async fn read_plugin_file(
+    context: &AppContext,
+    digest: &str,
+    path: &str,
+) -> Result<Vec<u8>, ApiError> {
+    let artifacts = context.plugin_artifacts.clone();
+    let owned_digest = digest.to_owned();
+    let owned_path = path.to_owned();
+    tokio::task::spawn_blocking(move || artifacts.read_file(&owned_digest, &owned_path))
+        .await
+        .map_err(|error| ApiError::new(AppError::internal(error.to_string())))?
+        .map_err(|error| match error {
+            fastcart_plugin::PluginError::NotFound(_) => {
+                ApiError::new(AppError::not_found("plugin asset", path.to_owned()))
+            }
+            fastcart_plugin::PluginError::UnsafePath(_) => ApiError::new(AppError::Forbidden),
+            other => ApiError::new(other.into()),
+        })
 }
 
 fn content_type(path: &str) -> &'static str {

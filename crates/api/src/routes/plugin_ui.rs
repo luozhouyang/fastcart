@@ -101,16 +101,7 @@ async fn serve(
     }
 
     let bytes =
-        context
-            .plugin_artifacts
-            .read_file(&digest, &path)
-            .map_err(|error| match error {
-                fastcart_plugin::PluginError::NotFound(_) => {
-                    ApiError::new(AppError::not_found("plugin asset", path.clone()))
-                }
-                fastcart_plugin::PluginError::UnsafePath(_) => ApiError::new(AppError::Forbidden),
-                other => ApiError::new(other.into()),
-            })?;
+        super::storefront_extensions::read_plugin_file(context.as_ref(), &digest, &path).await?;
 
     let content_type = content_type(&path);
     let mut headers = HeaderMap::new();
