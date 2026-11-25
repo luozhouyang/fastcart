@@ -62,6 +62,11 @@ import {
 } from "@/lib/demo-content";
 import { fromUnixSeconds, shortDate, timeOfDay } from "@/lib/format";
 import {
+  listPluginComponents,
+  mergePluginComponents,
+  type PluginComponentContribution,
+} from "@/lib/plugin-components";
+import {
   appendBlock,
   appendBlockToSlot,
   blockId,
@@ -88,6 +93,7 @@ interface PageEditorData {
   page: Page;
   activeTheme: Theme | null;
   versions: PageVersion[];
+  pluginComponents: PluginComponentContribution[];
 }
 
 function pageBodyToJson(body: PageBody): JsonValue {
@@ -149,23 +155,29 @@ export function PageEditorPage() {
           page,
           activeTheme,
           versions: listDefaultPageVersions(pageId),
+          pluginComponents: [],
         };
       }
-      if (!client) throw new Error("No store is selected.");
+      if (!client || !store) throw new Error("No store is selected.");
       const page = await client.content.pages.get(pageId, { signal });
       const activeTheme = await client.themes.active({ signal }).catch(() => null);
       const versions = await client.content.pages
         .versions(pageId, { limit: 50 }, { signal })
         .then((page) => page.data)
         .catch(() => []);
-      return { page, activeTheme, versions };
+      const pluginComponents = await listPluginComponents(store.id, signal).catch(() => []);
+      return { page, activeTheme, versions, pluginComponents };
     },
-    [mode, client, pageId],
+    [mode, client, pageId, store],
   );
 
   const { data, error, loading, reload } = useAsyncData(loader, [mode, store?.id, dataKey, pageId]);
 
-  const editorManifest = DEFAULT_THEME_EDITOR_MANIFEST;
+  const pluginComponents = data?.pluginComponents;
+  const editorManifest = useMemo(
+    () => mergePluginComponents(DEFAULT_THEME_EDITOR_MANIFEST, pluginComponents ?? []),
+    [pluginComponents],
+  );
   const structured = Object.keys(editorManifest.components ?? {}).length > 0;
 
   useEffect(() => {
