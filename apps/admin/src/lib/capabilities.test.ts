@@ -143,7 +143,15 @@ describe("capability client", () => {
 
   it("surfaces the server error message", async () => {
     const mock = vi.fn(async () =>
-      jsonResponse({ error: "capability config must be a JSON object" }, 400),
+      jsonResponse(
+        {
+          error: {
+            code: "VALIDATION_ERROR",
+            message: "capability config must be a JSON object",
+          },
+        },
+        400,
+      ),
     );
     vi.stubGlobal("fetch", mock);
 

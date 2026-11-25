@@ -1,4 +1,4 @@
-import { API_BASE_URL, readCookie } from "@/lib/api";
+import { API_BASE_URL, apiErrorMessage, readCookie } from "@/lib/api";
 
 /** JSON value accepted by capability configuration objects. */
 export type JsonValue =
@@ -66,8 +66,8 @@ async function capabilityRequest<T>(
     headers,
   });
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `Capability request failed (${response.status})`);
+    const body = await response.json().catch(() => null);
+    throw new Error(apiErrorMessage(body, `Capability request failed (${response.status})`));
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;

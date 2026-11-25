@@ -77,6 +77,25 @@ export async function fetchAll<T>(
   return records;
 }
 
+/**
+ * Extracts a human-readable message from an API error envelope.
+ *
+ * The API renders `{error: {code, message, request_id}}`, while a few legacy
+ * surfaces return `{error: "..."}`. Both shapes fall back to `fallback`.
+ */
+export function apiErrorMessage(body: unknown, fallback: string): string {
+  if (typeof body !== "object" || body === null || !("error" in body)) {
+    return fallback;
+  }
+  const error = (body as { error?: unknown }).error;
+  if (typeof error === "string" && error.length > 0) return error;
+  if (typeof error === "object" && error !== null) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  return fallback;
+}
+
 /** Turns SDK failures into copy the login and page surfaces can show. */
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {

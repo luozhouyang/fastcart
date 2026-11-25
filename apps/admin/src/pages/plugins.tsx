@@ -339,9 +339,7 @@ function PluginCard({
         </div>
       ) : null}
 
-      {secretsOpen && storeId ? (
-        <PluginSecrets storeId={storeId} pluginId={plugin.id} />
-      ) : null}
+      {secretsOpen && storeId ? <PluginSecrets storeId={storeId} pluginId={plugin.id} /> : null}
     </article>
   );
 }

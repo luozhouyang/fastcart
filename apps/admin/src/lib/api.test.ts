@@ -1,7 +1,7 @@
 import { ApiError } from "@fastcart/api-client";
 import { describe, expect, it, vi } from "vitest";
 
-import { errorMessage, fetchAll } from "@/lib/api";
+import { apiErrorMessage, errorMessage, fetchAll } from "@/lib/api";
 import { page } from "@/test/fixtures";
 
 describe("fetchAll", () => {
@@ -27,6 +27,25 @@ describe("fetchAll", () => {
 
     const records = await fetchAll(fetchPage, 3);
     expect(records).toHaveLength(3);
+  });
+});
+
+describe("apiErrorMessage", () => {
+  it("reads the platform error envelope", () => {
+    expect(
+      apiErrorMessage(
+        { error: { code: "VALIDATION_ERROR", message: "title must not be empty" } },
+        "fallback",
+      ),
+    ).toBe("title must not be empty");
+  });
+
+  it("accepts a legacy string error and falls back otherwise", () => {
+    expect(apiErrorMessage({ error: "plain failure" }, "fallback")).toBe("plain failure");
+    expect(apiErrorMessage({ error: { code: "X" } }, "fallback")).toBe("fallback");
+    expect(apiErrorMessage({ error: "" }, "fallback")).toBe("fallback");
+    expect(apiErrorMessage(null, "fallback")).toBe("fallback");
+    expect(apiErrorMessage("noise", "fallback")).toBe("fallback");
   });
 });
 

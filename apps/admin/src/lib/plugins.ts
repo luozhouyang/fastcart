@@ -1,4 +1,4 @@
-import { API_BASE_URL } from "@/lib/api";
+import { API_BASE_URL, apiErrorMessage } from "@/lib/api";
 import type { AdminExtension, AdminExtensionsResponse } from "@/plugins/types";
 
 export interface InstalledPlugin {
@@ -41,8 +41,8 @@ async function pluginRequest<T>(storeId: string, path: string, init: RequestInit
     headers,
   });
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `Plugin request failed (${response.status})`);
+    const body = await response.json().catch(() => null);
+    throw new Error(apiErrorMessage(body, `Plugin request failed (${response.status})`));
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
@@ -106,15 +106,11 @@ export function listPluginSecrets(
 }
 
 export function setPluginSecret(storeId: string, pluginId: string, name: string, value: string) {
-  return pluginRequest<void>(
-    storeId,
-    `/${pluginId}/secrets/${encodeURIComponent(name)}`,
-    {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ value }),
-    },
-  );
+  return pluginRequest<void>(storeId, `/${pluginId}/secrets/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ value }),
+  });
 }
 
 export function deletePluginSecret(storeId: string, pluginId: string, name: string) {
