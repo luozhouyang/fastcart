@@ -130,8 +130,7 @@ impl SsrService {
             );
             headers.insert(
                 axum::http::header::AGE,
-                axum::http::HeaderValue::from_str(&entry.stored.elapsed().as_secs().to_string())
-                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("0")),
+                axum::http::HeaderValue::from(entry.stored.elapsed().as_secs()),
             );
         }
         builder.body(Body::from(entry.body)).ok()
