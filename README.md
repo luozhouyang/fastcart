@@ -469,7 +469,9 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 
 The suite covers module rules, repository behaviour, platform auth/RBAC, cart and checkout workflows, storefront HTTP flows (catalog → cart → tax → checkout → order), cancellations and restocking, webhook signing/retries, SQLite write serialization under concurrency, and cross-store tenant isolation.
 
-`pnpm e2e:browser` is a real-browser smoke test for the `/cart` and `/checkout` deep links. It drives headless Chrome against a running server (`FASTCART_BASE_URL`, `FASTCART_HOST`), waits for hydration, and asserts the cart drawer opened. Playwright is intentionally not a dependency; the script uses the Chrome binary already required by the deployment environment. The OpenAPI tests assert a 3.1.0 document, namespace coverage and resolvable schema references; there is no TypeScript code-generation or type-parity check in the repository.
+`pnpm e2e:browser` is a real-browser smoke test for the `/cart` and `/checkout` deep links. It drives headless Chrome against a running server (`FASTCART_BASE_URL`, `FASTCART_HOST`), waits for hydration, and asserts the cart drawer opened. Playwright is intentionally not a dependency; the script uses the Chrome binary already required by the deployment environment. The OpenAPI tests assert a 3.1.0 document, namespace coverage and resolvable schema references.
+
+`pnpm --filter @fastcart/admin-sdk check:openapi` compares the admin SDK's `request(...)` calls against a committed OpenAPI snapshot (`packages/admin-sdk/openapi.snapshot.json`). A path the SDK calls but the document does not describe is a hard error; undocumented SDK coverage and schema-name gaps are warnings that can be documented with a reason in `packages/admin-sdk/openapi-sdk-gaps.json`. Refresh the snapshot after API changes with `FASTCART_WRITE_OPENAPI_SNAPSHOT=1 cargo test -p fastcart-api --test openapi writes_openapi_snapshot`. The check is opt-in and not wired into `pnpm lint`.
 
 ## Documentation
 
