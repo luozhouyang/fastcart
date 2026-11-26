@@ -290,8 +290,10 @@ use crate::state::AppContext;
     crate::routes::admin_orders::FulfillmentItemRequest,
     crate::routes::admin_orders::RefundOrderRequest,
     crate::routes::admin_orders::ReturnRefundResponse,
+    crate::routes::admin_payments::CreateGiftCardRequest,
     crate::routes::admin_payments::CreateRefundRequest,
     crate::routes::admin_payments::FailSessionRequest,
+    crate::routes::admin_payments::GiftCardDto,
     crate::routes::admin_payments::RefundDto,
     crate::routes::admin_pricing::BulkPricesRequest,
     crate::routes::admin_pricing::CalculatePricesRequest,
@@ -954,11 +956,11 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 204);
+        assert_eq!(count("/api/v1/admin"), 208);
         assert_eq!(count("/api/v1/store"), 48);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 277);
+        assert_eq!(paths.len(), 281);
 
         for key in [
             "/api/v1/platform/stores",
@@ -966,6 +968,10 @@ mod tests {
             "/api/v1/admin/catalog/products",
             "/api/v1/admin/catalog/product-types",
             "/api/v1/admin/orders/{id}/refunds",
+            "/api/v1/admin/gift-cards",
+            "/api/v1/admin/gift-cards/{id}",
+            "/api/v1/admin/gift-cards/{id}/disable",
+            "/api/v1/admin/gift-cards/{id}/enable",
             "/api/v1/admin/content/pages/{id}/preview-token",
             "/api/v1/admin/inquiry-forms",
             "/api/v1/admin/inquiries",
@@ -1071,7 +1077,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 390);
+        assert_eq!(operation_count, 395);
     }
 
     #[test]

@@ -462,6 +462,97 @@ pub struct PaymentCollection {
     pub updated_at: i64,
 }
 
+/// Lifecycle status of a gift card.
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GiftCardStatus {
+    /// The card can still be redeemed.
+    Active,
+    /// The card was disabled and rejects redemption until it is enabled again.
+    Disabled,
+}
+
+impl GiftCardStatus {
+    /// Stable storage representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Parses a stored status, returning `None` for unknown values.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for GiftCardStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A prepaid card whose remaining balance pays for future purchases.
+///
+/// Gift cards are issued in one currency and never change it: a card may only
+/// be redeemed against money priced in its own currency.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GiftCard {
+    /// Gift card identifier.
+    pub id: String,
+    /// Opaque redemption code. Treat it as a bearer credential: an administrator
+    /// reads it to hand it to the customer, so admin responses return it in
+    /// full.
+    pub code: String,
+    /// ISO-style currency code the card is priced in.
+    pub currency_code: String,
+    /// Balance the card was issued with, in minor units.
+    pub initial_amount_minor: i64,
+    /// Remaining balance in minor units.
+    pub balance_minor: i64,
+    /// Current lifecycle status.
+    pub status: GiftCardStatus,
+    /// Extension metadata.
+    pub metadata: Metadata,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: i64,
+}
+
+/// Input for [`crate::PaymentService::issue_gift_card`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreateGiftCardInput {
+    /// ISO-style currency code.
+    pub currency_code: String,
+    /// Initial balance in minor units; must be positive.
+    pub amount_minor: i64,
+    /// Caller-supplied redemption code; a random code is generated when absent.
+    pub code: Option<String>,
+    /// Extension metadata.
+    pub metadata: Metadata,
+}
+
+impl CreateGiftCardInput {
+    /// Creates an input with a generated code and no metadata.
+    #[must_use]
+    pub fn new(currency_code: impl Into<String>, amount_minor: i64) -> Self {
+        Self {
+            currency_code: currency_code.into(),
+            amount_minor,
+            code: None,
+            metadata: Metadata::empty(),
+        }
+    }
+}
+
 /// Input for [`crate::PaymentService::create_session`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreatePaymentSessionInput {

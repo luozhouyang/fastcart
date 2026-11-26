@@ -128,6 +128,7 @@ fn is_audit_fallback_path(path: &str) -> bool {
     }
     const PREFIXES: &[&str] = &[
         "/api/v1/admin/customers",
+        "/api/v1/admin/gift-cards",
         "/api/v1/admin/payments",
         "/api/v1/admin/prices",
         "/api/v1/admin/price-lists",

@@ -13,6 +13,7 @@ use crate::provider::{PaymentProvider, ProviderRegistry};
 
 mod capture;
 mod collections;
+mod gift_cards;
 mod reads;
 mod refunds;
 mod sessions;

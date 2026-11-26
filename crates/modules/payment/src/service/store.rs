@@ -14,8 +14,9 @@ use fastcart_kernel::{
 use sqlx::{Sqlite, Transaction};
 
 use crate::domain::{
-    Payment, PaymentAttempt, PaymentCollection, PaymentCollectionId, PaymentCollectionStatus,
-    PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund, RefundStatus, WebhookStatus,
+    GiftCard, GiftCardStatus, Payment, PaymentAttempt, PaymentCollection, PaymentCollectionId,
+    PaymentCollectionStatus, PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund,
+    RefundStatus, WebhookStatus,
 };
 
 /// Loads a payment session inside an open transaction.
@@ -154,6 +155,19 @@ pub(super) struct RefundRow {
 }
 
 #[derive(sqlx::FromRow)]
+pub(super) struct GiftCardRow {
+    pub(super) id: String,
+    pub(super) code: String,
+    pub(super) currency_code: String,
+    pub(super) initial_amount_minor: i64,
+    pub(super) balance_minor: i64,
+    pub(super) status: String,
+    pub(super) metadata: String,
+    pub(super) created_at: i64,
+    pub(super) updated_at: i64,
+}
+
+#[derive(sqlx::FromRow)]
 pub(super) struct PaymentWebhookRow {
     pub(super) id: String,
     pub(super) provider: String,
@@ -238,6 +252,20 @@ pub(super) fn refund_from_row(row: RefundRow) -> Refund {
         provider_refund_id: row.provider_refund_id,
         idempotency_key: row.idempotency_key,
         reason: row.reason,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+pub(super) fn gift_card_from_row(row: GiftCardRow) -> GiftCard {
+    GiftCard {
+        id: row.id,
+        code: row.code,
+        currency_code: row.currency_code,
+        initial_amount_minor: row.initial_amount_minor,
+        balance_minor: row.balance_minor,
+        status: GiftCardStatus::parse(&row.status).unwrap_or(GiftCardStatus::Disabled),
+        metadata: fastcart_kernel::Metadata::from_json_str(&row.metadata),
         created_at: row.created_at,
         updated_at: row.updated_at,
     }

@@ -201,6 +201,7 @@ impl PaymentProvider for TestProvider {
 }
 
 mod capture;
+mod gift_cards;
 mod queries;
 mod refunds;
 mod sessions;

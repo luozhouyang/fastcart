@@ -10,9 +10,9 @@ pub mod service;
 pub mod stripe;
 
 pub use domain::{
-    CreatePaymentSessionInput, ListPaymentsFilter, Payment, PaymentAttempt, PaymentCollection,
-    PaymentCollectionId, PaymentCollectionStatus, PaymentSession, PaymentStatus,
-    PaymentWebhookRecord, Refund, RefundStatus, WebhookStatus,
+    CreateGiftCardInput, CreatePaymentSessionInput, GiftCard, GiftCardStatus, ListPaymentsFilter,
+    Payment, PaymentAttempt, PaymentCollection, PaymentCollectionId, PaymentCollectionStatus,
+    PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund, RefundStatus, WebhookStatus,
 };
 pub use provider::{
     CaptureRequest, CaptureResult, CreateProviderSession, MANUAL_SIGNATURE_HEADER, ManualProvider,

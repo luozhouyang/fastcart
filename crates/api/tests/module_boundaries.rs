@@ -250,6 +250,7 @@ fn owner_for(table: &str) -> Option<&'static str> {
         ("campaign_", "promotion"),
         ("payments", "payment"),
         ("payment_", "payment"),
+        ("gift_cards", "payment"),
         ("refunds", "payment"),
         ("shipping", "shipping"),
         ("fulfillment_", "shipping"),

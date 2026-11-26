@@ -3,6 +3,10 @@
 //! These endpoints expose the provider-independent payment service for the
 //! admin namespace. Every handler requires an authenticated store administrator
 //! holding the `payments.read` or `payments.write` permission.
+//!
+//! Gift cards are administrable here as well: issuing, listing and toggling a
+//! card's status. Redemption is a storefront concern and stays in the service
+//! layer, where the caller has already checked the purchased currency.
 
 use std::sync::Arc;
 
@@ -19,8 +23,8 @@ use fastcart_module_order::{
     OrderService, PaymentStatus as OrderPaymentStatus, RefundStatus as OrderRefundStatus,
 };
 use fastcart_module_payment::{
-    ListPaymentsFilter, Payment, PaymentAttempt, PaymentService, PaymentSession, PaymentStatus,
-    PaymentWebhookRecord, Refund,
+    CreateGiftCardInput, GiftCard, ListPaymentsFilter, Payment, PaymentAttempt, PaymentService,
+    PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -48,6 +52,10 @@ pub fn router() -> Router<Arc<AppContext>> {
         )
         .route("/payment-webhooks", get(list_webhooks))
         .route("/payment-webhooks/{id}", get(get_webhook))
+        .route("/gift-cards", get(list_gift_cards).post(create_gift_card))
+        .route("/gift-cards/{id}", get(get_gift_card))
+        .route("/gift-cards/{id}/disable", post(disable_gift_card))
+        .route("/gift-cards/{id}/enable", post(enable_gift_card))
 }
 
 /// Builds the documented admin payment routes for OpenAPI generation.
@@ -63,6 +71,10 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(list_payment_attempts))
         .routes(routes!(list_webhooks))
         .routes(routes!(get_webhook))
+        .routes(routes!(list_gift_cards, create_gift_card))
+        .routes(routes!(get_gift_card))
+        .routes(routes!(disable_gift_card))
+        .routes(routes!(enable_gift_card))
 }
 
 /// Filter query accepted by the payment list endpoint.
@@ -156,6 +168,41 @@ pub struct RefundDto {
     status: String,
     provider_refund_id: Option<String>,
     reason: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+/// Body for issuing a gift card.
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
+#[schema(as = CreateGiftCardRequest)]
+pub struct CreateGiftCardRequest {
+    /// Currency the card is priced in.
+    currency_code: String,
+    /// Initial balance in minor units.
+    amount_minor: i64,
+    /// Optional caller-chosen code; a random code is generated when absent.
+    code: Option<String>,
+    /// Extension metadata.
+    #[serde(default)]
+    metadata: Metadata,
+}
+
+/// HTTP representation of a gift card.
+///
+/// The `code` is included on purpose: administrators need it to hand the card
+/// to its buyer, and without it the issue response would be unusable. It is a
+/// bearer credential, so every response here is gated by the payments
+/// permissions.
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+#[schema(as = GiftCard)]
+pub struct GiftCardDto {
+    id: String,
+    code: String,
+    currency_code: String,
+    initial_amount_minor: i64,
+    balance_minor: i64,
+    status: String,
+    metadata: Metadata,
     created_at: i64,
     updated_at: i64,
 }
@@ -465,6 +512,132 @@ async fn get_webhook(
     let service = payment_service(&context, &actor, &db)?;
     let webhook = service.get_webhook(&id).await?;
     Ok(Json(payment_webhook_dto(&webhook)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/gift-cards",
+    tag = "Admin",
+    summary = "List gift cards",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<GiftCardDto>))
+)]
+async fn list_gift_cards(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    PaginationQuery { limit, offset }: PaginationQuery,
+) -> ApiResult<Json<PageResponse<GiftCardDto>>> {
+    require_permission(&actor, "payments.read")?;
+    let pagination = PaginationQuery { limit, offset }.pagination()?;
+    let service = payment_service(&context, &actor, &db)?;
+    let page = service.list_gift_cards(pagination).await?;
+    Ok(Json(PageResponse::from_page(
+        page.map(|card| gift_card_dto(&card)),
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/gift-cards",
+    tag = "Admin",
+    summary = "Issue a gift card",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateGiftCardRequest,
+    responses((status = 201, body = GiftCardDto))
+)]
+async fn create_gift_card(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    ApiJson(request): ApiJson<CreateGiftCardRequest>,
+) -> ApiResult<(StatusCode, Json<GiftCardDto>)> {
+    require_permission(&actor, "payments.write")?;
+    let service = payment_service(&context, &actor, &db)?;
+    let card = service
+        .issue_gift_card(CreateGiftCardInput {
+            currency_code: request.currency_code,
+            amount_minor: request.amount_minor,
+            code: request.code,
+            metadata: request.metadata,
+        })
+        .await?;
+    Ok((StatusCode::CREATED, Json(gift_card_dto(&card))))
+}
+
+#[utoipa::path(
+    get,
+    path = "/gift-cards/{id}",
+    tag = "Admin",
+    summary = "Get a gift card",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = GiftCardDto))
+)]
+async fn get_gift_card(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<GiftCardDto>> {
+    require_permission(&actor, "payments.read")?;
+    let service = payment_service(&context, &actor, &db)?;
+    let card = service.get_gift_card(&id).await?;
+    Ok(Json(gift_card_dto(&card)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/gift-cards/{id}/disable",
+    tag = "Admin",
+    summary = "Disable a gift card",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = GiftCardDto))
+)]
+async fn disable_gift_card(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<GiftCardDto>> {
+    require_permission(&actor, "payments.write")?;
+    let service = payment_service(&context, &actor, &db)?;
+    let card = service.disable_gift_card(&id).await?;
+    Ok(Json(gift_card_dto(&card)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/gift-cards/{id}/enable",
+    tag = "Admin",
+    summary = "Enable a gift card",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = GiftCardDto))
+)]
+async fn enable_gift_card(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<GiftCardDto>> {
+    require_permission(&actor, "payments.write")?;
+    let service = payment_service(&context, &actor, &db)?;
+    let card = service.enable_gift_card(&id).await?;
+    Ok(Json(gift_card_dto(&card)))
+}
+
+fn gift_card_dto(card: &GiftCard) -> GiftCardDto {
+    GiftCardDto {
+        id: card.id.clone(),
+        code: card.code.clone(),
+        currency_code: card.currency_code.clone(),
+        initial_amount_minor: card.initial_amount_minor,
+        balance_minor: card.balance_minor,
+        status: card.status.as_str().to_owned(),
+        metadata: card.metadata.clone(),
+        created_at: card.created_at,
+        updated_at: card.updated_at,
+    }
 }
 
 fn payment_dto(payment: &Payment) -> PaymentDto {
