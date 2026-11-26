@@ -157,11 +157,11 @@ impl PaymentService {
              ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
         );
         let rows = sqlx::query_as::<_, GiftCardRow>(&sql)
-        .bind(pagination.limit)
-        .bind(pagination.offset)
-        .fetch_all(self.db.pool())
-        .await
-        .map_err(database_error)?;
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(database_error)?;
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gift_cards")
             .fetch_one(self.db.pool())
             .await
