@@ -57,6 +57,37 @@
         ],
         "type": "object"
       },
+      "AddStoreLocaleRequest": {
+        "description": "Store locale creation body.",
+        "properties": {
+          "direction": {
+            "description": "Text direction, `ltr` (default) or `rtl`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_default": {
+            "description": "Whether the new locale becomes the default display locale.",
+            "type": "boolean"
+          },
+          "label": {
+            "description": "Native label such as `Français`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "locale": {
+            "description": "Locale to publish, for example `fr-FR`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "locale"
+        ],
+        "type": "object"
+      },
       "Address": {
         "description": "A postal address snapshot attached to a cart.\n\nThe billing and shipping roles are tracked by the owning cart fields rather\nthan by this value.",
         "properties": {
@@ -465,6 +496,93 @@
           "variant_id",
           "quantity",
           "created_at"
+        ],
+        "type": "object"
+      },
+      "AiTaskDto": {
+        "description": "A recorded agent task.",
+        "properties": {
+          "created_at": {
+            "description": "Creation timestamp.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "created_by": {
+            "description": "Administrator that requested the task.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "description": "Error message when the task failed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Task identifier.",
+            "type": "string"
+          },
+          "input": {
+            "description": "Recorded invocation input.",
+            "type": "object"
+          },
+          "status": {
+            "description": "Lifecycle status.",
+            "type": "string"
+          },
+          "tool": {
+            "description": "Stable tool name the task invokes.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Last update timestamp.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "input",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "AiToolDto": {
+        "description": "One tool definition exposed to administrators.",
+        "properties": {
+          "description": {
+            "description": "Description presented to the model.",
+            "type": "string"
+          },
+          "input_schema": {
+            "description": "JSON Schema for tool input.",
+            "type": "object"
+          },
+          "mutates": {
+            "description": "Whether the tool mutates state.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Stable tool name.",
+            "type": "string"
+          },
+          "requires_approval": {
+            "description": "Whether a human must approve an invocation.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "input_schema",
+          "mutates",
+          "requires_approval"
         ],
         "type": "object"
       },
@@ -2335,6 +2453,23 @@
         ],
         "type": "object"
       },
+      "CreateAiTaskRequest": {
+        "description": "Task creation payload.",
+        "properties": {
+          "input": {
+            "description": "Invocation input; must be a JSON object.",
+            "type": "object"
+          },
+          "tool": {
+            "description": "Stable tool name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "type": "object"
+      },
       "CreateApiTokenRequest": {
         "description": "API token creation request.",
         "properties": {
@@ -2593,7 +2728,14 @@
             "description": "Free-form metadata."
           },
           "reason": {
-            "description": "Optional reason for the claim.",
+            "description": "Optional free-text reason for the claim, used when `reason_id` is absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason_id": {
+            "description": "Configured return reason whose label is snapshotted onto the claim.",
             "type": [
               "string",
               "null"
@@ -2782,7 +2924,14 @@
             "type": "array"
           },
           "reason": {
-            "description": "Optional reason for the exchange.",
+            "description": "Optional free-text reason for the exchange, used when `reason_id` is\nabsent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason_id": {
+            "description": "Configured return reason whose label is snapshotted onto the exchange.",
             "type": [
               "string",
               "null"
@@ -2819,6 +2968,36 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "CreateGiftCardRequest": {
+        "description": "Body for issuing a gift card.",
+        "properties": {
+          "amount_minor": {
+            "description": "Initial balance in minor units.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "code": {
+            "description": "Optional caller-chosen code; a random code is generated when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currency_code": {
+            "description": "Currency the card is priced in.",
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata",
+            "description": "Extension metadata."
+          }
+        },
+        "required": [
+          "currency_code",
+          "amount_minor"
         ],
         "type": "object"
       },
@@ -3351,6 +3530,12 @@
             },
             "type": "array"
           },
+          "product_type_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "subtitle": {
             "type": [
               "string",
@@ -3388,6 +3573,21 @@
         },
         "required": [
           "title"
+        ],
+        "type": "object"
+      },
+      "CreateProductTypeRequest": {
+        "description": "Product type creation body.",
+        "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
         ],
         "type": "object"
       },
@@ -3592,6 +3792,35 @@
         ],
         "type": "object"
       },
+      "CreateReturnReasonRequest": {
+        "description": "Request body for creating a return reason.",
+        "properties": {
+          "description": {
+            "description": "Optional description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "Human-readable label snapshotted onto new after-sales records.",
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata",
+            "description": "Free-form metadata."
+          },
+          "value": {
+            "description": "Stable machine-readable value, unique per store.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "type": "object"
+      },
       "CreateReturnRequest": {
         "description": "Request body for creating a return.",
         "properties": {
@@ -3607,7 +3836,14 @@
             "description": "Free-form metadata."
           },
           "reason": {
-            "description": "Optional reason for the return.",
+            "description": "Optional free-text reason for the return, used when `reason_id` is\nabsent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason_id": {
+            "description": "Configured return reason whose label is snapshotted onto the return.",
             "type": [
               "string",
               "null"
@@ -4556,6 +4792,55 @@
         ],
         "type": "string"
       },
+      "DeliveryView": {
+        "description": "One persisted plugin delivery.",
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "available_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plugin_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "plugin_id",
+          "event_id",
+          "event_type",
+          "status",
+          "attempts",
+          "available_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
       "DifferenceCollectionResponse": {
         "description": "The payable an after-sales difference was collected as.",
         "properties": {
@@ -5203,6 +5488,54 @@
           "returned"
         ],
         "type": "string"
+      },
+      "GiftCard": {
+        "description": "HTTP representation of a gift card.\n\nThe `code` is included on purpose: administrators need it to hand the card\nto its buyer, and without it the issue response would be unusable. It is a\nbearer credential, so every response here is gated by the payments\npermissions.",
+        "properties": {
+          "balance_minor": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency_code": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "initial_amount_minor": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata"
+          },
+          "status": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "currency_code",
+          "initial_amount_minor",
+          "balance_minor",
+          "status",
+          "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
       },
       "GroupCustomerRequest": {
         "properties": {
@@ -6241,6 +6574,56 @@
         ],
         "type": "object"
       },
+      "JobView": {
+        "description": "One persisted plugin job.",
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "available_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "plugin_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "plugin_id",
+          "name",
+          "status",
+          "attempts",
+          "available_at",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "JsonObject": {
         "additionalProperties": true,
         "type": "object"
@@ -6327,6 +6710,42 @@
       "Locale": {
         "description": "A locale identifier such as `en-US` or `fr_FR`.",
         "type": "string"
+      },
+      "LogView": {
+        "description": "One persisted plugin log line.",
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "fields_json": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "plugin_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "plugin_id",
+          "level",
+          "message",
+          "created_at"
+        ],
+        "type": "object"
       },
       "LoginRequest": {
         "description": "Login request body.",
@@ -8729,6 +9148,78 @@
         ],
         "type": "object"
       },
+      "PageResponse_AiTaskDto": {
+        "description": "Paginated API response.",
+        "properties": {
+          "data": {
+            "description": "Page records.",
+            "items": {
+              "description": "A recorded agent task.",
+              "properties": {
+                "created_at": {
+                  "description": "Creation timestamp.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "created_by": {
+                  "description": "Administrator that requested the task.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "description": "Error message when the task failed.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "description": "Task identifier.",
+                  "type": "string"
+                },
+                "input": {
+                  "description": "Recorded invocation input.",
+                  "type": "object"
+                },
+                "status": {
+                  "description": "Lifecycle status.",
+                  "type": "string"
+                },
+                "tool": {
+                  "description": "Stable tool name the task invokes.",
+                  "type": "string"
+                },
+                "updated_at": {
+                  "description": "Last update timestamp.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "tool",
+                "input",
+                "status",
+                "created_at",
+                "updated_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Pagination metadata."
+          }
+        },
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "type": "object"
+      },
       "PageResponse_Asset": {
         "description": "Paginated API response.",
         "properties": {
@@ -9316,6 +9807,72 @@
                 "id",
                 "name",
                 "set_type",
+                "metadata",
+                "created_at",
+                "updated_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Pagination metadata."
+          }
+        },
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "type": "object"
+      },
+      "PageResponse_GiftCard": {
+        "description": "Paginated API response.",
+        "properties": {
+          "data": {
+            "description": "Page records.",
+            "items": {
+              "description": "HTTP representation of a gift card.\n\nThe `code` is included on purpose: administrators need it to hand the card\nto its buyer, and without it the issue response would be unusable. It is a\nbearer credential, so every response here is gated by the payments\npermissions.",
+              "properties": {
+                "balance_minor": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "currency_code": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "initial_amount_minor": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "metadata": {
+                  "$ref": "#/components/schemas/Metadata"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "updated_at": {
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "code",
+                "currency_code",
+                "initial_amount_minor",
+                "balance_minor",
+                "status",
                 "metadata",
                 "created_at",
                 "updated_at"
@@ -10554,6 +11111,13 @@
                   },
                   "type": "array"
                 },
+                "product_type_id": {
+                  "description": "Optional product type.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "sales_channel_ids": {
                   "description": "Sales channels the product is published to. Empty when unlinked.",
                   "items": {
@@ -10627,6 +11191,59 @@
                 "collections",
                 "tags",
                 "sales_channel_ids"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Pagination metadata."
+          }
+        },
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "type": "object"
+      },
+      "PageResponse_ProductType": {
+        "description": "Paginated API response.",
+        "properties": {
+          "data": {
+            "description": "Page records.",
+            "items": {
+              "description": "A store-managed product taxonomy value, such as \"shirt\" or \"digital\".",
+              "properties": {
+                "created_at": {
+                  "description": "Creation timestamp in Unix seconds.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "id": {
+                  "description": "Product type identifier.",
+                  "type": "string"
+                },
+                "metadata": {
+                  "$ref": "#/components/schemas/Metadata",
+                  "description": "Free-form metadata."
+                },
+                "updated_at": {
+                  "description": "Last update timestamp in Unix seconds.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "value": {
+                  "description": "Unique display value.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "value",
+                "metadata",
+                "created_at",
+                "updated_at"
               ],
               "type": "object"
             },
@@ -12381,6 +12998,20 @@
         ],
         "type": "object"
       },
+      "PluginArchiveForm": {
+        "description": "Multipart body carrying a plugin archive.",
+        "properties": {
+          "archive": {
+            "description": "Plugin archive bytes, sent as the multipart field `archive`.",
+            "format": "binary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "archive"
+        ],
+        "type": "object"
+      },
       "PluginDetail": {
         "description": "Installation plus the full manifest.",
         "properties": {
@@ -12891,6 +13522,13 @@
             },
             "type": "array"
           },
+          "product_type_id": {
+            "description": "Optional product type.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "sales_channel_ids": {
             "description": "Sales channels the product is published to. Empty when unlinked.",
             "items": {
@@ -13200,6 +13838,41 @@
         },
         "required": [
           "tag_id"
+        ],
+        "type": "object"
+      },
+      "ProductType": {
+        "description": "A store-managed product taxonomy value, such as \"shirt\" or \"digital\".",
+        "properties": {
+          "created_at": {
+            "description": "Creation timestamp in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Product type identifier.",
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata",
+            "description": "Free-form metadata."
+          },
+          "updated_at": {
+            "description": "Last update timestamp in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "value": {
+            "description": "Unique display value.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "value",
+          "metadata",
+          "created_at",
+          "updated_at"
         ],
         "type": "object"
       },
@@ -14545,6 +15218,55 @@
         ],
         "type": "string"
       },
+      "ReturnReason": {
+        "description": "A configurable reason for creating a return, claim or exchange.\n\nAfter-sales records snapshot the [`Self::label`] into their own free-text\n`reason` column when they are created, so deleting a reason never rewrites\nor breaks the records that referenced it.",
+        "properties": {
+          "created_at": {
+            "$ref": "#/components/schemas/i64",
+            "description": "Creation timestamp in Unix seconds."
+          },
+          "description": {
+            "description": "Optional description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/ReturnReasonId",
+            "description": "Reason identifier."
+          },
+          "label": {
+            "description": "Human-readable label snapshotted onto new after-sales records.",
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata",
+            "description": "Free-form metadata."
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/i64",
+            "description": "Last update timestamp in Unix seconds."
+          },
+          "value": {
+            "description": "Stable machine-readable value, unique per store.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "value",
+          "label",
+          "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "ReturnReasonId": {
+        "description": "Identifier of a configured return reason.\n\nReturn reasons only exist inside the order module, so the identifier lives\nhere instead of `fastcart_kernel`; it still follows the kernel identifier\nshape (`\"{prefix}_{uuid}\"` with a UUID v7 suffix).",
+        "type": "string"
+      },
       "ReturnRefundResponse": {
         "description": "Result of refunding a return.",
         "properties": {
@@ -14636,6 +15358,56 @@
         },
         "required": [
           "secret"
+        ],
+        "type": "object"
+      },
+      "RuntimeStatus": {
+        "description": "Runtime health exposed to the admin API.",
+        "properties": {
+          "generation": {
+            "description": "Current generation id.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error": {
+            "description": "Last error.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "description": "Gateway port.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "restarts": {
+            "description": "Number of restarts.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "running": {
+            "description": "Whether workerd is running.",
+            "type": "boolean"
+          },
+          "uptime_seconds": {
+            "description": "Uptime in seconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "running",
+          "restarts",
+          "uptime_seconds"
         ],
         "type": "object"
       },
@@ -15347,6 +16119,53 @@
         ],
         "type": "object"
       },
+      "StoreLocale": {
+        "description": "A locale published by a store.",
+        "properties": {
+          "created_at": {
+            "description": "Creation timestamp.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "direction": {
+            "description": "Text direction, `ltr` or `rtl`.",
+            "type": "string"
+          },
+          "is_default": {
+            "description": "Whether this is the default display locale.",
+            "type": "boolean"
+          },
+          "label": {
+            "description": "Native label such as `Français`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "locale": {
+            "description": "Canonical BCP-47 locale.",
+            "type": "string"
+          },
+          "store_id": {
+            "description": "Store identifier.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Last update timestamp.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "store_id",
+          "locale",
+          "is_default",
+          "direction",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "StorePageResponse": {
         "description": "A published storefront content page.",
         "properties": {
@@ -15997,6 +16816,48 @@
         "required": [
           "from",
           "to"
+        ],
+        "type": "object"
+      },
+      "Translation": {
+        "description": "A stored translation row.",
+        "properties": {
+          "created_at": {
+            "$ref": "#/components/schemas/i64",
+            "description": "Creation timestamp in Unix seconds."
+          },
+          "fields": {
+            "description": "Translated fields; absent fields fall back to the source content."
+          },
+          "id": {
+            "description": "Row identifier.",
+            "type": "string"
+          },
+          "locale": {
+            "description": "Canonical BCP-47 locale.",
+            "type": "string"
+          },
+          "resource_id": {
+            "description": "Translated resource identifier.",
+            "type": "string"
+          },
+          "resource_type": {
+            "description": "Translated resource type.",
+            "type": "string"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/i64",
+            "description": "Last update timestamp in Unix seconds."
+          }
+        },
+        "required": [
+          "id",
+          "resource_type",
+          "resource_id",
+          "locale",
+          "fields",
+          "created_at",
+          "updated_at"
         ],
         "type": "object"
       },
@@ -16767,6 +17628,13 @@
               "null"
             ]
           },
+          "product_type_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "default": null,
             "oneOf": [
@@ -16824,6 +17692,30 @@
             "format": "double",
             "type": [
               "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateProductTypeRequest": {
+        "description": "Partial product type update body.",
+        "properties": {
+          "metadata": {
+            "default": null,
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Metadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "value": {
+            "default": null,
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -17045,6 +17937,44 @@
         },
         "type": "object"
       },
+      "UpdateReturnReasonRequest": {
+        "description": "Request body for partially updating a return reason.\n\nOmitted fields keep their stored value; an explicit `null` description\nclears it.",
+        "properties": {
+          "description": {
+            "description": "Replacement description; `null` clears it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "Replacement label.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Metadata",
+                "description": "Replacement metadata."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "value": {
+            "description": "Replacement machine-readable value.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "UpdateSalesChannelRequest": {
         "description": "Partial sales-channel update body.",
         "properties": {
@@ -17215,6 +18145,26 @@
             ]
           },
           "province_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateStoreLocaleRequest": {
+        "description": "Store locale update body.\n\nOmitted fields are left unchanged; an empty label clears it.",
+        "properties": {
+          "direction": {
+            "description": "Replacement text direction, `ltr` or `rtl`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "Replacement native label.",
             "type": [
               "string",
               "null"
@@ -17517,6 +18467,19 @@
         "required": [
           "id",
           "expires_at"
+        ],
+        "type": "object"
+      },
+      "UpsertTranslationRequest": {
+        "description": "Translation write body.\n\nThe translated resource fields are carried as a JSON object; field-level\nvalidation belongs to the resource that owns the fields.",
+        "properties": {
+          "fields": {
+            "description": "Translated fields.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "fields"
         ],
         "type": "object"
       },
@@ -18088,6 +19051,742 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/ai/tasks": {
+      "get": {
+        "operationId": "get_api_v1_admin_ai_tasks",
+        "parameters": [
+          {
+            "description": "Page size, 1-100.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Records to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_AiTaskDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List AI agent tasks",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_api_v1_admin_ai_tasks",
+        "parameters": [
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAiTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiTaskDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Create an AI agent task",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/ai/tasks/{id}": {
+      "get": {
+        "operationId": "get_api_v1_admin_ai_tasks_by_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiTaskDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Get an AI agent task",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/ai/tasks/{id}/approve": {
+      "post": {
+        "operationId": "post_api_v1_admin_ai_tasks_by_id_approve",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiTaskDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Approve an AI agent task",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/ai/tasks/{id}/reject": {
+      "post": {
+        "operationId": "post_api_v1_admin_ai_tasks_by_id_reject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiTaskDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Reject an AI agent task",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/ai/tools": {
+      "get": {
+        "operationId": "get_api_v1_admin_ai_tools",
+        "parameters": [
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AiToolDto"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List AI tool definitions",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
     "/api/v1/admin/assets": {
       "get": {
         "operationId": "get_api_v1_admin_assets",
@@ -21780,6 +23479,628 @@
           }
         ],
         "summary": "Remove a product image",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/catalog/product-types": {
+      "get": {
+        "operationId": "get_api_v1_admin_catalog_product_types",
+        "parameters": [
+          {
+            "description": "Page size, 1-100.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Records to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_ProductType"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List product types",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_api_v1_admin_catalog_product_types",
+        "parameters": [
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProductTypeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductType"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Create a product type",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/catalog/product-types/{id}": {
+      "delete": {
+        "operationId": "delete_api_v1_admin_catalog_product_types_by_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Delete a product type",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_api_v1_admin_catalog_product_types_by_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductType"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Get a product type",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_api_v1_admin_catalog_product_types_by_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProductTypeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductType"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Update a product type",
         "tags": [
           "Admin"
         ]
@@ -27681,6 +30002,433 @@
         ]
       }
     },
+    "/api/v1/admin/content/translations": {
+      "delete": {
+        "operationId": "delete_api_v1_admin_content_translations",
+        "parameters": [
+          {
+            "description": "Resource type: product, category, collection, page or navigation.",
+            "in": "query",
+            "name": "resource_type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Translated resource identifier.",
+            "in": "query",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Translation locale; when omitted, GET lists every locale of the resource.",
+            "in": "query",
+            "name": "locale",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Delete one translation",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_api_v1_admin_content_translations",
+        "parameters": [
+          {
+            "description": "Resource type: product, category, collection, page or navigation.",
+            "in": "query",
+            "name": "resource_type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Translated resource identifier.",
+            "in": "query",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Translation locale; when omitted, GET lists every locale of the resource.",
+            "in": "query",
+            "name": "locale",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Translation"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List the translations of a content resource",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "put": {
+        "operationId": "put_api_v1_admin_content_translations",
+        "parameters": [
+          {
+            "description": "Resource type: product, category, collection, page or navigation.",
+            "in": "query",
+            "name": "resource_type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Translated resource identifier.",
+            "in": "query",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Translation locale; when omitted, GET lists every locale of the resource.",
+            "in": "query",
+            "name": "locale",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertTranslationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Translation"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Create or replace one translation",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
     "/api/v1/admin/coupons": {
       "get": {
         "operationId": "get_api_v1_admin_coupons",
@@ -30257,6 +33005,630 @@
           }
         ],
         "summary": "List data-source records for the editor picker",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/gift-cards": {
+      "get": {
+        "operationId": "get_api_v1_admin_gift_cards",
+        "parameters": [
+          {
+            "description": "Page size, 1-100.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Records to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_GiftCard"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List gift cards",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_api_v1_admin_gift_cards",
+        "parameters": [
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGiftCardRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GiftCard"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Issue a gift card",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/gift-cards/{id}": {
+      "get": {
+        "operationId": "get_api_v1_admin_gift_cards_by_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GiftCard"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Get a gift card",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/gift-cards/{id}/disable": {
+      "post": {
+        "operationId": "post_api_v1_admin_gift_cards_by_id_disable",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GiftCard"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Disable a gift card",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/gift-cards/{id}/enable": {
+      "post": {
+        "operationId": "post_api_v1_admin_gift_cards_by_id_enable",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GiftCard"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Enable a gift card",
         "tags": [
           "Admin"
         ]
@@ -42774,6 +46146,115 @@
         ]
       }
     },
+    "/api/v1/admin/plugins/runtime": {
+      "get": {
+        "operationId": "get_api_v1_admin_plugins_runtime",
+        "parameters": [
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Plugin runtime health",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
     "/api/v1/admin/plugins/{id}": {
       "delete": {
         "operationId": "delete_api_v1_admin_plugins_by_id",
@@ -43004,6 +46485,255 @@
           }
         ],
         "summary": "Get one installed plugin",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/deliveries": {
+      "get": {
+        "operationId": "get_api_v1_admin_plugins_by_id_deliveries",
+        "parameters": [
+          {
+            "description": "Plugin id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeliveryView"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List recent event deliveries for a plugin",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/deliveries/{delivery_id}/replay": {
+      "post": {
+        "operationId": "post_api_v1_admin_plugins_by_id_deliveries_by_delivery_id_replay",
+        "parameters": [
+          {
+            "description": "Plugin id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Delivery id",
+            "in": "path",
+            "name": "delivery_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Queue an event delivery for another attempt",
         "tags": [
           "Admin"
         ]
@@ -43258,6 +46988,493 @@
           }
         ],
         "summary": "Enable a plugin for this store",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/jobs": {
+      "get": {
+        "operationId": "get_api_v1_admin_plugins_by_id_jobs",
+        "parameters": [
+          {
+            "description": "Plugin id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/JobView"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List scheduled jobs for a plugin",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/jobs/{name}/run": {
+      "post": {
+        "operationId": "post_api_v1_admin_plugins_by_id_jobs_by_name_run",
+        "parameters": [
+          {
+            "description": "Plugin id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Job name declared by the manifest",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Queue one plugin job to run now",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/logs": {
+      "delete": {
+        "operationId": "delete_api_v1_admin_plugins_by_id_logs",
+        "parameters": [
+          {
+            "description": "Plugin id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Delete every stored log line for a plugin",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_api_v1_admin_plugins_by_id_logs",
+        "parameters": [
+          {
+            "description": "Plugin id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LogView"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List recent plugin log lines",
         "tags": [
           "Admin"
         ]
@@ -43522,6 +47739,152 @@
           }
         ],
         "summary": "Replace plugin settings",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/upgrade": {
+      "post": {
+        "operationId": "post_api_v1_admin_plugins_by_id_upgrade",
+        "parameters": [
+          {
+            "description": "Plugin id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Accept capabilities added by the new version",
+            "in": "query",
+            "name": "accept_new_scopes",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginArchiveForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledPlugin"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Upgrade a plugin from a new archive",
         "tags": [
           "Admin"
         ]
@@ -47091,6 +51454,613 @@
           }
         ],
         "summary": "Update a region",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/return-reasons": {
+      "get": {
+        "operationId": "get_api_v1_admin_return_reasons",
+        "parameters": [
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReturnReason"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List configured return reasons",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "post": {
+        "operationId": "post_api_v1_admin_return_reasons",
+        "parameters": [
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReturnReasonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReturnReason"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Create a configured return reason",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/api/v1/admin/return-reasons/{id}": {
+      "delete": {
+        "operationId": "delete_api_v1_admin_return_reasons_by_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Delete a configured return reason",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "get": {
+        "operationId": "get_api_v1_admin_return_reasons_by_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReturnReason"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Get a configured return reason",
+        "tags": [
+          "Admin"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_api_v1_admin_return_reasons_by_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateReturnReasonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReturnReason"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Update a configured return reason",
         "tags": [
           "Admin"
         ]
@@ -58488,6 +63458,617 @@
           }
         ],
         "summary": "Remove a store domain",
+        "tags": [
+          "Platform"
+        ]
+      }
+    },
+    "/api/v1/platform/stores/{store_id}/locales": {
+      "get": {
+        "operationId": "get_api_v1_platform_stores_by_store_id_locales",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "store_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/StoreLocale"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List store locales",
+        "tags": [
+          "Platform"
+        ]
+      },
+      "post": {
+        "operationId": "post_api_v1_platform_stores_by_store_id_locales",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "store_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddStoreLocaleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreLocale"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Add a store locale",
+        "tags": [
+          "Platform"
+        ]
+      }
+    },
+    "/api/v1/platform/stores/{store_id}/locales/{locale}": {
+      "delete": {
+        "operationId": "delete_api_v1_platform_stores_by_store_id_locales_by_locale",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "store_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "locale",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Remove a store locale",
+        "tags": [
+          "Platform"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_api_v1_platform_stores_by_store_id_locales_by_locale",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "store_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "locale",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateStoreLocaleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreLocale"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Update a store locale",
+        "tags": [
+          "Platform"
+        ]
+      }
+    },
+    "/api/v1/platform/stores/{store_id}/locales/{locale}/default": {
+      "post": {
+        "operationId": "post_api_v1_platform_stores_by_store_id_locales_by_locale_default",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "store_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "locale",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreLocale"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "Set the default store locale",
         "tags": [
           "Platform"
         ]

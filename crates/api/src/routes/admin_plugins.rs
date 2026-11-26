@@ -70,6 +70,13 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(disable_plugin))
         .routes(routes!(update_settings))
         .routes(routes!(rollback_plugin))
+        .routes(routes!(runtime_status))
+        .routes(routes!(list_deliveries))
+        .routes(routes!(replay_delivery))
+        .routes(routes!(list_jobs))
+        .routes(routes!(run_job))
+        .routes(routes!(list_logs, clear_logs))
+        .routes(routes!(upgrade_plugin))
 }
 
 /// Response for the plugin list.
@@ -390,6 +397,27 @@ async fn install_plugin(
     }
 }
 
+/// Multipart body carrying a plugin archive.
+#[derive(Clone, Debug, ToSchema)]
+pub struct PluginArchiveForm {
+    /// Plugin archive bytes, sent as the multipart field `archive`.
+    #[schema(value_type = String, format = Binary)]
+    pub archive: Vec<u8>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/plugins/{id}/upgrade",
+    tag = "Plugins",
+    summary = "Upgrade a plugin from a new archive",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(
+        ("id" = String, Path, description = "Plugin id"),
+        ("accept_new_scopes" = Option<bool>, Query, description = "Accept capabilities added by the new version")
+    ),
+    request_body(content = PluginArchiveForm, content_type = "multipart/form-data"),
+    responses((status = 200, body = InstalledPlugin))
+)]
 async fn upgrade_plugin(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -567,6 +595,14 @@ fn valid_method(method: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+#[utoipa::path(
+    get,
+    path = "/plugins/runtime",
+    tag = "Plugins",
+    summary = "Plugin runtime health",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = super::plugin_runtime::RuntimeStatus))
+)]
 async fn runtime_status(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -710,6 +746,15 @@ pub struct JobView {
     pub updated_at: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/plugins/{id}/deliveries",
+    tag = "Plugins",
+    summary = "List recent event deliveries for a plugin",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(("id" = String, Path, description = "Plugin id")),
+    responses((status = 200, body = Vec<DeliveryView>))
+)]
 async fn list_deliveries(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -727,6 +772,18 @@ async fn list_deliveries(
     Ok(Json(rows))
 }
 
+#[utoipa::path(
+    post,
+    path = "/plugins/{id}/deliveries/{delivery_id}/replay",
+    tag = "Plugins",
+    summary = "Queue an event delivery for another attempt",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(
+        ("id" = String, Path, description = "Plugin id"),
+        ("delivery_id" = String, Path, description = "Delivery id")
+    ),
+    responses((status = 202))
+)]
 async fn replay_delivery(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -740,6 +797,15 @@ async fn replay_delivery(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[utoipa::path(
+    get,
+    path = "/plugins/{id}/jobs",
+    tag = "Plugins",
+    summary = "List scheduled jobs for a plugin",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(("id" = String, Path, description = "Plugin id")),
+    responses((status = 200, body = Vec<JobView>))
+)]
 async fn list_jobs(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -757,6 +823,18 @@ async fn list_jobs(
     Ok(Json(rows))
 }
 
+#[utoipa::path(
+    post,
+    path = "/plugins/{id}/jobs/{name}/run",
+    tag = "Plugins",
+    summary = "Queue one plugin job to run now",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(
+        ("id" = String, Path, description = "Plugin id"),
+        ("name" = String, Path, description = "Job name declared by the manifest")
+    ),
+    responses((status = 202))
+)]
 async fn run_job(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -796,6 +874,15 @@ pub struct LogView {
     pub created_at: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/plugins/{id}/logs",
+    tag = "Plugins",
+    summary = "List recent plugin log lines",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(("id" = String, Path, description = "Plugin id")),
+    responses((status = 200, body = Vec<LogView>))
+)]
 async fn list_logs(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
@@ -813,6 +900,15 @@ async fn list_logs(
     Ok(Json(rows))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/plugins/{id}/logs",
+    tag = "Plugins",
+    summary = "Delete every stored log line for a plugin",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(("id" = String, Path, description = "Plugin id")),
+    responses((status = 204))
+)]
 async fn clear_logs(
     State(_context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
