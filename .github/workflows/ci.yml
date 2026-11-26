@@ -45,6 +45,8 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+      - name: Check admin SDK against the OpenAPI snapshot
+        run: pnpm --filter @fastcart/admin-sdk check:openapi --file openapi.snapshot.json
 
   tanstack-template:
     runs-on: ubuntu-latest
