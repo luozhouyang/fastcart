@@ -101,6 +101,12 @@ const WebhooksPage = lazyRouteComponent(() =>
 const PaymentsPage = lazyRouteComponent(() =>
   import("@/pages/payments").then((module) => ({ default: module.PaymentsPage })),
 );
+const GiftCardsPage = lazyRouteComponent(() =>
+  import("@/pages/gift-cards").then((module) => ({ default: module.GiftCardsPage })),
+);
+const ReturnReasonsPage = lazyRouteComponent(() =>
+  import("@/pages/return-reasons").then((module) => ({ default: module.ReturnReasonsPage })),
+);
 
 function PageLoading() {
   return (
@@ -352,6 +358,18 @@ const paymentsRoute = createRoute({
   component: guarded(PaymentsPage, PERMISSIONS.payments.read),
 });
 
+const giftCardsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/gift-cards",
+  component: guarded(GiftCardsPage, PERMISSIONS.payments.read),
+});
+
+const returnReasonsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/return-reasons",
+  component: guarded(ReturnReasonsPage, PERMISSIONS.orders.read),
+});
+
 const routeTree = rootRoute.addChildren([
   overviewRoute,
   ordersRoute,
@@ -380,6 +398,8 @@ const routeTree = rootRoute.addChildren([
   campaignsRoute,
   webhooksRoute,
   paymentsRoute,
+  giftCardsRoute,
+  returnReasonsRoute,
   regionsRoute,
   shippingRoute,
   taxRoute,

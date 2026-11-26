@@ -122,6 +122,7 @@ export function buildReturnRequest(
   items: OrderItemView[],
   quantities: Record<string, number>,
   reason: string,
+  reasonId = "",
 ): CreateReturnRequest {
   const lines = items.flatMap((item) => {
     const quantity = requestedQuantity(quantities, item);
@@ -136,6 +137,9 @@ export function buildReturnRequest(
   }
   return {
     reason: reason.trim().length > 0 ? reason.trim() : null,
+    // A configured reason takes precedence server-side; its label is
+    // snapshotted onto the record.
+    ...(reasonId.length > 0 ? { reason_id: reasonId } : {}),
     metadata: {},
     items: lines,
   };
@@ -146,6 +150,7 @@ export function buildClaimRequest(
   items: OrderItemView[],
   quantities: Record<string, number>,
   reason: string,
+  reasonId = "",
 ): CreateClaimRequest {
   const lines: ClaimItemRequest[] = items.flatMap((item) => {
     const quantity = requestedQuantity(quantities, item);
@@ -160,6 +165,7 @@ export function buildClaimRequest(
   }
   return {
     reason: reason.trim().length > 0 ? reason.trim() : null,
+    ...(reasonId.length > 0 ? { reason_id: reasonId } : {}),
     metadata: {},
     items: lines,
   };
@@ -176,6 +182,7 @@ export function buildExchangeRequest(
   quantities: Record<string, number>,
   replacementVariantId: string,
   reason: string,
+  reasonId = "",
 ): CreateExchangeRequest {
   const variantId = replacementVariantId.trim();
   if (variantId.length === 0) {
@@ -194,6 +201,7 @@ export function buildExchangeRequest(
   }
   return {
     reason: reason.trim().length > 0 ? reason.trim() : null,
+    ...(reasonId.length > 0 ? { reason_id: reasonId } : {}),
     metadata: {},
     inbound_items: inbound,
     outbound_items: inbound.map((line) => ({

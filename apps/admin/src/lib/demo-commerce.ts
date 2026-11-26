@@ -1,4 +1,5 @@
 import type {
+  GiftCard,
   PaymentRefund,
   Price,
   PriceList,
@@ -359,4 +360,43 @@ export function demoPaymentSession(sessionId: string): AdminPaymentSession {
     created_at: daysAgo(0),
     updated_at: daysAgo(0),
   };
+}
+
+/** Sample gift cards shown by the demo. */
+export function demoGiftCards(): GiftCard[] {
+  return [
+    {
+      id: "gift_demo_7001",
+      code: "7QK2M9XR4TZB1HVN",
+      currency_code: "USD",
+      initial_amount_minor: 10_000,
+      balance_minor: 7_500,
+      status: "active",
+      metadata: {},
+      created_at: daysAgo(12),
+      updated_at: daysAgo(2),
+    },
+    {
+      id: "gift_demo_7002",
+      code: "STUDIO2026DEMO01",
+      currency_code: "USD",
+      initial_amount_minor: 5_000,
+      balance_minor: 0,
+      status: "active",
+      metadata: {},
+      created_at: daysAgo(30),
+      updated_at: daysAgo(7),
+    },
+    {
+      id: "gift_demo_7003",
+      code: "HALCYON-FRIENDS",
+      currency_code: "USD",
+      initial_amount_minor: 2_500,
+      balance_minor: 2_500,
+      status: "disabled",
+      metadata: {},
+      created_at: daysAgo(45),
+      updated_at: daysAgo(20),
+    },
+  ];
 }

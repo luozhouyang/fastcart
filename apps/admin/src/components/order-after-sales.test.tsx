@@ -8,9 +8,11 @@ import type {
 } from "@fastcart/shared-types";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OrderAfterSalesPanel } from "@/components/order-after-sales";
+import { AuthProvider } from "@/lib/auth";
+import { DEMO_STORAGE_KEY } from "@/lib/api";
 import type { OrderAfterSalesData } from "@/lib/order-after-sales";
 import type { OrderView } from "@/lib/models";
 
@@ -163,19 +165,31 @@ function renderPanel(
 ) {
   const onChanged = vi.fn();
   render(
-    <OrderAfterSalesPanel
-      order={order}
-      client={client}
-      data={data()}
-      error={null}
-      onRetry={vi.fn()}
-      onChanged={onChanged}
-      canWrite
-      {...props}
-    />,
+    <AuthProvider>
+      <OrderAfterSalesPanel
+        order={order}
+        client={client}
+        data={data()}
+        error={null}
+        onRetry={vi.fn()}
+        onChanged={onChanged}
+        canWrite
+        {...props}
+      />
+    </AuthProvider>,
   );
   return { onChanged, client };
 }
+
+beforeEach(() => {
+  // Demo mode keeps the configured-reason lookup from making a request; the
+  // free-text reason field is covered by the other cases.
+  window.sessionStorage.setItem(DEMO_STORAGE_KEY, "1");
+});
+
+afterEach(() => {
+  window.sessionStorage.removeItem(DEMO_STORAGE_KEY);
+});
 
 describe("OrderAfterSalesPanel", () => {
   it("shows the payment summary and flags money the customer still owes", () => {

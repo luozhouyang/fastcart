@@ -13,6 +13,7 @@ import {
   CreditCard,
   FileText,
   FolderTree,
+  Gift,
   Globe2,
   Images,
   Inbox,
@@ -34,6 +35,7 @@ import {
   Tags,
   TicketPercent,
   Truck,
+  Undo2,
   Users,
   Webhook,
 } from "lucide-react";
@@ -76,6 +78,8 @@ interface NavItem {
     | "/campaigns"
     | "/webhooks"
     | "/payments"
+    | "/gift-cards"
+    | "/return-reasons"
     | "/forms"
     | "/inbox"
     | "/pages"
@@ -149,6 +153,18 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         label: "Payments",
         icon: CreditCard,
         permission: PERMISSIONS.payments.read,
+      },
+      {
+        to: "/gift-cards",
+        label: "Gift cards",
+        icon: Gift,
+        permission: PERMISSIONS.payments.read,
+      },
+      {
+        to: "/return-reasons",
+        label: "Return reasons",
+        icon: Undo2,
+        permission: PERMISSIONS.orders.read,
       },
       { to: "/forms", label: "Forms", icon: FileText, permission: PERMISSIONS.settings.read },
       { to: "/inbox", label: "Inbox", icon: Inbox, permission: PERMISSIONS.settings.read },

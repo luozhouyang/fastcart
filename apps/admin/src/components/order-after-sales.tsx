@@ -1,6 +1,6 @@
 import type { AdminClient } from "@fastcart/admin-sdk";
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { ChevronDown, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,8 +16,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { errorMessage } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { money } from "@/lib/format";
 import { toMajor, type OrderView } from "@/lib/models";
+import { listReturnReasons } from "@/lib/return-reasons";
 import {
   buildClaimRequest,
   buildExchangeRequest,
@@ -84,10 +86,14 @@ export function OrderAfterSalesPanel({
   onChanged: () => void;
   canWrite: boolean;
 }) {
+  const { mode, store } = useAuth();
   const [recordBusy, setRecordBusy] = useState<string | null>(null);
   const [creation, setCreation] = useState<CreationKind | null>(null);
   const [draftQuantities, setDraftQuantities] = useState<Record<string, number>>({});
   const [draftReason, setDraftReason] = useState("");
+  /** Configured reasons, loaded once the creation dialog opens. */
+  const [reasonOptions, setReasonOptions] = useState<Array<{ id: string; label: string }>>([]);
+  const [draftReasonId, setDraftReasonId] = useState("");
   const [newLineTitle, setNewLineTitle] = useState("");
   const [newLinePrice, setNewLinePrice] = useState("");
   const [newLineQuantity, setNewLineQuantity] = useState("1");
@@ -99,9 +105,24 @@ export function OrderAfterSalesPanel({
   const [provider, setProvider] = useState("manual");
 
   useEffect(() => {
+    if (creation === null || mode === "demo" || !store) return;
+    const controller = new AbortController();
+    listReturnReasons(store.id, controller.signal)
+      .then((reasons) =>
+        setReasonOptions(reasons.map((reason) => ({ id: reason.id, label: reason.label }))),
+      )
+      .catch(() => {
+        // Configured reasons are optional; the free-text field still works.
+        setReasonOptions([]);
+      });
+    return () => controller.abort();
+  }, [creation, mode, store]);
+
+  useEffect(() => {
     setCreation(null);
     setDraftQuantities({});
     setDraftReason("");
+    setDraftReasonId("");
     setNewLineTitle("");
     setNewLinePrice("");
     setNewLineQuantity("1");
@@ -125,6 +146,7 @@ export function OrderAfterSalesPanel({
   const openCreation = (kind: CreationKind) => {
     setCreation(kind);
     setDraftReason("");
+    setDraftReasonId("");
     setNewLineTitle("");
     setNewLinePrice("");
     setNewLineQuantity("1");
@@ -177,19 +199,25 @@ export function OrderAfterSalesPanel({
         case "return":
           await client.orders.returns.create(
             order.id,
-            buildReturnRequest(order.items, draftQuantities, draftReason),
+            buildReturnRequest(order.items, draftQuantities, draftReason, draftReasonId),
           );
           break;
         case "claim":
           await client.orders.claims.create(
             order.id,
-            buildClaimRequest(order.items, draftQuantities, draftReason),
+            buildClaimRequest(order.items, draftQuantities, draftReason, draftReasonId),
           );
           break;
         case "exchange":
           await client.orders.exchanges.create(
             order.id,
-            buildExchangeRequest(order.items, draftQuantities, replacementVariant, draftReason),
+            buildExchangeRequest(
+              order.items,
+              draftQuantities,
+              replacementVariant,
+              draftReason,
+              draftReasonId,
+            ),
           );
           break;
       }
@@ -780,14 +808,51 @@ export function OrderAfterSalesPanel({
                 </p>
               </div>
             ) : null}
+            {creation !== "edit" && reasonOptions.length > 0 ? (
+              <div className="space-y-2">
+                <Label htmlFor="after-sales-reason-id">Configured reason</Label>
+                <div className="relative">
+                  <select
+                    id="after-sales-reason-id"
+                    value={draftReasonId}
+                    onChange={(event) => {
+                      setDraftReasonId(event.target.value);
+                      // A configured reason snapshots its own label; the
+                      // free-text field stays for anything unlisted.
+                      const chosen = reasonOptions.find(
+                        (option) => option.id === event.target.value,
+                      );
+                      setDraftReason(chosen?.label ?? "");
+                    }}
+                    disabled={creating}
+                    className="h-10 w-full cursor-pointer appearance-none rounded-md border border-input bg-card pr-9 pl-3 text-[13.5px] text-foreground shadow-xs outline-none transition-colors hover:border-line-strong focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/25 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <option value="">Custom reason</option>
+                    {reasonOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown
+                    className="pointer-events-none absolute top-1/2 right-3 size-3.5 -translate-y-1/2 text-faint"
+                    aria-hidden="true"
+                  />
+                </div>
+              </div>
+            ) : null}
             <div className="space-y-2">
               <Label htmlFor="after-sales-reason">Reason</Label>
               <Input
                 id="after-sales-reason"
                 placeholder="Customer changed their mind"
                 value={draftReason}
-                onChange={(event) => setDraftReason(event.target.value)}
-                disabled={creating}
+                onChange={(event) => {
+                  setDraftReason(event.target.value);
+                  // Typing a custom reason detaches the configured choice.
+                  setDraftReasonId("");
+                }}
+                disabled={creating || draftReasonId.length > 0}
               />
             </div>
           </div>
