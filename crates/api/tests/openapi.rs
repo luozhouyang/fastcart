@@ -21,3 +21,26 @@ async fn handler_serves_the_document() {
     let response = fastcart_api::openapi::handler().await;
     assert_eq!(response.0["openapi"], "3.1.0");
 }
+
+/// Refreshes the snapshot consumed by the admin SDK parity check.
+///
+/// The test is inert unless `FASTCART_WRITE_OPENAPI_SNAPSHOT=1`, so the
+/// regular suite never mutates the working tree. Regenerate with:
+///
+/// ```text
+/// FASTCART_WRITE_OPENAPI_SNAPSHOT=1 cargo test -p fastcart-api --test openapi writes_openapi_snapshot
+/// ```
+#[test]
+fn writes_openapi_snapshot() {
+    if std::env::var("FASTCART_WRITE_OPENAPI_SNAPSHOT").as_deref() != Ok("1") {
+        return;
+    }
+
+    let document = fastcart_api::openapi::document();
+    let snapshot = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/admin-sdk/openapi.snapshot.json");
+    let mut serialized = serde_json::to_string_pretty(&document).expect("serialize document");
+    serialized.push('\n');
+    std::fs::write(&snapshot, serialized).expect("write OpenAPI snapshot");
+    eprintln!("wrote {}", snapshot.display());
+}

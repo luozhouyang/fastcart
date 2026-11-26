@@ -1,0 +1,60 @@
+{
+  "$comment": "Documented exceptions for packages/admin-sdk/scripts/check-openapi-parity.mjs. Every entry needs a reason. allowedMissingPaths suppresses hard errors for SDK calls the API no longer documents (broken SDK routes awaiting removal); allowedMissingSchemas suppresses schema warnings; ignoredAdminPaths lists documented admin operations the SDK intentionally does not implement yet.",
+  "allowedMissingPaths": [],
+  "allowedMissingSchemas": [],
+  "schemaAliases": [
+    {
+      "schema": "InventoryAvailability",
+      "type": "AvailabilityResponse",
+      "reason": "The inventory availability endpoint documents InventoryAvailability; the SDK names the same body AvailabilityResponse."
+    },
+    {
+      "schema": "TransferResponse",
+      "type": "InventoryTransferResponse",
+      "reason": "The transfer endpoint documents TransferResponse; the SDK names the same body InventoryTransferResponse."
+    },
+    {
+      "schema": "UnreadCountResponse",
+      "type": "InquiryUnreadCountResponse",
+      "reason": "The inquiry unread counter documents UnreadCountResponse; the SDK names the same body InquiryUnreadCountResponse."
+    },
+    {
+      "schema": "TestChannelResponse",
+      "type": "NotificationChannelTestResponse",
+      "reason": "The notification channel test result documents TestChannelResponse; the SDK names the same body NotificationChannelTestResponse."
+    },
+    {
+      "schema": "FieldOption",
+      "type": "InquiryFieldOption",
+      "reason": "The inquiry form field option documents FieldOption; the SDK names the same body InquiryFieldOption."
+    },
+    {
+      "schema": "SaveInquiryDraftRequest",
+      "type": "SaveInquiryFormDraftRequest",
+      "reason": "The inquiry form draft body documents SaveInquiryDraftRequest; the SDK names the same body SaveInquiryFormDraftRequest."
+    },
+    {
+      "schema": "SettingsRequest",
+      "type": "SettingsUpdateRequest",
+      "reason": "The batch settings body documents SettingsRequest; the SDK names the same body SettingsUpdateRequest."
+    }
+  ],
+  "ignoredAdminPaths": [
+    {
+      "pathPrefix": "/api/v1/admin/catalog/product-types",
+      "reason": "Product types are owned by parallel work and may be absent from the committed snapshot; the SDK will add methods once the routes land."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/return-reasons",
+      "reason": "Return reasons are owned by parallel work and may be absent from the committed snapshot; the SDK will add methods once the routes land."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/gift-cards",
+      "reason": "Gift cards are owned by parallel work and may be absent from the committed snapshot; the SDK will add methods once the routes land."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/content/translations",
+      "reason": "Content translations are owned by parallel work and may be absent from the committed snapshot; the SDK will add methods once the routes land."
+    }
+  ]
+}
