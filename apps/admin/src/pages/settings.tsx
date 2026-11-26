@@ -17,6 +17,7 @@ import type { ApiToken, CreatedApiToken, Membership, Role } from "@fastcart/shar
 
 import { PageHeader } from "@/components/page-header";
 import { PluginSlot } from "@/plugins/plugin-slot";
+import { LocalesSection } from "@/components/locales-section";
 import { EmptyState, ErrorState, PageSkeleton } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -91,6 +92,7 @@ const SECTIONS = [
   { id: "store-details", label: "Store details" },
   { id: "domains", label: "Domains" },
   { id: "checkout", label: "Checkout" },
+  { id: "locales", label: "Locales" },
   { id: "team", label: "Team" },
 ] as const;
 
@@ -144,6 +146,7 @@ export function SettingsPage() {
   const detailsRef = useRef<HTMLDivElement>(null);
   const domainsRef = useRef<HTMLDivElement>(null);
   const checkoutRef = useRef<HTMLDivElement>(null);
+  const localesRef = useRef<HTMLDivElement>(null);
   const teamRef = useRef<HTMLDivElement>(null);
 
   const loader = useCallback(
@@ -170,7 +173,9 @@ export function SettingsPage() {
           ? domainsRef.current
           : id === "checkout"
             ? checkoutRef.current
-            : teamRef.current;
+            : id === "locales"
+              ? localesRef.current
+              : teamRef.current;
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     target?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
   };
@@ -495,6 +500,9 @@ export function SettingsPage() {
                 }
               />
             </div>
+          </Card>
+          <Card ref={localesRef} className="scroll-mt-24 p-0">
+            <LocalesSection />
           </Card>
           <Card ref={teamRef} className="scroll-mt-24 p-0">
             <TeamSection />

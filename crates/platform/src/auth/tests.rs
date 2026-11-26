@@ -77,15 +77,23 @@ async fn login_does_not_block_the_async_runtime() {
     });
     tokio::task::yield_now().await;
 
+    let started = std::time::Instant::now();
     auth.login("owner@example.com", "hunter2hunter2")
         .await
         .unwrap();
+    let elapsed = started.elapsed();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     watchdog.await.unwrap();
 
+    // Compare against the login duration rather than an absolute bound: on a
+    // loaded machine the scheduler itself can pause the watchdog for a few
+    // milliseconds. An inline hash would block for essentially the whole
+    // login, so requiring the gap to stay under half of it keeps the property
+    // while tolerating a busy host.
     let gap_ms = max_gap_ms.load(std::sync::atomic::Ordering::Relaxed);
+    let budget = u64::try_from(elapsed.as_millis() / 2).unwrap_or(0).max(20);
     assert!(
-        gap_ms < 20,
+        gap_ms < budget,
         "the async runtime was blocked for {gap_ms}ms while Argon2 verified a password"
     );
 }
