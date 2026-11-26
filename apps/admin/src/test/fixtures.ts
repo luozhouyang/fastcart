@@ -77,6 +77,7 @@ export function product(overrides: Partial<Product> = {}): Product {
     metadata: {},
     created_at: NOW,
     updated_at: NOW,
+    product_type_id: null,
     variants: [variant()],
     options: [],
     images: [],

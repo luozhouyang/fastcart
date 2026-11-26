@@ -359,12 +359,32 @@ export interface Product {
   metadata: Metadata;
   created_at: Timestamp;
   updated_at: Timestamp;
+  product_type_id: string | null;
   variants: Variant[];
   options: ProductOption[];
   images: ProductImage[];
   categories: Category[];
   collections: Collection[];
   tags: Tag[];
+}
+
+/** A store-managed product taxonomy value, such as "shirt" or "digital". */
+export interface ProductType {
+  id: string;
+  value: string;
+  metadata: Metadata;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface CreateProductTypeRequest {
+  value: string;
+  metadata?: Metadata;
+}
+
+export interface UpdateProductTypeRequest {
+  value?: string;
+  metadata?: Metadata;
 }
 
 export interface CreateOptionRequest {
@@ -404,6 +424,7 @@ export interface CreateProductRequest {
   collection_ids?: string[];
   tag_values?: string[];
   images?: string[];
+  product_type_id?: string | null;
 }
 
 export interface UpdateVariantRequest {
@@ -437,6 +458,7 @@ export interface UpdateProductRequest {
   collection_ids?: string[];
   tag_values?: string[];
   images?: string[];
+  product_type_id?: string | null;
 }
 
 export interface CreateCategoryRequest {

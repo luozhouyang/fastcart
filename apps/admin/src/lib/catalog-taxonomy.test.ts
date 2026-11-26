@@ -9,19 +9,23 @@ import {
   collectionCounts,
   createCategory,
   createCollection,
+  createProductType,
   deleteCategory,
   deleteCollection,
+  deleteProductType,
   flattenCategoryTree,
   handleError,
   isValidHandle,
   listCategories,
   listCollectionProducts,
   listCollections,
+  listProductTypes,
   publishCollection,
   removeProductFromCollection,
   searchProducts,
   unpublishCollection,
   updateCategory,
+  updateProductType,
 } from "@/lib/catalog-taxonomy";
 import { page } from "@/test/fixtures";
 
@@ -294,6 +298,75 @@ describe("category tree helpers", () => {
     const tree = buildCategoryTree(cyclic);
     const flat = flattenCategoryTree(tree);
     expect(flat.length).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("product type client", () => {
+  const productType = {
+    id: "ptype_1",
+    value: "Shirt",
+    metadata: {},
+    created_at: 1,
+    updated_at: 2,
+  };
+
+  it("lists product types across pages", async () => {
+    const mock = vi.fn(async () => jsonResponse(page([productType])));
+    vi.stubGlobal("fetch", mock);
+
+    await expect(listProductTypes("store-1")).resolves.toEqual([productType]);
+
+    const { url, init } = requestAt(mock);
+    expect(url).toContain(`${API_BASE_URL}/api/v1/admin/catalog/product-types?`);
+    const headers = init.headers as Headers;
+    expect(headers.get("x-store-id")).toBe("store-1");
+    expect(headers.get("x-csrf-token")).toBe("csrf-token");
+  });
+
+  it("creates a product type", async () => {
+    const mock = vi.fn(async () => jsonResponse(productType, 201));
+    vi.stubGlobal("fetch", mock);
+
+    await createProductType("store-1", { value: "Shirt" });
+
+    const { url, init } = requestAt(mock);
+    expect(url).toBe(`${API_BASE_URL}/api/v1/admin/catalog/product-types`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ value: "Shirt" });
+  });
+
+  it("renames a product type by its encoded id", async () => {
+    const mock = vi.fn(async () => jsonResponse({ ...productType, value: "T-shirt" }));
+    vi.stubGlobal("fetch", mock);
+
+    await updateProductType("store-1", "ptype 1", { value: "T-shirt" });
+
+    const { url, init } = requestAt(mock);
+    expect(url).toBe(`${API_BASE_URL}/api/v1/admin/catalog/product-types/ptype%201`);
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({ value: "T-shirt" });
+  });
+
+  it("deletes a product type and returns void", async () => {
+    const mock = vi.fn(async () => jsonResponse(null, 204));
+    vi.stubGlobal("fetch", mock);
+
+    await expect(deleteProductType("store-1", "ptype_1")).resolves.toBeUndefined();
+
+    const { url, init } = requestAt(mock);
+    expect(url).toBe(`${API_BASE_URL}/api/v1/admin/catalog/product-types/ptype_1`);
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("surfaces API error envelopes", async () => {
+    const mock = vi.fn(async () =>
+      jsonResponse({ error: { message: "That product type already exists." } }, 409),
+    );
+    vi.stubGlobal("fetch", mock);
+
+    await expect(createProductType("store-1", { value: "Shirt" })).rejects.toThrow(
+      "That product type already exists.",
+    );
   });
 });
 

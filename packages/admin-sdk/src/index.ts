@@ -34,6 +34,7 @@ import type {
   CreatePriceListRequest,
   CreatePriceRequest,
   CreateProductRequest,
+  CreateProductTypeRequest,
   CreatePromotionRequest,
   CreateReservationsRequest,
   CreateReturnRequest,
@@ -106,6 +107,7 @@ import type {
   Product,
   ProductImage,
   ProductListQuery,
+  ProductType,
   Promotion,
   PromotionListQuery,
   PromotionUsageResponse,
@@ -158,6 +160,7 @@ import type {
   UpdatePriceListRequest,
   UpdatePriceRequest,
   UpdateProductRequest,
+  UpdateProductTypeRequest,
   UpdatePromotionRequest,
   UpdateShippingOptionRequest,
   UpdateShippingProfileRequest,
@@ -632,6 +635,18 @@ export interface AdminClient {
         options?: AdminRequestOptions,
       ): Promise<ProductImage[]>;
     };
+  };
+
+  productTypes: {
+    list(query?: PaginationQuery, options?: AdminRequestOptions): Promise<PageResult<ProductType>>;
+    get(id: string, options?: AdminRequestOptions): Promise<ProductType>;
+    create(body: CreateProductTypeRequest, options?: AdminRequestOptions): Promise<ProductType>;
+    update(
+      id: string,
+      body: UpdateProductTypeRequest,
+      options?: AdminRequestOptions,
+    ): Promise<ProductType>;
+    delete(id: string, options?: AdminRequestOptions): Promise<void>;
   };
 
   categories: {
@@ -1809,6 +1824,36 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
             },
           ),
       },
+    },
+
+    productTypes: {
+      list: (query, requestOptions) =>
+        request<PageResult<ProductType>>("/api/v1/admin/catalog/product-types", {
+          ...requestOptions,
+          query,
+        }),
+      get: (productTypeId, requestOptions) =>
+        request<ProductType>(
+          `/api/v1/admin/catalog/product-types/${id(productTypeId)}`,
+          requestOptions,
+        ),
+      create: (body, requestOptions) =>
+        request<ProductType>("/api/v1/admin/catalog/product-types", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      update: (productTypeId, body, requestOptions) =>
+        request<ProductType>(`/api/v1/admin/catalog/product-types/${id(productTypeId)}`, {
+          ...requestOptions,
+          method: "PATCH",
+          body,
+        }),
+      delete: (productTypeId, requestOptions) =>
+        request<void>(`/api/v1/admin/catalog/product-types/${id(productTypeId)}`, {
+          ...requestOptions,
+          method: "DELETE",
+        }),
     },
 
     categories: {

@@ -3,10 +3,13 @@ import type {
   Collection,
   CreateCategoryRequest,
   CreateCollectionRequest,
+  CreateProductTypeRequest,
   PageResult,
   Product,
+  ProductType,
   UpdateCategoryRequest,
   UpdateCollectionRequest,
+  UpdateProductTypeRequest,
 } from "@fastcart/shared-types";
 
 import { API_BASE_URL, apiErrorMessage, readCookie } from "@/lib/api";
@@ -308,6 +311,70 @@ export async function searchProducts(
     signal ? { signal } : {},
   );
   return page.data;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Product types                                                      */
+/* ------------------------------------------------------------------ */
+
+/** Lists every product type in the store. */
+export function listProductTypes(storeId: string, signal?: AbortSignal): Promise<ProductType[]> {
+  return fetchEvery((limit, offset) =>
+    taxonomyRequest<PageResult<ProductType>>(
+      storeId,
+      `/catalog/product-types?limit=${limit}&offset=${offset}`,
+      { ...(signal ? { signal } : {}) },
+    ),
+  );
+}
+
+/** Creates a product type. The API rejects duplicates case-insensitively. */
+export function createProductType(
+  storeId: string,
+  input: CreateProductTypeRequest,
+  signal?: AbortSignal,
+): Promise<ProductType> {
+  return taxonomyRequest<ProductType>(storeId, "/catalog/product-types", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+    ...(signal ? { signal } : {}),
+  });
+}
+
+/** Renames a product type. */
+export function updateProductType(
+  storeId: string,
+  productTypeId: string,
+  input: UpdateProductTypeRequest,
+  signal?: AbortSignal,
+): Promise<ProductType> {
+  return taxonomyRequest<ProductType>(
+    storeId,
+    `/catalog/product-types/${encodeURIComponent(productTypeId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+/** Deletes a product type and clears it from every product that used it. */
+export function deleteProductType(
+  storeId: string,
+  productTypeId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return taxonomyRequest<void>(
+    storeId,
+    `/catalog/product-types/${encodeURIComponent(productTypeId)}`,
+    {
+      method: "DELETE",
+      ...(signal ? { signal } : {}),
+    },
+  );
 }
 
 /* ------------------------------------------------------------------ */

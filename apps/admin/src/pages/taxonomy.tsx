@@ -9,6 +9,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Tags,
   Trash2,
   X,
 } from "lucide-react";
@@ -18,7 +19,9 @@ import type {
   Collection,
   CreateCategoryRequest,
   CreateCollectionRequest,
+  CreateProductTypeRequest,
   Product,
+  ProductType,
   UpdateCategoryRequest,
   UpdateCollectionRequest,
 } from "@fastcart/shared-types";
@@ -65,19 +68,23 @@ import {
   collectionCounts,
   createCategory,
   createCollection,
+  createProductType,
   deleteCategory,
   deleteCollection,
+  deleteProductType,
   flattenCategoryTree,
   handleError,
   listCategories,
   listCollectionProducts,
   listCollections,
+  listProductTypes,
   publishCollection,
   removeProductFromCollection,
   searchProducts,
   unpublishCollection,
   updateCategory,
   updateCollection,
+  updateProductType,
 } from "@/lib/catalog-taxonomy";
 import { demoProducts } from "@/lib/demo";
 import { fromUnixSeconds, shortDate } from "@/lib/format";
@@ -89,6 +96,7 @@ const selectClass =
 interface TaxonomyData {
   categories: Category[];
   collections: Collection[];
+  productTypes: ProductType[];
 }
 
 interface CategoryDraft {
@@ -175,6 +183,30 @@ const DEMO_CATEGORY_FIXTURES: Category[] = [
   },
 ];
 
+const DEMO_PRODUCT_TYPE_FIXTURES: ProductType[] = [
+  {
+    id: "ptype_demo_shirt",
+    value: "Shirt",
+    metadata: {},
+    created_at: 1_760_000_000,
+    updated_at: 1_760_000_000,
+  },
+  {
+    id: "ptype_demo_mug",
+    value: "Mug",
+    metadata: {},
+    created_at: 1_760_010_000,
+    updated_at: 1_760_010_000,
+  },
+  {
+    id: "ptype_demo_digital",
+    value: "Digital download",
+    metadata: {},
+    created_at: 1_760_020_000,
+    updated_at: 1_760_020_000,
+  },
+];
+
 const DEMO_COLLECTION_FIXTURES: Collection[] = [
   {
     id: "col_demo_new",
@@ -214,11 +246,16 @@ function demoCollectionRows(): Collection[] {
   return DEMO_COLLECTION_FIXTURES.map((collection) => ({ ...collection }));
 }
 
+function demoProductTypeRows(): ProductType[] {
+  return DEMO_PRODUCT_TYPE_FIXTURES.map((productType) => ({ ...productType }));
+}
+
 export function TaxonomyPage() {
   const { mode, store, dataKey, can } = useAuth();
   const [tab, setTab] = useState("categories");
   const [demoCategories, setDemoCategories] = useState<Category[]>(demoCategoryRows);
   const [demoCollections, setDemoCollections] = useState<Collection[]>(demoCollectionRows);
+  const [demoProductTypes, setDemoProductTypes] = useState<ProductType[]>(demoProductTypeRows);
   const [demoMembers, setDemoMembers] = useState<Record<string, string[]>>(DEMO_COLLECTION_MEMBERS);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [categorySearch, setCategorySearch] = useState("");
@@ -233,6 +270,11 @@ export function TaxonomyPage() {
   const [editingCollection, setEditingCollection] = useState<Collection | null>(null);
   const [deleteCollectionTarget, setDeleteCollectionTarget] = useState<Collection | null>(null);
   const [collectionBusy, setCollectionBusy] = useState(false);
+
+  const [productTypeDialogOpen, setProductTypeDialogOpen] = useState(false);
+  const [editingProductType, setEditingProductType] = useState<ProductType | null>(null);
+  const [deleteProductTypeTarget, setDeleteProductTypeTarget] = useState<ProductType | null>(null);
+  const [productTypeBusy, setProductTypeBusy] = useState(false);
 
   /** Parent preselected when "Add subcategory" opens the dialog. */
   const [pendingParentId, setPendingParentId] = useState("");
@@ -252,6 +294,9 @@ export function TaxonomyPage() {
     setCollectionDialogOpen(false);
     setEditingCollection(null);
     setDeleteCollectionTarget(null);
+    setProductTypeDialogOpen(false);
+    setEditingProductType(null);
+    setDeleteProductTypeTarget(null);
     setMembersCollection(null);
     setExpanded(new Set());
     setCategorySearch("");
@@ -261,15 +306,24 @@ export function TaxonomyPage() {
   const loader = useCallback(
     (signal: AbortSignal): Promise<TaxonomyData> => {
       if (mode === "demo") {
-        return Promise.resolve({ categories: demoCategories, collections: demoCollections });
+        return Promise.resolve({
+          categories: demoCategories,
+          collections: demoCollections,
+          productTypes: demoProductTypes,
+        });
       }
       if (!store) return Promise.reject(new Error("No store is selected."));
       return Promise.all([
         listCategories(store.id, signal),
         listCollections(store.id, signal),
-      ]).then(([categories, collections]) => ({ categories, collections }));
+        listProductTypes(store.id, signal),
+      ]).then(([categories, collections, productTypes]) => ({
+        categories,
+        collections,
+        productTypes,
+      }));
     },
-    [mode, store, demoCategories, demoCollections],
+    [mode, store, demoCategories, demoCollections, demoProductTypes],
   );
 
   const { data, error, loading, reload } = useAsyncData(loader, [
@@ -278,10 +332,12 @@ export function TaxonomyPage() {
     dataKey,
     demoCategories,
     demoCollections,
+    demoProductTypes,
   ]);
 
   const categories = useMemo(() => data?.categories ?? [], [data]);
   const collections = useMemo(() => data?.collections ?? [], [data]);
+  const productTypes = useMemo(() => data?.productTypes ?? [], [data]);
 
   const categoryTree = useMemo(() => buildCategoryTree(categories), [categories]);
   const categoryRows = useMemo(() => flattenCategoryTree(categoryTree), [categoryTree]);
@@ -609,6 +665,73 @@ export function TaxonomyPage() {
     }
   };
 
+  const saveProductType = async (value: string) => {
+    setProductTypeBusy(true);
+    try {
+      if (mode === "demo") {
+        const now = Math.floor(Date.now() / 1000);
+        if (editingProductType) {
+          setDemoProductTypes((current) =>
+            current.map((entry) =>
+              entry.id === editingProductType.id ? { ...entry, value, updated_at: now } : entry,
+            ),
+          );
+          toast.success("Product type renamed in the demo");
+        } else {
+          setDemoProductTypes((current) => [
+            ...current,
+            {
+              id: `ptype_demo_${Date.now()}`,
+              value,
+              metadata: {},
+              created_at: now,
+              updated_at: now,
+            },
+          ]);
+          toast.success("Product type created in the demo");
+        }
+        setProductTypeDialogOpen(false);
+        return;
+      }
+      if (!store) throw new Error("No store is selected.");
+      if (editingProductType) {
+        await updateProductType(store.id, editingProductType.id, { value });
+        toast.success("Product type renamed");
+      } else {
+        const input: CreateProductTypeRequest = { value };
+        await createProductType(store.id, input);
+        toast.success("Product type created");
+      }
+      setProductTypeDialogOpen(false);
+      reload();
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      setProductTypeBusy(false);
+    }
+  };
+
+  const confirmDeleteProductType = async () => {
+    if (!deleteProductTypeTarget || productTypeBusy) return;
+    const target = deleteProductTypeTarget;
+    setProductTypeBusy(true);
+    try {
+      if (mode === "demo") {
+        setDemoProductTypes((current) => current.filter((entry) => entry.id !== target.id));
+      } else {
+        if (!store) throw new Error("No store is selected.");
+        await deleteProductType(store.id, target.id);
+      }
+      setDeleteProductTypeTarget(null);
+      toast.success("Product type deleted");
+      reload();
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      setProductTypeBusy(false);
+    }
+  };
+
   /** Search results that can still be added to the open collection. */
   const addableProducts = useMemo(() => {
     const needle = memberQuery.trim().toLowerCase();
@@ -700,13 +823,23 @@ export function TaxonomyPage() {
     <div className="space-y-6 animate-enter">
       <PageHeader
         title="Taxonomy"
-        description="Organize the catalog with nested categories and curated collections."
+        description="Organize the catalog with nested categories, product types and curated collections."
         actions={
           writable ? (
             tab === "categories" ? (
               <Button onClick={() => openCreateCategory()}>
                 <Plus className="size-4" aria-hidden="true" />
                 New category
+              </Button>
+            ) : tab === "product-types" ? (
+              <Button
+                onClick={() => {
+                  setEditingProductType(null);
+                  setProductTypeDialogOpen(true);
+                }}
+              >
+                <Plus className="size-4" aria-hidden="true" />
+                New product type
               </Button>
             ) : (
               <Button
@@ -734,6 +867,11 @@ export function TaxonomyPage() {
             <Layers3 className="size-3.5" aria-hidden="true" />
             Collections
             <span className="font-mono text-[10px] text-faint tnum">{collections.length}</span>
+          </TabsTrigger>
+          <TabsTrigger value="product-types">
+            <Tags className="size-3.5" aria-hidden="true" />
+            Product types
+            <span className="font-mono text-[10px] text-faint tnum">{productTypes.length}</span>
           </TabsTrigger>
         </TabsList>
 
@@ -1065,6 +1203,101 @@ export function TaxonomyPage() {
             </Table>
           </Card>
         </TabsContent>
+
+        <TabsContent value="product-types" className="mt-4 space-y-4">
+          <p className="text-[11.5px] text-muted-foreground">
+            Product types classify what a product is, such as Shirt or Digital download. Deleting a
+            type clears it from the products that used it.
+            {mode === "demo" ? " · sample data" : ""}
+          </p>
+          <Card className="overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="pl-6">Value</TableHead>
+                  <TableHead className="hidden w-[160px] md:table-cell">Handle</TableHead>
+                  <TableHead className="hidden w-[130px] lg:table-cell">Updated</TableHead>
+                  <TableHead className="w-10 pr-5" aria-label="Actions" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {productTypes.map((productType) => (
+                  <TableRow key={productType.id} className="h-[52px]">
+                    <TableCell className="pl-6 text-[12.5px] font-medium text-foreground">
+                      {productType.value}
+                    </TableCell>
+                    <TableCell className="hidden font-mono text-[11px] text-muted-foreground md:table-cell">
+                      {productType.id}
+                    </TableCell>
+                    <TableCell className="hidden text-[11.5px] text-muted-foreground lg:table-cell">
+                      {shortDate(fromUnixSeconds(productType.updated_at))}
+                    </TableCell>
+                    <TableCell className="pr-5 text-right">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`Actions for ${productType.value}`}
+                            className="text-faint data-[state=open]:bg-accent"
+                          >
+                            <MoreHorizontal className="size-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-[200px]">
+                          <DropdownMenuLabel className="truncate">
+                            {productType.value}
+                          </DropdownMenuLabel>
+                          <DropdownMenuItem
+                            disabled={!writable}
+                            onSelect={() => {
+                              setEditingProductType(productType);
+                              setProductTypeDialogOpen(true);
+                            }}
+                          >
+                            <Pencil aria-hidden="true" />
+                            Rename type
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            variant="destructive"
+                            disabled={!writable}
+                            onSelect={() => setDeleteProductTypeTarget(productType)}
+                          >
+                            <Trash2 aria-hidden="true" />
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {productTypes.length === 0 ? (
+                  <TableRow className="hover:bg-transparent">
+                    <TableCell colSpan={4} className="p-0">
+                      <EmptyState
+                        title="No product types yet"
+                        description="Add types such as Shirt or Download to classify products."
+                        action={
+                          writable ? (
+                            <Button
+                              onClick={() => {
+                                setEditingProductType(null);
+                                setProductTypeDialogOpen(true);
+                              }}
+                            >
+                              <Plus className="size-4" aria-hidden="true" />
+                              New product type
+                            </Button>
+                          ) : null
+                        }
+                      />
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+              </TableBody>
+            </Table>
+          </Card>
+        </TabsContent>
       </Tabs>
 
       <CategoryDialog
@@ -1156,6 +1389,55 @@ export function TaxonomyPage() {
               disabled={collectionBusy}
             >
               {collectionBusy ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Trash2 className="size-4" aria-hidden="true" />
+              )}
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ProductTypeDialog
+        open={productTypeDialogOpen}
+        onOpenChange={(open) => {
+          setProductTypeDialogOpen(open);
+          if (!open) setEditingProductType(null);
+        }}
+        productType={editingProductType}
+        busy={productTypeBusy}
+        onSubmit={saveProductType}
+      />
+
+      <Dialog
+        open={deleteProductTypeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !productTypeBusy) setDeleteProductTypeTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete product type?</DialogTitle>
+            <DialogDescription>
+              “{deleteProductTypeTarget?.value}” is removed and cleared from every product that used
+              it. Products stay in the catalog.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setDeleteProductTypeTarget(null)}
+              disabled={productTypeBusy}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void confirmDeleteProductType()}
+              disabled={productTypeBusy}
+            >
+              {productTypeBusy ? (
                 <Loader2 className="size-4 animate-spin" aria-hidden="true" />
               ) : (
                 <Trash2 className="size-4" aria-hidden="true" />
@@ -1326,6 +1608,7 @@ function demoProductRecord(view: {
     metadata: {},
     created_at: 0,
     updated_at: 0,
+    product_type_id: null,
     variants: [],
     options: [],
     images: [],
@@ -1700,6 +1983,104 @@ function CollectionDialog({
             <Button type="submit" disabled={busy}>
               {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
               {collection ? "Save changes" : "Create collection"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ProductTypeDialog({
+  open,
+  onOpenChange,
+  productType,
+  busy,
+  onSubmit,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  productType: ProductType | null;
+  busy: boolean;
+  onSubmit: (value: string) => Promise<void>;
+}) {
+  const [value, setValue] = useState("");
+  const [valueError, setValueError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setValue(productType?.value ?? "");
+    setValueError(null);
+  }, [open, productType?.id]);
+
+  const submit = async () => {
+    if (busy) return;
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      setValueError("Enter a value for this product type.");
+      return;
+    }
+    if (trimmed.length > 100) {
+      setValueError("Product types cannot be longer than 100 characters.");
+      return;
+    }
+    // A failed save keeps the dialog open so the value can be corrected; the
+    // caller shows the API error as a toast.
+    await onSubmit(trimmed);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <form
+          className="space-y-5"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{productType ? "Rename product type" : "New product type"}</DialogTitle>
+            <DialogDescription>
+              Product types are global to the store. Values are compared case-insensitively.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <Label htmlFor="product-type-value">Value</Label>
+            <Input
+              id="product-type-value"
+              value={value}
+              onChange={(event) => {
+                setValue(event.target.value);
+                setValueError(null);
+              }}
+              placeholder="Shirt"
+              autoComplete="off"
+              autoFocus
+              disabled={busy}
+              aria-invalid={valueError !== null}
+            />
+            {valueError ? (
+              <p className="text-[11.5px] text-destructive" role="alert">
+                {valueError}
+              </p>
+            ) : null}
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => onOpenChange(false)}
+              disabled={busy}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy}>
+              {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+              {productType ? "Save changes" : "Create product type"}
             </Button>
           </DialogFooter>
         </form>
