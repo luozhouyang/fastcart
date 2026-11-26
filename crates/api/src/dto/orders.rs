@@ -14,8 +14,12 @@ pub struct ReturnItemRequest {
 /// Request body for creating a return.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateReturnRequest {
-    /// Optional reason for the return.
+    /// Optional free-text reason for the return, used when `reason_id` is
+    /// absent.
     pub reason: Option<String>,
+    /// Configured return reason whose label is snapshotted onto the return.
+    #[serde(default)]
+    pub reason_id: Option<String>,
     /// Refund created for this return, when linked.
     pub refund_id: Option<String>,
     /// Free-form metadata.
@@ -79,8 +83,11 @@ pub struct ClaimItemRequest {
 /// Request body for creating a claim.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateClaimRequest {
-    /// Optional reason for the claim.
+    /// Optional free-text reason for the claim, used when `reason_id` is absent.
     pub reason: Option<String>,
+    /// Configured return reason whose label is snapshotted onto the claim.
+    #[serde(default)]
+    pub reason_id: Option<String>,
     /// Free-form metadata.
     #[serde(default)]
     pub metadata: Metadata,
@@ -104,8 +111,12 @@ pub struct ExchangeItemRequest {
 /// Request body for creating an exchange.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateExchangeRequest {
-    /// Optional reason for the exchange.
+    /// Optional free-text reason for the exchange, used when `reason_id` is
+    /// absent.
     pub reason: Option<String>,
+    /// Configured return reason whose label is snapshotted onto the exchange.
+    #[serde(default)]
+    pub reason_id: Option<String>,
     /// Free-form metadata.
     #[serde(default)]
     pub metadata: Metadata,

@@ -101,6 +101,7 @@ async fn accepting_an_exchange_prices_the_replacement_from_the_pricing_module() 
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -155,6 +156,7 @@ async fn accepting_a_claim_prices_its_replacements_from_the_pricing_module() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -218,6 +220,7 @@ async fn a_replacement_without_a_price_settles_nothing() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),

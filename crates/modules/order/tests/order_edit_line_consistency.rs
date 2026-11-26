@@ -319,6 +319,7 @@ async fn a_removed_line_keeps_its_row_with_a_zero_quantity() {
             &order.id,
             CreateReturnInput {
                 reason: None,
+                reason_id: None,
                 refund_id: None,
                 metadata: Metadata::default(),
                 items: vec![ReturnItemInput {
@@ -343,6 +344,7 @@ async fn existing_return_references_survive_a_quantity_reduction() {
             &order.id,
             CreateReturnInput {
                 reason: Some("damaged".to_owned()),
+                reason_id: None,
                 refund_id: None,
                 metadata: Metadata::default(),
                 items: vec![ReturnItemInput {
@@ -393,6 +395,7 @@ async fn an_edit_cannot_shrink_a_line_below_committed_after_sales_quantities() {
             &order.id,
             CreateReturnInput {
                 reason: None,
+                reason_id: None,
                 refund_id: None,
                 metadata: Metadata::default(),
                 items: vec![ReturnItemInput {

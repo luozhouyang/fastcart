@@ -150,6 +150,7 @@ pub(crate) async fn requested_return(
             &order.id,
             CreateReturnInput {
                 reason: Some("damaged".to_owned()),
+                reason_id: None,
                 refund_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ReturnItemInput {

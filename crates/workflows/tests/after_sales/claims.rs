@@ -24,6 +24,7 @@ async fn claim_replacements_are_fulfilled_and_consume_stock_once() {
             &order.id,
             CreateClaimInput {
                 reason: Some("wrong size".to_owned()),
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -101,6 +102,7 @@ async fn refund_and_replacement_claim_lines_compose() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![
                     ClaimItemInput {
@@ -175,6 +177,7 @@ async fn claim_fulfillment_does_not_call_the_provider_without_stock() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -228,6 +231,7 @@ async fn claim_fulfillment_restores_stock_when_the_provider_fails() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),

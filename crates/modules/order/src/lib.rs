@@ -13,11 +13,12 @@ pub use after_sales::{
     AfterSalesFulfillment, AfterSalesFulfillmentItem, AfterSalesFulfillmentItemInput,
     ClaimItemInput, ClaimItemStatus, ClaimItemType, ClaimStatus, CreateAfterSalesFulfillmentInput,
     CreateClaimInput, CreateExchangeInput, CreateOrderEditInput, CreateReturnInput,
-    ExchangeItemDirection, ExchangeItemInput, ExchangeItemStatus, ExchangeStatus, OrderClaim,
-    OrderClaimItem, OrderEdit, OrderEditAction, OrderEditItem, OrderEditItemInput,
-    OrderEditItemStatus, OrderEditStatus, OrderExchange, OrderExchangeItem, OrderReturn,
-    OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput, ReplacementUnitPrice,
-    ReturnItemInput, ReturnItemStatus, ReturnStatus, WriteOffReturnInput, WriteOffReturnItemInput,
+    CreateReturnReasonInput, ExchangeItemDirection, ExchangeItemInput, ExchangeItemStatus,
+    ExchangeStatus, OrderClaim, OrderClaimItem, OrderEdit, OrderEditAction, OrderEditItem,
+    OrderEditItemInput, OrderEditItemStatus, OrderEditStatus, OrderExchange, OrderExchangeItem,
+    OrderReturn, OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput, ReplacementUnitPrice,
+    ReturnItemInput, ReturnItemStatus, ReturnReason, ReturnReasonId, ReturnStatus,
+    UpdateReturnReasonInput, WriteOffReturnInput, WriteOffReturnItemInput,
 };
 pub use domain::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput,

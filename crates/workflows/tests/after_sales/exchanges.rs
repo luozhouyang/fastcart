@@ -23,6 +23,7 @@ async fn accepting_an_exchange_restocks_inbound_items_once() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -94,6 +95,7 @@ async fn exchange_outbound_fulfillment_is_idempotent() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),

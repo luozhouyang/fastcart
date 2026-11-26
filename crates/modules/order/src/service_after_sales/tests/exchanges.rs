@@ -11,6 +11,7 @@ async fn exchanges_track_inbound_and_outbound_items() {
             &order.id,
             CreateExchangeInput {
                 reason: Some("wrong size".to_owned()),
+                reason_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -41,6 +42,7 @@ async fn exchanges_track_inbound_and_outbound_items() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -76,6 +78,7 @@ async fn an_exchanged_inbound_unit_cannot_also_be_claimed() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -99,6 +102,7 @@ async fn an_exchanged_inbound_unit_cannot_also_be_claimed() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),

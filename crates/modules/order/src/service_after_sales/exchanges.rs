@@ -16,8 +16,9 @@ use crate::domain::OrderStatus;
 use crate::service::OrderService;
 
 use super::{
-    DifferenceSource, append_after_sales_event, fetch_order_item, normalize_text,
-    settle_price_difference, sum_active_claims, sum_active_exchange_inbound, sum_active_returns,
+    DifferenceSource, append_after_sales_event, fetch_order_item, fetch_return_reason_label,
+    normalize_text, settle_price_difference, sum_active_claims, sum_active_exchange_inbound,
+    sum_active_returns,
 };
 
 #[derive(sqlx::FromRow)]
@@ -95,9 +96,12 @@ impl OrderService {
                 "an exchange must contain at least one outbound item",
             ));
         }
-        let reason = normalize_text(input.reason);
-
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
+        // A configured reason must exist; its label is snapshotted as free text.
+        let reason = match input.reason_id.as_ref() {
+            Some(reason_id) => Some(fetch_return_reason_label(&mut tx, reason_id).await?),
+            None => normalize_text(input.reason),
+        };
         let mut seen = HashSet::new();
         let mut inbound_by_line: HashMap<&str, i64> = HashMap::new();
         for item in &input.inbound_items {

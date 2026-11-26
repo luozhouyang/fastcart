@@ -60,6 +60,7 @@ async fn after_sales_refund_links_are_idempotent() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),

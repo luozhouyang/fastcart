@@ -717,6 +717,131 @@ async fn a_positive_difference_is_collectable_but_not_refundable() {
 }
 
 #[tokio::test]
+async fn a_configured_return_reason_is_snapshotted_and_survives_deletion() {
+    let fixture = fixture().await;
+    let headers = fixture.headers();
+    let reasons = "/api/v1/admin/return-reasons";
+
+    let (status, reason, _) = send(
+        &fixture.app,
+        "POST",
+        reasons,
+        Some(json!({
+            "value": "damaged",
+            "label": "Arrived damaged",
+            "description": "Carrier damage"
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{reason}");
+    assert_eq!(reason["value"], "damaged");
+    assert_eq!(reason["label"], "Arrived damaged");
+    let reason_id = reason["id"].as_str().unwrap().to_owned();
+
+    // A duplicate value is rejected.
+    let (status, duplicate, _) = send(
+        &fixture.app,
+        "POST",
+        reasons,
+        Some(json!({"value": "damaged", "label": "Another label"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+    assert_eq!(duplicate["error"]["code"], "CONFLICT");
+
+    let (status, listed, _) = send(&fixture.app, "GET", reasons, None, &headers).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["id"], reason["id"]);
+
+    // A return created with `reason_id` snapshots the label into its own
+    // free-text reason, overriding any supplied text.
+    let base = format!("/api/v1/admin/orders/{}/returns", fixture.order_id);
+    let (status, created, _) = send(
+        &fixture.app,
+        "POST",
+        &base,
+        Some(json!({
+            "reason": "free text",
+            "reason_id": reason_id,
+            "items": [{"order_item_id": fixture.order_item_id, "quantity": 1}]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["reason"], "Arrived damaged");
+    let return_id = created["id"].as_str().unwrap().to_owned();
+
+    // Unknown reason identifiers are rejected before anything is recorded.
+    let (status, missing, _) = send(
+        &fixture.app,
+        "POST",
+        &base,
+        Some(json!({
+            "reason_id": "rreason_missing",
+            "items": [{"order_item_id": fixture.order_item_id, "quantity": 1}]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+
+    // Updating the reason does not rewrite the record.
+    let (status, updated, _) = send(
+        &fixture.app,
+        "PATCH",
+        &format!("{reasons}/{reason_id}"),
+        Some(json!({"label": "Renamed"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["label"], "Renamed");
+    assert_eq!(updated["value"], "damaged");
+
+    // Deleting the reason leaves the historical return intact.
+    let (status, _, _) = send(
+        &fixture.app,
+        "DELETE",
+        &format!("{reasons}/{reason_id}"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, reloaded, _) = send(
+        &fixture.app,
+        "GET",
+        &format!("{base}/{return_id}"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(reloaded["reason"], "Arrived damaged");
+
+    let (status, listed, _) = send(&fixture.app, "GET", reasons, None, &headers).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed.as_array().unwrap().is_empty());
+
+    // The return still moves through its lifecycle after the reason is gone.
+    let (status, requested, _) = send(
+        &fixture.app,
+        "POST",
+        &format!("{base}/{return_id}/request"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{requested}");
+    assert_eq!(requested["reason"], "Arrived damaged");
+}
+
+#[tokio::test]
 async fn a_zero_difference_edit_needs_no_settlement() {
     let fixture = fixture().await;
     let headers = fixture.headers();

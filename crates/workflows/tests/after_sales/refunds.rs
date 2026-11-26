@@ -175,6 +175,7 @@ async fn claim_refunds_only_refund_type_items_once() {
             &order.id,
             CreateClaimInput {
                 reason: Some("damaged".to_owned()),
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -232,6 +233,7 @@ async fn claims_without_refund_items_do_not_refund() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),

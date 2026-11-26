@@ -125,6 +125,7 @@ use crate::state::AppContext;
     fastcart_module_order::PaymentStatus,
     fastcart_module_order::RefundStatus,
     fastcart_module_order::ReturnItemStatus,
+    fastcart_module_order::ReturnReason,
     fastcart_module_order::ReturnStatus,
     crate::dto::CancelAfterSaleRequest,
     crate::dto::ClaimItemRequest,
@@ -288,8 +289,10 @@ use crate::state::AppContext;
     crate::routes::admin_orders::FulfillAfterSalesRequest,
     crate::routes::admin_orders::FulfillOrderRequest,
     crate::routes::admin_orders::FulfillmentItemRequest,
+    crate::routes::admin_orders::CreateReturnReasonRequest,
     crate::routes::admin_orders::RefundOrderRequest,
     crate::routes::admin_orders::ReturnRefundResponse,
+    crate::routes::admin_orders::UpdateReturnReasonRequest,
     crate::routes::admin_payments::CreateGiftCardRequest,
     crate::routes::admin_payments::CreateRefundRequest,
     crate::routes::admin_payments::FailSessionRequest,
@@ -956,11 +959,11 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 208);
+        assert_eq!(count("/api/v1/admin"), 210);
         assert_eq!(count("/api/v1/store"), 48);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 281);
+        assert_eq!(paths.len(), 283);
 
         for key in [
             "/api/v1/platform/stores",
@@ -972,6 +975,8 @@ mod tests {
             "/api/v1/admin/gift-cards/{id}",
             "/api/v1/admin/gift-cards/{id}/disable",
             "/api/v1/admin/gift-cards/{id}/enable",
+            "/api/v1/admin/return-reasons",
+            "/api/v1/admin/return-reasons/{id}",
             "/api/v1/admin/content/pages/{id}/preview-token",
             "/api/v1/admin/inquiry-forms",
             "/api/v1/admin/inquiries",
@@ -1077,7 +1082,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 395);
+        assert_eq!(operation_count, 400);
     }
 
     #[test]

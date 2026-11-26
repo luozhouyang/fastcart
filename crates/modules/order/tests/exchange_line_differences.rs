@@ -57,6 +57,7 @@ async fn every_priced_replacement_line_carries_its_own_difference() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: order
                     .items
@@ -129,6 +130,7 @@ async fn a_replacement_without_a_price_settles_no_line_difference() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: order
                     .items
@@ -181,6 +183,7 @@ async fn a_claim_replacement_carries_its_difference_too() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),

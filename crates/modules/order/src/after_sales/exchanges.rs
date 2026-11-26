@@ -81,7 +81,17 @@ pub struct ExchangeItemInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateExchangeInput {
     /// Optional reason for the exchange.
+    ///
+    /// Used when `reason_id` is absent; the free-text reason remains supported
+    /// for callers that do not maintain configured reasons.
     pub reason: Option<String>,
+    /// Configured return reason to snapshot into
+    /// [`crate::OrderExchange::reason`], when supplied.
+    ///
+    /// The service validates that the reason exists and stores its label as free
+    /// text. It takes precedence over `reason`.
+    #[serde(default)]
+    pub reason_id: Option<ReturnReasonId>,
     /// Free-form metadata.
     pub metadata: Metadata,
     /// Items returned by the customer.

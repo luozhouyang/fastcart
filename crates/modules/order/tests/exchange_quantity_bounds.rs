@@ -64,6 +64,7 @@ async fn an_exchange_cannot_ship_more_replacements_than_it_takes_back() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -103,6 +104,7 @@ async fn an_exchange_cannot_replace_a_line_it_does_not_take_back() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -140,6 +142,7 @@ async fn a_replacement_may_match_what_came_back_line_by_line() {
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![
                     ExchangeItemInput {

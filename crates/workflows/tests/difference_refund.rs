@@ -103,6 +103,7 @@ async fn exchange_for(
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),

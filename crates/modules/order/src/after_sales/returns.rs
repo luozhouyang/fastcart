@@ -71,7 +71,17 @@ pub struct ReturnItemInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateReturnInput {
     /// Optional reason for the return.
+    ///
+    /// Used when `reason_id` is absent; the free-text reason remains supported
+    /// for callers that do not maintain configured reasons.
     pub reason: Option<String>,
+    /// Configured return reason to snapshot into
+    /// [`crate::OrderReturn::reason`], when supplied.
+    ///
+    /// The service validates that the reason exists and stores its label as free
+    /// text. It takes precedence over `reason`.
+    #[serde(default)]
+    pub reason_id: Option<ReturnReasonId>,
     /// Refund created for this return, when linked.
     pub refund_id: Option<RefundId>,
     /// Free-form metadata.

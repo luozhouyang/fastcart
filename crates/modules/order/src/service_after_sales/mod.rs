@@ -13,7 +13,10 @@ mod claims;
 mod edits;
 mod exchanges;
 mod fulfillments;
+mod return_reasons;
 mod returns;
+
+pub(crate) use return_reasons::fetch_return_reason_label;
 
 use std::collections::HashMap;
 

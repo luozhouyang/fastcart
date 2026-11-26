@@ -18,6 +18,7 @@ async fn claims_respect_returned_quantities_and_transitions() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -37,6 +38,7 @@ async fn claims_respect_returned_quantities_and_transitions() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -78,6 +80,7 @@ async fn a_claimed_unit_cannot_also_be_returned() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),

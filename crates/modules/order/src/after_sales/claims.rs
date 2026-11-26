@@ -84,7 +84,17 @@ pub struct ClaimItemInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateClaimInput {
     /// Optional reason for the claim.
+    ///
+    /// Used when `reason_id` is absent; the free-text reason remains supported
+    /// for callers that do not maintain configured reasons.
     pub reason: Option<String>,
+    /// Configured return reason to snapshot into
+    /// [`crate::OrderClaim::reason`], when supplied.
+    ///
+    /// The service validates that the reason exists and stores its label as free
+    /// text. It takes precedence over `reason`.
+    #[serde(default)]
+    pub reason_id: Option<ReturnReasonId>,
     /// Free-form metadata.
     pub metadata: Metadata,
     /// Claimed lines.

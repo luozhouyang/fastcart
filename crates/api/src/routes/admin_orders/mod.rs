@@ -19,7 +19,7 @@ use fastcart_module_order::{
     CreateOrderEditInput, CreateReturnInput, ExchangeItemInput, FulfillmentInput,
     FulfillmentItemInput, Order, OrderClaim, OrderEditItemInput, OrderExchange, OrderFilter,
     OrderItem, OrderRefund, OrderReturn, OrderStatus, PaymentStatus, ReceiveReturnInput,
-    ReceiveReturnItemInput, RefundInput, ReturnItemInput, WriteOffReturnInput,
+    ReceiveReturnItemInput, RefundInput, ReturnItemInput, ReturnReasonId, WriteOffReturnInput,
     WriteOffReturnItemInput,
 };
 use fastcart_module_payment::{PaymentCollection, PaymentService, PaymentSession, Refund};
@@ -42,7 +42,10 @@ mod exchanges;
 mod fulfillment;
 mod orders;
 mod refunds;
+mod return_reasons;
 mod returns;
+
+pub use return_reasons::{CreateReturnReasonRequest, UpdateReturnReasonRequest};
 
 pub fn router() -> Router<Arc<AppContext>> {
     Router::new()
@@ -173,6 +176,16 @@ pub fn router() -> Router<Arc<AppContext>> {
             post(edits::cancel_order_edit),
         )
         .route("/orders/{id}/payment-summary", get(edits::payment_summary))
+        .route(
+            "/return-reasons",
+            get(return_reasons::list_return_reasons).post(return_reasons::create_return_reason),
+        )
+        .route(
+            "/return-reasons/{id}",
+            get(return_reasons::get_return_reason)
+                .patch(return_reasons::update_return_reason)
+                .delete(return_reasons::delete_return_reason),
+        )
 }
 
 /// Builds the documented routes for this namespace.
@@ -221,6 +234,15 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(edits::refund_order_edit_difference))
         .routes(routes!(edits::cancel_order_edit))
         .routes(routes!(edits::payment_summary))
+        .routes(routes!(
+            return_reasons::list_return_reasons,
+            return_reasons::create_return_reason
+        ))
+        .routes(routes!(
+            return_reasons::get_return_reason,
+            return_reasons::update_return_reason,
+            return_reasons::delete_return_reason
+        ))
 }
 
 // -------------------------------------------------------------------------
@@ -490,6 +512,7 @@ fn map_refund_input(request: RefundOrderRequest) -> RefundInput {
 fn map_return_input(request: CreateReturnRequest) -> CreateReturnInput {
     CreateReturnInput {
         reason: request.reason,
+        reason_id: request.reason_id.map(ReturnReasonId::from_string),
         refund_id: request.refund_id.map(RefundId::from_string),
         metadata: request.metadata,
         items: request
@@ -533,6 +556,7 @@ fn map_write_off_input(request: WriteOffReturnRequest) -> WriteOffReturnInput {
 fn map_claim_input(request: CreateClaimRequest) -> CreateClaimInput {
     CreateClaimInput {
         reason: request.reason,
+        reason_id: request.reason_id.map(ReturnReasonId::from_string),
         metadata: request.metadata,
         items: request
             .items
@@ -571,6 +595,7 @@ fn map_exchange_input(request: CreateExchangeRequest) -> CreateExchangeInput {
         .collect();
     CreateExchangeInput {
         reason: request.reason,
+        reason_id: request.reason_id.map(ReturnReasonId::from_string),
         metadata: request.metadata,
         inbound_items,
         outbound_items,

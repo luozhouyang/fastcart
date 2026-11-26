@@ -81,6 +81,7 @@ async fn exchange(
             &order.id,
             CreateExchangeInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 inbound_items: vec![ExchangeItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -364,6 +365,7 @@ async fn claim_replacements_settle_the_difference_too() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),
@@ -407,6 +409,7 @@ async fn refund_claim_lines_never_carry_a_difference() {
             &order.id,
             CreateClaimInput {
                 reason: None,
+                reason_id: None,
                 metadata: Metadata::empty(),
                 items: vec![ClaimItemInput {
                     order_item_id: order.items[0].id.clone(),

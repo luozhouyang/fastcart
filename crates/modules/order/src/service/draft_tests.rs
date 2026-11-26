@@ -227,6 +227,7 @@ async fn after_sales_creation_is_refused_on_a_draft() {
             &draft.id,
             CreateReturnInput {
                 reason: None,
+                reason_id: None,
                 refund_id: None,
                 metadata: Default::default(),
                 items: vec![ReturnItemInput {

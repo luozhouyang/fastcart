@@ -214,6 +214,7 @@ mod claims;
 mod edits;
 mod exchanges;
 mod fulfillments;
+mod return_reasons;
 mod returns;
 
 pub use claims::{ClaimItemInput, CreateClaimInput, OrderClaim, OrderClaimItem};
@@ -224,6 +225,9 @@ pub use exchanges::{
 pub use fulfillments::{
     AfterSalesFulfillment, AfterSalesFulfillmentItem, AfterSalesFulfillmentItemInput,
     CreateAfterSalesFulfillmentInput,
+};
+pub use return_reasons::{
+    CreateReturnReasonInput, ReturnReason, ReturnReasonId, UpdateReturnReasonInput,
 };
 pub use returns::{
     CreateReturnInput, OrderReturn, OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput,

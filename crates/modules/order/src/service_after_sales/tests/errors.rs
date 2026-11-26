@@ -24,6 +24,7 @@ async fn missing_order_or_line_is_not_found() {
             &OrderId::new(),
             CreateReturnInput {
                 reason: None,
+                reason_id: None,
                 refund_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 items: vec![ReturnItemInput {
@@ -42,6 +43,7 @@ async fn missing_order_or_line_is_not_found() {
             &order.id,
             CreateReturnInput {
                 reason: None,
+                reason_id: None,
                 refund_id: None,
                 metadata: fastcart_kernel::Metadata::default(),
                 items: vec![ReturnItemInput {

@@ -13,6 +13,7 @@ use crate::after_sales::{
     OrderEditItemInput, OrderEditStatus, ReceiveReturnInput, ReceiveReturnItemInput,
     ReturnItemInput, ReturnStatus, WriteOffReturnInput,
 };
+
 use crate::service::OrderService;
 /// A single item-scoped tax line, matching what checkout snapshots.
 fn tax_line(amount: i64) -> CreateOrderTaxLineInput {
@@ -56,6 +57,7 @@ async fn order(service: &OrderService, quantity: i64) -> Order {
 fn return_input(order: &Order, quantity: i64) -> CreateReturnInput {
     CreateReturnInput {
         reason: Some("damaged".to_owned()),
+        reason_id: None,
         refund_id: None,
         metadata: fastcart_kernel::Metadata::default(),
         items: vec![ReturnItemInput {
@@ -71,4 +73,5 @@ mod edits;
 mod errors;
 mod exchanges;
 mod refunds;
+mod return_reasons;
 mod returns;
