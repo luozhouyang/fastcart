@@ -231,7 +231,8 @@ pub use return_reasons::{
 };
 pub use returns::{
     CreateReturnInput, OrderReturn, OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput,
-    ReturnItemInput, WriteOffReturnInput, WriteOffReturnItemInput,
+    ReturnItemInput, StoreReturnFilter, StoreReturnRow, WriteOffReturnInput,
+    WriteOffReturnItemInput,
 };
 
 #[cfg(test)]

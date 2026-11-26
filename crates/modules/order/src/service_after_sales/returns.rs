@@ -4,14 +4,14 @@ use std::collections::{HashMap, HashSet};
 
 use fastcart_infrastructure::database_error;
 use fastcart_kernel::{
-    AppError, EventId, LineItemId, OrderId, RefundId, ReturnId, Timestamp, now_timestamp,
-    validate_metadata, validate_quantity,
+    AppError, EventId, LineItemId, OrderId, PageResult, Pagination, RefundId, ReturnId, Timestamp,
+    now_timestamp, validate_metadata, validate_quantity,
 };
 use fastcart_module_inventory::{InventoryService, ReverseWriteOffRequest};
 
 use crate::after_sales::{
     CreateReturnInput, OrderReturn, OrderReturnItem, ReceiveReturnInput, ReturnItemStatus,
-    ReturnStatus, WriteOffReturnInput,
+    ReturnStatus, StoreReturnFilter, StoreReturnRow, WriteOffReturnInput,
 };
 use crate::domain::OrderStatus;
 use crate::service::OrderService;
@@ -35,6 +35,37 @@ struct ReturnRow {
     received_at: Option<i64>,
     written_off_at: Option<i64>,
     canceled_at: Option<i64>,
+}
+
+/// Persistence row for the store-wide return list: a return joined to the
+/// order context the table shows.
+#[derive(sqlx::FromRow)]
+struct StoreReturnRowRecord {
+    id: String,
+    order_id: String,
+    order_display_number: i64,
+    customer_email: String,
+    status: String,
+    reason: Option<String>,
+    item_count: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl StoreReturnRowRecord {
+    fn into_domain(self) -> Result<StoreReturnRow, AppError> {
+        Ok(StoreReturnRow {
+            id: ReturnId::from_string(self.id),
+            order_id: OrderId::from_string(self.order_id),
+            order_display_number: self.order_display_number,
+            customer_email: self.customer_email,
+            status: ReturnStatus::from_stored(&self.status)?,
+            reason: self.reason,
+            item_count: self.item_count,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -270,6 +301,69 @@ impl OrderService {
             returns.push(self.return_from_row(row).await?);
         }
         Ok(returns)
+    }
+
+    /// Lists returns across every order in the store, newest first.
+    ///
+    /// The admin list is one joined query plus a `COUNT(*)`, so page size does
+    /// not change the number of statements. Line counts come from a correlated
+    /// subquery rather than one query per return.
+    pub async fn list_store_returns(
+        &self,
+        pagination: Pagination,
+        filter: StoreReturnFilter,
+    ) -> Result<PageResult<StoreReturnRow>, AppError> {
+        if pagination.limit < 1 || pagination.limit > Pagination::MAX_LIMIT {
+            return Err(AppError::validation(format!(
+                "limit must be between 1 and {}",
+                Pagination::MAX_LIMIT
+            )));
+        }
+        if pagination.offset < 0 {
+            return Err(AppError::validation(
+                "offset must not be negative".to_owned(),
+            ));
+        }
+
+        let where_clause = match filter.status {
+            Some(_) => " WHERE r.status = ?",
+            None => "",
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM order_returns r{where_clause}");
+        let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+        if let Some(status) = filter.status {
+            count_query = count_query.bind(status.as_str());
+        }
+        let count = count_query
+            .fetch_one(self.database().pool())
+            .await
+            .map_err(database_error)?;
+
+        let list_sql = format!(
+            "SELECT r.id, r.order_id, o.display_number AS order_display_number, o.email AS \
+                    customer_email, r.status, r.reason, r.created_at, r.updated_at, \
+                    (SELECT COUNT(*) FROM order_return_items i WHERE i.return_id = r.id) AS item_count
+             FROM order_returns r
+             JOIN orders o ON o.id = r.order_id{where_clause}
+             ORDER BY r.created_at DESC, r.id DESC
+             LIMIT ? OFFSET ?"
+        );
+        let mut list_query = sqlx::query_as::<_, StoreReturnRowRecord>(&list_sql);
+        if let Some(status) = filter.status {
+            list_query = list_query.bind(status.as_str());
+        }
+        let rows = list_query
+            .bind(pagination.limit)
+            .bind(pagination.offset)
+            .fetch_all(self.database().pool())
+            .await
+            .map_err(database_error)?;
+        let data = rows
+            .into_iter()
+            .map(StoreReturnRowRecord::into_domain)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PageResult::new(data, count, pagination))
     }
 
     /// Submits a draft return request.

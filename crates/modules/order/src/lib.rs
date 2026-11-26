@@ -18,7 +18,8 @@ pub use after_sales::{
     OrderEditItemInput, OrderEditItemStatus, OrderEditStatus, OrderExchange, OrderExchangeItem,
     OrderReturn, OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput, ReplacementUnitPrice,
     ReturnItemInput, ReturnItemStatus, ReturnReason, ReturnReasonId, ReturnStatus,
-    UpdateReturnReasonInput, WriteOffReturnInput, WriteOffReturnItemInput,
+    StoreReturnFilter, StoreReturnRow, UpdateReturnReasonInput, WriteOffReturnInput,
+    WriteOffReturnItemInput,
 };
 pub use domain::{
     CreateAdjustmentInput, CreateOrderInput, CreateOrderItemInput, CreateOrderTaxLineInput,

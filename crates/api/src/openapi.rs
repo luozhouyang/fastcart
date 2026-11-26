@@ -130,6 +130,7 @@ use crate::state::AppContext;
     fastcart_module_order::ReturnItemStatus,
     fastcart_module_order::ReturnReason,
     fastcart_module_order::ReturnStatus,
+    fastcart_module_order::StoreReturnRow,
     crate::dto::CancelAfterSaleRequest,
     crate::dto::ClaimItemRequest,
     crate::dto::CreateClaimRequest,
@@ -968,11 +969,11 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 23);
-        assert_eq!(count("/api/v1/admin"), 223);
+        assert_eq!(count("/api/v1/admin"), 224);
         assert_eq!(count("/api/v1/store"), 48);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 299);
+        assert_eq!(paths.len(), 300);
 
         for key in [
             "/api/v1/platform/stores",
@@ -982,6 +983,7 @@ mod tests {
             "/api/v1/admin/catalog/products",
             "/api/v1/admin/catalog/product-types",
             "/api/v1/admin/orders/{id}/refunds",
+            "/api/v1/admin/returns",
             "/api/v1/admin/gift-cards",
             "/api/v1/admin/gift-cards/{id}",
             "/api/v1/admin/gift-cards/{id}/disable",
@@ -1097,7 +1099,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 422);
+        assert_eq!(operation_count, 423);
     }
 
     #[test]
@@ -1182,6 +1184,27 @@ mod tests {
             parameters
                 .iter()
                 .any(|parameter| parameter["name"] == "offset" && parameter["in"] == "query")
+        );
+
+        // The store-wide return list documents pagination plus its status
+        // filter and returns the row schema, not the aggregate.
+        let returns = &document["paths"]["/api/v1/admin/returns"]["get"];
+        let parameters = returns["parameters"].as_array().expect("parameters");
+        for name in ["limit", "offset", "status"] {
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["name"] == name && parameter["in"] == "query"),
+                "store return list is missing the {name} query parameter"
+            );
+        }
+        let schema = serde_json::to_string(
+            &returns["responses"]["200"]["content"]["application/json"]["schema"],
+        )
+        .expect("serialize response schema");
+        assert!(
+            schema.contains("StoreReturnRow"),
+            "store return list does not document StoreReturnRow: {schema}"
         );
     }
 

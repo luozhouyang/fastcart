@@ -31,6 +31,40 @@ pub struct OrderReturn {
     pub items: Vec<OrderReturnItem>,
 }
 
+/// One row of the store-wide return list.
+///
+/// The list is an operational view across every order, so a row carries the
+/// order context the table shows next to the return itself. The returned lines
+/// are summarized by [`StoreReturnRow::item_count`] instead of being loaded.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoreReturnRow {
+    /// Return identifier.
+    pub id: ReturnId,
+    /// Owning order.
+    pub order_id: OrderId,
+    /// Sequential order number shown to operators.
+    pub order_display_number: i64,
+    /// Contact email snapshotted on the order.
+    pub customer_email: String,
+    /// Return lifecycle state.
+    pub status: ReturnStatus,
+    /// Optional reason for the return.
+    pub reason: Option<String>,
+    /// Number of lines in the return.
+    pub item_count: i64,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: Timestamp,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: Timestamp,
+}
+
+/// Filters accepted by [`crate::OrderService::list_store_returns`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StoreReturnFilter {
+    /// Restricts the list to one lifecycle state.
+    pub status: Option<ReturnStatus>,
+}
+
 /// One line of a return request.
 #[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderReturnItem {

@@ -72,6 +72,7 @@ pub fn router() -> Router<Arc<AppContext>> {
             "/orders/{id}/refunds",
             get(refunds::list_refunds).post(refunds::create_refund),
         )
+        .route("/returns", get(returns::list_store_returns))
         .route(
             "/orders/{id}/returns",
             get(returns::list_returns).post(returns::create_return),
@@ -202,6 +203,7 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(fulfillment::fulfill_order))
         .routes(routes!(orders::order_history))
         .routes(routes!(refunds::list_refunds, refunds::create_refund))
+        .routes(routes!(returns::list_store_returns))
         .routes(routes!(returns::list_returns, returns::create_return))
         .routes(routes!(returns::get_return))
         .routes(routes!(returns::request_return))

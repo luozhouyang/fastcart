@@ -10,6 +10,7 @@ import type {
 
 import type { Campaign } from "@/lib/campaigns";
 import type { AdminPayment, AdminPaymentSession } from "@/lib/payments";
+import type { StoreReturnRow } from "@/lib/returns";
 
 /** Fixed demo clock so seeded timestamps stay stable between renders. */
 const DEMO_CLOCK = Math.floor(new Date("2026-11-26T12:00:00Z").getTime() / 1000);
@@ -360,6 +361,78 @@ export function demoPaymentSession(sessionId: string): AdminPaymentSession {
     created_at: daysAgo(0),
     updated_at: daysAgo(0),
   };
+}
+
+/** Sample store-wide returns shown by the demo, newest first. */
+export function demoStoreReturns(): StoreReturnRow[] {
+  return [
+    {
+      id: "return_demo_9001",
+      order_id: "order_demo_1047",
+      order_display_number: 1047,
+      customer_email: "imogen@halcyonsupply.test",
+      status: "requested",
+      reason: "Arrived damaged",
+      item_count: 2,
+      created_at: daysAgo(1),
+      updated_at: daysAgo(0),
+    },
+    {
+      id: "return_demo_9002",
+      order_id: "order_demo_1043",
+      order_display_number: 1043,
+      customer_email: "dara@halcyonsupply.test",
+      status: "partially_received",
+      reason: "Wrong size or fit",
+      item_count: 1,
+      created_at: daysAgo(4),
+      updated_at: daysAgo(2),
+    },
+    {
+      id: "return_demo_9003",
+      order_id: "order_demo_1041",
+      order_display_number: 1041,
+      customer_email: "noa@halcyonsupply.test",
+      status: "received",
+      reason: "Customer changed their mind",
+      item_count: 3,
+      created_at: daysAgo(9),
+      updated_at: daysAgo(5),
+    },
+    {
+      id: "return_demo_9004",
+      order_id: "order_demo_1038",
+      order_display_number: 1038,
+      customer_email: "suri@halcyonsupply.test",
+      status: "written_off",
+      reason: "Arrived damaged",
+      item_count: 1,
+      created_at: daysAgo(16),
+      updated_at: daysAgo(11),
+    },
+    {
+      id: "return_demo_9005",
+      order_id: "order_demo_1034",
+      order_display_number: 1034,
+      customer_email: "mira@halcyonsupply.test",
+      status: "canceled",
+      reason: null,
+      item_count: 1,
+      created_at: daysAgo(24),
+      updated_at: daysAgo(22),
+    },
+    {
+      id: "return_demo_9006",
+      order_id: "order_demo_1029",
+      order_display_number: 1029,
+      customer_email: "oskar@halcyonsupply.test",
+      status: "draft",
+      reason: "Wrong size or fit",
+      item_count: 1,
+      created_at: daysAgo(31),
+      updated_at: daysAgo(31),
+    },
+  ];
 }
 
 /** Sample gift cards shown by the demo. */

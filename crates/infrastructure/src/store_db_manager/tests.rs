@@ -51,6 +51,8 @@ async fn migrations_create_operational_indexes() {
         ("idx_inventory_reservations_order", "inventory_reservations"),
         ("idx_order_items_variant", "order_items"),
         ("idx_cart_items_variant", "cart_items"),
+        ("idx_order_returns_created", "order_returns"),
+        ("idx_order_returns_status_created", "order_returns"),
     ] {
         let indexed_table: Option<String> = sqlx::query_scalar(
             "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?",

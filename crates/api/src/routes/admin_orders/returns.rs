@@ -8,19 +8,62 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult};
+use fastcart_http::{AdminActor, ApiError, ApiJson, ApiQuery, ApiResult, PaginationQuery};
 use fastcart_kernel::{OrderId, ReturnId};
-use fastcart_module_order::{OrderReturn, OrderService};
+use fastcart_module_order::{
+    OrderReturn, OrderService, ReturnStatus, StoreReturnFilter, StoreReturnRow,
+};
 use fastcart_workflows::AfterSalesWorkflow;
+use serde::Deserialize;
 
 use super::StoreDb;
 use crate::dto::{
-    CancelAfterSaleRequest, CreateReturnRequest, ReceiveReturnRequest, WriteOffReturnRequest,
+    CancelAfterSaleRequest, CreateReturnRequest, PageResponse, ReceiveReturnRequest,
+    WriteOffReturnRequest,
 };
 use crate::state::AppContext;
 
 /// Builds the routes for this namespace.
 use super::*;
+
+/// Query accepted by the store-wide return list.
+#[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(super) struct StoreReturnListQuery {
+    /// Restricts the list to one lifecycle state.
+    status: Option<ReturnStatus>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/returns",
+    tag = "Admin",
+    summary = "List returns across every order in the store",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery, StoreReturnListQuery),
+    responses((status = 200, body = PageResponse<StoreReturnRow>))
+)]
+pub(super) async fn list_store_returns(
+    State(_context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    PaginationQuery { limit, offset }: PaginationQuery,
+    ApiQuery(query): ApiQuery<StoreReturnListQuery>,
+) -> ApiResult<Json<PageResponse<StoreReturnRow>>> {
+    actor
+        .require_permission("orders.read")
+        .map_err(ApiError::new)?;
+    let pagination = PaginationQuery { limit, offset }.pagination()?;
+    let page = OrderService::new(db)
+        .list_store_returns(
+            pagination,
+            StoreReturnFilter {
+                status: query.status,
+            },
+        )
+        .await?;
+    Ok(Json(PageResponse::from_page(page)))
+}
 
 #[utoipa::path(
     get,
