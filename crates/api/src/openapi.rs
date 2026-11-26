@@ -968,11 +968,11 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 23);
-        assert_eq!(count("/api/v1/admin"), 216);
+        assert_eq!(count("/api/v1/admin"), 223);
         assert_eq!(count("/api/v1/store"), 48);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 292);
+        assert_eq!(paths.len(), 299);
 
         for key in [
             "/api/v1/platform/stores",
@@ -1097,7 +1097,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 410);
+        assert_eq!(operation_count, 422);
     }
 
     #[test]
