@@ -53,6 +53,7 @@ pub(super) fn product_from_row(row: &SqliteRow) -> Result<Product, AppError> {
         collections: Vec::new(),
         tags: Vec::new(),
         sales_channel_ids: Vec::new(),
+        product_type_id: column(row, "product_type_id")?,
     })
 }
 

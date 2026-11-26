@@ -19,9 +19,10 @@ pub use ids::{
     InquiryId, InquiryRevisionId, InventoryItemId, InventoryLocationId, JobId, LineItemId,
     NavigationId, NotificationChannelId, NotificationDeliveryId, OptionId, OptionValueId,
     OrderEditId, OrderId, PageId, PaymentAttemptId, PaymentId, PaymentSessionId, PriceId,
-    PriceListId, PriceSetId, ProductId, PromotionId, RefundId, ReservationId, ReturnId, SessionId,
-    ShippingOptionId, ShippingProfileId, StoreId, TagId, TaxCategoryId, TaxRateId, TaxRegionId,
-    ThemeActivationId, ThemeId, UserId, VariantId, WebhookDeliveryId, WebhookId,
+    PriceListId, PriceSetId, ProductId, ProductTypeId, PromotionId, RefundId, ReservationId,
+    ReturnId, SessionId, ShippingOptionId, ShippingProfileId, StoreId, TagId, TaxCategoryId,
+    TaxRateId, TaxRegionId, ThemeActivationId, ThemeId, UserId, VariantId, WebhookDeliveryId,
+    WebhookId,
 };
 pub use money::{CurrencyCode, Money, Rounding, allocate_proportionally};
 pub use types::{

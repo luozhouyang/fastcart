@@ -16,18 +16,23 @@ pub const MAX_TAG_VALUE_LENGTH: usize = 100;
 /// Maximum image URL length.
 pub const MAX_URL_LENGTH: usize = 2048;
 
+/// Maximum product type value length.
+pub use product_types::MAX_PRODUCT_TYPE_VALUE_LENGTH;
+
 /// Maximum number of bound parameters used in one `IN (...)` statement.
 /// SQLite's default limit is 999; staying under it leaves headroom for the
 /// other parameters a query may carry.
 const SQLITE_PARAMETER_LIMIT: usize = 900;
 
 const PRODUCT_COLUMNS: &str = "p.id, p.title, p.subtitle, p.description, p.handle, p.status, \
-     p.thumbnail, p.weight, p.length, p.height, p.width, p.metadata, p.created_at, p.updated_at";
+     p.thumbnail, p.weight, p.length, p.height, p.width, p.metadata, p.product_type_id, \
+     p.created_at, p.updated_at";
 
 /// Full CRUD over the catalog aggregate.
 mod categories;
 mod collections;
 mod images;
+mod product_types;
 mod products;
 mod shared;
 mod tags;

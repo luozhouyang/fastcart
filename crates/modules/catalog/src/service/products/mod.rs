@@ -16,6 +16,7 @@ use crate::domain::{
     Tag, UpdateProductInput,
 };
 
+use super::product_types::ensure_product_type_exists_tx;
 use super::shared::*;
 use super::variants::{insert_variants_tx, replace_variants_tx};
 /// Full CRUD over the catalog aggregate.

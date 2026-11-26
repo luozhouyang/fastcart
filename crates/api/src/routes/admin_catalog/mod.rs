@@ -16,13 +16,14 @@ use fastcart_http::extractors::ApiQuery;
 use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
 use fastcart_kernel::{
     ActorContext, AppError, CategoryId, CollectionId, ImageId, Metadata, Pagination, ProductId,
-    TagId, VariantId,
+    ProductTypeId, TagId, VariantId,
 };
 use fastcart_module_catalog::{
     CatalogService, Category, Collection, CreateCategoryInput, CreateCollectionInput,
-    CreateImageInput, CreateOptionInput, CreateProductInput, CreateVariantInput, Dimensions,
-    Product, ProductFilter, ProductImage, ProductStatus, Tag, UpdateCategoryInput,
-    UpdateCollectionInput, UpdateProductInput, UpdateVariantInput, VariantOptionInput,
+    CreateImageInput, CreateOptionInput, CreateProductInput, CreateProductTypeInput,
+    CreateVariantInput, Dimensions, Product, ProductFilter, ProductImage, ProductStatus,
+    ProductType, Tag, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput,
+    UpdateProductTypeInput, UpdateVariantInput, VariantOptionInput,
 };
 use fastcart_module_store::{
     CreateSalesChannelInput, SalesChannel, StoreService, UpdateSalesChannelInput,
@@ -76,6 +77,16 @@ pub fn router() -> Router<Arc<AppContext>> {
             get(get_category)
                 .patch(update_category)
                 .delete(delete_category),
+        )
+        .route(
+            "/catalog/product-types",
+            get(list_product_types).post(create_product_type),
+        )
+        .route(
+            "/catalog/product-types/{id}",
+            get(get_product_type)
+                .patch(update_product_type)
+                .delete(delete_product_type),
         )
         .route(
             "/catalog/collections",
@@ -140,6 +151,12 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(reorder_images))
         .routes(routes!(list_categories, create_category))
         .routes(routes!(get_category, update_category, delete_category))
+        .routes(routes!(list_product_types, create_product_type))
+        .routes(routes!(
+            get_product_type,
+            update_product_type,
+            delete_product_type
+        ))
         .routes(routes!(list_collections, create_collection))
         .routes(routes!(
             get_collection,
@@ -169,6 +186,7 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
 
 mod categories;
 mod collections;
+mod product_types;
 mod products;
 mod sales_channels;
 mod settings;
@@ -176,6 +194,7 @@ mod tags;
 
 use categories::*;
 use collections::*;
+use product_types::*;
 use products::*;
 use sales_channels::*;
 use settings::*;
@@ -185,6 +204,7 @@ pub use categories::{CreateCategoryRequest, UpdateCategoryRequest};
 pub use collections::{
     CollectionProductsRequest, CreateCollectionRequest, UpdateCollectionRequest,
 };
+pub use product_types::{CreateProductTypeRequest, UpdateProductTypeRequest};
 pub use products::{
     CreateImageRequest, CreateOptionRequest, CreateProductRequest, CreateVariantRequest,
     ImageReorderRequest, ProductSalesChannelsRequest, UpdateProductRequest, UpdateVariantRequest,

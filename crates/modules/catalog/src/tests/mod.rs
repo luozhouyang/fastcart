@@ -75,6 +75,7 @@ mod categories;
 mod channels;
 mod collections;
 mod images;
+mod product_types;
 mod products;
 mod search;
 mod tags;

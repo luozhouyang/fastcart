@@ -12,12 +12,13 @@ mod tests;
 
 pub use domain::{
     Category, Collection, CreateCategoryInput, CreateCollectionInput, CreateImageInput,
-    CreateOptionInput, CreateProductInput, CreateVariantInput, Dimensions, Product, ProductFilter,
-    ProductImage, ProductOption, ProductOptionValue, ProductSort, ProductStatus, ProductVariant,
-    PublishedRouteEntry, Tag, UpdateCategoryInput, UpdateCollectionInput, UpdateProductInput,
-    UpdateVariantInput, VariantOptionInput,
+    CreateOptionInput, CreateProductInput, CreateProductTypeInput, CreateVariantInput, Dimensions,
+    Product, ProductFilter, ProductImage, ProductOption, ProductOptionValue, ProductSort,
+    ProductStatus, ProductType, ProductVariant, PublishedRouteEntry, Tag, UpdateCategoryInput,
+    UpdateCollectionInput, UpdateProductInput, UpdateProductTypeInput, UpdateVariantInput,
+    VariantOptionInput,
 };
 pub use service::{
-    CatalogService, MAX_OPTION_VALUE_LENGTH, MAX_SKU_LENGTH, MAX_TAG_VALUE_LENGTH,
-    MAX_TITLE_LENGTH, MAX_URL_LENGTH,
+    CatalogService, MAX_OPTION_VALUE_LENGTH, MAX_PRODUCT_TYPE_VALUE_LENGTH, MAX_SKU_LENGTH,
+    MAX_TAG_VALUE_LENGTH, MAX_TITLE_LENGTH, MAX_URL_LENGTH,
 };

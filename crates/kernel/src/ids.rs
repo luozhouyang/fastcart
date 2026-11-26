@@ -89,6 +89,7 @@ define_id!(ImageId, "img", "Identifier of a product image.");
 define_id!(CategoryId, "cat", "Identifier of a category.");
 define_id!(CollectionId, "coll", "Identifier of a collection.");
 define_id!(TagId, "tag", "Identifier of a tag.");
+define_id!(ProductTypeId, "ptype", "Identifier of a product type.");
 define_id!(PriceId, "price", "Identifier of a price.");
 define_id!(PriceListId, "plist", "Identifier of a price list.");
 define_id!(PriceSetId, "pset", "Identifier of a price set.");

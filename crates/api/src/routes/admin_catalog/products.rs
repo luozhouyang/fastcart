@@ -126,6 +126,8 @@ pub struct CreateProductRequest {
     tag_values: Vec<String>,
     #[serde(default)]
     images: Vec<String>,
+    #[serde(default)]
+    product_type_id: Option<String>,
 }
 
 impl From<CreateProductRequest> for CreateProductInput {
@@ -145,6 +147,7 @@ impl From<CreateProductRequest> for CreateProductInput {
             collection_ids: request.collection_ids,
             tag_values: request.tag_values,
             images: request.images,
+            product_type_id: request.product_type_id,
         }
     }
 }
@@ -168,6 +171,7 @@ pub struct UpdateProductRequest {
     collection_ids: Option<Vec<String>>,
     tag_values: Option<Vec<String>>,
     images: Option<Vec<String>>,
+    product_type_id: Option<String>,
 }
 
 impl From<UpdateProductRequest> for UpdateProductInput {
@@ -192,6 +196,7 @@ impl From<UpdateProductRequest> for UpdateProductInput {
             collection_ids: request.collection_ids,
             tag_values: request.tag_values,
             images: request.images,
+            product_type_id: request.product_type_id,
         }
     }
 }

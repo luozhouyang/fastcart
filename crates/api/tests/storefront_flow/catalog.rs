@@ -178,6 +178,150 @@ async fn storefront_products_respect_publishable_key_channels_and_calculated_pri
 }
 
 #[tokio::test]
+async fn admin_manages_product_types_and_assigns_them_to_products() {
+    let fixture = fixture().await;
+    let (store_id, admin_auth, csrf) =
+        bootstrap_store_with_admin(&fixture, "types.example.com").await;
+    let store_id_header = store_id.to_string();
+    let headers = [
+        ("cookie", admin_auth.as_str()),
+        ("x-csrf-token", csrf.as_str()),
+        ("x-store-id", store_id_header.as_str()),
+    ];
+
+    let (status, product_type) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/catalog/product-types",
+        Some(serde_json::json!({"value": "Shirt"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{product_type}");
+    let product_type_id = product_type["id"].as_str().unwrap().to_owned();
+    assert!(product_type_id.starts_with("ptype_"));
+
+    let (status, duplicate) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/catalog/product-types",
+        Some(serde_json::json!({"value": "shirt"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+
+    let (status, product) = request(
+        &fixture.app,
+        "POST",
+        "/api/v1/admin/catalog/products",
+        Some(serde_json::json!({
+            "title": "Typed Hoodie",
+            "product_type_id": product_type_id.as_str(),
+            "variants": [{"title": "Default", "sku": "TYPED-1"}]
+        })),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{product}");
+    let product_id = product["id"].as_str().unwrap().to_owned();
+    assert_eq!(product["product_type_id"], product_type_id.as_str());
+
+    let (status, products) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/catalog/products",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{products}");
+    assert_eq!(products["pagination"]["total"], 1);
+    assert_eq!(
+        products["data"][0]["product_type_id"],
+        product_type_id.as_str()
+    );
+
+    let (status, product_types) = request(
+        &fixture.app,
+        "GET",
+        "/api/v1/admin/catalog/product-types",
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{product_types}");
+    assert_eq!(product_types["pagination"]["total"], 1);
+    assert_eq!(product_types["data"][0]["value"], "Shirt");
+    assert_eq!(product_types["data"][0]["id"], product_type_id.as_str());
+
+    let (status, updated) = request(
+        &fixture.app,
+        "PATCH",
+        &format!("/api/v1/admin/catalog/product-types/{product_type_id}"),
+        Some(serde_json::json!({"value": "T-Shirt"})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["value"], "T-Shirt");
+    assert_eq!(updated["id"], product_type_id.as_str());
+
+    let (status, product) = request(
+        &fixture.app,
+        "PATCH",
+        &format!("/api/v1/admin/catalog/products/{product_id}"),
+        Some(serde_json::json!({"product_type_id": ""})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{product}");
+    assert!(product["product_type_id"].is_null());
+
+    let (status, product) = request(
+        &fixture.app,
+        "PATCH",
+        &format!("/api/v1/admin/catalog/products/{product_id}"),
+        Some(serde_json::json!({"product_type_id": product_type_id.as_str()})),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{product}");
+    assert_eq!(product["product_type_id"], product_type_id.as_str());
+
+    let (status, body) = request(
+        &fixture.app,
+        "DELETE",
+        &format!("/api/v1/admin/catalog/product-types/{product_type_id}"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, product) = request(
+        &fixture.app,
+        "GET",
+        &format!("/api/v1/admin/catalog/products/{product_id}"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{product}");
+    assert!(product["product_type_id"].is_null());
+
+    let (status, body) = request(
+        &fixture.app,
+        "GET",
+        &format!("/api/v1/admin/catalog/product-types/{product_type_id}"),
+        None,
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
 async fn storefront_context_reports_store_identity_and_currency() {
     let fixture = fixture().await;
     let _store_id = bootstrap_store(&fixture, "context.example.com").await;

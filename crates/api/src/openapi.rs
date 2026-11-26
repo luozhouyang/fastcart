@@ -38,6 +38,7 @@ use crate::state::AppContext;
     fastcart_module_catalog::ProductOption,
     fastcart_module_catalog::ProductOptionValue,
     fastcart_module_catalog::ProductStatus,
+    fastcart_module_catalog::ProductType,
     fastcart_module_catalog::ProductVariant,
     fastcart_module_catalog::Tag,
     fastcart_module_store::PublishableApiKey,
@@ -226,6 +227,7 @@ use crate::state::AppContext;
     crate::routes::admin_catalog::UpdateCategoryRequest,
     crate::routes::admin_catalog::UpdateCollectionRequest,
     crate::routes::admin_catalog::UpdateProductRequest,
+    crate::routes::admin_catalog::UpdateProductTypeRequest,
     crate::routes::admin_catalog::UpdateSalesChannelRequest,
     crate::routes::admin_catalog::UpdateVariantRequest,
     crate::routes::admin_content::CreateNavigationRequest,
@@ -253,6 +255,7 @@ use crate::state::AppContext;
     crate::routes::admin_catalog::CreateImageRequest,
     crate::routes::admin_catalog::CreateOptionRequest,
     crate::routes::admin_catalog::CreateProductRequest,
+    crate::routes::admin_catalog::CreateProductTypeRequest,
     crate::routes::admin_catalog::CreateSalesChannelRequest,
     crate::routes::admin_catalog::CreateVariantRequest,
     crate::routes::admin_catalog::ImageReorderRequest,
@@ -951,16 +954,17 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 202);
+        assert_eq!(count("/api/v1/admin"), 204);
         assert_eq!(count("/api/v1/store"), 48);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 275);
+        assert_eq!(paths.len(), 277);
 
         for key in [
             "/api/v1/platform/stores",
             "/api/v1/platform/stores/{store_id}/domains",
             "/api/v1/admin/catalog/products",
+            "/api/v1/admin/catalog/product-types",
             "/api/v1/admin/orders/{id}/refunds",
             "/api/v1/admin/content/pages/{id}/preview-token",
             "/api/v1/admin/inquiry-forms",
@@ -1067,7 +1071,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 385);
+        assert_eq!(operation_count, 390);
     }
 
     #[test]

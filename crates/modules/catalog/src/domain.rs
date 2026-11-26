@@ -139,6 +139,8 @@ pub struct Product {
     pub tags: Vec<Tag>,
     /// Sales channels the product is published to. Empty when unlinked.
     pub sales_channel_ids: Vec<String>,
+    /// Optional product type.
+    pub product_type_id: Option<String>,
 }
 
 /// A concrete purchasable variant of a product.
@@ -294,6 +296,39 @@ pub struct Tag {
     pub created_at: i64,
 }
 
+/// A store-managed product taxonomy value, such as "shirt" or "digital".
+#[derive(utoipa::ToSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProductType {
+    /// Product type identifier.
+    pub id: String,
+    /// Unique display value.
+    pub value: String,
+    /// Free-form metadata.
+    pub metadata: Metadata,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: i64,
+}
+
+/// Input for creating a product type.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreateProductTypeInput {
+    /// Required unique value.
+    pub value: String,
+    /// Free-form metadata.
+    pub metadata: Metadata,
+}
+
+/// Input for partially updating a product type.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UpdateProductTypeInput {
+    /// New value. `None` leaves it unchanged.
+    pub value: Option<String>,
+    /// Replacement metadata. `None` leaves it unchanged.
+    pub metadata: Option<Metadata>,
+}
+
 /// A selected option value used to build a variant during product creation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VariantOptionInput {
@@ -406,6 +441,8 @@ pub struct CreateProductInput {
     pub tag_values: Vec<String>,
     /// Image URLs to attach, ordered as supplied.
     pub images: Vec<String>,
+    /// Optional product type. Must exist when set.
+    pub product_type_id: Option<String>,
 }
 
 /// Input for partially updating a product.
@@ -443,6 +480,8 @@ pub struct UpdateProductInput {
     pub tag_values: Option<Vec<String>>,
     /// Replaces product images when supplied.
     pub images: Option<Vec<String>>,
+    /// New product type. `Some("")` clears it; `None` leaves it unchanged.
+    pub product_type_id: Option<String>,
 }
 
 /// Input for creating a category.

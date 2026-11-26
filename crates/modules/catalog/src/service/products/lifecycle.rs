@@ -16,8 +16,13 @@ impl CatalogService {
         }
 
         let product_id = ProductId::new().as_str().to_owned();
+        let product_type_id = normalize_optional(input.product_type_id);
         let now = now_timestamp();
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
+
+        if let Some(product_type_id) = product_type_id.as_deref() {
+            ensure_product_type_exists_tx(&mut tx, product_type_id).await?;
+        }
 
         let existing_handles: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE handle = ?")
@@ -34,8 +39,8 @@ impl CatalogService {
         sqlx::query(
             "INSERT INTO products \
              (id, title, subtitle, description, handle, status, thumbnail, weight, length, height, \
-              width, metadata, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              width, metadata, product_type_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&product_id)
         .bind(&title)
@@ -49,6 +54,7 @@ impl CatalogService {
         .bind(dimensions.height)
         .bind(dimensions.width)
         .bind(input.metadata.to_json_string())
+        .bind(&product_type_id)
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
@@ -126,6 +132,11 @@ impl CatalogService {
             }
         }
 
+        let product_type_id = match input.product_type_id {
+            Some(value) => normalize_optional(Some(value)),
+            None => existing.product_type_id.clone(),
+        };
+
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         if handle != existing.handle {
             let count: i64 =
@@ -141,11 +152,16 @@ impl CatalogService {
                 )));
             }
         }
+        if product_type_id != existing.product_type_id
+            && let Some(product_type_id) = product_type_id.as_deref()
+        {
+            ensure_product_type_exists_tx(&mut tx, product_type_id).await?;
+        }
 
         sqlx::query(
             "UPDATE products SET title = ?, subtitle = ?, description = ?, handle = ?, status = ?, \
              thumbnail = ?, weight = ?, length = ?, height = ?, width = ?, metadata = ?, \
-             updated_at = ? WHERE id = ?",
+             product_type_id = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&title)
         .bind(&subtitle)
@@ -158,6 +174,7 @@ impl CatalogService {
         .bind(dimensions.height)
         .bind(dimensions.width)
         .bind(metadata.to_json_string())
+        .bind(&product_type_id)
         .bind(now_timestamp())
         .bind(id)
         .execute(&mut *tx)
