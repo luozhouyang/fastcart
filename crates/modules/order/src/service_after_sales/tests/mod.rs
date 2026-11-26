@@ -69,6 +69,7 @@ fn return_input(order: &Order, quantity: i64) -> CreateReturnInput {
 }
 
 mod claims;
+mod customer_returns;
 mod edits;
 mod errors;
 mod exchanges;

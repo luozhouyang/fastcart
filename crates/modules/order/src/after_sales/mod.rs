@@ -90,6 +90,29 @@ impl ReturnStatus {
             Self::Draft | Self::Requested | Self::PartiallyReceived
         )
     }
+
+    /// Returns true when the return has not reached a terminal state.
+    ///
+    /// Open returns still owe the customer something: they may be submitted,
+    /// received, refunded or written off. A `canceled` or `written_off` return
+    /// is finished and no longer blocks a new request for the same order.
+    #[must_use]
+    pub fn is_open(self) -> bool {
+        matches!(
+            self,
+            Self::Draft | Self::Requested | Self::PartiallyReceived | Self::Received
+        )
+    }
+}
+
+string_enum! {
+    /// Who created a return request.
+    pub enum ReturnSource {
+        /// Created by store staff through the admin API.
+        Admin => "admin",
+        /// Requested by the customer through the storefront.
+        Customer => "customer",
+    }
 }
 
 string_enum! {
@@ -239,7 +262,7 @@ pub use returns::{
 mod tests {
     use super::{
         ClaimItemType, ClaimStatus, ExchangeItemDirection, ExchangeStatus, OrderEditAction,
-        OrderEditStatus, ReturnItemStatus, ReturnStatus,
+        OrderEditStatus, ReturnItemStatus, ReturnSource, ReturnStatus,
     };
 
     #[test]
@@ -341,5 +364,30 @@ mod tests {
         assert!(!ReturnStatus::Received.is_cancelable());
         assert!(!ReturnStatus::WrittenOff.is_cancelable());
         assert!(!ReturnStatus::Canceled.is_cancelable());
+    }
+
+    #[test]
+    fn only_unfinished_returns_are_open() {
+        assert!(ReturnStatus::Draft.is_open());
+        assert!(ReturnStatus::Requested.is_open());
+        assert!(ReturnStatus::PartiallyReceived.is_open());
+        assert!(ReturnStatus::Received.is_open());
+        assert!(!ReturnStatus::WrittenOff.is_open());
+        assert!(!ReturnStatus::Canceled.is_open());
+    }
+
+    #[test]
+    fn return_sources_round_trip_through_storage() {
+        assert_eq!(
+            ReturnSource::from_stored("admin").unwrap(),
+            ReturnSource::Admin
+        );
+        assert_eq!(
+            ReturnSource::from_stored("customer").unwrap(),
+            ReturnSource::Customer
+        );
+        assert!(ReturnSource::from_stored("unknown").is_err());
+        assert_eq!(ReturnSource::Admin.as_str(), "admin");
+        assert_eq!(ReturnSource::Customer.as_str(), "customer");
     }
 }

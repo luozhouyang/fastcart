@@ -9,6 +9,8 @@ pub struct OrderReturn {
     pub order_id: OrderId,
     /// Return lifecycle state.
     pub status: ReturnStatus,
+    /// Who created the return: store staff or the customer.
+    pub source: ReturnSource,
     /// Optional reason for the return.
     pub reason: Option<String>,
     /// Refund created for this return, when linked.

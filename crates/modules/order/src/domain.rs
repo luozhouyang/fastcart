@@ -83,6 +83,18 @@ impl OrderStatus {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Canceled | Self::Completed)
     }
+
+    /// Returns true when a customer may request a return of a placed order.
+    ///
+    /// This is only the lifecycle half of [`Order::is_customer_returnable`];
+    /// the order also has to have shipped at least partially.
+    #[must_use]
+    pub fn is_customer_returnable(self) -> bool {
+        matches!(
+            self,
+            Self::Pending | Self::Confirmed | Self::Processing | Self::Fulfilled | Self::Completed
+        )
+    }
 }
 
 /// State of the money collection for an order.
@@ -305,6 +317,29 @@ impl Order {
     #[must_use]
     pub fn is_draft_order(&self) -> bool {
         self.status.is_draft()
+    }
+
+    /// Returns true when the customer may ask to return this order.
+    ///
+    /// Customer returns follow what the store has actually shipped. The return
+    /// rule is deliberately narrower than the admin one:
+    ///
+    /// * The order must be live (`pending`, `confirmed`, `processing`,
+    ///   `fulfilled` or `completed`). Draft orders were never placed and
+    ///   canceled orders have nothing to send back.
+    /// * At least one unit must have been shipped, so the fulfillment status is
+    ///   `partially_fulfilled` or `fulfilled`. A `not_fulfilled` order has
+    ///   nothing in transit to return, and a `returned` order is already closed.
+    ///
+    /// Finer checks (remaining returnable quantity per line) stay in the return
+    /// service, which owns the after-sales records.
+    #[must_use]
+    pub fn is_customer_returnable(&self) -> bool {
+        self.status.is_customer_returnable()
+            && matches!(
+                self.fulfillment_status,
+                FulfillmentStatus::PartiallyFulfilled | FulfillmentStatus::Fulfilled
+            )
     }
 }
 
@@ -840,5 +875,16 @@ mod tests {
         assert!(!OrderStatus::Fulfilled.is_cancelable());
         assert!(!OrderStatus::Completed.is_cancelable());
         assert!(!OrderStatus::Canceled.is_cancelable());
+    }
+
+    #[test]
+    fn customer_returns_require_a_placed_lifecycle_state() {
+        assert!(!OrderStatus::Draft.is_customer_returnable());
+        assert!(OrderStatus::Pending.is_customer_returnable());
+        assert!(OrderStatus::Confirmed.is_customer_returnable());
+        assert!(OrderStatus::Processing.is_customer_returnable());
+        assert!(OrderStatus::Fulfilled.is_customer_returnable());
+        assert!(OrderStatus::Completed.is_customer_returnable());
+        assert!(!OrderStatus::Canceled.is_customer_returnable());
     }
 }

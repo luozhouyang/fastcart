@@ -17,7 +17,7 @@ pub use after_sales::{
     ExchangeStatus, OrderClaim, OrderClaimItem, OrderEdit, OrderEditAction, OrderEditItem,
     OrderEditItemInput, OrderEditItemStatus, OrderEditStatus, OrderExchange, OrderExchangeItem,
     OrderReturn, OrderReturnItem, ReceiveReturnInput, ReceiveReturnItemInput, ReplacementUnitPrice,
-    ReturnItemInput, ReturnItemStatus, ReturnReason, ReturnReasonId, ReturnStatus,
+    ReturnItemInput, ReturnItemStatus, ReturnReason, ReturnReasonId, ReturnSource, ReturnStatus,
     StoreReturnFilter, StoreReturnRow, UpdateReturnReasonInput, WriteOffReturnInput,
     WriteOffReturnItemInput,
 };

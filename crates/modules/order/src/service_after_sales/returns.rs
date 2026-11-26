@@ -4,16 +4,17 @@ use std::collections::{HashMap, HashSet};
 
 use fastcart_infrastructure::database_error;
 use fastcart_kernel::{
-    AppError, EventId, LineItemId, OrderId, PageResult, Pagination, RefundId, ReturnId, Timestamp,
+    AppError, CustomerId, EventId, LineItemId, OrderId, PageResult, Pagination, RefundId, ReturnId,
+    Timestamp,
     now_timestamp, validate_metadata, validate_quantity,
 };
 use fastcart_module_inventory::{InventoryService, ReverseWriteOffRequest};
 
 use crate::after_sales::{
     CreateReturnInput, OrderReturn, OrderReturnItem, ReceiveReturnInput, ReturnItemStatus,
-    ReturnStatus, StoreReturnFilter, StoreReturnRow, WriteOffReturnInput,
+    ReturnSource, ReturnStatus, StoreReturnFilter, StoreReturnRow, WriteOffReturnInput,
 };
-use crate::domain::OrderStatus;
+use crate::domain::{Order, OrderStatus};
 use crate::service::OrderService;
 
 use super::{
@@ -26,6 +27,7 @@ struct ReturnRow {
     id: String,
     order_id: String,
     status: String,
+    source: String,
     reason: Option<String>,
     refund_id: Option<String>,
     metadata: String,
@@ -108,6 +110,101 @@ impl OrderService {
         order_id: &OrderId,
         input: CreateReturnInput,
     ) -> Result<OrderReturn, AppError> {
+        self.create_return_with_source(order_id, input, ReturnSource::Admin)
+            .await
+    }
+
+    /// Creates a return requested by the signed-in customer.
+    ///
+    /// The order must belong to `customer_id`; a mismatch answers `not found`
+    /// rather than `forbidden` so order identifiers do not leak. Only orders in
+    /// a customer-returnable state are accepted (see
+    /// [`Order::is_customer_returnable`]): the order must still be live and its
+    /// fulfillment must have started, so a draft, canceled, unshipped or
+    /// already-`returned` order is rejected with a conflict that names the
+    /// current status and fulfillment state. Remaining returnable quantity per
+    /// line is enforced separately by the shared quantity check below.
+    ///
+    /// A customer may hold at most one open return per order. A second request
+    /// is rejected while a customer-created return is still open, which keeps
+    /// the customer-facing endpoint from piling up overlapping requests.
+    /// Admin-created returns do not block a new customer request; the quantity
+    /// check still keeps the combined returns within what was purchased. The
+    /// customer return starts in `requested` state because the customer has
+    /// already submitted it; admins can receive, refund, write off or cancel it
+    /// through the existing after-sales flow.
+    pub async fn create_customer_return(
+        &self,
+        customer_id: &CustomerId,
+        order_id: &OrderId,
+        input: CreateReturnInput,
+    ) -> Result<OrderReturn, AppError> {
+        let order = self.load_owned_order(customer_id, order_id).await?;
+        if !order.is_customer_returnable() {
+            return Err(AppError::conflict(format!(
+                "order in state {} with fulfillment {} cannot be returned by the customer",
+                order.status.as_str(),
+                order.fulfillment_status.as_str()
+            )));
+        }
+        self.create_return_with_source(order_id, input, ReturnSource::Customer)
+            .await
+    }
+
+    /// Lists the returns of one customer-owned order, oldest first.
+    ///
+    /// Draft returns are excluded: they are admin work in progress that the
+    /// customer never submitted, so the storefront does not show them.
+    pub async fn list_customer_returns(
+        &self,
+        customer_id: &CustomerId,
+        order_id: &OrderId,
+    ) -> Result<Vec<OrderReturn>, AppError> {
+        self.load_owned_order(customer_id, order_id).await?;
+        let mut returns = self.list_returns(order_id).await?;
+        returns.retain(|order_return| order_return.status != ReturnStatus::Draft);
+        Ok(returns)
+    }
+
+    /// Loads one submitted return of a customer-owned order.
+    ///
+    /// An admin draft is reported as `not found`, matching the list view.
+    pub async fn get_customer_return(
+        &self,
+        customer_id: &CustomerId,
+        order_id: &OrderId,
+        return_id: &ReturnId,
+    ) -> Result<OrderReturn, AppError> {
+        self.load_owned_order(customer_id, order_id).await?;
+        let order_return = self.get_return(order_id, return_id).await?;
+        if order_return.status == ReturnStatus::Draft {
+            return Err(AppError::not_found("order return", return_id));
+        }
+        Ok(order_return)
+    }
+
+    /// Loads an order only when it belongs to the customer and is not a draft.
+    ///
+    /// Both failures answer `not found`, mirroring the customer order routes so
+    /// the storefront never reveals whether an order exists for someone else.
+    async fn load_owned_order(
+        &self,
+        customer_id: &CustomerId,
+        order_id: &OrderId,
+    ) -> Result<Order, AppError> {
+        let order = self.get(order_id).await?;
+        if order.customer_id.as_ref() != Some(customer_id) || order.is_draft_order() {
+            return Err(AppError::not_found("order", order_id));
+        }
+        Ok(order)
+    }
+
+    async fn create_return_with_source(
+        &self,
+        order_id: &OrderId,
+        input: CreateReturnInput,
+        source: ReturnSource,
+    ) -> Result<OrderReturn, AppError> {
         let order = self.get(order_id).await?;
         if order.status == OrderStatus::Canceled {
             return Err(AppError::conflict(
@@ -126,6 +223,29 @@ impl OrderService {
             ));
         }
         let mut tx = self.database().begin().await.map_err(AppError::from)?;
+        // A customer holds at most one open return per order. Only returns the
+        // customer created count: a draft an admin staged is store-side work in
+        // progress that the customer never submitted and cannot see. The check
+        // runs under the write lock so two concurrent customer requests cannot
+        // both observe an empty set.
+        if source == ReturnSource::Customer {
+            let statuses: Vec<String> = sqlx::query_scalar(
+                "SELECT status FROM order_returns WHERE order_id = ? AND source = ?",
+            )
+            .bind(order_id.as_str())
+            .bind(ReturnSource::Customer.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            let has_open = statuses.iter().try_fold(false, |open, status| {
+                Ok::<_, AppError>(open || ReturnStatus::from_stored(status)?.is_open())
+            })?;
+            if has_open {
+                return Err(AppError::conflict(
+                    "this order already has an open return request; wait for it to finish or cancel it first",
+                ));
+            }
+        }
         // A configured reason must exist; its label is snapshotted as free text.
         let reason = match input.reason_id.as_ref() {
             Some(reason_id) => Some(fetch_return_reason_label(&mut tx, reason_id).await?),
@@ -154,20 +274,29 @@ impl OrderService {
 
         let return_id = ReturnId::new();
         let now = now_timestamp();
+        // Admin returns start as drafts the store submits explicitly; a
+        // customer return was submitted by its creator and starts requested.
+        let status = match source {
+            ReturnSource::Admin => ReturnStatus::Draft,
+            ReturnSource::Customer => ReturnStatus::Requested,
+        };
+        let requested_at = (source == ReturnSource::Customer).then_some(now);
         sqlx::query(
             "INSERT INTO order_returns
-                (id, order_id, status, reason, refund_id, metadata, created_at, updated_at,
+                (id, order_id, status, source, reason, refund_id, metadata, created_at, updated_at,
                  requested_at, received_at, written_off_at, canceled_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
         )
         .bind(return_id.as_str())
         .bind(order_id.as_str())
-        .bind(ReturnStatus::Draft.as_str())
+        .bind(status.as_str())
+        .bind(source.as_str())
         .bind(reason.as_deref())
         .bind(input.refund_id.as_ref().map(RefundId::as_str))
         .bind(input.metadata.to_json_string())
         .bind(now)
         .bind(now)
+        .bind(requested_at)
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
@@ -189,7 +318,10 @@ impl OrderService {
             "order.return_created",
             "order_return",
             return_id.as_str(),
-            serde_json::json!({"order_id": order_id.as_str()}),
+            serde_json::json!({
+                "order_id": order_id.as_str(),
+                "source": source.as_str(),
+            }),
         )
         .await?;
         tx.commit().await.map_err(database_error)?;
@@ -286,8 +418,8 @@ impl OrderService {
     pub async fn list_returns(&self, order_id: &OrderId) -> Result<Vec<OrderReturn>, AppError> {
         self.get(order_id).await?;
         let rows = sqlx::query_as::<_, ReturnRow>(
-            "SELECT id, order_id, status, reason, refund_id, metadata, created_at, updated_at,
-                    requested_at, received_at, written_off_at, canceled_at
+            "SELECT id, order_id, status, source, reason, refund_id, metadata, created_at,
+                    updated_at, requested_at, received_at, written_off_at, canceled_at
              FROM order_returns WHERE order_id = ?
              ORDER BY created_at ASC, rowid ASC",
         )
@@ -731,8 +863,8 @@ impl OrderService {
         return_id: &ReturnId,
     ) -> Result<OrderReturn, AppError> {
         let row = sqlx::query_as::<_, ReturnRow>(
-            "SELECT id, order_id, status, reason, refund_id, metadata, created_at, updated_at,
-                    requested_at, received_at, written_off_at, canceled_at
+            "SELECT id, order_id, status, source, reason, refund_id, metadata, created_at,
+                    updated_at, requested_at, received_at, written_off_at, canceled_at
              FROM order_returns WHERE id = ? AND order_id = ?",
         )
         .bind(return_id.as_str())
@@ -762,6 +894,7 @@ impl OrderService {
             id: ReturnId::from_string(row.id),
             order_id: OrderId::from_string(row.order_id),
             status: ReturnStatus::from_stored(&row.status)?,
+            source: ReturnSource::from_stored(&row.source)?,
             reason: row.reason,
             refund_id: row.refund_id.map(RefundId::from_string),
             metadata: fastcart_kernel::Metadata::from_json_str(&row.metadata),

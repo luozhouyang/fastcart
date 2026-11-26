@@ -1,5 +1,11 @@
 use super::*;
 
+use fastcart_kernel::LineItemId;
+use fastcart_module_order::{
+    CreateReturnInput, OrderReturn, ReturnItemInput, ReturnItemStatus, ReturnReasonId,
+    ReturnSource, ReturnStatus,
+};
+
 /// One returned line in a create-return request.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ReturnItemRequest {
@@ -27,6 +33,60 @@ pub struct CreateReturnRequest {
     pub metadata: Metadata,
     /// Returned lines.
     pub items: Vec<ReturnItemRequest>,
+}
+
+/// One returned line in a customer return request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CustomerReturnItemRequest {
+    /// Historical order line being returned.
+    pub order_item_id: String,
+    /// Requested return quantity.
+    pub quantity: i64,
+    /// Optional line-level reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Request body for a customer return request.
+///
+/// It carries only what the customer chooses: a free-text or configured reason
+/// and the lines to return. Refund links, metadata and lifecycle state stay
+/// under store control.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreateCustomerReturnRequest {
+    /// Optional free-text reason for the return, used when `reason_id` is
+    /// absent.
+    pub reason: Option<String>,
+    /// Configured return reason whose label is snapshotted onto the return.
+    #[serde(default)]
+    pub reason_id: Option<String>,
+    /// Returned lines.
+    pub items: Vec<CustomerReturnItemRequest>,
+}
+
+impl CreateCustomerReturnRequest {
+    /// Converts the request into the shared return service input.
+    ///
+    /// The customer cannot attach a refund, choose metadata or set the return
+    /// source; the service stamps those itself.
+    #[must_use]
+    pub fn into_input(self) -> CreateReturnInput {
+        CreateReturnInput {
+            reason: self.reason,
+            reason_id: self.reason_id.map(ReturnReasonId::from_string),
+            refund_id: None,
+            metadata: Metadata::empty(),
+            items: self
+                .items
+                .into_iter()
+                .map(|item| ReturnItemInput {
+                    order_item_id: LineItemId::from_string(item.order_item_id),
+                    quantity: item.quantity,
+                    reason: item.reason,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One received line in a receive-return request.
@@ -241,6 +301,101 @@ pub struct UpdateDraftAddressRequest {
     pub shipping_address: serde_json::Value,
     /// New billing address snapshot, left unchanged when omitted.
     pub billing_address: Option<serde_json::Value>,
+}
+
+/// One line of a customer-visible return.
+///
+/// Mirrors [`fastcart_module_order::OrderReturnItem`] without the internal
+/// `return_id` back-reference; the line identifier and quantities are what the
+/// customer needs to track the request.
+#[derive(Clone, Debug, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct CustomerReturnItemView {
+    /// Line identifier.
+    pub id: String,
+    /// Historical order line being returned.
+    pub order_item_id: String,
+    /// Requested return quantity.
+    pub quantity: i64,
+    /// Quantity received by the store so far.
+    pub received_quantity: i64,
+    /// Quantity written off instead of restocked.
+    pub written_off_quantity: i64,
+    /// Optional line-level reason.
+    pub reason: Option<String>,
+    /// Line state.
+    pub status: ReturnItemStatus,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: i64,
+}
+
+/// A return as shown to the customer who requested it.
+///
+/// This is deliberately narrower than [`fastcart_module_order::OrderReturn`].
+/// The domain record carries admin-only fields — the linked `refund_id` and the
+/// free-form `metadata`, which store staff use for internal notes — and the
+/// storefront must not leak them. The lifecycle status, reason and quantities
+/// are all the customer needs to follow the request.
+#[derive(Clone, Debug, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct CustomerReturnView {
+    /// Return identifier.
+    pub id: String,
+    /// Owning order.
+    pub order_id: String,
+    /// Return lifecycle state.
+    pub status: ReturnStatus,
+    /// Who created the return.
+    pub source: ReturnSource,
+    /// Reason recorded for the return, free text or a configured label.
+    pub reason: Option<String>,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: i64,
+    /// Submission timestamp in Unix seconds.
+    pub requested_at: Option<i64>,
+    /// Timestamp at which every requested item was received.
+    pub received_at: Option<i64>,
+    /// Timestamp at which the return was written off.
+    pub written_off_at: Option<i64>,
+    /// Cancellation timestamp in Unix seconds.
+    pub canceled_at: Option<i64>,
+    /// Returned lines.
+    pub items: Vec<CustomerReturnItemView>,
+}
+
+impl From<OrderReturn> for CustomerReturnView {
+    fn from(order_return: OrderReturn) -> Self {
+        Self {
+            id: order_return.id.as_str().to_owned(),
+            order_id: order_return.order_id.as_str().to_owned(),
+            status: order_return.status,
+            source: order_return.source,
+            reason: order_return.reason,
+            created_at: order_return.created_at,
+            updated_at: order_return.updated_at,
+            requested_at: order_return.requested_at,
+            received_at: order_return.received_at,
+            written_off_at: order_return.written_off_at,
+            canceled_at: order_return.canceled_at,
+            items: order_return
+                .items
+                .into_iter()
+                .map(|item| CustomerReturnItemView {
+                    id: item.id.as_str().to_owned(),
+                    order_item_id: item.order_item_id.as_str().to_owned(),
+                    quantity: item.quantity,
+                    received_quantity: item.received_quantity,
+                    written_off_quantity: item.written_off_quantity,
+                    reason: item.reason,
+                    status: item.status,
+                    created_at: item.created_at,
+                    updated_at: item.updated_at,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A page of the authenticated customer's orders.

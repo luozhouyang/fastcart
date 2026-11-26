@@ -129,9 +129,14 @@ use crate::state::AppContext;
     fastcart_module_order::RefundStatus,
     fastcart_module_order::ReturnItemStatus,
     fastcart_module_order::ReturnReason,
+    fastcart_module_order::ReturnSource,
     fastcart_module_order::ReturnStatus,
     fastcart_module_order::StoreReturnRow,
     crate::dto::CancelAfterSaleRequest,
+    crate::dto::CreateCustomerReturnRequest,
+    crate::dto::CustomerReturnItemRequest,
+    crate::dto::CustomerReturnItemView,
+    crate::dto::CustomerReturnView,
     crate::dto::ClaimItemRequest,
     crate::dto::CreateClaimRequest,
     crate::dto::CreateDraftOrderRequest,
@@ -970,10 +975,10 @@ mod tests {
 
         assert_eq!(count("/api/v1/platform"), 23);
         assert_eq!(count("/api/v1/admin"), 224);
-        assert_eq!(count("/api/v1/store"), 48);
+        assert_eq!(count("/api/v1/store"), 50);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 300);
+        assert_eq!(paths.len(), 302);
 
         for key in [
             "/api/v1/platform/stores",
@@ -1000,6 +1005,8 @@ mod tests {
             "/api/v1/admin/ai/tasks/{id}/approve",
             "/api/v1/admin/themes",
             "/api/v1/store/checkouts/{checkout_id}/complete",
+            "/api/v1/store/customers/me/orders/{order_id}/returns",
+            "/api/v1/store/customers/me/orders/{order_id}/returns/{return_id}",
             "/api/v1/store/inquiries",
             "/api/v1/store/inquiry-forms/{handle}",
             "/api/v1/store/theme",
@@ -1099,7 +1106,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 423);
+        assert_eq!(operation_count, 426);
     }
 
     #[test]

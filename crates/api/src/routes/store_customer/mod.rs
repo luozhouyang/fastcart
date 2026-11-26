@@ -20,7 +20,7 @@ use fastcart_http::{
     PaginationQuery, csrf_cookie, parse_cookies, session_cookie, session_cookie_clear,
 };
 use fastcart_infrastructure::{JobQueue, StoreDatabase};
-use fastcart_kernel::{AppError, Metadata, OrderId, normalize_email, now_timestamp};
+use fastcart_kernel::{AppError, Metadata, OrderId, ReturnId, normalize_email, now_timestamp};
 use fastcart_module_customer::{
     Address, AddressInput, CreatedCustomerSession, CustomerService, RegisterCustomerInput,
     UpdateCustomerInput,
@@ -54,6 +54,14 @@ pub fn router() -> Router<Arc<AppContext>> {
         )
         .route("/customers/me/orders", get(list_orders))
         .route("/customers/me/orders/{order_id}", get(get_own_order))
+        .route(
+            "/customers/me/orders/{order_id}/returns",
+            get(list_own_returns).post(create_own_return),
+        )
+        .route(
+            "/customers/me/orders/{order_id}/returns/{return_id}",
+            get(get_own_return),
+        )
         .route("/customers/me/groups", get(list_groups))
         .route("/customers/me/password", post(change_password))
         .route(
@@ -85,6 +93,8 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(update_address, remove_address))
         .routes(routes!(list_orders))
         .routes(routes!(get_own_order))
+        .routes(routes!(list_own_returns, create_own_return))
+        .routes(routes!(get_own_return))
         .routes(routes!(list_groups))
         .routes(routes!(change_password))
         .routes(routes!(request_email_verification))
@@ -97,12 +107,14 @@ mod addresses;
 mod auth;
 mod groups;
 mod orders;
+mod returns;
 mod verification;
 
 use addresses::*;
 use auth::*;
 use groups::*;
 use orders::*;
+use returns::*;
 use verification::*;
 
 /// Registration request body.
