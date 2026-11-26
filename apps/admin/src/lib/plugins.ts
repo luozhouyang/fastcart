@@ -30,7 +30,12 @@ function csrfToken(): string | null {
   return match ? decodeURIComponent(match[1] ?? "") : null;
 }
 
-async function pluginRequest<T>(storeId: string, path: string, init: RequestInit = {}): Promise<T> {
+/** Sends a store-scoped request to the admin plugin API. */
+export async function pluginRequest<T>(
+  storeId: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("x-store-id", storeId);
   const csrf = csrfToken();
@@ -44,8 +49,11 @@ async function pluginRequest<T>(storeId: string, path: string, init: RequestInit
     const body = await response.json().catch(() => null);
     throw new Error(apiErrorMessage(body, `Plugin request failed (${response.status})`));
   }
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  // Accepted and no-content endpoints acknowledge work without a JSON body.
+  if (response.status === 202 || response.status === 204) return undefined as T;
+  const text = await response.text();
+  if (text.length === 0) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 export async function fetchPluginExtensions(

@@ -271,6 +271,177 @@ export interface CreatePublishableApiKeyRequest {
   sales_channel_ids: string[];
 }
 
+/** A stored plugin artifact available to install or roll back to. */
+export interface PluginArtifactSummary {
+  digest: string;
+  id: string;
+  name: string;
+  version: string;
+}
+
+/** An installed plugin and its store-scoped state. */
+export interface InstalledPlugin {
+  id: string;
+  name: string;
+  version: string;
+  digest: string;
+  previous_digest: string | null;
+  enabled: boolean;
+  settings: Record<string, unknown>;
+  settings_revision: number;
+  granted_scopes: string[];
+  installed_at: number;
+  updated_at: number;
+}
+
+/** Metadata for one write-only plugin secret; values are never returned. */
+export interface PluginSecretName {
+  name: string;
+  updated_at: number;
+}
+
+/** One UI extension declared by a plugin manifest. */
+export interface PluginAdminExtension {
+  target: string;
+  title?: string | null;
+  label?: string | null;
+  icon?: string | null;
+  route?: string | null;
+  entry?: string | null;
+  height?: number | null;
+  priority?: number | null;
+}
+
+/** One storefront embed declared by a plugin manifest. */
+export interface PluginStorefrontExtension {
+  kind: string;
+  placement: string;
+  entry: string;
+  css?: string | null;
+  pages?: string[];
+  exclude_paths?: string[];
+  height_hint?: number | null;
+}
+
+/** Capability groups requested by a plugin manifest. */
+export interface PluginManifestCapabilities {
+  data?: string[];
+  storage?: string[];
+  secrets?: string[];
+  events?: string[];
+  network?: string[];
+  network_auth?: string[];
+  admin?: string[];
+  storefront?: string[];
+}
+
+/** One declared plugin job and its optional cron schedule. */
+export interface PluginJobSpec {
+  name: string;
+  schedule?: string | null;
+}
+
+/**
+ * Validated plugin manifest returned with a plugin detail.
+ *
+ * Declarations the SDK does not model stay reachable through the index
+ * signature so callers can render the raw manifest.
+ */
+export interface PluginManifest {
+  schema_version: string;
+  id: string;
+  name: string;
+  version: string;
+  description?: string | null;
+  author?: { name: string; url?: string | null } | null;
+  api_version: number;
+  runtime: {
+    engine: string;
+    compatibility_date: string;
+    compatibility_flags?: string[];
+  };
+  entry: { type: string; path: string; export?: string | null };
+  capabilities?: PluginManifestCapabilities;
+  extensions?: {
+    admin?: PluginAdminExtension[];
+    storefront?: PluginStorefrontExtension[];
+  };
+  settings?: { schema: unknown; ui?: string | null } | null;
+  rpc?: string[];
+  rpc_permissions?: Record<string, string>;
+  jobs?: PluginJobSpec[];
+  [key: string]: unknown;
+}
+
+/** Installation record plus its validated manifest. */
+export interface PluginDetail {
+  plugin: InstalledPlugin;
+  manifest: PluginManifest;
+}
+
+/** Response for the installed plugin list. */
+export interface PluginListResponse {
+  plugins: InstalledPlugin[];
+  artifacts: PluginArtifactSummary[];
+}
+
+/** Body of a plugin settings replacement. */
+export interface UpdatePluginSettingsRequest {
+  settings: unknown;
+}
+
+/** Optional upgrade parameters. */
+export interface PluginUpgradeQuery {
+  /** Accept capabilities added by the new version. */
+  accept_new_scopes?: boolean;
+}
+
+/** One persisted plugin event delivery. */
+export interface PluginDeliveryView {
+  id: string;
+  plugin_id: string;
+  event_id: string;
+  event_type: string;
+  status: string;
+  attempts: number;
+  available_at: number;
+  last_error: string | null;
+  created_at: number;
+}
+
+/** One persisted plugin job. */
+export interface PluginJobView {
+  id: string;
+  plugin_id: string;
+  name: string;
+  status: string;
+  attempts: number;
+  available_at: number;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One persisted plugin log line. */
+export interface PluginLogView {
+  id: number;
+  plugin_id: string;
+  level: string;
+  message: string;
+  fields_json: string | null;
+  created_at: number;
+}
+
+/** Health of the shared plugin runtime. */
+export interface PluginRuntimeStatus {
+  running: boolean;
+  generation: string | null;
+  port: number | null;
+  restarts: number;
+  uptime_seconds: number;
+  last_error: string | null;
+}
+
 /** Typed administration SDK for the `/api/v1/admin` and platform namespaces. */
 export interface AdminClient {
   /** Store selected by this client. */
@@ -1089,6 +1260,40 @@ export interface AdminClient {
       options?: AdminRequestOptions,
     ): Promise<{ key: string; value: string }>;
     delete(key: string, options?: AdminRequestOptions): Promise<void>;
+  };
+
+  plugins: {
+    /** Reads one installation together with its validated manifest. */
+    get(id: string, options?: AdminRequestOptions): Promise<PluginDetail>;
+    /**
+     * Uploads a new archive for an installed plugin.
+     *
+     * A version that adds capabilities is rejected unless
+     * `accept_new_scopes` is set.
+     */
+    upgrade(
+      id: string,
+      archive: File | Blob,
+      query?: PluginUpgradeQuery,
+      options?: AdminRequestOptions,
+    ): Promise<InstalledPlugin>;
+    /** Rolls back to the previously active artifact. */
+    rollback(id: string, options?: AdminRequestOptions): Promise<InstalledPlugin>;
+    jobs: {
+      list(id: string, options?: AdminRequestOptions): Promise<PluginJobView[]>;
+      /** Enqueues a declared job for immediate execution. */
+      run(id: string, name: string, options?: AdminRequestOptions): Promise<void>;
+    };
+    logs: {
+      list(id: string, options?: AdminRequestOptions): Promise<PluginLogView[]>;
+      clear(id: string, options?: AdminRequestOptions): Promise<void>;
+    };
+    deliveries: {
+      list(id: string, options?: AdminRequestOptions): Promise<PluginDeliveryView[]>;
+      replay(id: string, deliveryId: string, options?: AdminRequestOptions): Promise<void>;
+    };
+    /** Reads health of the shared plugin runtime. */
+    runtime(options?: AdminRequestOptions): Promise<PluginRuntimeStatus>;
   };
 }
 
@@ -2765,6 +2970,62 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
           ...requestOptions,
           method: "DELETE",
         }),
+    },
+
+    plugins: {
+      get: (pluginId, requestOptions) =>
+        request<PluginDetail>(`/api/v1/admin/plugins/${id(pluginId)}`, requestOptions),
+      upgrade: (pluginId, archive, query, requestOptions) => {
+        const form = new FormData();
+        const filename =
+          typeof File !== "undefined" && archive instanceof File && archive.name.length > 0
+            ? archive.name
+            : "plugin.tar.gz";
+        form.append("archive", archive, filename);
+        return request<InstalledPlugin>(`/api/v1/admin/plugins/${id(pluginId)}/upgrade`, {
+          ...requestOptions,
+          method: "POST",
+          query,
+          body: form,
+        });
+      },
+      rollback: (pluginId, requestOptions) =>
+        request<InstalledPlugin>(`/api/v1/admin/plugins/${id(pluginId)}/rollback`, {
+          ...requestOptions,
+          method: "POST",
+        }),
+      jobs: {
+        list: (pluginId, requestOptions) =>
+          request<PluginJobView[]>(`/api/v1/admin/plugins/${id(pluginId)}/jobs`, requestOptions),
+        run: (pluginId, name, requestOptions) =>
+          request<void>(`/api/v1/admin/plugins/${id(pluginId)}/jobs/${id(name)}/run`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+      },
+      logs: {
+        list: (pluginId, requestOptions) =>
+          request<PluginLogView[]>(`/api/v1/admin/plugins/${id(pluginId)}/logs`, requestOptions),
+        clear: (pluginId, requestOptions) =>
+          request<void>(`/api/v1/admin/plugins/${id(pluginId)}/logs`, {
+            ...requestOptions,
+            method: "DELETE",
+          }),
+      },
+      deliveries: {
+        list: (pluginId, requestOptions) =>
+          request<PluginDeliveryView[]>(
+            `/api/v1/admin/plugins/${id(pluginId)}/deliveries`,
+            requestOptions,
+          ),
+        replay: (pluginId, deliveryId, requestOptions) =>
+          request<void>(
+            `/api/v1/admin/plugins/${id(pluginId)}/deliveries/${id(deliveryId)}/replay`,
+            { ...requestOptions, method: "POST" },
+          ),
+      },
+      runtime: (requestOptions) =>
+        request<PluginRuntimeStatus>("/api/v1/admin/plugins/runtime", requestOptions),
     },
   };
 }
