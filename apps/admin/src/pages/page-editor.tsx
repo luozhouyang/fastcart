@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   Eye,
   History,
+  Languages,
   Layers3,
   Loader2,
   RotateCcw,
@@ -27,6 +28,7 @@ import type {
 import { PageHeader } from "@/components/page-header";
 import { ErrorState, PageSkeleton } from "@/components/states";
 import { PageStatusPill } from "@/components/status-pill";
+import { TranslationEditor } from "@/components/translation-editor";
 import { ComponentPalette } from "@/components/theme-editor/component-palette";
 import { BlockTree } from "@/components/theme-editor/block-tree";
 import { BlockFields } from "@/components/theme-editor/field-editor";
@@ -101,6 +103,34 @@ function pageBodyToJson(body: PageBody): JsonValue {
   return JSON.parse(JSON.stringify(body)) as JsonValue;
 }
 
+/**
+ * Translatable page fields.
+ *
+ * SEO keys are stored flat (`seo_title`, `seo_description`) so the storefront
+ * can merge them field by field against the page's `seo` object.
+ */
+const PAGE_TRANSLATION_FIELDS = [
+  { key: "title", label: "Title" },
+  { key: "seo_title", label: "SEO title" },
+  { key: "seo_description", label: "SEO description", multiline: true },
+] as const;
+
+/** Reads a string key from a page's free-form SEO object. */
+function seoText(seo: JsonValue, key: string): string {
+  if (typeof seo !== "object" || seo === null || Array.isArray(seo)) return "";
+  const value = (seo as Record<string, JsonValue>)[key];
+  return typeof value === "string" ? value : "";
+}
+
+/** Source content shown as the fallback in the translation editor. */
+function pageTranslationSource(page: Page): Record<string, unknown> {
+  return {
+    title: page.title,
+    seo_title: seoText(page.seo, "title"),
+    seo_description: seoText(page.seo, "description"),
+  };
+}
+
 function isConflict(cause: unknown): boolean {
   return cause instanceof ApiError && cause.status === 409;
 }
@@ -142,6 +172,7 @@ export function PageEditorPage() {
     null,
   );
   const [versionsOpen, setVersionsOpen] = useState(false);
+  const [translationsOpen, setTranslationsOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewOrigin, setPreviewOrigin] = useState<string | null>(null);
   const [previewToken, setPreviewToken] = useState<PreviewTokenResponse | null>(null);
@@ -515,6 +546,10 @@ export function PageEditorPage() {
               <History className="size-4" aria-hidden="true" />
               Versions
             </Button>
+            <Button variant="outline" onClick={() => setTranslationsOpen(true)}>
+              <Languages className="size-4" aria-hidden="true" />
+              Translations
+            </Button>
             <Button variant="outline" onClick={() => void openPreview()} disabled={busy !== null}>
               {busy === "preview" ? (
                 <Loader2 className="size-4 animate-spin" aria-hidden="true" />
@@ -800,6 +835,26 @@ export function PageEditorPage() {
           ) : null}
         </Card>
       )}
+
+      <Sheet open={translationsOpen} onOpenChange={setTranslationsOpen}>
+        <SheetContent side="right" className="sm:max-w-lg">
+          <SheetHeader>
+            <SheetTitle>Page translations</SheetTitle>
+            <SheetDescription>
+              Translate the page title and SEO metadata. Untranslated fields fall back to the source
+              content.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="flex-1 overflow-y-auto p-6">
+            <TranslationEditor
+              resourceType="page"
+              resourceId={page.id}
+              fields={PAGE_TRANSLATION_FIELDS}
+              source={pageTranslationSource(page)}
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
 
       <Sheet open={versionsOpen} onOpenChange={setVersionsOpen}>
         <SheetContent side="right" className="sm:max-w-md">

@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Languages,
   Loader2,
   Pencil,
   Plus,
@@ -18,6 +19,7 @@ import { toast } from "sonner";
 
 import { ProductStatusPill, StockPill } from "@/components/status-pill";
 import { ErrorState } from "@/components/states";
+import { TranslationEditor } from "@/components/translation-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -115,7 +117,7 @@ function DemoProductSheet({
         <div className="flex-1 space-y-5 overflow-y-auto p-6">
           <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-[12px] leading-relaxed text-muted-foreground">
             Variants, publish controls and prices are available when the admin is connected to the
-            Fastcart API. This demo catalog is read-only.
+            Fastcart API. Translations below are kept for this demo session.
           </p>
           <dl className="grid grid-cols-2 gap-4 text-[12px]">
             <div>
@@ -137,6 +139,8 @@ function DemoProductSheet({
               <dd className="mt-0.5 text-foreground">{shortDate(product.updatedAt)}</dd>
             </div>
           </dl>
+
+          <TranslationsSection resourceId={product.id} source={{ title: product.title }} />
         </div>
       </SheetContent>
     </Sheet>
@@ -269,6 +273,13 @@ function LiveProductSheet({
                 </div>
               ) : null}
               <VariantsPanel detail={data} defaultCurrency={currency} onChanged={refresh} />
+              <TranslationsSection
+                resourceId={data.product.id}
+                source={{
+                  title: data.product.title,
+                  description: data.product.description ?? "",
+                }}
+              />
               <PluginSlot
                 target="admin.page.products.details.side"
                 context={{ productId: product.id }}
@@ -278,6 +289,47 @@ function LiveProductSheet({
         </div>
       </SheetContent>
     </Sheet>
+  );
+}
+
+/** Fields the product translations surface covers. */
+const PRODUCT_TRANSLATION_FIELDS = [
+  { key: "title", label: "Title" },
+  { key: "description", label: "Description", multiline: true },
+] as const;
+
+/** Translates a product's title and description, in place on the drawer. */
+function TranslationsSection({
+  resourceId,
+  source,
+}: {
+  resourceId: string;
+  source: Record<string, unknown>;
+}) {
+  return (
+    <section
+      className="space-y-4 border-t border-border pt-6"
+      aria-labelledby="product-translations-heading"
+    >
+      <div>
+        <h3
+          id="product-translations-heading"
+          className="flex items-center gap-2 text-[13.5px] font-semibold text-foreground"
+        >
+          <Languages className="size-3.5 text-faint" aria-hidden="true" />
+          Translations
+        </h3>
+        <p className="mt-1 text-[11.5px] text-muted-foreground">
+          Translate the title and description customers see on the storefront.
+        </p>
+      </div>
+      <TranslationEditor
+        resourceType="product"
+        resourceId={resourceId}
+        fields={[...PRODUCT_TRANSLATION_FIELDS]}
+        source={source}
+      />
+    </section>
   );
 }
 
