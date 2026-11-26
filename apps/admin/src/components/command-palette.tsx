@@ -86,10 +86,11 @@ const PAGES: Array<{
   },
   { to: "/payments", label: "Payments", icon: CreditCard, permission: PERMISSIONS.payments.read },
   { to: "/gift-cards", label: "Gift cards", icon: Gift, permission: PERMISSIONS.payments.read },
+  { to: "/returns", label: "Returns", icon: Undo2, permission: PERMISSIONS.orders.read },
   {
     to: "/return-reasons",
     label: "Return reasons",
-    icon: Undo2,
+    icon: SlidersHorizontal,
     permission: PERMISSIONS.orders.read,
   },
   { to: "/webhooks", label: "Webhooks", icon: Webhook, permission: PERMISSIONS.settings.read },

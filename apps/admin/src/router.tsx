@@ -107,6 +107,9 @@ const GiftCardsPage = lazyRouteComponent(() =>
 const ReturnReasonsPage = lazyRouteComponent(() =>
   import("@/pages/return-reasons").then((module) => ({ default: module.ReturnReasonsPage })),
 );
+const ReturnsPage = lazyRouteComponent(() =>
+  import("@/pages/returns").then((module) => ({ default: module.ReturnsPage })),
+);
 
 function PageLoading() {
   return (
@@ -370,6 +373,12 @@ const returnReasonsRoute = createRoute({
   component: guarded(ReturnReasonsPage, PERMISSIONS.orders.read),
 });
 
+const returnsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/returns",
+  component: guarded(ReturnsPage, PERMISSIONS.orders.read),
+});
+
 const routeTree = rootRoute.addChildren([
   overviewRoute,
   ordersRoute,
@@ -399,6 +408,7 @@ const routeTree = rootRoute.addChildren([
   webhooksRoute,
   paymentsRoute,
   giftCardsRoute,
+  returnsRoute,
   returnReasonsRoute,
   regionsRoute,
   shippingRoute,

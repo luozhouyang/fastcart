@@ -31,6 +31,7 @@ import {
   Search,
   Settings as SettingsIcon,
   Settings2,
+  SlidersHorizontal,
   SunMoon,
   Tags,
   TicketPercent,
@@ -79,6 +80,7 @@ interface NavItem {
     | "/webhooks"
     | "/payments"
     | "/gift-cards"
+    | "/returns"
     | "/return-reasons"
     | "/forms"
     | "/inbox"
@@ -161,9 +163,15 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         permission: PERMISSIONS.payments.read,
       },
       {
+        to: "/returns",
+        label: "Returns",
+        icon: Undo2,
+        permission: PERMISSIONS.orders.read,
+      },
+      {
         to: "/return-reasons",
         label: "Return reasons",
-        icon: Undo2,
+        icon: SlidersHorizontal,
         permission: PERMISSIONS.orders.read,
       },
       { to: "/forms", label: "Forms", icon: FileText, permission: PERMISSIONS.settings.read },
