@@ -11,7 +11,9 @@ import {
   ChevronsRight,
   ChevronsUpDown,
   FileText,
+  FolderTree,
   Globe2,
+  Images,
   Inbox,
   Layers3,
   LayoutGrid,
@@ -62,6 +64,9 @@ interface NavItem {
     | "/products"
     | "/inventory"
     | "/customers"
+    | "/customer-groups"
+    | "/taxonomy"
+    | "/media"
     | "/promotions"
     | "/forms"
     | "/inbox"
@@ -100,6 +105,19 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         permission: PERMISSIONS.inventory.read,
       },
       { to: "/customers", label: "Customers", icon: Users, permission: PERMISSIONS.customers.read },
+      {
+        to: "/customer-groups",
+        label: "Customer groups",
+        icon: Users,
+        permission: PERMISSIONS.customers.read,
+      },
+      {
+        to: "/taxonomy",
+        label: "Categories",
+        icon: FolderTree,
+        permission: PERMISSIONS.products.read,
+      },
+      { to: "/media", label: "Media", icon: Images, permission: PERMISSIONS.products.read },
       {
         to: "/promotions",
         label: "Promotions",

@@ -77,6 +77,18 @@ const CapabilitiesPage = lazyRouteComponent(() =>
 const PluginPage = lazyRouteComponent(() =>
   import("@/pages/plugin-page").then((module) => ({ default: module.PluginPage })),
 );
+const PluginDetailPage = lazyRouteComponent(() =>
+  import("@/pages/plugin-detail").then((module) => ({ default: module.PluginDetailPage })),
+);
+const CustomerGroupsPage = lazyRouteComponent(() =>
+  import("@/pages/customer-groups").then((module) => ({ default: module.CustomerGroupsPage })),
+);
+const TaxonomyPage = lazyRouteComponent(() =>
+  import("@/pages/taxonomy").then((module) => ({ default: module.TaxonomyPage })),
+);
+const MediaPage = lazyRouteComponent(() =>
+  import("@/pages/media").then((module) => ({ default: module.MediaPage })),
+);
 
 function PageLoading() {
   return (
@@ -280,6 +292,30 @@ const taxRoute = createRoute({
   component: guarded(TaxPage, PERMISSIONS.settings.read),
 });
 
+const pluginDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/plugins/$pluginId",
+  component: guarded(PluginDetailPage, PERMISSIONS.plugins.read),
+});
+
+const customerGroupsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/customer-groups",
+  component: guarded(CustomerGroupsPage, PERMISSIONS.customers.read),
+});
+
+const taxonomyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/taxonomy",
+  component: guarded(TaxonomyPage, PERMISSIONS.products.read),
+});
+
+const mediaRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/media",
+  component: guarded(MediaPage, PERMISSIONS.products.read),
+});
+
 const routeTree = rootRoute.addChildren([
   overviewRoute,
   ordersRoute,
@@ -298,8 +334,12 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   pluginsRoute,
   capabilitiesRoute,
+  pluginDetailRoute,
   pluginPageRoute,
   pluginPageNestedRoute,
+  customerGroupsRoute,
+  taxonomyRoute,
+  mediaRoute,
   regionsRoute,
   shippingRoute,
   taxRoute,

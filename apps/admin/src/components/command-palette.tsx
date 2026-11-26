@@ -2,7 +2,9 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   Blocks,
   ExternalLink,
+  FolderTree,
   Globe2,
+  Images,
   Layers3,
   LayoutGrid,
   LayoutTemplate,
@@ -45,6 +47,19 @@ const PAGES: Array<{
   { to: "/products", label: "Products", icon: Package, permission: PERMISSIONS.products.read },
   { to: "/inventory", label: "Inventory", icon: Layers3, permission: PERMISSIONS.inventory.read },
   { to: "/customers", label: "Customers", icon: Users, permission: PERMISSIONS.customers.read },
+  {
+    to: "/customer-groups",
+    label: "Customer groups",
+    icon: Users,
+    permission: PERMISSIONS.customers.read,
+  },
+  {
+    to: "/taxonomy",
+    label: "Categories & collections",
+    icon: FolderTree,
+    permission: PERMISSIONS.products.read,
+  },
+  { to: "/media", label: "Media", icon: Images, permission: PERMISSIONS.products.read },
   {
     to: "/promotions",
     label: "Promotions",
