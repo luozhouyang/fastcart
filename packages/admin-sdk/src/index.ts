@@ -5,6 +5,9 @@ import {
   type RequestOptions,
 } from "@fastcart/api-client";
 import type {
+  AddStoreLocaleRequest,
+  AiTask,
+  AiTool,
   Asset,
   AssetListQuery,
   AvailabilityResponse,
@@ -30,6 +33,8 @@ import type {
   CreateInventoryItemRequest,
   CreateInventoryLocationRequest,
   CreateOrderEditRequest,
+  CreateAiTaskRequest,
+  CreateGiftCardRequest,
   CreatePageRequest,
   CreatePriceListRequest,
   CreatePriceRequest,
@@ -37,6 +42,7 @@ import type {
   CreateProductTypeRequest,
   CreatePromotionRequest,
   CreateReservationsRequest,
+  CreateReturnReasonRequest,
   CreateReturnRequest,
   CreateShippingOptionRequest,
   CreateShippingProfileRequest,
@@ -104,6 +110,7 @@ import type {
   PriceList,
   PriceListQuery,
   PrimaryDomainRequest,
+  GiftCard,
   Product,
   ProductImage,
   ProductListQuery,
@@ -115,6 +122,7 @@ import type {
   PublishThemeSettingsRequest,
   PreviewTokenResponse,
   ReceiveReturnRequest,
+  ReturnReason,
   Refund,
   Region,
   RegisterThemeRequest,
@@ -135,6 +143,7 @@ import type {
   ShippingProfile,
   ShippingRate,
   Store,
+  StoreLocale,
   StoreSettings,
   Tag,
   TagRequest,
@@ -161,6 +170,8 @@ import type {
   UpdatePriceRequest,
   UpdateProductRequest,
   UpdateProductTypeRequest,
+  UpdateReturnReasonRequest,
+  UpdateStoreLocaleRequest,
   UpdatePromotionRequest,
   UpdateShippingOptionRequest,
   UpdateShippingProfileRequest,
@@ -172,7 +183,10 @@ import type {
   UpdateThemeSettingsRequest,
   UpdateVariantRequest,
   UpdateWebhookRequest,
+  Translation,
+  TranslationQuery,
   UploadAssetFields,
+  UpsertTranslationRequest,
   Variant,
   WebhookDeliveriesQuery,
   WebhookDelivery,
@@ -1159,6 +1173,70 @@ export interface AdminClient {
       ): Promise<PageResult<PaymentWebhookRecord>>;
       get(id: string, options?: AdminRequestOptions): Promise<PaymentWebhookRecord>;
     };
+    giftCards: {
+      list(query?: PaginationQuery, options?: AdminRequestOptions): Promise<PageResult<GiftCard>>;
+      get(id: string, options?: AdminRequestOptions): Promise<GiftCard>;
+      create(body: CreateGiftCardRequest, options?: AdminRequestOptions): Promise<GiftCard>;
+      disable(id: string, options?: AdminRequestOptions): Promise<GiftCard>;
+      enable(id: string, options?: AdminRequestOptions): Promise<GiftCard>;
+    };
+  };
+
+  returnReasons: {
+    list(options?: AdminRequestOptions): Promise<ReturnReason[]>;
+    get(id: string, options?: AdminRequestOptions): Promise<ReturnReason>;
+    create(body: CreateReturnReasonRequest, options?: AdminRequestOptions): Promise<ReturnReason>;
+    update(
+      id: string,
+      body: UpdateReturnReasonRequest,
+      options?: AdminRequestOptions,
+    ): Promise<ReturnReason>;
+    delete(id: string, options?: AdminRequestOptions): Promise<void>;
+  };
+
+  ai: {
+    tools(options?: AdminRequestOptions): Promise<AiTool[]>;
+    tasks: {
+      list(query?: PaginationQuery, options?: AdminRequestOptions): Promise<PageResult<AiTask>>;
+      get(id: string, options?: AdminRequestOptions): Promise<AiTask>;
+      create(body: CreateAiTaskRequest, options?: AdminRequestOptions): Promise<AiTask>;
+      approve(id: string, options?: AdminRequestOptions): Promise<AiTask>;
+      reject(id: string, options?: AdminRequestOptions): Promise<AiTask>;
+    };
+  };
+
+  translations: {
+    list(query: TranslationQuery, options?: AdminRequestOptions): Promise<Translation[]>;
+    upsert(
+      query: TranslationQuery & { locale: string },
+      body: UpsertTranslationRequest,
+      options?: AdminRequestOptions,
+    ): Promise<Translation>;
+    delete(
+      query: TranslationQuery & { locale: string },
+      options?: AdminRequestOptions,
+    ): Promise<void>;
+  };
+
+  locales: {
+    list(storeId: string, options?: AdminRequestOptions): Promise<StoreLocale[]>;
+    add(
+      storeId: string,
+      body: AddStoreLocaleRequest,
+      options?: AdminRequestOptions,
+    ): Promise<StoreLocale>;
+    update(
+      storeId: string,
+      locale: string,
+      body: UpdateStoreLocaleRequest,
+      options?: AdminRequestOptions,
+    ): Promise<StoreLocale>;
+    remove(storeId: string, locale: string, options?: AdminRequestOptions): Promise<void>;
+    setDefault(
+      storeId: string,
+      locale: string,
+      options?: AdminRequestOptions,
+    ): Promise<StoreLocale>;
   };
 
   webhooks: {
@@ -2787,6 +2865,135 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
             requestOptions,
           ),
       },
+      giftCards: {
+        list: (query, requestOptions) =>
+          request<PageResult<GiftCard>>("/api/v1/admin/gift-cards", {
+            ...requestOptions,
+            query,
+          }),
+        get: (giftCardId, requestOptions) =>
+          request<GiftCard>(`/api/v1/admin/gift-cards/${id(giftCardId)}`, requestOptions),
+        create: (body, requestOptions) =>
+          request<GiftCard>("/api/v1/admin/gift-cards", {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        disable: (giftCardId, requestOptions) =>
+          request<GiftCard>(`/api/v1/admin/gift-cards/${id(giftCardId)}/disable`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+        enable: (giftCardId, requestOptions) =>
+          request<GiftCard>(`/api/v1/admin/gift-cards/${id(giftCardId)}/enable`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+      },
+    },
+
+    returnReasons: {
+      list: (requestOptions) =>
+        request<ReturnReason[]>("/api/v1/admin/return-reasons", requestOptions),
+      get: (returnReasonId, requestOptions) =>
+        request<ReturnReason>(`/api/v1/admin/return-reasons/${id(returnReasonId)}`, requestOptions),
+      create: (body, requestOptions) =>
+        request<ReturnReason>("/api/v1/admin/return-reasons", {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      update: (returnReasonId, body, requestOptions) =>
+        request<ReturnReason>(`/api/v1/admin/return-reasons/${id(returnReasonId)}`, {
+          ...requestOptions,
+          method: "PATCH",
+          body,
+        }),
+      delete: (returnReasonId, requestOptions) =>
+        request<void>(`/api/v1/admin/return-reasons/${id(returnReasonId)}`, {
+          ...requestOptions,
+          method: "DELETE",
+        }),
+    },
+
+    ai: {
+      tools: (requestOptions) => request<AiTool[]>("/api/v1/admin/ai/tools", requestOptions),
+      tasks: {
+        list: (query, requestOptions) =>
+          request<PageResult<AiTask>>("/api/v1/admin/ai/tasks", {
+            ...requestOptions,
+            query,
+          }),
+        get: (taskId, requestOptions) =>
+          request<AiTask>(`/api/v1/admin/ai/tasks/${id(taskId)}`, requestOptions),
+        create: (body, requestOptions) =>
+          request<AiTask>("/api/v1/admin/ai/tasks", {
+            ...requestOptions,
+            method: "POST",
+            body,
+          }),
+        approve: (taskId, requestOptions) =>
+          request<AiTask>(`/api/v1/admin/ai/tasks/${id(taskId)}/approve`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+        reject: (taskId, requestOptions) =>
+          request<AiTask>(`/api/v1/admin/ai/tasks/${id(taskId)}/reject`, {
+            ...requestOptions,
+            method: "POST",
+          }),
+      },
+    },
+
+    translations: {
+      list: (query, requestOptions) =>
+        request<Translation[]>("/api/v1/admin/content/translations", {
+          ...requestOptions,
+          query,
+        }),
+      upsert: (query, body, requestOptions) =>
+        request<Translation>("/api/v1/admin/content/translations", {
+          ...requestOptions,
+          method: "PUT",
+          query,
+          body,
+        }),
+      delete: (query, requestOptions) =>
+        request<void>("/api/v1/admin/content/translations", {
+          ...requestOptions,
+          method: "DELETE",
+          query,
+        }),
+    },
+
+    locales: {
+      list: (storeId, requestOptions) =>
+        request<StoreLocale[]>(`/api/v1/platform/stores/${id(storeId)}/locales`, requestOptions),
+      add: (storeId, body, requestOptions) =>
+        request<StoreLocale>(`/api/v1/platform/stores/${id(storeId)}/locales`, {
+          ...requestOptions,
+          method: "POST",
+          body,
+        }),
+      update: (storeId, locale, body, requestOptions) =>
+        request<StoreLocale>(`/api/v1/platform/stores/${id(storeId)}/locales/${id(locale)}`, {
+          ...requestOptions,
+          method: "PATCH",
+          body,
+        }),
+      remove: (storeId, locale, requestOptions) =>
+        request<void>(`/api/v1/platform/stores/${id(storeId)}/locales/${id(locale)}`, {
+          ...requestOptions,
+          method: "DELETE",
+        }),
+      setDefault: (storeId, locale, requestOptions) =>
+        request<StoreLocale>(
+          `/api/v1/platform/stores/${id(storeId)}/locales/${id(locale)}/default`,
+          {
+            ...requestOptions,
+            method: "POST",
+          },
+        ),
     },
 
     webhooks: {

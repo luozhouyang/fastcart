@@ -37,24 +37,58 @@
       "schema": "SettingsRequest",
       "type": "SettingsUpdateRequest",
       "reason": "The batch settings body documents SettingsRequest; the SDK names the same body SettingsUpdateRequest."
+    },
+    {
+      "schema": "BulkPricesRequest",
+      "type": "BulkPriceRequest",
+      "reason": "The bulk price endpoint documents BulkPricesRequest; the SDK names the same body BulkPriceRequest."
+    },
+    {
+      "schema": "FailSessionRequest",
+      "type": "FailPaymentSessionRequest",
+      "reason": "The fail-session endpoint documents FailSessionRequest; the SDK names the same body FailPaymentSessionRequest."
     }
   ],
   "ignoredAdminPaths": [
     {
-      "pathPrefix": "/api/v1/admin/catalog/product-types",
-      "reason": "Product types are owned by parallel work and may be absent from the committed snapshot; the SDK will add methods once the routes land."
+      "pathPrefix": "/api/v1/admin/campaigns",
+      "reason": "The admin app manages campaigns with its own request helper (apps/admin/src/lib/campaigns.ts); the package SDK predates those routes and will gain methods with the SDK extraction."
     },
     {
-      "pathPrefix": "/api/v1/admin/return-reasons",
-      "reason": "Return reasons are owned by parallel work and may be absent from the committed snapshot; the SDK will add methods once the routes land."
+      "pathPrefix": "/api/v1/admin/content/navigations",
+      "reason": "Navigations are served to the admin app's content clients directly; SDK methods are a planned extraction."
     },
     {
-      "pathPrefix": "/api/v1/admin/gift-cards",
-      "reason": "Gift cards are owned by parallel work and may be absent from the committed snapshot; the SDK will add methods once the routes land."
+      "pathPrefix": "/api/v1/admin/content/navigation-items",
+      "reason": "Navigation items are served to the admin app's content clients directly; SDK methods are a planned extraction."
     },
     {
-      "pathPrefix": "/api/v1/admin/content/translations",
-      "reason": "Content translations are owned by parallel work and may be absent from the committed snapshot; the SDK will add methods once the routes land."
+      "pathPrefix": "/api/v1/admin/content/redirects",
+      "reason": "Redirects are served to the admin app's content clients directly; SDK methods are a planned extraction."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/customer-groups",
+      "reason": "Customer groups are served to the admin app's own client (apps/admin/src/lib/customer-groups.ts); SDK methods are a planned extraction."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/prices",
+      "reason": "Bulk price reads and calculations are served through the admin app's pricing client; SDK methods are a planned extraction."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/shipping/fulfillment-sets",
+      "reason": "Fulfillment sets are served to the admin app's shipping client; SDK methods are a planned extraction."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/products/{}/sales-channels",
+      "reason": "Sales-channel assignment is a storefront-availability concern served by the admin app's catalog client."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/catalog/reindex",
+      "reason": "The reindex trigger is an operational maintenance endpoint with no SDK caller."
+    },
+    {
+      "pathPrefix": "/api/v1/admin/plugins",
+      "reason": "The plugins pages call the API through apps/admin/src/lib/plugins.ts with multipart and observability reads; the stable, typed subset lives on client.plugins."
     }
   ]
 }

@@ -1141,9 +1141,37 @@ export interface ReturnItemRequest {
 
 export interface CreateReturnRequest {
   reason?: string | null;
+  /** Configured return reason whose label is snapshotted onto the return. */
+  reason_id?: string | null;
   refund_id?: string | null;
   metadata?: Metadata;
   items: ReturnItemRequest[];
+}
+
+/** A store-configured after-sales reason. */
+export interface ReturnReason {
+  id: string;
+  value: string;
+  label: string;
+  description: string | null;
+  metadata: Metadata;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface CreateReturnReasonRequest {
+  value: string;
+  label: string;
+  description?: string | null;
+  metadata?: Metadata;
+}
+
+export interface UpdateReturnReasonRequest {
+  value?: string;
+  label?: string;
+  /** `null` clears the description. */
+  description?: string | null;
+  metadata?: Metadata;
 }
 
 export interface ReceiveReturnItemRequest {
@@ -1220,6 +1248,8 @@ export interface ClaimItemRequest {
 
 export interface CreateClaimRequest {
   reason?: string | null;
+  /** Configured return reason whose label is snapshotted onto the claim. */
+  reason_id?: string | null;
   metadata?: Metadata;
   items: ClaimItemRequest[];
 }
@@ -1273,6 +1303,8 @@ export interface ExchangeItemRequest {
 
 export interface CreateExchangeRequest {
   reason?: string | null;
+  /** Configured return reason whose label is snapshotted onto the exchange. */
+  reason_id?: string | null;
   metadata?: Metadata;
   inbound_items: ExchangeItemRequest[];
   outbound_items: ExchangeItemRequest[];
@@ -2149,6 +2181,34 @@ export interface PaymentSession {
   data: Metadata;
   created_at: Timestamp;
   updated_at: Timestamp;
+}
+
+/** Lifecycle state of a prepaid gift card. */
+export type GiftCardStatus = "active" | "disabled";
+
+/**
+ * A prepaid gift card.
+ *
+ * `code` is a bearer credential: anyone holding it can spend the balance, so
+ * only admin surfaces may read it.
+ */
+export interface GiftCard {
+  id: string;
+  code: string;
+  currency_code: CurrencyCode;
+  initial_amount_minor: number;
+  balance_minor: number;
+  status: GiftCardStatus;
+  metadata: Metadata;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface CreateGiftCardRequest {
+  currency_code: string;
+  amount_minor: number;
+  code?: string | null;
+  metadata?: Metadata;
 }
 
 export interface PaymentAttempt {
@@ -3133,4 +3193,84 @@ export interface CreateInquiryResponse {
   status?: InquiryStatus;
   event_id?: string;
   idempotency_key?: string | null;
+}
+
+/** One recorded agent task awaiting approval or execution. */
+export interface AiTask {
+  id: string;
+  tool: string;
+  input: Record<string, unknown>;
+  status: string;
+  error: string | null;
+  created_by: string | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+/** One tool definition the agent layer can invoke. */
+export interface AiTool {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  mutates: boolean;
+  requires_approval: boolean;
+}
+
+export interface CreateAiTaskRequest {
+  tool: string;
+  input?: Record<string, unknown>;
+}
+
+/** Resource types a translation may target. */
+export type TranslationResourceType = "product" | "category" | "collection" | "page" | "navigation";
+
+/**
+ * One translated content resource.
+ *
+ * Absent `fields` fall back to the source content of the requested locale's
+ * fallback chain.
+ */
+export interface Translation {
+  id: string;
+  resource_type: string;
+  resource_id: string;
+  locale: string;
+  fields: Record<string, unknown>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface TranslationQuery {
+  resource_type: TranslationResourceType;
+  resource_id: string;
+  /** Required for writes; omitted on GET lists every locale of the resource. */
+  locale?: string;
+}
+
+export interface UpsertTranslationRequest {
+  fields: Record<string, unknown>;
+}
+
+/** One locale enabled for a store. */
+export interface StoreLocale {
+  store_id: string;
+  locale: string;
+  is_default: boolean;
+  label: string | null;
+  direction: "ltr" | "rtl";
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface AddStoreLocaleRequest {
+  locale: string;
+  is_default?: boolean;
+  label?: string | null;
+  direction?: "ltr" | "rtl";
+}
+
+export interface UpdateStoreLocaleRequest {
+  /** An empty string clears the label. */
+  label?: string | null;
+  direction?: "ltr" | "rtl";
 }
