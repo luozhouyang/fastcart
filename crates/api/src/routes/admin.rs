@@ -35,6 +35,7 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
     let scoped = scoped_layers(
         context,
         Router::new()
+            .merge(super::admin_ai::router())
             .merge(super::admin_assets::router())
             .merge(super::admin_campaigns::router())
             .merge(super::admin_capabilities::router())

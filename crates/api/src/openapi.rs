@@ -43,6 +43,9 @@ use crate::state::AppContext;
     fastcart_module_catalog::Tag,
     fastcart_module_store::PublishableApiKey,
     fastcart_module_store::Region,
+    crate::routes::admin_ai::AiTaskDto,
+    crate::routes::admin_ai::AiToolDto,
+    crate::routes::admin_ai::CreateAiTaskRequest,
     crate::routes::admin_campaigns::CampaignDto,
     crate::routes::admin_campaigns::CreateCampaignRequest,
     crate::routes::admin_campaigns::LinkPromotionRequest,
@@ -557,6 +560,7 @@ fn generated_api() -> utoipa::openapi::OpenApi {
     let admin = OpenApiRouter::new()
         .merge(crate::routes::admin::openapi_router())
         .merge(crate::routes::auth::openapi_router())
+        .merge(crate::routes::admin_ai::openapi_router())
         .merge(crate::routes::admin_assets::openapi_router())
         .merge(crate::routes::admin_campaigns::openapi_router())
         .merge(crate::routes::admin_catalog::openapi_router())
@@ -959,11 +963,11 @@ mod tests {
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
         assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 210);
+        assert_eq!(count("/api/v1/admin"), 215);
         assert_eq!(count("/api/v1/store"), 48);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 283);
+        assert_eq!(paths.len(), 288);
 
         for key in [
             "/api/v1/platform/stores",
@@ -981,6 +985,9 @@ mod tests {
             "/api/v1/admin/inquiry-forms",
             "/api/v1/admin/inquiries",
             "/api/v1/admin/notification-channels",
+            "/api/v1/admin/ai/tools",
+            "/api/v1/admin/ai/tasks",
+            "/api/v1/admin/ai/tasks/{id}/approve",
             "/api/v1/admin/themes",
             "/api/v1/store/checkouts/{checkout_id}/complete",
             "/api/v1/store/inquiries",
@@ -1082,7 +1089,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 400);
+        assert_eq!(operation_count, 407);
     }
 
     #[test]

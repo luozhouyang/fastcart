@@ -1,0 +1,434 @@
+//! Admin AI tool catalog and agent-task lifecycle.
+//!
+//! This slice is metadata and state only: the tool catalog describes
+//! operations that map to existing application services, and tasks record
+//! which invocation an administrator requested. No model is called and no tool
+//! is executed. Tasks persist in the store database so approvals survive a
+//! restart, and every transition is written to the admin audit log.
+
+use std::sync::Arc;
+
+use axum::Json;
+use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use fastcart_ai::{AgentTaskStatus, ToolDefinition};
+use fastcart_http::{AdminActor, ApiError, ApiJson, ApiResult, PaginationQuery};
+use fastcart_infrastructure::{StoreDatabase, database_error};
+use fastcart_kernel::{ActorContext, AppError, PageResult, now_timestamp};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+
+use super::{StoreDb, record_store_audit};
+use crate::dto::PageResponse;
+use crate::state::AppContext;
+
+/// Builds the admin AI routes.
+pub fn router() -> Router<Arc<AppContext>> {
+    Router::new()
+        .route("/ai/tools", get(list_tools))
+        .route("/ai/tasks", get(list_tasks).post(create_task))
+        .route("/ai/tasks/{id}", get(get_task))
+        .route("/ai/tasks/{id}/approve", post(approve_task))
+        .route("/ai/tasks/{id}/reject", post(reject_task))
+}
+
+/// Builds the documented admin AI routes.
+pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
+    OpenApiRouter::new()
+        .routes(routes!(list_tools))
+        .routes(routes!(list_tasks, create_task))
+        .routes(routes!(get_task))
+        .routes(routes!(approve_task))
+        .routes(routes!(reject_task))
+}
+
+fn require(actor: &ActorContext, permission: &str) -> ApiResult<()> {
+    actor.require_user().map_err(ApiError::new)?;
+    actor.require_permission(permission).map_err(ApiError::new)
+}
+
+/// One tool definition exposed to administrators.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AiToolDto {
+    /// Stable tool name.
+    pub name: String,
+    /// Description presented to the model.
+    pub description: String,
+    /// JSON Schema for tool input.
+    #[schema(value_type = Object)]
+    pub input_schema: Value,
+    /// Whether the tool mutates state.
+    pub mutates: bool,
+    /// Whether a human must approve an invocation.
+    pub requires_approval: bool,
+}
+
+impl From<ToolDefinition> for AiToolDto {
+    fn from(tool: ToolDefinition) -> Self {
+        Self {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+            mutates: tool.mutates,
+            requires_approval: tool.requires_approval,
+        }
+    }
+}
+
+/// A recorded agent task.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AiTaskDto {
+    /// Task identifier.
+    pub id: String,
+    /// Stable tool name the task invokes.
+    pub tool: String,
+    /// Recorded invocation input.
+    #[schema(value_type = Object)]
+    pub input: Value,
+    /// Lifecycle status.
+    pub status: String,
+    /// Error message when the task failed.
+    pub error: Option<String>,
+    /// Administrator that requested the task.
+    pub created_by: Option<String>,
+    /// Creation timestamp.
+    pub created_at: i64,
+    /// Last update timestamp.
+    pub updated_at: i64,
+}
+
+/// Task creation payload.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateAiTaskRequest {
+    /// Stable tool name.
+    pub tool: String,
+    /// Invocation input; must be a JSON object.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub input: Value,
+}
+
+/// Row shape persisted in `ai_tasks`.
+#[derive(Debug, sqlx::FromRow)]
+struct AiTaskRow {
+    id: String,
+    tool: String,
+    input_json: String,
+    status: String,
+    error: Option<String>,
+    created_by: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+const TASK_COLUMNS: &str =
+    "id, tool, input_json, status, error, created_by, created_at, updated_at";
+
+fn task_dto(row: AiTaskRow) -> ApiResult<AiTaskDto> {
+    let status = AgentTaskStatus::parse(&row.status).ok_or_else(|| {
+        ApiError::new(AppError::internal(format!(
+            "unknown stored agent task status: {}",
+            row.status
+        )))
+    })?;
+    let input = serde_json::from_str(&row.input_json).map_err(|error| {
+        ApiError::new(AppError::internal(format!(
+            "invalid stored agent task input: {error}"
+        )))
+    })?;
+    Ok(AiTaskDto {
+        id: row.id,
+        tool: row.tool,
+        input,
+        status: status.as_str().to_owned(),
+        error: row.error,
+        created_by: row.created_by,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn db_error(error: sqlx::Error) -> ApiError {
+    ApiError::new(database_error(error))
+}
+
+#[utoipa::path(
+    get,
+    path = "/ai/tools",
+    tag = "Admin",
+    summary = "List AI tool definitions",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<AiToolDto>))
+)]
+async fn list_tools(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+) -> ApiResult<Json<Vec<AiToolDto>>> {
+    require(&actor, "settings.read")?;
+    Ok(Json(
+        context
+            .ai
+            .tools()
+            .into_iter()
+            .map(AiToolDto::from)
+            .collect(),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/ai/tasks",
+    tag = "Admin",
+    summary = "List AI agent tasks",
+    security(("adminSession" = []), ("apiToken" = [])),
+    params(PaginationQuery),
+    responses((status = 200, body = PageResponse<AiTaskDto>))
+)]
+async fn list_tasks(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    PaginationQuery { limit, offset }: PaginationQuery,
+) -> ApiResult<Json<PageResponse<AiTaskDto>>> {
+    require(&actor, "settings.read")?;
+    let pagination = PaginationQuery { limit, offset }.pagination()?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_tasks")
+        .fetch_one(db.pool())
+        .await
+        .map_err(db_error)?;
+    let rows: Vec<AiTaskRow> = sqlx::query_as(&format!(
+        "SELECT {TASK_COLUMNS} FROM ai_tasks ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    ))
+    .bind(pagination.limit)
+    .bind(pagination.offset)
+    .fetch_all(db.pool())
+    .await
+    .map_err(db_error)?;
+    let data = rows
+        .into_iter()
+        .map(task_dto)
+        .collect::<ApiResult<Vec<_>>>()?;
+    Ok(Json(PageResponse::from_page(PageResult::new(
+        data, total, pagination,
+    ))))
+}
+
+#[utoipa::path(
+    get,
+    path = "/ai/tasks/{id}",
+    tag = "Admin",
+    summary = "Get an AI agent task",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = AiTaskDto))
+)]
+async fn get_task(
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AiTaskDto>> {
+    require(&actor, "settings.read")?;
+    let row: Option<AiTaskRow> =
+        sqlx::query_as(&format!("SELECT {TASK_COLUMNS} FROM ai_tasks WHERE id = ?"))
+            .bind(&id)
+            .fetch_optional(db.pool())
+            .await
+            .map_err(db_error)?;
+    let Some(row) = row else {
+        return Err(ApiError::not_found(format!("ai task not found: {id}")));
+    };
+    Ok(Json(task_dto(row)?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/ai/tasks",
+    tag = "Admin",
+    summary = "Create an AI agent task",
+    security(("adminSession" = []), ("apiToken" = [])),
+    request_body = CreateAiTaskRequest,
+    responses((status = 201, body = AiTaskDto))
+)]
+async fn create_task(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    ApiJson(request): ApiJson<CreateAiTaskRequest>,
+) -> ApiResult<(StatusCode, Json<AiTaskDto>)> {
+    require(&actor, "settings.write")?;
+    let tool = context.ai.tool(&request.tool).ok_or_else(|| {
+        ApiError::new(AppError::validation(format!(
+            "unknown AI tool: {}",
+            request.tool
+        )))
+    })?;
+    let input = if request.input.is_null() {
+        Value::Object(Default::default())
+    } else {
+        request.input
+    };
+    if !input.is_object() {
+        return Err(ApiError::new(AppError::validation(
+            "AI task input must be a JSON object",
+        )));
+    }
+
+    let user_id = actor.require_user().map_err(ApiError::new)?;
+    let id = format!("task_{}", uuid::Uuid::now_v7().simple());
+    let status = AgentTaskStatus::Pending;
+    let now = now_timestamp();
+    sqlx::query(
+        "INSERT INTO ai_tasks (id, tool, input_json, status, error, created_by, created_at, \
+         updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&tool.name)
+    .bind(input.to_string())
+    .bind(status.as_str())
+    .bind(user_id.as_str())
+    .bind(now)
+    .bind(now)
+    .execute(db.pool())
+    .await
+    .map_err(db_error)?;
+
+    record_store_audit(
+        &context,
+        &actor,
+        "ai.task.created",
+        "ai_task",
+        &id,
+        serde_json::json!({"tool": tool.name, "requires_approval": tool.requires_approval}),
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(AiTaskDto {
+            id,
+            tool: tool.name,
+            input,
+            status: status.as_str().to_owned(),
+            error: None,
+            created_by: Some(user_id.to_string()),
+            created_at: now,
+            updated_at: now,
+        }),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/ai/tasks/{id}/approve",
+    tag = "Admin",
+    summary = "Approve an AI agent task",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = AiTaskDto))
+)]
+async fn approve_task(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AiTaskDto>> {
+    require(&actor, "settings.write")?;
+    let task = transition(&db, &id, AgentTaskStatus::Running).await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "ai.task.approved",
+        "ai_task",
+        &id,
+        serde_json::json!({"tool": task.tool, "status": task.status}),
+    )
+    .await;
+    Ok(Json(task))
+}
+
+#[utoipa::path(
+    post,
+    path = "/ai/tasks/{id}/reject",
+    tag = "Admin",
+    summary = "Reject an AI agent task",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = AiTaskDto))
+)]
+async fn reject_task(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    StoreDb(db): StoreDb,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AiTaskDto>> {
+    require(&actor, "settings.write")?;
+    let task = transition(&db, &id, AgentTaskStatus::Cancelled).await?;
+    record_store_audit(
+        &context,
+        &actor,
+        "ai.task.rejected",
+        "ai_task",
+        &id,
+        serde_json::json!({"tool": task.tool, "status": task.status}),
+    )
+    .await;
+    Ok(Json(task))
+}
+
+/// Applies one legal status transition inside an immediate transaction.
+///
+/// The write lock is taken before the row is read, so two concurrent
+/// approvals cannot both observe the same status. Illegal transitions are
+/// reported as conflicts, which the API renders as `409`.
+async fn transition(db: &StoreDatabase, id: &str, next: AgentTaskStatus) -> ApiResult<AiTaskDto> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| ApiError::new(error.into()))?;
+    let row: Option<AiTaskRow> =
+        sqlx::query_as(&format!("SELECT {TASK_COLUMNS} FROM ai_tasks WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_error)?;
+    let Some(row) = row else {
+        return Err(ApiError::not_found(format!("ai task not found: {id}")));
+    };
+    let current = AgentTaskStatus::parse(&row.status).ok_or_else(|| {
+        ApiError::new(AppError::internal(format!(
+            "unknown stored agent task status: {}",
+            row.status
+        )))
+    })?;
+    if !current.can_transition_to(next) {
+        return Err(ApiError::new(AppError::conflict_details(
+            "illegal AI agent task transition",
+            serde_json::json!({"from": current.as_str(), "to": next.as_str()}),
+        )));
+    }
+
+    let now = now_timestamp();
+    sqlx::query("UPDATE ai_tasks SET status = ?, updated_at = ? WHERE id = ?")
+        .bind(next.as_str())
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+
+    Ok(AiTaskDto {
+        id: row.id,
+        tool: row.tool,
+        input: serde_json::from_str(&row.input_json).map_err(|error| {
+            ApiError::new(AppError::internal(format!(
+                "invalid stored agent task input: {error}"
+            )))
+        })?,
+        status: next.as_str().to_owned(),
+        error: row.error,
+        created_by: row.created_by,
+        created_at: row.created_at,
+        updated_at: now,
+    })
+}

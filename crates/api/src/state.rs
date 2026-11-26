@@ -185,6 +185,10 @@ pub struct AppContext {
     pub customer_email_limiter: RateLimiter,
     /// Serializes first-user bootstrap so concurrent setup calls cannot both win.
     pub bootstrap_lock: Arc<Mutex<()>>,
+    /// AI tool catalog exposed to agent tasks.
+    ///
+    /// Metadata only: this slice never calls a model or executes a tool.
+    pub ai: fastcart_ai::AiRegistry,
     /// Registered payment providers shared by all stores.
     pub payment_providers: ProviderRegistry,
     /// Per-store provider registries, built lazily from env overrides.
@@ -433,6 +437,7 @@ impl AppContext {
             login_limiter: RateLimiter::new(10, Duration::from_secs(5 * 60)),
             customer_email_limiter: RateLimiter::new(5, Duration::from_secs(15 * 60)),
             bootstrap_lock: Arc::new(Mutex::new(())),
+            ai: fastcart_ai::builtin_registry(),
             payment_providers,
             payment_providers_cache: Arc::new(StdMutex::new(HashMap::new())),
             shipping_providers:

@@ -101,6 +101,33 @@ pub enum AgentTaskStatus {
 }
 
 impl AgentTaskStatus {
+    /// Stable snake_case name used by storage and HTTP payloads.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parses a stable snake_case name.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "running" => Some(Self::Running),
+            "awaiting_approval" => Some(Self::AwaitingApproval),
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
     /// Whether the status is terminal.
     #[must_use]
     pub fn is_terminal(&self) -> bool {
@@ -179,6 +206,123 @@ pub struct AgentAuditEntry {
     pub created_at: i64,
 }
 
+/// Stable names of the built-in tools.
+///
+/// The names are an API contract: changing one breaks recorded tasks, so a new
+/// tool must be added under a new name instead.
+pub mod tool_names {
+    /// Read one content page by identifier.
+    pub const PAGE_GET: &str = "page.get";
+    /// Update the editable fields of one content page.
+    pub const PAGE_UPDATE: &str = "page.update";
+    /// Publish one content page.
+    pub const PAGE_PUBLISH: &str = "page.publish";
+    /// List the theme editor block types a page body may use.
+    pub const BLOCK_LIST_TYPES: &str = "block.list_types";
+    /// Read one order by identifier.
+    pub const ORDER_GET: &str = "order.get";
+}
+
+/// Builds the registry of built-in tools.
+///
+/// Every tool maps to an existing application service operation. The registry
+/// is metadata only: it does not execute anything and is safe to expose to
+/// administrators. Mutating tools declare [`ToolDefinition::mutates`] and
+/// [`ToolDefinition::requires_approval`] so a future executor can gate them.
+#[must_use]
+pub fn builtin_registry() -> AiRegistry {
+    let registry = AiRegistry::new();
+    let tools = [
+        ToolDefinition {
+            name: tool_names::PAGE_GET.to_owned(),
+            description: "Read one content page, including its draft body, by page id.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Page identifier."}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            mutates: false,
+            requires_approval: false,
+        },
+        ToolDefinition {
+            name: tool_names::PAGE_UPDATE.to_owned(),
+            description: "Update the title, handle, type, body or SEO fields of one content \
+                page. Omitted fields keep their current value."
+                .to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Page identifier."},
+                    "title": {"type": "string"},
+                    "handle": {"type": "string"},
+                    "page_type": {"type": "string"},
+                    "body": {"type": "object"},
+                    "seo": {"type": "object"},
+                    "base_revision": {"type": "integer"}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            mutates: true,
+            requires_approval: true,
+        },
+        ToolDefinition {
+            name: tool_names::PAGE_PUBLISH.to_owned(),
+            description: "Publish one content page. Publishing makes the current draft \
+                revision the storefront revision."
+                .to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Page identifier."}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            mutates: true,
+            requires_approval: true,
+        },
+        ToolDefinition {
+            name: tool_names::BLOCK_LIST_TYPES.to_owned(),
+            description: "List the theme editor block types available to page bodies, \
+                including plugin-contributed components."
+                .to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            mutates: false,
+            requires_approval: false,
+        },
+        ToolDefinition {
+            name: tool_names::ORDER_GET.to_owned(),
+            description: "Read one order aggregate, including items, totals and status \
+                history, by order id."
+                .to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Order identifier."}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            mutates: false,
+            requires_approval: false,
+        },
+    ];
+    for tool in tools {
+        registry
+            .register_tool(tool)
+            .expect("built-in tool definitions are valid");
+    }
+    registry
+}
+
 /// Registry of providers, models and tools.
 #[derive(Debug, Default)]
 pub struct AiRegistry {
@@ -229,13 +373,19 @@ impl AiRegistry {
     }
 
     /// Registers a tool definition.
+    ///
+    /// Names are lowercase namespaces separated by single dots, for example
+    /// `page.update`. Each segment may contain lowercase ASCII letters, digits
+    /// and underscores.
     pub fn register_tool(&self, tool: ToolDefinition) -> Result<(), AiError> {
-        if tool.name.trim().is_empty()
-            || !tool
-                .name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-        {
+        let valid_name = !tool.name.is_empty()
+            && tool.name.split('.').all(|segment| {
+                !segment.is_empty()
+                    && segment.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            });
+        if !valid_name {
             return Err(AiError::Invalid(format!(
                 "invalid tool name: {}",
                 tool.name
@@ -570,7 +720,7 @@ mod tests {
 
     use super::{
         AgentTaskService, AgentTaskStatus, AiError, AiRegistry, ModelDefinition,
-        ProviderDefinition, ToolDefinition,
+        ProviderDefinition, ToolDefinition, builtin_registry, tool_names,
     };
 
     fn registry() -> AiRegistry {
@@ -673,6 +823,80 @@ mod tests {
         let resumed = service.approve(&task.id, &approver).unwrap();
         assert_eq!(resumed.status, AgentTaskStatus::Running);
         assert_eq!(resumed.approved_by, Some(approver));
+    }
+
+    #[test]
+    fn builtin_registry_exposes_stable_tool_contracts() {
+        let registry = builtin_registry();
+        let names: Vec<String> = registry.tools().into_iter().map(|tool| tool.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                tool_names::BLOCK_LIST_TYPES.to_owned(),
+                tool_names::ORDER_GET.to_owned(),
+                tool_names::PAGE_GET.to_owned(),
+                tool_names::PAGE_PUBLISH.to_owned(),
+                tool_names::PAGE_UPDATE.to_owned(),
+            ]
+        );
+
+        let update = registry.tool(tool_names::PAGE_UPDATE).unwrap();
+        assert!(update.mutates);
+        assert!(update.requires_approval);
+        assert!(update.input_schema.is_object());
+
+        let get = registry.tool(tool_names::PAGE_GET).unwrap();
+        assert!(!get.mutates);
+        assert!(!get.requires_approval);
+
+        for tool in registry.tools() {
+            assert_eq!(
+                tool.requires_approval, tool.mutates,
+                "every mutating tool requires approval and read-only tools do not"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_names_reject_empty_segments() {
+        let registry = AiRegistry::new();
+        for name in ["", "page.", ".page", "page..get", "Page.get", "page get"] {
+            let tool = ToolDefinition {
+                name: name.to_owned(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+                mutates: false,
+                requires_approval: false,
+            };
+            assert!(
+                registry.register_tool(tool).is_err(),
+                "tool name {name:?} should be rejected"
+            );
+        }
+        registry
+            .register_tool(ToolDefinition {
+                name: "page.get_2".to_owned(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+                mutates: false,
+                requires_approval: false,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn task_status_names_round_trip() {
+        for status in [
+            AgentTaskStatus::Pending,
+            AgentTaskStatus::Running,
+            AgentTaskStatus::AwaitingApproval,
+            AgentTaskStatus::Succeeded,
+            AgentTaskStatus::Failed,
+            AgentTaskStatus::Cancelled,
+        ] {
+            assert_eq!(AgentTaskStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(AgentTaskStatus::parse("queued"), None);
     }
 
     #[test]

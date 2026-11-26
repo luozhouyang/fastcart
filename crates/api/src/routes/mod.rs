@@ -1,6 +1,7 @@
 //! Shared route helpers and store-database middleware.
 
 pub mod admin;
+pub mod admin_ai;
 pub mod admin_assets;
 pub mod admin_campaigns;
 pub mod admin_capabilities;
