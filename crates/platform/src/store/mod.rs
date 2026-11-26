@@ -295,8 +295,14 @@ fn unique_violation(error: &sqlx::Error) -> bool {
 }
 
 mod domains;
+mod locales;
 mod registry;
 mod stores;
+
+pub use locales::{
+    AddStoreLocaleInput, LocaleDirection, MAX_LOCALE_LABEL_LENGTH, StoreLocale,
+    UpdateStoreLocaleInput,
+};
 
 #[cfg(test)]
 mod tests;

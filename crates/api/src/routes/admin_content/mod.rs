@@ -1,7 +1,8 @@
-//! Admin content HTTP routes: pages, versions, navigation and redirects.
+//! Admin content HTTP routes: pages, versions, navigation, redirects and
+//! translations.
 //!
-//! Handlers enforce `themes.*` permissions and delegate all business rules to
-//! [`ContentService`].
+//! Handlers enforce `themes.*` and `settings.*` permissions and delegate all
+//! business rules to [`ContentService`].
 
 use std::sync::Arc;
 
@@ -17,7 +18,8 @@ use fastcart_kernel::{ActorContext, AppError, Metadata, NavigationId, PageId, no
 use fastcart_module_content::{
     ContentService, CreateNavigationInput, CreatePageInput, CreateRedirectInput, Navigation,
     NavigationItem, NavigationItemInput, NavigationTree, Page, PageRevisionOrigin, PageStatus,
-    PageVersion, Redirect, UpdateNavigationInput, UpdatePageInput,
+    PageVersion, Redirect, Translation, UpdateNavigationInput, UpdatePageInput,
+    UpsertTranslationInput,
 };
 use fastcart_module_theme::ThemeService;
 use fastcart_storefront::{PageThemeRef, SUPPORTED_EDITOR_SCHEMA_VERSION};
@@ -83,6 +85,12 @@ pub fn router() -> Router<Arc<AppContext>> {
             "/content/redirects/{id}",
             get(get_redirect).delete(delete_redirect),
         )
+        .route(
+            "/content/translations",
+            get(list_translations)
+                .put(upsert_translation)
+                .delete(delete_translation),
+        )
 }
 
 /// Builds the documented admin content routes for OpenAPI generation.
@@ -109,17 +117,24 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(reorder_navigation_items))
         .routes(routes!(list_redirects, create_redirect))
         .routes(routes!(get_redirect, delete_redirect))
+        .routes(routes!(
+            list_translations,
+            upsert_translation,
+            delete_translation
+        ))
 }
 
 mod navigation;
 mod pages;
 mod preview;
 mod redirects;
+mod translations;
 
 use navigation::*;
 use pages::*;
 use preview::*;
 use redirects::*;
+use translations::*;
 
 /// Query parameters for administrative page listing.
 #[derive(Clone, Debug, Deserialize, utoipa::IntoParams)]
@@ -218,6 +233,17 @@ pub struct CreateRedirectRequest {
     to_path: String,
     #[serde(default)]
     status_code: Option<i64>,
+}
+
+/// Translation write body.
+///
+/// The translated resource fields are carried as a JSON object; field-level
+/// validation belongs to the resource that owns the fields.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpsertTranslationRequest {
+    /// Translated fields.
+    #[schema(value_type = Object)]
+    pub fields: Value,
 }
 
 /// A short-lived capability for rendering one page in draft preview.

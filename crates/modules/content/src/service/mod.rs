@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use fastcart_infrastructure::{NewAuditOutbox, StoreDatabase, append_audit_outbox, database_error};
 use fastcart_kernel::{
-    AppError, Metadata, NavigationId, PageId, PageResult, Pagination, now_timestamp,
+    AppError, Metadata, NavigationId, PageId, PageResult, Pagination, Timestamp, now_timestamp,
     validate_handle, validate_length, validate_metadata,
 };
 use fastcart_storefront::{PageBody, PageThemeRef, StorefrontError, ThemeEditorManifest};
@@ -34,6 +34,12 @@ mod pages;
 mod publishing;
 mod reads;
 mod redirects;
+mod translations;
+
+pub use translations::{
+    MAX_TRANSLATION_BYTES, MAX_TRANSLATION_RESOURCE_ID_LENGTH, ResolvedTranslation,
+    TRANSLATION_RESOURCE_TYPES, Translation, UpsertTranslationInput, resolve_translation,
+};
 
 /// A page whose stored body does not validate against a candidate theme.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]

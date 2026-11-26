@@ -16,7 +16,9 @@ use fastcart_module_order::{ClaimItemType, Order, OrderEditAction};
 use fastcart_module_shipping::ResolvedShippingOption;
 use fastcart_module_store::Region;
 use fastcart_module_theme::Theme;
-use fastcart_platform::{Membership, Store, StoreDomain, User};
+use fastcart_platform::{
+    AddStoreLocaleInput, Membership, Store, StoreDomain, StoreLocale, UpdateStoreLocaleInput, User,
+};
 use fastcart_storefront::{ThemeManifest, ThemeRequirements};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

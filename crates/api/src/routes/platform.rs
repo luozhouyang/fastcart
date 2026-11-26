@@ -7,7 +7,7 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::middleware;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use fastcart_http::{AdminActor, AdminAuthState, ApiError, ApiJson, ApiResult, PaginationQuery};
 use fastcart_kernel::{ActorContext, AppError, StoreId, UserId};
 use fastcart_platform::{CreateStoreInput, CreateUserInput, NewAudit, UpdateStoreInput};
@@ -17,10 +17,10 @@ use utoipa_axum::routes;
 use super::auth::{login, logout, me, setup};
 use super::{authorize_store, require_owner};
 use crate::dto::{
-    ApiTokenDto, CreateApiTokenRequest, CreateStoreRequest, CreateUserRequest,
-    CreatedApiTokenResponse, DeleteStoreRequest, DomainDto, DomainRequest, MembershipDto,
-    MembershipRequest, PageResponse, PrimaryDomainRequest, ProvisioningResponse, RoleDto, StoreDto,
-    UpdateStoreRequest, UserDto,
+    AddStoreLocaleRequest, ApiTokenDto, CreateApiTokenRequest, CreateStoreRequest,
+    CreateUserRequest, CreatedApiTokenResponse, DeleteStoreRequest, DomainDto, DomainRequest,
+    MembershipDto, MembershipRequest, PageResponse, PrimaryDomainRequest, ProvisioningResponse,
+    RoleDto, StoreDto, StoreLocaleDto, UpdateStoreLocaleRequest, UpdateStoreRequest, UserDto,
 };
 use crate::state::AppContext;
 
@@ -64,6 +64,18 @@ pub fn router(context: &Arc<AppContext>) -> Router<Arc<AppContext>> {
             "/stores/{store_id}/memberships/{user_id}",
             delete(remove_membership),
         )
+        .route(
+            "/stores/{store_id}/locales",
+            get(list_store_locales).post(add_store_locale),
+        )
+        .route(
+            "/stores/{store_id}/locales/{locale}",
+            patch(update_store_locale).delete(remove_store_locale),
+        )
+        .route(
+            "/stores/{store_id}/locales/{locale}/default",
+            post(set_default_store_locale),
+        )
         .route_layer(middleware::from_fn_with_state(
             AdminAuthState {
                 auth: context.auth.clone(),
@@ -97,6 +109,9 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(remove_domain))
         .routes(routes!(list_memberships, upsert_membership))
         .routes(routes!(remove_membership))
+        .routes(routes!(list_store_locales, add_store_locale))
+        .routes(routes!(update_store_locale, remove_store_locale))
+        .routes(routes!(set_default_store_locale))
 }
 
 #[utoipa::path(
@@ -566,6 +581,155 @@ async fn remove_membership(
         .revoke_membership(&user_id, &store_id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get,
+    path = "/stores/{store_id}/locales",
+    tag = "Platform",
+    summary = "List store locales",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = Vec<StoreLocaleDto>))
+)]
+async fn list_store_locales(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    Path(store_id): Path<String>,
+) -> ApiResult<Json<Vec<StoreLocaleDto>>> {
+    let store_id = parse_store_id(&store_id)?;
+    authorize_store(&context.platform, &actor, &store_id, Some("settings.read")).await?;
+    let locales = context.platform.list_store_locales(&store_id).await?;
+    Ok(Json(
+        locales.into_iter().map(StoreLocaleDto::from).collect(),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/locales",
+    tag = "Platform",
+    summary = "Add a store locale",
+    request_body = AddStoreLocaleRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 201, body = StoreLocaleDto))
+)]
+async fn add_store_locale(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    Path(store_id): Path<String>,
+    ApiJson(request): ApiJson<AddStoreLocaleRequest>,
+) -> ApiResult<(StatusCode, Json<StoreLocaleDto>)> {
+    let store_id = parse_store_id(&store_id)?;
+    authorize_store(&context.platform, &actor, &store_id, Some("settings.write")).await?;
+    let locale = context
+        .platform
+        .add_store_locale(&store_id, request.into())
+        .await?;
+    audit(
+        &context,
+        &actor,
+        Some(&store_id),
+        "store.locale_added",
+        Some("store_locale"),
+        Some(&locale.locale),
+    )
+    .await;
+    Ok((StatusCode::CREATED, Json(StoreLocaleDto::from(locale))))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/stores/{store_id}/locales/{locale}",
+    tag = "Platform",
+    summary = "Update a store locale",
+    request_body = UpdateStoreLocaleRequest,
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = StoreLocaleDto))
+)]
+async fn update_store_locale(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    Path((store_id, locale)): Path<(String, String)>,
+    ApiJson(request): ApiJson<UpdateStoreLocaleRequest>,
+) -> ApiResult<Json<StoreLocaleDto>> {
+    let store_id = parse_store_id(&store_id)?;
+    authorize_store(&context.platform, &actor, &store_id, Some("settings.write")).await?;
+    let locale = context
+        .platform
+        .update_store_locale(&store_id, &locale, request.into())
+        .await?;
+    audit(
+        &context,
+        &actor,
+        Some(&store_id),
+        "store.locale_updated",
+        Some("store_locale"),
+        Some(&locale.locale),
+    )
+    .await;
+    Ok(Json(StoreLocaleDto::from(locale)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/stores/{store_id}/locales/{locale}",
+    tag = "Platform",
+    summary = "Remove a store locale",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 204))
+)]
+async fn remove_store_locale(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    Path((store_id, locale)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let store_id = parse_store_id(&store_id)?;
+    authorize_store(&context.platform, &actor, &store_id, Some("settings.write")).await?;
+    context
+        .platform
+        .remove_store_locale(&store_id, &locale)
+        .await?;
+    audit(
+        &context,
+        &actor,
+        Some(&store_id),
+        "store.locale_removed",
+        Some("store_locale"),
+        Some(&locale),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/locales/{locale}/default",
+    tag = "Platform",
+    summary = "Set the default store locale",
+    security(("adminSession" = []), ("apiToken" = [])),
+    responses((status = 200, body = StoreLocaleDto))
+)]
+async fn set_default_store_locale(
+    State(context): State<Arc<AppContext>>,
+    AdminActor(actor): AdminActor,
+    Path((store_id, locale)): Path<(String, String)>,
+) -> ApiResult<Json<StoreLocaleDto>> {
+    let store_id = parse_store_id(&store_id)?;
+    authorize_store(&context.platform, &actor, &store_id, Some("settings.write")).await?;
+    let locale = context
+        .platform
+        .set_default_store_locale(&store_id, &locale)
+        .await?;
+    audit(
+        &context,
+        &actor,
+        Some(&store_id),
+        "store.locale_default_set",
+        Some("store_locale"),
+        Some(&locale.locale),
+    )
+    .await;
+    Ok(Json(StoreLocaleDto::from(locale)))
 }
 
 #[utoipa::path(

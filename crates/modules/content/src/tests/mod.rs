@@ -102,4 +102,5 @@ mod pages;
 mod publishing;
 mod redirects;
 mod theme;
+mod translations;
 mod validation;

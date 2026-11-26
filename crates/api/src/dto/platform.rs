@@ -293,6 +293,89 @@ pub struct MembershipRequest {
     pub roles: Vec<String>,
 }
 
+/// A locale published by a store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = StoreLocale)]
+pub struct StoreLocaleDto {
+    /// Store identifier.
+    pub store_id: String,
+    /// Canonical BCP-47 locale.
+    pub locale: String,
+    /// Whether this is the default display locale.
+    pub is_default: bool,
+    /// Native label such as `Français`.
+    pub label: Option<String>,
+    /// Text direction, `ltr` or `rtl`.
+    pub direction: String,
+    /// Creation timestamp.
+    pub created_at: i64,
+    /// Last update timestamp.
+    pub updated_at: i64,
+}
+
+impl From<StoreLocale> for StoreLocaleDto {
+    fn from(locale: StoreLocale) -> Self {
+        Self {
+            store_id: locale.store_id.to_string(),
+            locale: locale.locale,
+            is_default: locale.is_default,
+            label: locale.label,
+            direction: locale.direction.as_str().to_owned(),
+            created_at: locale.created_at,
+            updated_at: locale.updated_at,
+        }
+    }
+}
+
+/// Store locale creation body.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct AddStoreLocaleRequest {
+    /// Locale to publish, for example `fr-FR`.
+    pub locale: String,
+    /// Whether the new locale becomes the default display locale.
+    #[serde(default)]
+    pub is_default: bool,
+    /// Native label such as `Français`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Text direction, `ltr` (default) or `rtl`.
+    #[serde(default)]
+    pub direction: Option<String>,
+}
+
+impl From<AddStoreLocaleRequest> for AddStoreLocaleInput {
+    fn from(request: AddStoreLocaleRequest) -> Self {
+        Self {
+            locale: request.locale,
+            is_default: request.is_default,
+            label: request.label,
+            direction: request.direction,
+        }
+    }
+}
+
+/// Store locale update body.
+///
+/// Omitted fields are left unchanged; an empty label clears it.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct UpdateStoreLocaleRequest {
+    /// Replacement native label.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Replacement text direction, `ltr` or `rtl`.
+    #[serde(default)]
+    pub direction: Option<String>,
+}
+
+impl From<UpdateStoreLocaleRequest> for UpdateStoreLocaleInput {
+    fn from(request: UpdateStoreLocaleRequest) -> Self {
+        Self {
+            label: request.label,
+            direction: request.direction,
+        }
+    }
+}
+
 /// User creation request.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateUserRequest {

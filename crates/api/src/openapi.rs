@@ -170,6 +170,7 @@ use crate::state::AppContext;
     fastcart_module_promotion::PromotionStatus,
     fastcart_module_promotion::PromotionType,
     fastcart_module_promotion::PromotionUsage,
+    crate::dto::AddStoreLocaleRequest,
     crate::dto::ApiTokenDto,
     crate::dto::CreateApiTokenRequest,
     crate::dto::CreateStoreRequest,
@@ -189,6 +190,8 @@ use crate::state::AppContext;
     crate::dto::RoleDto,
     crate::dto::SetupRequest,
     crate::dto::StoreDto,
+    crate::dto::StoreLocaleDto,
+    crate::dto::UpdateStoreLocaleRequest,
     crate::dto::UpdateStoreRequest,
     crate::dto::UserDto,
     crate::dto::CheckoutDto,
@@ -269,6 +272,8 @@ use crate::state::AppContext;
     crate::routes::admin_catalog::SettingsRequest,
     crate::routes::admin_catalog::TagRequest,
     crate::routes::admin_content::NavigationItemReorderRequest,
+    crate::routes::admin_content::UpsertTranslationRequest,
+    fastcart_module_content::Translation,
     crate::routes::admin_customers::CreateGroupRequest,
     crate::routes::admin_customers::GroupCustomerRequest,
     crate::routes::admin_customers::UpdateCustomerRequest,
@@ -962,16 +967,18 @@ mod tests {
         let paths = document["paths"].as_object().expect("paths");
         let count = |prefix: &str| paths.keys().filter(|path| path.starts_with(prefix)).count();
 
-        assert_eq!(count("/api/v1/platform"), 20);
-        assert_eq!(count("/api/v1/admin"), 215);
+        assert_eq!(count("/api/v1/platform"), 23);
+        assert_eq!(count("/api/v1/admin"), 216);
         assert_eq!(count("/api/v1/store"), 48);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 288);
+        assert_eq!(paths.len(), 292);
 
         for key in [
             "/api/v1/platform/stores",
             "/api/v1/platform/stores/{store_id}/domains",
+            "/api/v1/platform/stores/{store_id}/locales",
+            "/api/v1/platform/stores/{store_id}/locales/{locale}/default",
             "/api/v1/admin/catalog/products",
             "/api/v1/admin/catalog/product-types",
             "/api/v1/admin/orders/{id}/refunds",
@@ -982,6 +989,7 @@ mod tests {
             "/api/v1/admin/return-reasons",
             "/api/v1/admin/return-reasons/{id}",
             "/api/v1/admin/content/pages/{id}/preview-token",
+            "/api/v1/admin/content/translations",
             "/api/v1/admin/inquiry-forms",
             "/api/v1/admin/inquiries",
             "/api/v1/admin/notification-channels",
@@ -1089,7 +1097,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 407);
+        assert_eq!(operation_count, 410);
     }
 
     #[test]

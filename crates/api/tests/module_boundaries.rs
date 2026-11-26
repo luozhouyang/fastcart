@@ -262,6 +262,7 @@ fn owner_for(table: &str) -> Option<&'static str> {
         ("navigations", "content"),
         ("navigation_", "content"),
         ("redirects", "content"),
+        ("translations", "content"),
         ("inquiries", "inquiry"),
         ("inquiry_", "inquiry"),
         ("assets", "asset"),

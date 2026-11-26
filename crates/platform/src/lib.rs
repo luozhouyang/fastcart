@@ -26,7 +26,10 @@ pub use provisioning::{
 };
 pub use repository::PlatformStore;
 pub use resolver::StoreResolver;
-pub use store::{CreateStoreInput, Store, StoreRegistry, StoreStatus, UpdateStoreInput};
+pub use store::{
+    AddStoreLocaleInput, CreateStoreInput, LocaleDirection, MAX_LOCALE_LABEL_LENGTH, Store,
+    StoreLocale, StoreRegistry, StoreStatus, UpdateStoreInput, UpdateStoreLocaleInput,
+};
 pub use user::{
     AuditLog, CreateUserInput, Membership, MembershipStatus, NewAudit, User, UserStatus,
 };
