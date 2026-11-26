@@ -1,22 +1,66 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronDown, Globe, Loader2, Plus } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Copy,
+  Globe,
+  KeyRound,
+  Loader2,
+  Plus,
+  ShieldAlert,
+  Trash2,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import { toast } from "sonner";
+import type { ApiToken, CreatedApiToken, Membership, Role } from "@fastcart/shared-types";
 
 import { PageHeader } from "@/components/page-header";
 import { PluginSlot } from "@/plugins/plugin-slot";
-import { ErrorState, PageSkeleton } from "@/components/states";
+import { EmptyState, ErrorState, PageSkeleton } from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { errorMessage } from "@/lib/api";
 import { demoSettings } from "@/lib/demo";
+import { fromUnixSeconds, shortDate } from "@/lib/format";
 import { addDomain, loadSettings, saveStoreProfile, setPrimaryDomain } from "@/lib/loaders";
 import type { StoreProfileView } from "@/lib/models";
+import {
+  SCOPE_PRESETS,
+  TOKEN_TTL_OPTIONS,
+  apiTokenFormError,
+  createApiToken,
+  isTokenActive,
+  listApiTokens,
+  listRoles,
+  membershipRoleError,
+  normalizeScopes,
+  revokeApiToken,
+  tokenState,
+} from "@/lib/platform-team";
 import { useAsyncData } from "@/lib/use-async-data";
 import { cn } from "@/lib/utils";
 
@@ -47,6 +91,7 @@ const SECTIONS = [
   { id: "store-details", label: "Store details" },
   { id: "domains", label: "Domains" },
   { id: "checkout", label: "Checkout" },
+  { id: "team", label: "Team" },
 ] as const;
 
 const selectClass =
@@ -99,6 +144,7 @@ export function SettingsPage() {
   const detailsRef = useRef<HTMLDivElement>(null);
   const domainsRef = useRef<HTMLDivElement>(null);
   const checkoutRef = useRef<HTMLDivElement>(null);
+  const teamRef = useRef<HTMLDivElement>(null);
 
   const loader = useCallback(
     (signal: AbortSignal) => {
@@ -122,7 +168,9 @@ export function SettingsPage() {
         ? detailsRef.current
         : id === "domains"
           ? domainsRef.current
-          : checkoutRef.current;
+          : id === "checkout"
+            ? checkoutRef.current
+            : teamRef.current;
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     target?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
   };
@@ -448,6 +496,9 @@ export function SettingsPage() {
               />
             </div>
           </Card>
+          <Card ref={teamRef} className="scroll-mt-24 p-0">
+            <TeamSection />
+          </Card>
           <PluginSlot target="admin.page.settings.tabs" />
         </div>
       </div>
@@ -474,5 +525,982 @@ function CheckoutSwitch({
       </div>
       <Switch checked={checked} onCheckedChange={onChange} aria-label={label} />
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Team                                                                      */
+/* -------------------------------------------------------------------------- */
+
+interface TeamData {
+  memberships: Membership[];
+  roles: Role[];
+  tokens: ApiToken[];
+}
+
+const DEMO_ROLES: Role[] = [
+  { name: "owner", description: "Full control of the store" },
+  { name: "admin", description: "Administrative access to the store" },
+  { name: "manager", description: "Operational access to the store" },
+  { name: "product-manager", description: "Catalog and inventory access" },
+  { name: "order-manager", description: "Order and customer access" },
+  { name: "content-editor", description: "Content and theme access" },
+  { name: "support-agent", description: "Customer support access" },
+];
+
+const DEMO_MEMBERSHIPS: Membership[] = [
+  {
+    id: "membership_demo_owner",
+    user_id: "user_demo_zhouyang",
+    store_id: "demo-store",
+    status: "active",
+    roles: ["owner"],
+    created_at: 1_736_000_000,
+    updated_at: 1_736_000_000,
+  },
+  {
+    id: "membership_demo_ops",
+    user_id: "user_demo_ops",
+    store_id: "demo-store",
+    status: "active",
+    roles: ["order-manager", "support-agent"],
+    created_at: 1_740_000_000,
+    updated_at: 1_745_000_000,
+  },
+];
+
+const DEMO_TOKENS: ApiToken[] = [
+  {
+    id: "token_demo_ci",
+    user_id: "user_demo_zhouyang",
+    store_id: "demo-store",
+    name: "Storefront CI",
+    prefix: "fc_demo123456",
+    scopes: ["products.read", "inventory.read"],
+    expires_at: 1_800_000_000,
+    revoked_at: null,
+    last_used_at: 1_763_000_000,
+    created_at: 1_757_000_000,
+  },
+  {
+    id: "token_demo_etl",
+    user_id: "user_demo_zhouyang",
+    store_id: "demo-store",
+    name: "Analytics export",
+    prefix: "fc_demo789012",
+    scopes: ["orders.read", "customers.read"],
+    expires_at: 1_770_000_000,
+    revoked_at: 1_762_000_000,
+    last_used_at: 1_761_000_000,
+    created_at: 1_755_000_000,
+  },
+];
+
+function teamDemoData(): TeamData {
+  return {
+    memberships: DEMO_MEMBERSHIPS.map((membership) => ({
+      ...membership,
+      roles: [...membership.roles],
+    })),
+    roles: DEMO_ROLES.map((role) => ({ ...role })),
+    tokens: DEMO_TOKENS.map((token) => ({ ...token, scopes: [...token.scopes] })),
+  };
+}
+
+const ROLE_SCOPE_CANDIDATES = [
+  "products.read",
+  "products.write",
+  "orders.read",
+  "orders.write",
+  "customers.read",
+  "customers.write",
+  "inventory.read",
+  "inventory.write",
+  "promotions.read",
+  "settings.read",
+  "settings.write",
+  "themes.read",
+  "themes.write",
+] as const;
+
+function TeamSection() {
+  const { mode, client, store, dataKey, can } = useAuth();
+  const canWrite = can("settings.write");
+  const [demoData, setDemoData] = useState<TeamData>(teamDemoData);
+  const [memberDialogOpen, setMemberDialogOpen] = useState(false);
+  const [memberUserId, setMemberUserId] = useState("");
+  const [memberRoles, setMemberRoles] = useState<string[]>([]);
+  const [memberBusy, setMemberBusy] = useState(false);
+  const [memberError, setMemberError] = useState<string | null>(null);
+  const [editingMembership, setEditingMembership] = useState<Membership | null>(null);
+  const [removeMembershipTarget, setRemoveMembershipTarget] = useState<Membership | null>(null);
+  const [removeMembershipBusy, setRemoveMembershipBusy] = useState(false);
+
+  const [tokenDialogOpen, setTokenDialogOpen] = useState(false);
+  const [tokenName, setTokenName] = useState("");
+  const [tokenScopes, setTokenScopes] = useState<string[]>(["products.read"]);
+  const [tokenTtl, setTokenTtl] = useState(TOKEN_TTL_OPTIONS[0]?.seconds ?? 2_592_000);
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [createdToken, setCreatedToken] = useState<CreatedApiToken | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<ApiToken | null>(null);
+  const [revokeBusy, setRevokeBusy] = useState(false);
+
+  useEffect(() => {
+    setMemberDialogOpen(false);
+    setEditingMembership(null);
+    setRemoveMembershipTarget(null);
+    setTokenDialogOpen(false);
+    setCreatedToken(null);
+    setRevokeTarget(null);
+  }, [store?.id, dataKey]);
+
+  const loader = useCallback(
+    (signal: AbortSignal): Promise<TeamData> => {
+      if (mode === "demo") return Promise.resolve(demoData);
+      if (!client || !store) return Promise.reject(new Error("No store is selected."));
+      return Promise.all([
+        client.stores.memberships.list(store.id, { signal }),
+        listRoles(store.id, signal),
+        listApiTokens(store.id, signal),
+      ]).then(([memberships, roles, tokens]) => ({ memberships, roles, tokens }));
+    },
+    [mode, client, store, demoData],
+  );
+
+  const { data, error, loading, reload } = useAsyncData(loader, [
+    mode,
+    store?.id,
+    dataKey,
+    demoData,
+  ]);
+
+  const roles = data?.roles ?? [];
+  const memberships = data?.memberships ?? [];
+  const tokens = data?.tokens ?? [];
+
+  const openAddMember = () => {
+    setEditingMembership(null);
+    setMemberUserId("");
+    setMemberRoles([]);
+    setMemberError(null);
+    setMemberDialogOpen(true);
+  };
+
+  const openEditMember = (membership: Membership) => {
+    setEditingMembership(membership);
+    setMemberUserId(membership.user_id);
+    setMemberRoles([...membership.roles]);
+    setMemberError(null);
+    setMemberDialogOpen(true);
+  };
+
+  const saveMembership = async () => {
+    if (memberBusy) return;
+    const roleMessage = membershipRoleError(memberRoles);
+    if (roleMessage !== null) {
+      setMemberError(roleMessage);
+      return;
+    }
+    const userId = memberUserId.trim();
+    if (userId.length === 0) {
+      setMemberError("Enter the user id to add.");
+      return;
+    }
+    setMemberBusy(true);
+    try {
+      if (mode === "demo") {
+        const now = Math.floor(Date.now() / 1000);
+        setDemoData((current) => {
+          const existing = current.memberships.find((entry) => entry.user_id === userId);
+          const memberships = existing
+            ? current.memberships.map((entry) =>
+                entry.user_id === userId
+                  ? { ...entry, roles: [...memberRoles], updated_at: now }
+                  : entry,
+              )
+            : [
+                ...current.memberships,
+                {
+                  id: `membership_demo_${Date.now()}`,
+                  user_id: userId,
+                  store_id: store?.id ?? "demo-store",
+                  status: "active" as const,
+                  roles: [...memberRoles],
+                  created_at: now,
+                  updated_at: now,
+                },
+              ];
+          return { ...current, memberships };
+        });
+        toast.success(editingMembership ? "Member roles updated" : "Member added");
+        setMemberDialogOpen(false);
+        return;
+      }
+      if (!client || !store) throw new Error("No store is selected.");
+      await client.stores.memberships.upsert(store.id, { user_id: userId, roles: memberRoles });
+      toast.success(editingMembership ? "Member roles updated" : "Member added");
+      setMemberDialogOpen(false);
+      reload();
+    } catch (cause) {
+      setMemberError(errorMessage(cause));
+    } finally {
+      setMemberBusy(false);
+    }
+  };
+
+  const confirmRemoveMembership = async () => {
+    if (!removeMembershipTarget || removeMembershipBusy) return;
+    const target = removeMembershipTarget;
+    setRemoveMembershipBusy(true);
+    try {
+      if (mode === "demo") {
+        setDemoData((current) => ({
+          ...current,
+          memberships: current.memberships.filter((entry) => entry.user_id !== target.user_id),
+        }));
+      } else {
+        if (!client || !store) throw new Error("No store is selected.");
+        await client.stores.memberships.remove(store.id, target.user_id);
+      }
+      setRemoveMembershipTarget(null);
+      toast.success("Member removed from the store");
+      reload();
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      setRemoveMembershipBusy(false);
+    }
+  };
+
+  const toggleScope = (scope: string) => {
+    setTokenScopes((current) =>
+      current.includes(scope) ? current.filter((entry) => entry !== scope) : [...current, scope],
+    );
+    setTokenError(null);
+  };
+
+  const applyScopePreset = (preset: string[]) => {
+    setTokenScopes((current) => normalizeScopes([...current, ...preset]));
+    setTokenError(null);
+  };
+
+  const createToken = async () => {
+    if (tokenBusy) return;
+    const message = apiTokenFormError({ name: tokenName, scopes: tokenScopes });
+    if (message !== null) {
+      setTokenError(message);
+      return;
+    }
+    setTokenBusy(true);
+    try {
+      if (mode === "demo") {
+        const now = Math.floor(Date.now() / 1000);
+        const record: ApiToken = {
+          id: `token_demo_${Date.now()}`,
+          user_id: "user_demo_zhouyang",
+          store_id: store?.id ?? "demo-store",
+          name: tokenName.trim(),
+          prefix: `fc_demo${Math.random().toString(36).slice(2, 8)}`,
+          scopes: normalizeScopes(tokenScopes),
+          expires_at: now + tokenTtl,
+          revoked_at: null,
+          last_used_at: null,
+          created_at: now,
+        };
+        setDemoData((current) => ({ ...current, tokens: [record, ...current.tokens] }));
+        setCreatedToken({
+          token: `fc_demo_${Math.random().toString(36).slice(2)}`.repeat(2),
+          record,
+        });
+      } else {
+        if (!store) throw new Error("No store is selected.");
+        const created = await createApiToken(store.id, {
+          name: tokenName.trim(),
+          store_id: store.id,
+          scopes: normalizeScopes(tokenScopes),
+          ttl_seconds: tokenTtl,
+        });
+        setCreatedToken(created);
+      }
+      setTokenDialogOpen(false);
+      setTokenName("");
+      reload();
+    } catch (cause) {
+      setTokenError(errorMessage(cause));
+    } finally {
+      setTokenBusy(false);
+    }
+  };
+
+  const confirmRevoke = async () => {
+    if (!revokeTarget || revokeBusy) return;
+    const target = revokeTarget;
+    setRevokeBusy(true);
+    try {
+      if (mode === "demo") {
+        setDemoData((current) => ({
+          ...current,
+          tokens: current.tokens.map((token) =>
+            token.id === target.id
+              ? { ...token, revoked_at: Math.floor(Date.now() / 1000) }
+              : token,
+          ),
+        }));
+      } else {
+        if (!store) throw new Error("No store is selected.");
+        await revokeApiToken(store.id, target.id);
+      }
+      setRevokeTarget(null);
+      toast.success("API token revoked");
+      reload();
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      setRevokeBusy(false);
+    }
+  };
+
+  if (!data && loading) {
+    return (
+      <div className="p-6" aria-busy="true">
+        <div className="h-5 w-40 animate-pulse rounded bg-secondary" />
+        <div className="mt-4 h-24 animate-pulse rounded-lg bg-secondary/60" />
+      </div>
+    );
+  }
+  if (!data && error) {
+    return (
+      <div className="p-6">
+        <ErrorState message={error} onRetry={reload} />
+      </div>
+    );
+  }
+  if (!data) return null;
+
+  return (
+    <>
+      <div className="border-b border-border px-6 py-5">
+        <h2 className="text-[14px] font-medium text-foreground">Team</h2>
+        <p className="mt-1 text-[11.5px] text-muted-foreground">
+          Store memberships, assignable roles and API tokens for integrations
+        </p>
+      </div>
+
+      <div className="border-b border-border p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+              <Users className="size-4 text-muted-foreground" aria-hidden="true" />
+              Members
+            </p>
+            <p className="mt-1 text-[11.5px] text-muted-foreground">
+              A member needs an existing platform user; add them by id and pick their roles.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={openAddMember}
+            disabled={!canWrite}
+            title={canWrite ? undefined : "Requires settings.write"}
+          >
+            <UserPlus className="size-3.5" aria-hidden="true" />
+            Add member
+          </Button>
+        </div>
+
+        {memberships.length === 0 ? (
+          <EmptyState
+            title="No members yet"
+            description="Add the first teammate to let them administer this store."
+            action={
+              canWrite ? (
+                <Button onClick={openAddMember}>
+                  <UserPlus className="size-4" aria-hidden="true" />
+                  Add member
+                </Button>
+              ) : null
+            }
+          />
+        ) : (
+          <div className="mt-4 overflow-hidden rounded-lg border border-border">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="pl-4">User</TableHead>
+                  <TableHead className="w-[110px]">Status</TableHead>
+                  <TableHead>Roles</TableHead>
+                  <TableHead className="hidden w-[130px] sm:table-cell">Added</TableHead>
+                  <TableHead className="w-[130px] pr-4 text-right" aria-label="Actions" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {memberships.map((membership) => (
+                  <TableRow key={membership.id}>
+                    <TableCell className="pl-4">
+                      <p className="font-mono text-[11.5px] text-foreground">
+                        {membership.user_id}
+                      </p>
+                      <p className="mt-0.5 font-mono text-[10px] text-faint">{membership.id}</p>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={membership.status === "active" ? "brand" : "secondary"}>
+                        {membership.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1.5">
+                        {membership.roles.map((role) => (
+                          <Badge key={role} variant="outline">
+                            {role}
+                          </Badge>
+                        ))}
+                      </div>
+                    </TableCell>
+                    <TableCell className="hidden text-[11.5px] text-muted-foreground sm:table-cell">
+                      {shortDate(fromUnixSeconds(membership.created_at))}
+                    </TableCell>
+                    <TableCell className="pr-4 text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => openEditMember(membership)}
+                          disabled={!canWrite}
+                        >
+                          Change roles
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`Remove ${membership.user_id}`}
+                          onClick={() => setRemoveMembershipTarget(membership)}
+                          disabled={!canWrite}
+                          className="text-faint hover:text-destructive"
+                        >
+                          <Trash2 className="size-3.5" aria-hidden="true" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </div>
+
+      <div className="border-b border-border p-6">
+        <p className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+          <ShieldAlert className="size-4 text-muted-foreground" aria-hidden="true" />
+          Roles
+        </p>
+        <p className="mt-1 text-[11.5px] text-muted-foreground">
+          System roles bundled with Fastcart; each grants a fixed permission set.
+        </p>
+        <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+          {roles.map((role) => (
+            <li key={role.name} className="rounded-lg border border-border bg-background px-3 py-2">
+              <p className="font-mono text-[11.5px] text-foreground">{role.name}</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {role.description.length > 0 ? role.description : "No description"}
+              </p>
+            </li>
+          ))}
+          {roles.length === 0 ? (
+            <li className="text-[11.5px] text-muted-foreground">No roles returned by the API.</li>
+          ) : null}
+        </ul>
+      </div>
+
+      <div className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+              <KeyRound className="size-4 text-muted-foreground" aria-hidden="true" />
+              API tokens
+            </p>
+            <p className="mt-1 text-[11.5px] text-muted-foreground">
+              Store-scoped tokens for scripts and integrations. The secret is shown once.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setTokenName("");
+              setTokenScopes(["products.read"]);
+              setTokenError(null);
+              setTokenDialogOpen(true);
+            }}
+            disabled={!canWrite}
+            title={canWrite ? undefined : "Requires settings.write"}
+          >
+            <Plus className="size-3.5" aria-hidden="true" />
+            New token
+          </Button>
+        </div>
+
+        {tokens.length === 0 ? (
+          <EmptyState
+            title="No API tokens"
+            description="Create a token to let an integration read or write this store."
+            action={
+              canWrite ? (
+                <Button onClick={() => setTokenDialogOpen(true)}>
+                  <Plus className="size-4" aria-hidden="true" />
+                  New token
+                </Button>
+              ) : null
+            }
+          />
+        ) : (
+          <div className="mt-4 overflow-hidden rounded-lg border border-border">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="pl-4">Token</TableHead>
+                  <TableHead className="hidden md:table-cell">Scopes</TableHead>
+                  <TableHead className="w-[100px]">State</TableHead>
+                  <TableHead className="hidden w-[130px] lg:table-cell">Expires</TableHead>
+                  <TableHead className="w-[90px] pr-4 text-right" aria-label="Actions" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {tokens.map((token) => {
+                  const state = tokenState(token);
+                  return (
+                    <TableRow key={token.id}>
+                      <TableCell className="pl-4">
+                        <p className="text-[12px] text-foreground">{token.name}</p>
+                        <p className="mt-0.5 font-mono text-[10px] text-faint">{token.prefix}…</p>
+                      </TableCell>
+                      <TableCell className="hidden md:table-cell">
+                        <div className="flex flex-wrap gap-1">
+                          {token.scopes.slice(0, 3).map((scope) => (
+                            <Badge key={scope} variant="secondary">
+                              {scope}
+                            </Badge>
+                          ))}
+                          {token.scopes.length > 3 ? (
+                            <Badge variant="outline">+{token.scopes.length - 3}</Badge>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={state.tone}>{state.label}</Badge>
+                      </TableCell>
+                      <TableCell className="hidden text-[11.5px] text-muted-foreground lg:table-cell">
+                        {token.expires_at === null
+                          ? "Never"
+                          : shortDate(fromUnixSeconds(token.expires_at))}
+                      </TableCell>
+                      <TableCell className="pr-4 text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setRevokeTarget(token)}
+                          disabled={!canWrite || !isTokenActive(token)}
+                        >
+                          Revoke
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </div>
+
+      <Dialog open={memberDialogOpen} onOpenChange={setMemberDialogOpen}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md">
+          <form
+            className="space-y-5"
+            noValidate
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveMembership();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>
+                {editingMembership ? "Change member roles" : "Add a member"}
+              </DialogTitle>
+              <DialogDescription>
+                {editingMembership
+                  ? "Replaces the member's role list. At least one role is required."
+                  : "The user must already exist on this server. Membership is granted by user id."}
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-2">
+              <Label htmlFor="member-user-id">User id</Label>
+              <Input
+                id="member-user-id"
+                value={memberUserId}
+                onChange={(event) => {
+                  setMemberUserId(event.target.value);
+                  setMemberError(null);
+                }}
+                placeholder="user_..."
+                autoComplete="off"
+                spellCheck={false}
+                disabled={memberBusy || editingMembership !== null}
+                className="font-mono"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Roles</Label>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {roles.map((role) => {
+                  const checked = memberRoles.includes(role.name);
+                  return (
+                    <button
+                      key={role.name}
+                      type="button"
+                      aria-pressed={checked}
+                      onClick={() => {
+                        setMemberRoles((current) =>
+                          current.includes(role.name)
+                            ? current.filter((entry) => entry !== role.name)
+                            : [...current, role.name],
+                        );
+                        setMemberError(null);
+                      }}
+                      disabled={memberBusy}
+                      className={cn(
+                        "cursor-pointer rounded-lg border px-3 py-2 text-left transition-colors",
+                        checked
+                          ? "border-brand/40 bg-brand-soft"
+                          : "border-border bg-background hover:border-line-strong",
+                      )}
+                    >
+                      <p className="font-mono text-[11.5px] text-foreground">{role.name}</p>
+                      <p className="mt-0.5 line-clamp-2 text-[10.5px] text-muted-foreground">
+                        {role.description}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[10.5px] text-faint">
+                The roles endpoint lists system roles; a custom role must exist before it can be
+                assigned.
+              </p>
+            </div>
+
+            {memberError ? (
+              <p className="text-[11.5px] text-destructive" role="alert">
+                {memberError}
+              </p>
+            ) : null}
+
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setMemberDialogOpen(false)}
+                disabled={memberBusy}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={memberBusy}>
+                {memberBusy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+                {editingMembership ? "Save roles" : "Add member"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={removeMembershipTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !removeMembershipBusy) setRemoveMembershipTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Remove member?</DialogTitle>
+            <DialogDescription>
+              {removeMembershipTarget?.user_id} loses access to this store. Their platform account
+              and other store memberships stay intact.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setRemoveMembershipTarget(null)}
+              disabled={removeMembershipBusy}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void confirmRemoveMembership()}
+              disabled={removeMembershipBusy}
+            >
+              {removeMembershipBusy ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Trash2 className="size-4" aria-hidden="true" />
+              )}
+              Remove member
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+          <form
+            className="space-y-5"
+            noValidate
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createToken();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>New API token</DialogTitle>
+              <DialogDescription>
+                Tokens are bound to your account and this store. Requested scopes must be within
+                your own permissions.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-2">
+              <Label htmlFor="token-name">Name</Label>
+              <Input
+                id="token-name"
+                value={tokenName}
+                onChange={(event) => {
+                  setTokenName(event.target.value);
+                  setTokenError(null);
+                }}
+                placeholder="Storefront CI"
+                autoComplete="off"
+                autoFocus
+                disabled={tokenBusy}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Scopes</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {SCOPE_PRESETS.map((preset) => (
+                  <Button
+                    key={preset.id}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => applyScopePreset(preset.scopes)}
+                    disabled={tokenBusy}
+                  >
+                    {preset.label}
+                  </Button>
+                ))}
+              </div>
+              <div className="grid max-h-48 gap-1 overflow-y-auto rounded-lg border border-border p-2 sm:grid-cols-2">
+                {ROLE_SCOPE_CANDIDATES.map((scope) => {
+                  const checked = tokenScopes.includes(scope);
+                  return (
+                    <label
+                      key={scope}
+                      className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[11.5px] text-foreground hover:bg-accent"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleScope(scope)}
+                        disabled={tokenBusy}
+                        className="size-3.5 accent-[var(--brand)]"
+                      />
+                      <span className="font-mono">{scope}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="token-ttl">Lifetime</Label>
+              <div className="relative">
+                <select
+                  id="token-ttl"
+                  value={tokenTtl}
+                  onChange={(event) => setTokenTtl(Number(event.target.value))}
+                  disabled={tokenBusy}
+                  className={selectClass}
+                >
+                  {TOKEN_TTL_OPTIONS.map((option) => (
+                    <option key={option.seconds} value={option.seconds}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown
+                  className="pointer-events-none absolute top-1/2 right-3 size-3.5 -translate-y-1/2 text-faint"
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
+
+            {tokenError ? (
+              <p className="text-[11.5px] text-destructive" role="alert">
+                {tokenError}
+              </p>
+            ) : null}
+
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setTokenDialogOpen(false)}
+                disabled={tokenBusy}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={tokenBusy}>
+                {tokenBusy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+                Create token
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <TokenRevealDialog created={createdToken} onClose={() => setCreatedToken(null)} />
+
+      <Dialog
+        open={revokeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !revokeBusy) setRevokeTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Revoke API token?</DialogTitle>
+            <DialogDescription>
+              “{revokeTarget?.name}” stops authenticating immediately. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRevokeTarget(null)} disabled={revokeBusy}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void confirmRevoke()}
+              disabled={revokeBusy}
+            >
+              {revokeBusy ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Trash2 className="size-4" aria-hidden="true" />
+              )}
+              Revoke token
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function TokenRevealDialog({
+  created,
+  onClose,
+}: {
+  created: CreatedApiToken | null;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (created) setCopied(false);
+  }, [created?.record.id]);
+
+  const copy = async () => {
+    if (!created) return;
+    try {
+      await navigator.clipboard.writeText(created.token);
+      setCopied(true);
+      toast.success("Token copied to the clipboard");
+    } catch {
+      toast.error("Could not copy automatically. Select the token and copy it manually.");
+    }
+  };
+
+  return (
+    <Dialog
+      open={created !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>API token created</DialogTitle>
+          <DialogDescription>
+            Copy this token now. For security it is shown only once and cannot be recovered later.
+          </DialogDescription>
+        </DialogHeader>
+
+        {created ? (
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 rounded-lg border border-warning/25 bg-warning-soft px-3.5 py-3">
+              <ShieldAlert className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden="true" />
+              <p className="text-[11.5px] leading-relaxed text-warning">
+                Treat this value as a secret. Send it as a Bearer token and never commit it or paste
+                it into chat.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="created-token">Token</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="created-token"
+                  readOnly
+                  value={created.token}
+                  onFocus={(event) => event.currentTarget.select()}
+                  className="font-mono text-[12px]"
+                />
+                <Button type="button" variant="outline" className="shrink-0" onClick={copy}>
+                  {copied ? (
+                    <Check className="size-4" aria-hidden="true" />
+                  ) : (
+                    <Copy className="size-4" aria-hidden="true" />
+                  )}
+                  {copied ? "Copied" : "Copy"}
+                </Button>
+              </div>
+            </div>
+            <dl className="grid grid-cols-2 gap-3 text-[12px]">
+              <div>
+                <dt className="text-[11px] text-muted-foreground">Name</dt>
+                <dd className="mt-0.5 text-foreground">{created.record.name}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] text-muted-foreground">Scopes</dt>
+                <dd className="mt-0.5 font-mono text-[11px] text-foreground">
+                  {created.record.scopes.join(", ") || "—"}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        ) : null}
+
+        <DialogFooter>
+          <Button onClick={onClose}>
+            <KeyRound className="size-4" aria-hidden="true" />I have saved the token
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
