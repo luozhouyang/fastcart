@@ -161,6 +161,26 @@ async fn redemption_rejects_insufficient_balance_zero_and_unknown_codes() {
 }
 
 #[tokio::test]
+async fn finds_a_card_by_the_code_a_customer_presents() {
+    let (service, _db) = setup().await;
+    let card = service
+        .issue_gift_card(CreateGiftCardInput::new("usd", 5_000))
+        .await
+        .unwrap();
+
+    let found = service.find_gift_card_by_code(&card.code).await.unwrap();
+    assert_eq!(found.id, card.id);
+    assert_eq!(found.currency_code, "USD");
+    assert_eq!(found.balance_minor, 5_000);
+
+    let missing = service
+        .find_gift_card_by_code("NOT-A-REAL-CODE")
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, AppError::NotFound(_)), "{missing}");
+}
+
+#[tokio::test]
 async fn disabled_cards_cannot_be_redeemed_until_enabled() {
     let (service, _db) = setup().await;
     let card = service
@@ -170,11 +190,10 @@ async fn disabled_cards_cannot_be_redeemed_until_enabled() {
 
     let disabled = service.disable_gift_card(&card.id).await.unwrap();
     assert_eq!(disabled.status, GiftCardStatus::Disabled);
-    // Disabling again is a no-op.
-    assert_eq!(
-        service.disable_gift_card(&card.id).await.unwrap().status,
-        GiftCardStatus::Disabled
-    );
+    // Disabling again is a no-op, including `updated_at`.
+    let again = service.disable_gift_card(&card.id).await.unwrap();
+    assert_eq!(again.status, GiftCardStatus::Disabled);
+    assert_eq!(again.updated_at, disabled.updated_at);
     let rejected = service.redeem_gift_card(&card.code, 100).await.unwrap_err();
     assert!(matches!(rejected, AppError::Conflict(_)), "{rejected}");
     assert_eq!(

@@ -18,6 +18,10 @@ use crate::domain::{CreateGiftCardInput, GiftCard, GiftCardStatus};
 use super::store::*;
 use super::*;
 
+/// Columns selected for every gift card read.
+const GIFT_CARD_COLUMNS: &str = "id, code, currency_code, initial_amount_minor, balance_minor, \
+                                 status, metadata, created_at, updated_at";
+
 /// Alphabet for generated redemption codes.
 ///
 /// Crockford-style base32 without `I`, `L`, `O` and `U`: the characters that
@@ -46,14 +50,12 @@ fn generate_gift_card_code() -> String {
 
 /// Loads a gift card by identifier inside an open transaction.
 async fn load_gift_card(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<GiftCard, AppError> {
-    let row = sqlx::query_as::<_, GiftCardRow>(
-        "SELECT id, code, currency_code, initial_amount_minor, balance_minor, status, \
-         metadata, created_at, updated_at FROM gift_cards WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?;
+    let sql = format!("SELECT {GIFT_CARD_COLUMNS} FROM gift_cards WHERE id = ?");
+    let row = sqlx::query_as::<_, GiftCardRow>(&sql)
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?;
     row.map(gift_card_from_row)
         .ok_or_else(|| AppError::not_found("gift card", id))
 }
@@ -87,43 +89,62 @@ impl PaymentService {
 
         let id = format!("gift_{}", uuid::Uuid::now_v7().simple());
         let now = now_timestamp();
-        let inserted = sqlx::query(
+        // `RETURNING` keeps the response consistent with the committed row: a
+        // follow-up read could observe the card missing after a concurrent
+        // delete while its code is already spendable.
+        let sql = format!(
             "INSERT INTO gift_cards \
              (id, code, currency_code, initial_amount_minor, balance_minor, status, \
               metadata, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(&code)
-        .bind(currency.as_str())
-        .bind(input.amount_minor)
-        .bind(input.amount_minor)
-        .bind(input.metadata.to_json_string())
-        .bind(now)
-        .bind(now)
-        .execute(self.db.pool())
-        .await;
-        if let Err(error) = inserted {
-            return Err(conflict_on_unique(
+             VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?) \
+             RETURNING {GIFT_CARD_COLUMNS}"
+        );
+        let row = sqlx::query_as::<_, GiftCardRow>(&sql)
+            .bind(&id)
+            .bind(&code)
+            .bind(currency.as_str())
+            .bind(input.amount_minor)
+            .bind(input.amount_minor)
+            .bind(input.metadata.to_json_string())
+            .bind(now)
+            .bind(now)
+            .fetch_one(self.db.pool())
+            .await;
+        match row {
+            Ok(row) => Ok(gift_card_from_row(row)),
+            Err(error) => Err(conflict_on_unique(
                 error,
                 format!("gift card code {code} already exists"),
-            ));
+            )),
         }
-        self.get_gift_card(&id).await
     }
 
     /// Loads a gift card.
     pub async fn get_gift_card(&self, id: &str) -> Result<GiftCard, AppError> {
-        let row = sqlx::query_as::<_, GiftCardRow>(
-            "SELECT id, code, currency_code, initial_amount_minor, balance_minor, status, \
-             metadata, created_at, updated_at FROM gift_cards WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(database_error)?;
+        let sql = format!("SELECT {GIFT_CARD_COLUMNS} FROM gift_cards WHERE id = ?");
+        let row = sqlx::query_as::<_, GiftCardRow>(&sql)
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?;
         row.map(gift_card_from_row)
             .ok_or_else(|| AppError::not_found("gift card", id))
+    }
+
+    /// Loads a gift card by the code a customer presents.
+    ///
+    /// A caller that only holds the code (for example a checkout surface
+    /// validating a redemption) uses this to check the currency before
+    /// calling [`Self::redeem_gift_card`].
+    pub async fn find_gift_card_by_code(&self, code: &str) -> Result<GiftCard, AppError> {
+        let sql = format!("SELECT {GIFT_CARD_COLUMNS} FROM gift_cards WHERE code = ?");
+        let row = sqlx::query_as::<_, GiftCardRow>(&sql)
+            .bind(code)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(database_error)?;
+        row.map(gift_card_from_row)
+            .ok_or_else(|| AppError::not_found("gift card", code))
     }
 
     /// Lists gift cards, newest first, with offset/limit pagination.
@@ -131,11 +152,11 @@ impl PaymentService {
         &self,
         pagination: Pagination,
     ) -> Result<PageResult<GiftCard>, AppError> {
-        let rows = sqlx::query_as::<_, GiftCardRow>(
-            "SELECT id, code, currency_code, initial_amount_minor, balance_minor, status, \
-             metadata, created_at, updated_at FROM gift_cards \
-             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-        )
+        let sql = format!(
+            "SELECT {GIFT_CARD_COLUMNS} FROM gift_cards \
+             ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        );
+        let rows = sqlx::query_as::<_, GiftCardRow>(&sql)
         .bind(pagination.limit)
         .bind(pagination.offset)
         .fetch_all(self.db.pool())
@@ -174,7 +195,12 @@ impl PaymentService {
         status: GiftCardStatus,
     ) -> Result<GiftCard, AppError> {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
-        load_gift_card(&mut tx, id).await?;
+        let current = load_gift_card(&mut tx, id).await?;
+        if current.status == status {
+            // Already in the requested state: leave `updated_at` alone so the
+            // call is a true no-op.
+            return Ok(current);
+        }
         sqlx::query("UPDATE gift_cards SET status = ?, updated_at = ? WHERE id = ?")
             .bind(status.as_str())
             .bind(now_timestamp())
