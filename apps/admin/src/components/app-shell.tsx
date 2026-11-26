@@ -10,6 +10,7 @@ import {
   ChevronRight,
   ChevronsRight,
   ChevronsUpDown,
+  CreditCard,
   FileText,
   FolderTree,
   Globe2,
@@ -19,6 +20,7 @@ import {
   LayoutGrid,
   LayoutTemplate,
   LogOut,
+  Megaphone,
   Menu,
   Package,
   Palette,
@@ -29,9 +31,11 @@ import {
   Settings as SettingsIcon,
   Settings2,
   SunMoon,
+  Tags,
   TicketPercent,
   Truck,
   Users,
+  Webhook,
 } from "lucide-react";
 
 import { CommandPalette } from "@/components/command-palette";
@@ -68,6 +72,10 @@ interface NavItem {
     | "/taxonomy"
     | "/media"
     | "/promotions"
+    | "/price-lists"
+    | "/campaigns"
+    | "/webhooks"
+    | "/payments"
     | "/forms"
     | "/inbox"
     | "/pages"
@@ -124,6 +132,24 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         icon: TicketPercent,
         permission: PERMISSIONS.promotions.read,
       },
+      {
+        to: "/price-lists",
+        label: "Price lists",
+        icon: Tags,
+        permission: PERMISSIONS.promotions.read,
+      },
+      {
+        to: "/campaigns",
+        label: "Campaigns",
+        icon: Megaphone,
+        permission: PERMISSIONS.promotions.read,
+      },
+      {
+        to: "/payments",
+        label: "Payments",
+        icon: CreditCard,
+        permission: PERMISSIONS.payments.read,
+      },
       { to: "/forms", label: "Forms", icon: FileText, permission: PERMISSIONS.settings.read },
       { to: "/inbox", label: "Inbox", icon: Inbox, permission: PERMISSIONS.settings.read },
     ],
@@ -136,6 +162,12 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         to: "/notifications",
         label: "Notifications",
         icon: Bell,
+        permission: PERMISSIONS.settings.read,
+      },
+      {
+        to: "/webhooks",
+        label: "Webhooks",
+        icon: Webhook,
         permission: PERMISSIONS.settings.read,
       },
       { to: "/regions", label: "Regions", icon: Globe2, permission: PERMISSIONS.settings.read },

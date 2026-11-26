@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "@tanstack/react-router";
 
 import { PluginSecrets, PluginSettingsEditor } from "@/components/plugin-settings";
 import { useAuth } from "@/lib/auth";
@@ -14,11 +15,6 @@ import {
 
 function formatDate(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
-}
-
-/** Path of the plugin observability page; the integrator registers the route. */
-function pluginDetailHref(pluginId: string): string {
-  return `/plugins/${encodeURIComponent(pluginId)}`;
 }
 
 export function PluginsPage() {
@@ -242,16 +238,13 @@ function PluginCard({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {/*
-            Plain anchor: the detail route is registered by the integrator, so a
-            typed Link would not compile until `/plugins/$pluginId` exists.
-          */}
-          <a
-            href={pluginDetailHref(plugin.id)}
+          <Link
+            to="/plugins/$pluginId"
+            params={{ pluginId: plugin.id }}
             className="inline-flex h-8 items-center rounded-lg border border-border px-3 text-[12px] hover:bg-accent"
           >
             Observability
-          </a>
+          </Link>
           {canWrite ? (
             <button
               type="button"

@@ -1,6 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import {
   Blocks,
+  CreditCard,
   ExternalLink,
   FolderTree,
   Globe2,
@@ -9,6 +10,7 @@ import {
   LayoutGrid,
   LayoutTemplate,
   LogOut,
+  Megaphone,
   Package,
   Palette,
   Percent,
@@ -17,9 +19,11 @@ import {
   Settings2,
   SlidersHorizontal,
   SunMoon,
+  Tags,
   TicketPercent,
   Truck,
   Users,
+  Webhook,
 } from "lucide-react";
 
 import {
@@ -66,6 +70,20 @@ const PAGES: Array<{
     icon: TicketPercent,
     permission: PERMISSIONS.promotions.read,
   },
+  {
+    to: "/price-lists",
+    label: "Price lists",
+    icon: Tags,
+    permission: PERMISSIONS.promotions.read,
+  },
+  {
+    to: "/campaigns",
+    label: "Campaigns",
+    icon: Megaphone,
+    permission: PERMISSIONS.promotions.read,
+  },
+  { to: "/payments", label: "Payments", icon: CreditCard, permission: PERMISSIONS.payments.read },
+  { to: "/webhooks", label: "Webhooks", icon: Webhook, permission: PERMISSIONS.settings.read },
   { to: "/pages", label: "Pages", icon: LayoutTemplate, permission: PERMISSIONS.themes.read },
   { to: "/themes", label: "Themes", icon: Palette, permission: PERMISSIONS.themes.read },
   { to: "/regions", label: "Regions", icon: Globe2, permission: PERMISSIONS.settings.read },

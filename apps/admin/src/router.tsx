@@ -89,6 +89,18 @@ const TaxonomyPage = lazyRouteComponent(() =>
 const MediaPage = lazyRouteComponent(() =>
   import("@/pages/media").then((module) => ({ default: module.MediaPage })),
 );
+const PriceListsPage = lazyRouteComponent(() =>
+  import("@/pages/price-lists").then((module) => ({ default: module.PriceListsPage })),
+);
+const CampaignsPage = lazyRouteComponent(() =>
+  import("@/pages/campaigns").then((module) => ({ default: module.CampaignsPage })),
+);
+const WebhooksPage = lazyRouteComponent(() =>
+  import("@/pages/webhooks").then((module) => ({ default: module.WebhooksPage })),
+);
+const PaymentsPage = lazyRouteComponent(() =>
+  import("@/pages/payments").then((module) => ({ default: module.PaymentsPage })),
+);
 
 function PageLoading() {
   return (
@@ -316,6 +328,30 @@ const mediaRoute = createRoute({
   component: guarded(MediaPage, PERMISSIONS.products.read),
 });
 
+const priceListsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/price-lists",
+  component: guarded(PriceListsPage, PERMISSIONS.promotions.read),
+});
+
+const campaignsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/campaigns",
+  component: guarded(CampaignsPage, PERMISSIONS.promotions.read),
+});
+
+const webhooksRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/webhooks",
+  component: guarded(WebhooksPage, PERMISSIONS.settings.read),
+});
+
+const paymentsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/payments",
+  component: guarded(PaymentsPage, PERMISSIONS.payments.read),
+});
+
 const routeTree = rootRoute.addChildren([
   overviewRoute,
   ordersRoute,
@@ -340,6 +376,10 @@ const routeTree = rootRoute.addChildren([
   customerGroupsRoute,
   taxonomyRoute,
   mediaRoute,
+  priceListsRoute,
+  campaignsRoute,
+  webhooksRoute,
+  paymentsRoute,
   regionsRoute,
   shippingRoute,
   taxRoute,
