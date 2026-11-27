@@ -1148,6 +1148,34 @@ export interface CreateReturnRequest {
   items: ReturnItemRequest[];
 }
 
+/** Who created a return request. */
+export type ReturnSource = "admin" | "customer";
+
+/**
+ * One return in the store-wide list.
+ *
+ * Carries just enough order context to operate on it without opening the
+ * order first.
+ */
+export interface StoreReturnRow {
+  id: string;
+  order_id: string;
+  order_display_number: number;
+  customer_email: string;
+  status: ReturnStatus;
+  reason: string | null;
+  item_count: number;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+/** Query accepted by the store-wide return list. */
+export interface StoreReturnQuery {
+  limit?: number;
+  offset?: number;
+  status?: ReturnStatus;
+}
+
 /** A store-configured after-sales reason. */
 export interface ReturnReason {
   id: string;
@@ -2202,6 +2230,27 @@ export interface GiftCard {
   metadata: Metadata;
   created_at: Timestamp;
   updated_at: Timestamp;
+}
+
+/** Lifecycle of one gift card redemption. */
+export type GiftCardRedemptionStatus = "redeemed" | "reversed";
+
+/** One order a gift card paid for. */
+export interface GiftCardRedemption {
+  id: string;
+  gift_card_id: string;
+  checkout_id: string;
+  order_id: string | null;
+  amount_minor: number;
+  status: GiftCardRedemptionStatus;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  reversed_at: Timestamp | null;
+}
+
+/** A gift card together with the orders it paid for. */
+export interface GiftCardDetail extends GiftCard {
+  redemptions: GiftCardRedemption[];
 }
 
 export interface CreateGiftCardRequest {

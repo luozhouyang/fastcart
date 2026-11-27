@@ -659,6 +659,19 @@
         ],
         "type": "object"
       },
+      "ApplyGiftCardRequest": {
+        "description": "Body for applying a gift card to a cart.",
+        "properties": {
+          "code": {
+            "description": "Redemption code printed on the card.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
       "ArtifactSummary": {
         "description": "Summary of one stored artifact.",
         "properties": {
@@ -1132,6 +1145,13 @@
               "null"
             ]
           },
+          "gift_cards": {
+            "description": "Gift cards applied as a payment method.",
+            "items": {
+              "$ref": "#/components/schemas/CartGiftCard"
+            },
+            "type": "array"
+          },
           "id": {
             "$ref": "#/components/schemas/CartId",
             "description": "Cart identifier."
@@ -1215,6 +1235,7 @@
           "billing_address",
           "items",
           "discounts",
+          "gift_cards",
           "shipping_methods",
           "item_adjustments",
           "shipping_adjustments",
@@ -1312,6 +1333,42 @@
           "amount",
           "is_automatic",
           "metadata"
+        ],
+        "type": "object"
+      },
+      "CartGiftCard": {
+        "description": "A gift card applied to the cart.\n\nOnly the masked code is stored here: the full code is a bearer credential\nthat stays in the payment module, which owns the card and its live balance.\nThe balance is a snapshot refreshed when the cart is priced, so a card spent\nsomewhere else cannot be sold twice.",
+        "properties": {
+          "amount": {
+            "description": "Amount the customer asked the card to cover, in minor units.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "applied_amount": {
+            "description": "Amount this card actually contributes to the payable total, in minor\nunits: the smaller of [`Self::amount`] and [`Self::balance`], capped by\nwhat the cards applied before it leave to pay.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "balance": {
+            "description": "Card balance when the cart was last priced, in minor units.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "gift_card_id": {
+            "description": "Gift card identifier.",
+            "type": "string"
+          },
+          "masked_code": {
+            "description": "Redemption code with every character but the last four masked.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "gift_card_id",
+          "masked_code",
+          "amount",
+          "balance",
+          "applied_amount"
         ],
         "type": "object"
       },
@@ -1533,6 +1590,11 @@
             "format": "int64",
             "type": "integer"
           },
+          "gift_card_total": {
+            "description": "Amount covered by applied gift cards, capped at the total they pay for.",
+            "format": "int64",
+            "type": "integer"
+          },
           "item_discount_total": {
             "description": "Sum of line adjustment amounts, capped per line.",
             "format": "int64",
@@ -1569,7 +1631,7 @@
             "type": "integer"
           },
           "total": {
-            "description": "Payable amount: subtotal - discounts + shipping + exclusive tax.",
+            "description": "Payable amount: subtotal - discounts + shipping + exclusive tax -\ngift cards, never negative.",
             "format": "int64",
             "type": "integer"
           }
@@ -1583,6 +1645,7 @@
           "discount_total",
           "shipping_total",
           "tax_total",
+          "gift_card_total",
           "total",
           "currency_code"
         ],
@@ -2830,6 +2893,36 @@
         "required": [
           "code",
           "promotion_id"
+        ],
+        "type": "object"
+      },
+      "CreateCustomerReturnRequest": {
+        "description": "Request body for a customer return request.\n\nIt carries only what the customer chooses: a free-text or configured reason\nand the lines to return. Refund links, metadata and lifecycle state stay\nunder store control.",
+        "properties": {
+          "items": {
+            "description": "Returned lines.",
+            "items": {
+              "$ref": "#/components/schemas/CustomerReturnItemRequest"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Optional free-text reason for the return, used when `reason_id` is\nabsent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason_id": {
+            "description": "Configured return reason whose label is snapshotted onto the return.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
         ],
         "type": "object"
       },
@@ -4689,6 +4782,179 @@
         ],
         "type": "object"
       },
+      "CustomerReturnItemRequest": {
+        "description": "One returned line in a customer return request.",
+        "properties": {
+          "order_item_id": {
+            "description": "Historical order line being returned.",
+            "type": "string"
+          },
+          "quantity": {
+            "description": "Requested return quantity.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Optional line-level reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "order_item_id",
+          "quantity"
+        ],
+        "type": "object"
+      },
+      "CustomerReturnItemView": {
+        "description": "One line of a customer-visible return.\n\nMirrors [`fastcart_module_order::OrderReturnItem`] without the internal\n`return_id` back-reference; the line identifier and quantities are what the\ncustomer needs to track the request.",
+        "properties": {
+          "created_at": {
+            "description": "Creation timestamp in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Line identifier.",
+            "type": "string"
+          },
+          "order_item_id": {
+            "description": "Historical order line being returned.",
+            "type": "string"
+          },
+          "quantity": {
+            "description": "Requested return quantity.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Optional line-level reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "received_quantity": {
+            "description": "Quantity received by the store so far.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReturnItemStatus",
+            "description": "Line state."
+          },
+          "updated_at": {
+            "description": "Last update timestamp in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "written_off_quantity": {
+            "description": "Quantity written off instead of restocked.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "order_item_id",
+          "quantity",
+          "received_quantity",
+          "written_off_quantity",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "CustomerReturnView": {
+        "description": "A return as shown to the customer who requested it.\n\nThis is deliberately narrower than [`fastcart_module_order::OrderReturn`].\nThe domain record carries admin-only fields — the linked `refund_id` and the\nfree-form `metadata`, which store staff use for internal notes — and the\nstorefront must not leak them. The lifecycle status, reason and quantities\nare all the customer needs to follow the request.",
+        "properties": {
+          "canceled_at": {
+            "description": "Cancellation timestamp in Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "Creation timestamp in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Return identifier.",
+            "type": "string"
+          },
+          "items": {
+            "description": "Returned lines.",
+            "items": {
+              "$ref": "#/components/schemas/CustomerReturnItemView"
+            },
+            "type": "array"
+          },
+          "order_id": {
+            "description": "Owning order.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason recorded for the return, free text or a configured label.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "received_at": {
+            "description": "Timestamp at which every requested item was received.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "requested_at": {
+            "description": "Submission timestamp in Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/ReturnSource",
+            "description": "Who created the return."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReturnStatus",
+            "description": "Return lifecycle state."
+          },
+          "updated_at": {
+            "description": "Last update timestamp in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "written_off_at": {
+            "description": "Timestamp at which the return was written off.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "order_id",
+          "status",
+          "source",
+          "created_at",
+          "updated_at",
+          "items"
+        ],
+        "type": "object"
+      },
       "CustomerSessionResponse": {
         "description": "Session response body. Tokens are delivered as cookies.",
         "properties": {
@@ -5532,6 +5798,85 @@
           "balance_minor",
           "status",
           "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "GiftCardDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/GiftCard"
+          },
+          {
+            "properties": {
+              "redemptions": {
+                "description": "Redemptions recorded against the card, newest first.",
+                "items": {
+                  "$ref": "#/components/schemas/GiftCardRedemptionDto"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "redemptions"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "A gift card with the orders it paid for.\n\nThe detail is only returned by the single-card read: listing every card\ntogether with its ledger would turn one page into an unbounded join."
+      },
+      "GiftCardRedemptionDto": {
+        "description": "One order a gift card paid for.\n\nThe `order_id` is filled in when the checkout is placed, so an operator can\nreconcile a card against the orders that spent it.",
+        "properties": {
+          "amount_minor": {
+            "description": "Amount taken from the card, in minor units.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "checkout_id": {
+            "description": "Checkout the card paid for.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "Creation timestamp in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Redemption identifier.",
+            "type": "string"
+          },
+          "order_id": {
+            "description": "Order the checkout was placed as, once it exists.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reversed_at": {
+            "description": "Reversal timestamp in Unix seconds, when the redemption was reversed.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "`redeemed` while the money is spent, `reversed` after a failed completion.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Last update timestamp in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "checkout_id",
+          "amount_minor",
+          "status",
           "created_at",
           "updated_at"
         ],
@@ -8746,6 +9091,10 @@
               }
             ]
           },
+          "source": {
+            "$ref": "#/components/schemas/ReturnSource",
+            "description": "Who created the return: store staff or the customer."
+          },
           "status": {
             "$ref": "#/components/schemas/ReturnStatus",
             "description": "Return lifecycle state."
@@ -8770,6 +9119,7 @@
           "id",
           "order_id",
           "status",
+          "source",
           "metadata",
           "created_at",
           "updated_at",
@@ -11817,6 +12167,81 @@
                 "locale",
                 "currency_code",
                 "timezone",
+                "created_at",
+                "updated_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Pagination metadata."
+          }
+        },
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "type": "object"
+      },
+      "PageResponse_StoreReturnRow": {
+        "description": "Paginated API response.",
+        "properties": {
+          "data": {
+            "description": "Page records.",
+            "items": {
+              "description": "One row of the store-wide return list.\n\nThe list is an operational view across every order, so a row carries the\norder context the table shows next to the return itself. The returned lines\nare summarized by [`StoreReturnRow::item_count`] instead of being loaded.",
+              "properties": {
+                "created_at": {
+                  "$ref": "#/components/schemas/i64",
+                  "description": "Creation timestamp in Unix seconds."
+                },
+                "customer_email": {
+                  "description": "Contact email snapshotted on the order.",
+                  "type": "string"
+                },
+                "id": {
+                  "$ref": "#/components/schemas/ReturnId",
+                  "description": "Return identifier."
+                },
+                "item_count": {
+                  "description": "Number of lines in the return.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "order_display_number": {
+                  "description": "Sequential order number shown to operators.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "order_id": {
+                  "$ref": "#/components/schemas/OrderId",
+                  "description": "Owning order."
+                },
+                "reason": {
+                  "description": "Optional reason for the return.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "$ref": "#/components/schemas/ReturnStatus",
+                  "description": "Return lifecycle state."
+                },
+                "updated_at": {
+                  "$ref": "#/components/schemas/i64",
+                  "description": "Last update timestamp in Unix seconds."
+                }
+              },
+              "required": [
+                "id",
+                "order_id",
+                "order_display_number",
+                "customer_email",
+                "status",
+                "item_count",
                 "created_at",
                 "updated_at"
               ],
@@ -15307,6 +15732,14 @@
         ],
         "type": "object"
       },
+      "ReturnSource": {
+        "description": "Who created a return request.",
+        "enum": [
+          "admin",
+          "customer"
+        ],
+        "type": "string"
+      },
       "ReturnStatus": {
         "description": "Lifecycle state of a return request.",
         "enum": [
@@ -16204,6 +16637,63 @@
         ],
         "description": "A product enriched with an optional calculated price."
       },
+      "StoreReturnRow": {
+        "description": "One row of the store-wide return list.\n\nThe list is an operational view across every order, so a row carries the\norder context the table shows next to the return itself. The returned lines\nare summarized by [`StoreReturnRow::item_count`] instead of being loaded.",
+        "properties": {
+          "created_at": {
+            "$ref": "#/components/schemas/i64",
+            "description": "Creation timestamp in Unix seconds."
+          },
+          "customer_email": {
+            "description": "Contact email snapshotted on the order.",
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ReturnId",
+            "description": "Return identifier."
+          },
+          "item_count": {
+            "description": "Number of lines in the return.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "order_display_number": {
+            "description": "Sequential order number shown to operators.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "order_id": {
+            "$ref": "#/components/schemas/OrderId",
+            "description": "Owning order."
+          },
+          "reason": {
+            "description": "Optional reason for the return.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReturnStatus",
+            "description": "Return lifecycle state."
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/i64",
+            "description": "Last update timestamp in Unix seconds."
+          }
+        },
+        "required": [
+          "id",
+          "order_id",
+          "order_display_number",
+          "customer_email",
+          "status",
+          "item_count",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "StoreTheme": {
         "description": "The active storefront theme exposed to public storefronts.",
         "properties": {
@@ -16773,6 +17263,11 @@
           },
           "discount_total": {
             "description": "Total discounts applied.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "gift_card_total": {
+            "description": "Amount paid by applied gift cards.",
             "format": "int64",
             "type": "integer"
           },
@@ -33292,7 +33787,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GiftCard"
+                  "$ref": "#/components/schemas/GiftCardDetail"
                 }
               }
             }
@@ -33376,7 +33871,7 @@
             "apiToken": []
           }
         ],
-        "summary": "Get a gift card",
+        "summary": "Get a gift card with the orders it paid for",
         "tags": [
           "Admin"
         ]
@@ -52066,6 +52561,144 @@
         ]
       }
     },
+    "/api/v1/admin/returns": {
+      "get": {
+        "operationId": "get_api_v1_admin_returns",
+        "parameters": [
+          {
+            "description": "Page size, 1-100.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Records to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Restricts the list to one lifecycle state.",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ReturnStatus"
+            }
+          },
+          {
+            "description": "Store selected by the authenticated administrator.",
+            "in": "header",
+            "name": "x-store-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_StoreReturnRow"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "adminSession": []
+          },
+          {
+            "apiToken": []
+          }
+        ],
+        "summary": "List returns across every order in the store",
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
     "/api/v1/admin/sales-channels": {
       "get": {
         "operationId": "get_api_v1_admin_sales_channels",
@@ -65854,6 +66487,254 @@
         ]
       }
     },
+    "/api/v1/store/carts/{cart_id}/gift-cards": {
+      "post": {
+        "operationId": "post_api_v1_store_carts_by_cart_id_gift_cards",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cart_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplyGiftCardRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "customerSession": []
+          },
+          {}
+        ],
+        "summary": "Apply a gift card to a cart",
+        "tags": [
+          "Store"
+        ]
+      }
+    },
+    "/api/v1/store/carts/{cart_id}/gift-cards/{gift_card_id}": {
+      "delete": {
+        "operationId": "delete_api_v1_store_carts_by_cart_id_gift_cards_by_gift_card_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cart_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "gift_card_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "customerSession": []
+          },
+          {}
+        ],
+        "summary": "Remove a gift card from a cart",
+        "tags": [
+          "Store"
+        ]
+      }
+    },
     "/api/v1/store/carts/{cart_id}/items": {
       "delete": {
         "operationId": "delete_api_v1_store_carts_by_cart_id_items",
@@ -69104,6 +69985,349 @@
           }
         ],
         "summary": "Get one of the current customer's orders",
+        "tags": [
+          "Store"
+        ]
+      }
+    },
+    "/api/v1/store/customers/me/orders/{order_id}/returns": {
+      "get": {
+        "operationId": "get_api_v1_store_customers_me_orders_by_order_id_returns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CustomerReturnView"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "customerSession": []
+          }
+        ],
+        "summary": "List the current customer's returns for an order",
+        "tags": [
+          "Store"
+        ]
+      },
+      "post": {
+        "operationId": "post_api_v1_store_customers_me_orders_by_order_id_returns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Double-submit CSRF token; must match the session CSRF cookie.",
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCustomerReturnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerReturnView"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "customerSession": []
+          }
+        ],
+        "summary": "Request a return for one of the current customer's orders",
+        "tags": [
+          "Store"
+        ]
+      }
+    },
+    "/api/v1/store/customers/me/orders/{order_id}/returns/{return_id}": {
+      "get": {
+        "operationId": "get_api_v1_store_customers_me_orders_by_order_id_returns_by_return_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "return_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerReturnView"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Permission denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "State conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "customerSession": []
+          }
+        ],
+        "summary": "Get one of the current customer's returns",
         "tags": [
           "Store"
         ]

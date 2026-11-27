@@ -111,6 +111,7 @@ import type {
   PriceListQuery,
   PrimaryDomainRequest,
   GiftCard,
+  GiftCardDetail,
   Product,
   ProductImage,
   ProductListQuery,
@@ -144,6 +145,8 @@ import type {
   ShippingRate,
   Store,
   StoreLocale,
+  StoreReturnQuery,
+  StoreReturnRow,
   StoreSettings,
   Tag,
   TagRequest,
@@ -1175,11 +1178,18 @@ export interface AdminClient {
     };
     giftCards: {
       list(query?: PaginationQuery, options?: AdminRequestOptions): Promise<PageResult<GiftCard>>;
-      get(id: string, options?: AdminRequestOptions): Promise<GiftCard>;
+      get(id: string, options?: AdminRequestOptions): Promise<GiftCardDetail>;
       create(body: CreateGiftCardRequest, options?: AdminRequestOptions): Promise<GiftCard>;
       disable(id: string, options?: AdminRequestOptions): Promise<GiftCard>;
       enable(id: string, options?: AdminRequestOptions): Promise<GiftCard>;
     };
+  };
+
+  returns: {
+    list(
+      query?: StoreReturnQuery,
+      options?: AdminRequestOptions,
+    ): Promise<PageResult<StoreReturnRow>>;
   };
 
   returnReasons: {
@@ -2872,7 +2882,7 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
             query,
           }),
         get: (giftCardId, requestOptions) =>
-          request<GiftCard>(`/api/v1/admin/gift-cards/${id(giftCardId)}`, requestOptions),
+          request<GiftCardDetail>(`/api/v1/admin/gift-cards/${id(giftCardId)}`, requestOptions),
         create: (body, requestOptions) =>
           request<GiftCard>("/api/v1/admin/gift-cards", {
             ...requestOptions,
@@ -2890,6 +2900,14 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
             method: "POST",
           }),
       },
+    },
+
+    returns: {
+      list: (query, requestOptions) =>
+        request<PageResult<StoreReturnRow>>("/api/v1/admin/returns", {
+          ...requestOptions,
+          query,
+        }),
     },
 
     returnReasons: {
