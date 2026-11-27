@@ -5,8 +5,7 @@ use std::collections::{HashMap, HashSet};
 use fastcart_infrastructure::database_error;
 use fastcart_kernel::{
     AppError, CustomerId, EventId, LineItemId, OrderId, PageResult, Pagination, RefundId, ReturnId,
-    Timestamp,
-    now_timestamp, validate_metadata, validate_quantity,
+    Timestamp, now_timestamp, validate_metadata, validate_quantity,
 };
 use fastcart_module_inventory::{InventoryService, ReverseWriteOffRequest};
 
