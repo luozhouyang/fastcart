@@ -20,6 +20,86 @@ pub const LATENCY_BUCKETS_SECONDS: [f64; 12] = [
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
 ];
 
+/// Coarse API namespace used as a bounded metrics label.
+///
+/// Only fixed route prefixes are recognized, so arbitrary request paths cannot
+/// create new series.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpNamespace {
+    /// Admin API.
+    Admin,
+    /// Storefront API.
+    Store,
+    /// Inbound payment and platform webhooks.
+    Webhooks,
+    /// Platform administration API.
+    Platform,
+    /// Health and metrics endpoints.
+    Health,
+    /// Everything else, including storefront SSR pages.
+    Other,
+}
+
+impl HttpNamespace {
+    /// Every namespace in rendering order.
+    pub const ALL: [Self; 6] = [
+        Self::Admin,
+        Self::Store,
+        Self::Webhooks,
+        Self::Platform,
+        Self::Health,
+        Self::Other,
+    ];
+
+    /// Stable label value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Store => "store",
+            Self::Webhooks => "webhooks",
+            Self::Platform => "platform",
+            Self::Health => "health",
+            Self::Other => "other",
+        }
+    }
+
+    /// Classifies a request path into one of the bounded namespaces.
+    #[must_use]
+    pub fn classify(path: &str) -> Self {
+        // Match whole path segments only: `/api/v1/administrators` is not the
+        // admin API, and `/api/v1/storefront` is not the store API.
+        let under = |prefix: &str| {
+            path.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        };
+        if under("/api/v1/admin") {
+            Self::Admin
+        } else if under("/api/v1/store") {
+            Self::Store
+        } else if under("/api/v1/webhooks") {
+            Self::Webhooks
+        } else if under("/api/v1/platform") {
+            Self::Platform
+        } else if under("/health") || path == "/metrics" {
+            Self::Health
+        } else {
+            Self::Other
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Admin => 0,
+            Self::Store => 1,
+            Self::Webhooks => 2,
+            Self::Platform => 3,
+            Self::Health => 4,
+            Self::Other => 5,
+        }
+    }
+}
+
 /// Process-wide HTTP metrics.
 #[derive(Debug)]
 pub struct Metrics {
@@ -30,6 +110,9 @@ pub struct Metrics {
     status_3xx: AtomicU64,
     status_4xx: AtomicU64,
     status_5xx: AtomicU64,
+    requests_by_namespace: [AtomicU64; HttpNamespace::ALL.len()],
+    checkout_completions_total: AtomicU64,
+    checkout_failures_total: AtomicU64,
     bucket_counts: [AtomicU64; LATENCY_BUCKETS_SECONDS.len()],
     duration_micros_total: AtomicU64,
     storefront_data_failures_total: AtomicU64,
@@ -72,6 +155,9 @@ impl Metrics {
             status_3xx: AtomicU64::new(0),
             status_4xx: AtomicU64::new(0),
             status_5xx: AtomicU64::new(0),
+            requests_by_namespace: std::array::from_fn(|_| AtomicU64::new(0)),
+            checkout_completions_total: AtomicU64::new(0),
+            checkout_failures_total: AtomicU64::new(0),
             bucket_counts: std::array::from_fn(|_| AtomicU64::new(0)),
             duration_micros_total: AtomicU64::new(0),
             storefront_data_failures_total: AtomicU64::new(0),
@@ -189,8 +275,14 @@ impl Metrics {
 
     /// Marks a request as finished and records its status and duration.
     pub fn end_request(&self, status: u16, duration: Duration) {
+        self.end_request_in(HttpNamespace::Other, status, duration);
+    }
+
+    /// Marks a request as finished in a known namespace.
+    pub fn end_request_in(&self, namespace: HttpNamespace, status: u16, duration: Duration) {
         self.requests_in_flight.fetch_sub(1, Ordering::Relaxed);
         self.requests_total.fetch_add(1, Ordering::Relaxed);
+        self.requests_by_namespace[namespace.index()].fetch_add(1, Ordering::Relaxed);
         if status >= 400 {
             self.errors_total.fetch_add(1, Ordering::Relaxed);
         }
@@ -213,6 +305,17 @@ impl Metrics {
             u64::try_from(duration.as_micros()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
+    }
+
+    /// Records a checkout completion that produced an order.
+    pub fn record_checkout_completion(&self) {
+        self.checkout_completions_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a checkout completion attempt that failed.
+    pub fn record_checkout_failure(&self) {
+        self.checkout_failures_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records one plugin request forwarded to the host.
@@ -272,6 +375,42 @@ impl Metrics {
         );
         let _ = writeln!(output, "# TYPE fastcart_http_requests_in_flight gauge");
         let _ = writeln!(output, "fastcart_http_requests_in_flight {in_flight}");
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_http_requests_by_namespace_total HTTP requests by API namespace."
+        );
+        let _ = writeln!(
+            output,
+            "# TYPE fastcart_http_requests_by_namespace_total counter"
+        );
+        for namespace in HttpNamespace::ALL {
+            let _ = writeln!(
+                output,
+                "fastcart_http_requests_by_namespace_total{{namespace=\"{}\"}} {}",
+                namespace.as_str(),
+                self.requests_by_namespace[namespace.index()].load(Ordering::Relaxed)
+            );
+        }
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_checkout_completions_total Completed checkouts that produced an order."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_checkout_completions_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_checkout_completions_total {}",
+            self.checkout_completions_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            output,
+            "# HELP fastcart_checkout_failures_total Checkout completion attempts that failed."
+        );
+        let _ = writeln!(output, "# TYPE fastcart_checkout_failures_total counter");
+        let _ = writeln!(
+            output,
+            "fastcart_checkout_failures_total {}",
+            self.checkout_failures_total.load(Ordering::Relaxed)
+        );
         let _ = writeln!(
             output,
             "# HELP fastcart_storefront_data_failures_total Storefront renders that degraded because binding resolution failed."
@@ -556,9 +695,10 @@ pub async fn metrics_middleware(
     next: Next,
 ) -> Response {
     let started = Instant::now();
+    let namespace = HttpNamespace::classify(request.uri().path());
     metrics.begin_request();
     let response = next.run(request).await;
-    metrics.end_request(response.status().as_u16(), started.elapsed());
+    metrics.end_request_in(namespace, response.status().as_u16(), started.elapsed());
     response
 }
 
@@ -574,7 +714,7 @@ mod tests {
     use axum::routing::get;
     use tower::ServiceExt;
 
-    use super::{Metrics, metrics_middleware};
+    use super::{HttpNamespace, Metrics, metrics_middleware};
 
     #[test]
     fn renders_counters_and_cumulative_buckets() {
@@ -612,12 +752,78 @@ mod tests {
         assert!(rendered.contains("fastcart_http_request_duration_seconds_count 4"));
     }
 
+    #[test]
+    fn classifies_paths_into_bounded_namespaces() {
+        assert_eq!(
+            HttpNamespace::classify("/api/v1/admin/products"),
+            HttpNamespace::Admin
+        );
+        assert_eq!(
+            HttpNamespace::classify("/api/v1/admin"),
+            HttpNamespace::Admin
+        );
+        assert_eq!(
+            HttpNamespace::classify("/api/v1/store/carts"),
+            HttpNamespace::Store
+        );
+        assert_eq!(
+            HttpNamespace::classify("/api/v1/webhooks/stripe"),
+            HttpNamespace::Webhooks
+        );
+        assert_eq!(
+            HttpNamespace::classify("/api/v1/platform/stores"),
+            HttpNamespace::Platform
+        );
+        assert_eq!(
+            HttpNamespace::classify("/health/live"),
+            HttpNamespace::Health
+        );
+        assert_eq!(HttpNamespace::classify("/metrics"), HttpNamespace::Health);
+        // Only whole segments match, and unknown paths stay in `other`.
+        assert_eq!(
+            HttpNamespace::classify("/api/v1/administrators"),
+            HttpNamespace::Other
+        );
+        assert_eq!(
+            HttpNamespace::classify("/api/v1/storefront"),
+            HttpNamespace::Other
+        );
+        assert_eq!(HttpNamespace::classify("/"), HttpNamespace::Other);
+    }
+
+    #[test]
+    fn renders_namespace_and_checkout_counters() {
+        let metrics = Metrics::new();
+        metrics.begin_request();
+        metrics.end_request_in(HttpNamespace::Admin, 200, Duration::from_millis(1));
+        metrics.begin_request();
+        metrics.end_request_in(HttpNamespace::Store, 500, Duration::from_millis(1));
+        metrics.record_checkout_completion();
+        metrics.record_checkout_completion();
+        metrics.record_checkout_failure();
+
+        let rendered = metrics.render();
+        assert!(
+            rendered.contains("fastcart_http_requests_by_namespace_total{namespace=\"admin\"} 1")
+        );
+        assert!(
+            rendered.contains("fastcart_http_requests_by_namespace_total{namespace=\"store\"} 1")
+        );
+        assert!(
+            rendered.contains("fastcart_http_requests_by_namespace_total{namespace=\"other\"} 0")
+        );
+        assert!(rendered.contains("fastcart_checkout_completions_total 2"));
+        assert!(rendered.contains("fastcart_checkout_failures_total 1"));
+        assert!(rendered.contains("fastcart_http_requests_total 2"));
+    }
+
     #[tokio::test]
     async fn middleware_records_real_responses() {
         let metrics = Arc::new(Metrics::new());
         let app = Router::new()
             .route("/ok", get(|| async { StatusCode::OK }))
             .route("/fail", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+            .route("/api/v1/admin/ping", get(|| async { StatusCode::OK }))
             .layer(middleware::from_fn_with_state(
                 metrics.clone(),
                 metrics_middleware,
@@ -630,15 +836,32 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let response = app
+            .clone()
             .oneshot(Request::builder().uri("/fail").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/ping")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
 
         let rendered = metrics.render();
-        assert!(rendered.contains("fastcart_http_requests_total 2"));
+        assert!(rendered.contains("fastcart_http_requests_total 3"));
         assert!(rendered.contains("fastcart_http_errors_total 1"));
-        assert!(rendered.contains("fastcart_http_response_status_total{class=\"2xx\"} 1"));
+        assert!(rendered.contains("fastcart_http_response_status_total{class=\"2xx\"} 2"));
         assert!(rendered.contains("fastcart_http_response_status_total{class=\"5xx\"} 1"));
+        assert!(
+            rendered.contains("fastcart_http_requests_by_namespace_total{namespace=\"admin\"} 1")
+        );
+        assert!(
+            rendered.contains("fastcart_http_requests_by_namespace_total{namespace=\"other\"} 2")
+        );
     }
 }

@@ -396,6 +396,9 @@ async fn a_card_spent_somewhere_else_rejects_the_completion() {
         checkout["checkout"]["status"], "order_placed",
         "the rejected completion must not place an order"
     );
+    let rendered = fixture._context.metrics.render();
+    assert!(rendered.contains("fastcart_checkout_failures_total 1"));
+    assert!(rendered.contains("fastcart_checkout_completions_total 0"));
 
     let card = fixture
         .payment()

@@ -120,7 +120,21 @@ pub(super) async fn complete_checkout(
         request.province_code,
     )
     .await?;
-    let result = workflow.complete(&checkout_id, &cart_context).await?;
+    let result = match workflow.complete(&checkout_id, &cart_context).await {
+        Ok(result) => {
+            context.metrics.record_checkout_completion();
+            result
+        }
+        Err(error) => {
+            context.metrics.record_checkout_failure();
+            return Err(error.into());
+        }
+    };
+    tracing::info!(
+        checkout_id = %checkout_id,
+        order_id = %result.order.id,
+        "checkout completed"
+    );
     // The order is already committed; a settings read failure must not turn a
     // successful checkout into an error. Default to sending the email.
     let confirmation_emails = match StoreService::new(db.clone())

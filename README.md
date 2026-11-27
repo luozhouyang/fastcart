@@ -65,7 +65,7 @@ Fastcart aims to deliver the developer experience of modern headless commerce pl
 - Storefront SSR: the accepted target is a framework-agnostic universal runtime. `fastcart-serve` resolves the store, strips client-supplied internal headers, injects trusted context and forwards the request to a process-isolated `workerd` runtime, which executes a standard Fetch-handler artifact and calls the internal Commerce API. A theme is a deployment artifact built with any supported framework: the theme registry stores settings and activation, while rendering and data access belong to the artifact ([ADR 0008](.livingdocs/adr/0008-themes-as-deployment-artifacts.md)).
 - Periodic maintenance: cart, reservation and checkout expiry; outbox dispatch; webhook delivery; email jobs; simple job handlers.
 - Store-scoped Moka cache with generation-based invalidation.
-- Prometheus-compatible `/metrics` with latency histograms, plus baseline security response headers.
+- Prometheus-compatible `/metrics` with latency histograms, namespace-labelled request counters, rate-limit rejection counters, checkout/plugin/SSR counters and baseline security response headers.
 - OpenAPI 3.1 schemas generated from the Rust response types with `utoipa`, with a cached document and schema-reference validation.
 - Local object storage with path-traversal protection.
 - Plugin manifest registry with capability checks and dependency resolution.
@@ -365,6 +365,14 @@ directory in place.
 `/metrics` now includes `fastcart_ssr_requests_total`,
 `fastcart_ssr_errors_total`, `fastcart_ssr_cache_hits_total`,
 `fastcart_ssr_cache_misses_total` and `fastcart_ssr_deployments`.
+
+Request counters are also broken down by a bounded namespace label:
+`fastcart_http_requests_by_namespace_total{namespace="admin|store|webhooks|platform|health|other"}`.
+Checkout outcomes are exported as `fastcart_checkout_completions_total` and
+`fastcart_checkout_failures_total`. Every rate limiter reports cumulative
+`fastcart_rate_limit_rejections_total{limiter=...}` and its current key count as
+`fastcart_rate_limit_entries{limiter=...}`; limiter names come from a fixed list,
+so labels cannot grow with traffic.
 
 Workers can opt into route-level SSR caching by returning
 `Cache-Control: public, s-maxage=<seconds>` (or `max-age`). Rust caches only

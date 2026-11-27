@@ -74,10 +74,20 @@ pub struct ReadinessStatus {
     responses((status = 200, body = String, content_type = "text/plain"))
 )]
 async fn metrics(State(context): State<Arc<AppContext>>) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        context.metrics.render(),
-    )
+    let mut body = context.metrics.render();
+    body.push_str(&fastcart_http::rate_limit::render_rate_limit_rejections([
+        ("cart_create", &context.cart_create_limiter),
+        ("cart_write", &context.cart_write_limiter),
+        ("checkout", &context.checkout_limiter),
+        ("preview", &context.preview_limiter),
+        ("webhook", &context.webhook_limiter),
+        ("login", &context.login_limiter),
+        ("customer_email", &context.customer_email_limiter),
+        ("inquiry", &context.inquiry_limiter),
+        ("upload", &context.upload_limiter),
+        ("plugin_apps", &context.plugin_apps_limiter),
+    ]));
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }
 
 #[utoipa::path(

@@ -162,6 +162,22 @@ async fn fresh_store_completes_checkout_with_provisioned_shipping() {
             .unwrap(),
         2
     );
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("fastcart_checkout_completions_total 1"));
+    assert!(body.contains("fastcart_http_requests_by_namespace_total{namespace=\"store\"}"));
 }
 
 #[tokio::test]

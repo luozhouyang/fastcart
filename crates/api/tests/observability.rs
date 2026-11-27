@@ -65,4 +65,8 @@ async fn metrics_and_security_headers_are_exposed() {
     assert!(metrics.contains("fastcart_http_requests_total"));
     assert!(metrics.contains("fastcart_http_request_duration_seconds_bucket"));
     assert!(metrics.contains("fastcart_http_response_status_total{class=\"2xx\"}"));
+    assert!(metrics.contains("fastcart_http_requests_by_namespace_total{namespace=\"health\"} 1"));
+    assert!(metrics.contains("fastcart_checkout_completions_total"));
+    assert!(metrics.contains("fastcart_checkout_failures_total"));
+    assert!(metrics.contains("fastcart_rate_limit_rejections_total{limiter=\"checkout\"} 0"));
 }
