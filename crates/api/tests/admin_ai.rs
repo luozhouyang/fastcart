@@ -2,9 +2,9 @@
 //!
 //! These tests drive the real HTTP surface: authentication, the
 //! `settings.read` / `settings.write` permissions, the tool catalog, task
-//! creation and the approval-gated state machine. No model is called and no
-//! tool is executed: a task only records its invocation and moves through the
-//! transitions defined by `fastcart-ai`.
+//! creation, deterministic tool execution and the approval-gated state
+//! machine. Read-only tools run when the task is created; mutating tools run
+//! only after approval. No model is called.
 
 use std::sync::Arc;
 
@@ -12,8 +12,10 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use fastcart_api::{ApiConfig, AppContext, build_router};
-use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabaseManager};
-use fastcart_kernel::StoreId;
+use fastcart_infrastructure::{DatabaseOptions, StoreCache, StoreDatabase, StoreDatabaseManager};
+use fastcart_kernel::{Metadata, StoreId};
+use fastcart_module_content::{ContentService, CreatePageInput, Page};
+use fastcart_module_order::{CreateOrderInput, CreateOrderItemInput, Order, OrderService};
 use fastcart_platform::{CreateUserInput, PlatformStore};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -215,6 +217,77 @@ impl Fixture {
         .await;
         (status, value)
     }
+
+    /// Opens the store database used by the running router.
+    async fn db(&self, store: &StoreId) -> StoreDatabase {
+        self.context.databases.database(store).await.unwrap()
+    }
+
+    /// Creates a page through the content service.
+    async fn create_page(&self, store: &StoreId, title: &str, handle: &str) -> Page {
+        ContentService::new(self.db(store).await)
+            .create_page(CreatePageInput {
+                title: title.to_owned(),
+                handle: Some(handle.to_owned()),
+                page_type: Some("custom".to_owned()),
+                body: json!({
+                    "schema_version": 1,
+                    "content": [{
+                        "type": "RichText",
+                        "props": {"id": "rich-1", "body": "hello"}
+                    }]
+                }),
+                seo: json!({"title": title}),
+                metadata: Metadata::empty(),
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Seeds one order through the order service.
+    async fn seed_order(&self, store: &StoreId) -> Order {
+        OrderService::new(self.db(store).await)
+            .create_order(CreateOrderInput {
+                email: "buyer@example.com".to_owned(),
+                currency_code: "USD".to_owned(),
+                items: vec![CreateOrderItemInput {
+                    product_title: "Widget".to_owned(),
+                    unit_price: 1_000,
+                    quantity: 2,
+                    requires_shipping: false,
+                    ..CreateOrderItemInput::default()
+                }],
+                subtotal: 2_000,
+                total: 2_000,
+                shipping_address: json!({}),
+                billing_address: json!({}),
+                ..CreateOrderInput::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Creates a task through the HTTP surface and returns its id.
+    async fn create_task(&self, tool: &str, input: Value) -> (StatusCode, Value) {
+        self.admin(
+            "POST",
+            "/api/v1/admin/ai/tasks",
+            Some(json!({"tool": tool, "input": input})),
+            &self.store_a,
+        )
+        .await
+    }
+
+    /// Approves a task through the HTTP surface.
+    async fn approve(&self, task_id: &str) -> (StatusCode, Value) {
+        self.admin(
+            "POST",
+            &format!("/api/v1/admin/ai/tasks/{task_id}/approve"),
+            None,
+            &self.store_a,
+        )
+        .await
+    }
 }
 
 #[tokio::test]
@@ -265,23 +338,25 @@ async fn tool_catalog_lists_the_stable_builtin_tools() {
 #[tokio::test]
 async fn task_lifecycle_is_recorded_and_approval_gated() {
     let fixture = fixture().await;
+    let page = fixture
+        .create_page(&fixture.store_a, "About", "about")
+        .await;
 
     let (status, created) = fixture
-        .admin(
-            "POST",
-            "/api/v1/admin/ai/tasks",
-            Some(json!({
-                "tool": "page.update",
-                "input": {"id": "page_1", "title": "Draft"}
-            })),
-            &fixture.store_a,
+        .create_task(
+            "page.update",
+            json!({"id": page.id.as_str(), "title": "Draft"}),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert!(created["id"].as_str().unwrap().starts_with("task_"));
     assert_eq!(created["tool"], "page.update");
-    assert_eq!(created["status"], "pending");
-    assert_eq!(created["input"], json!({"id": "page_1", "title": "Draft"}));
+    assert_eq!(created["status"], "pending", "mutations wait for approval");
+    assert_eq!(
+        created["input"],
+        json!({"id": page.id.as_str(), "title": "Draft"})
+    );
+    assert!(created["output"].is_null());
     assert!(created["created_by"].is_string(), "{created}");
     let task_id = created["id"].as_str().unwrap().to_owned();
 
@@ -296,30 +371,37 @@ async fn task_lifecycle_is_recorded_and_approval_gated() {
     assert_eq!(status, StatusCode::OK, "{fetched}");
     assert_eq!(fetched["status"], "pending");
 
-    let (status, page) = fixture
+    let (status, page_list) = fixture
         .admin("GET", "/api/v1/admin/ai/tasks", None, &fixture.store_a)
         .await;
-    assert_eq!(status, StatusCode::OK, "{page}");
-    assert_eq!(page["pagination"]["total"], 1);
-    assert_eq!(page["data"][0]["id"], task_id.as_str());
+    assert_eq!(status, StatusCode::OK, "{page_list}");
+    assert_eq!(page_list["pagination"]["total"], 1);
+    assert_eq!(page_list["data"][0]["id"], task_id.as_str());
 
-    // Approval resumes a pending task.
-    let (status, approved) = fixture
-        .admin(
-            "POST",
-            &format!("/api/v1/admin/ai/tasks/{task_id}/approve"),
-            None,
-            &fixture.store_a,
-        )
-        .await;
+    // Approval claims the task, executes it and records the terminal state.
+    let (status, approved) = fixture.approve(&task_id).await;
     assert_eq!(status, StatusCode::OK, "{approved}");
-    assert_eq!(approved["status"], "running");
+    assert_eq!(approved["status"], "succeeded", "{approved}");
+    assert_eq!(approved["output"]["title"], "Draft");
+    assert!(approved["error"].is_null());
 
-    // Rejection cancels a running task; the terminal state is final.
+    // A terminal task cannot be approved a second time.
+    let (status, conflict) = fixture.approve(&task_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "CONFLICT");
+    assert_eq!(conflict["error"]["details"]["from"], "succeeded");
+    assert_eq!(conflict["error"]["details"]["to"], "running");
+
+    // Rejection keeps cancelling a task that has not run.
+    let (status, pending) = fixture
+        .create_task("page.publish", json!({"id": page.id.as_str()}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{pending}");
+    let publish_id = pending["id"].as_str().unwrap().to_owned();
     let (status, rejected) = fixture
         .admin(
             "POST",
-            &format!("/api/v1/admin/ai/tasks/{task_id}/reject"),
+            &format!("/api/v1/admin/ai/tasks/{publish_id}/reject"),
             None,
             &fixture.store_a,
         )
@@ -327,16 +409,8 @@ async fn task_lifecycle_is_recorded_and_approval_gated() {
     assert_eq!(status, StatusCode::OK, "{rejected}");
     assert_eq!(rejected["status"], "cancelled");
 
-    let (status, conflict) = fixture
-        .admin(
-            "POST",
-            &format!("/api/v1/admin/ai/tasks/{task_id}/approve"),
-            None,
-            &fixture.store_a,
-        )
-        .await;
+    let (status, conflict) = fixture.approve(&publish_id).await;
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
-    assert_eq!(conflict["error"]["code"], "CONFLICT");
     assert_eq!(conflict["error"]["details"]["from"], "cancelled");
     assert_eq!(conflict["error"]["details"]["to"], "running");
 
@@ -344,7 +418,7 @@ async fn task_lifecycle_is_recorded_and_approval_gated() {
     let (status, fetched) = fixture
         .admin(
             "GET",
-            &format!("/api/v1/admin/ai/tasks/{task_id}"),
+            &format!("/api/v1/admin/ai/tasks/{publish_id}"),
             None,
             &fixture.store_a,
         )
@@ -358,14 +432,10 @@ async fn rejection_cancels_a_pending_task() {
     let fixture = fixture().await;
 
     let (status, created) = fixture
-        .admin(
-            "POST",
-            "/api/v1/admin/ai/tasks",
-            Some(json!({"tool": "page.publish", "input": {"id": "page_1"}})),
-            &fixture.store_a,
-        )
+        .create_task("page.publish", json!({"id": "page_1"}))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["status"], "pending");
     let task_id = created["id"].as_str().unwrap().to_owned();
 
     let (status, rejected) = fixture
@@ -381,16 +451,282 @@ async fn rejection_cancels_a_pending_task() {
 }
 
 #[tokio::test]
+async fn page_get_executes_immediately_and_persists_output() {
+    let fixture = fixture().await;
+    let page = fixture
+        .create_page(&fixture.store_a, "About", "about")
+        .await;
+
+    let (status, task) = fixture
+        .create_task("page.get", json!({"id": page.id.as_str()}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    assert_eq!(task["status"], "succeeded", "read tools run on creation");
+    assert_eq!(task["output"]["id"], page.id.as_str());
+    assert_eq!(task["output"]["title"], "About");
+    assert_eq!(task["output"]["handle"], "about");
+    assert!(task["error"].is_null());
+
+    let task_id = task["id"].as_str().unwrap();
+    let (status, fetched) = fixture
+        .admin(
+            "GET",
+            &format!("/api/v1/admin/ai/tasks/{task_id}"),
+            None,
+            &fixture.store_a,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["status"], "succeeded");
+    assert_eq!(fetched["output"]["id"], page.id.as_str());
+}
+
+#[tokio::test]
+async fn page_update_requires_approval_and_updates_the_draft() {
+    let fixture = fixture().await;
+    let page = fixture
+        .create_page(&fixture.store_a, "About", "about")
+        .await;
+
+    let (status, task) = fixture
+        .create_task(
+            "page.update",
+            json!({"id": page.id.as_str(), "title": "Updated"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    assert_eq!(task["status"], "pending");
+    let task_id = task["id"].as_str().unwrap().to_owned();
+
+    // The draft is untouched until the task is approved.
+    let stored = ContentService::new(fixture.db(&fixture.store_a).await)
+        .get_page(&page.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.title, "About");
+    assert_eq!(stored.revision, 1);
+
+    let (status, approved) = fixture.approve(&task_id).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["status"], "succeeded", "{approved}");
+    assert_eq!(approved["output"]["title"], "Updated");
+    assert_eq!(
+        approved["output"]["handle"], "about",
+        "omitted fields keep their current value"
+    );
+    assert_eq!(approved["output"]["revision"], 2);
+
+    let stored = ContentService::new(fixture.db(&fixture.store_a).await)
+        .get_page(&page.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.title, "Updated");
+    assert_eq!(stored.handle, "about");
+    assert_eq!(stored.revision, 2);
+}
+
+#[tokio::test]
+async fn page_publish_through_approval_publishes_the_page() {
+    let fixture = fixture().await;
+    let page = fixture
+        .create_page(&fixture.store_a, "About", "about")
+        .await;
+
+    let (status, task) = fixture
+        .create_task("page.publish", json!({"id": page.id.as_str()}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    assert_eq!(task["status"], "pending");
+    let task_id = task["id"].as_str().unwrap().to_owned();
+
+    let (status, approved) = fixture.approve(&task_id).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["status"], "succeeded", "{approved}");
+    assert_eq!(approved["output"]["status"], "published");
+
+    let stored = ContentService::new(fixture.db(&fixture.store_a).await)
+        .get_page(&page.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.status.as_str(), "published");
+    assert!(stored.published_body.is_some());
+}
+
+#[tokio::test]
+async fn block_list_types_returns_the_available_block_types() {
+    let fixture = fixture().await;
+
+    // Enabled plugin contributions are read from the same cached catalog the
+    // admin component route uses, so no HTTP plugin installation is needed.
+    let manifest = json!({
+        "schema_version": "1",
+        "id": "demo",
+        "name": "Demo Plugin",
+        "version": "1.0.0",
+        "api_version": 2,
+        "runtime": {"engine": "workerd", "compatibility_date": "2026-11-01"},
+        "entry": {"type": "worker", "path": "index.js"},
+        "capabilities": {
+            "data": ["catalog.read"],
+            "storefront": ["storefront.component"]
+        },
+        "provides": [{
+            "kind": "storefront_component",
+            "id": "hero",
+            "title": "Hero banner"
+        }]
+    });
+    let now = fastcart_kernel::now_timestamp();
+    sqlx::query(
+        "INSERT INTO plugin_installations (id, plugin_id, digest, version, manifest_json, \
+         enabled, settings_json, settings_revision, granted_scopes, installed_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, 1, '{}', 0, '[]', ?, ?)",
+    )
+    .bind("plugin_install_demo")
+    .bind("demo")
+    .bind("sha256:demo")
+    .bind("1.0.0")
+    .bind(manifest.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(fixture.db(&fixture.store_a).await.pool())
+    .await
+    .unwrap();
+
+    let (status, task) = fixture.create_task("block.list_types", json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    assert_eq!(task["status"], "succeeded", "{task}");
+    let types = task["output"].as_array().expect("block type array");
+    assert!(
+        types.iter().any(|value| value == "plugin:demo:hero"),
+        "plugin components use the page editor namespace: {types:?}"
+    );
+}
+
+#[tokio::test]
+async fn order_get_returns_a_seeded_order() {
+    let fixture = fixture().await;
+    let order = fixture.seed_order(&fixture.store_a).await;
+
+    let (status, task) = fixture
+        .create_task("order.get", json!({"id": order.id.as_str()}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    assert_eq!(task["status"], "succeeded", "{task}");
+    assert_eq!(task["output"]["id"], order.id.as_str());
+    assert_eq!(task["output"]["email"], "buyer@example.com");
+    assert_eq!(task["output"]["total"], 2_000);
+    assert_eq!(task["output"]["items"].as_array().unwrap().len(), 1);
+
+    // A missing order is a structured failure, not a panic or a silent success.
+    let (status, task) = fixture
+        .create_task("order.get", json!({"id": "order_missing"}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    assert_eq!(task["status"], "failed");
+    assert!(task["output"].is_null());
+    let error: Value = serde_json::from_str(task["error"].as_str().unwrap()).unwrap();
+    assert_eq!(error["code"], "NOT_FOUND", "{task}");
+    assert!(
+        error["message"].as_str().unwrap().contains("order"),
+        "{task}"
+    );
+}
+
+#[tokio::test]
+async fn failed_execution_persists_a_structured_error() {
+    let fixture = fixture().await;
+
+    let (status, task) = fixture
+        .create_task("page.get", json!({"id": "page_missing"}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    assert_eq!(task["status"], "failed");
+    assert!(task["output"].is_null());
+    let error: Value = serde_json::from_str(task["error"].as_str().unwrap()).unwrap();
+    assert_eq!(error["code"], "NOT_FOUND");
+    assert!(
+        error["message"].as_str().unwrap().contains("page_missing"),
+        "{task}"
+    );
+
+    let task_id = task["id"].as_str().unwrap();
+    let (status, fetched) = fixture
+        .admin(
+            "GET",
+            &format!("/api/v1/admin/ai/tasks/{task_id}"),
+            None,
+            &fixture.store_a,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["status"], "failed");
+    assert_eq!(fetched["error"], task["error"]);
+    assert!(fetched["output"].is_null());
+}
+
+#[tokio::test]
+async fn concurrent_approvals_execute_a_mutation_once() {
+    let fixture = fixture().await;
+    let page = fixture
+        .create_page(&fixture.store_a, "About", "about")
+        .await;
+    let (status, task) = fixture
+        .create_task(
+            "page.update",
+            json!({"id": page.id.as_str(), "title": "Once"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    let task_id = task["id"].as_str().unwrap().to_owned();
+    let uri = format!("/api/v1/admin/ai/tasks/{task_id}/approve");
+
+    let headers_a = [
+        ("cookie", fixture.owner_auth.as_str()),
+        ("x-csrf-token", fixture.csrf.as_str()),
+        ("x-store-id", fixture.store_a.as_str()),
+    ];
+    let headers_b = headers_a;
+    let first = send(&fixture.app, "POST", &uri, None, &headers_a);
+    let second = send(&fixture.app, "POST", &uri, None, &headers_b);
+    let ((first_status, first_body, _), (second_status, second_body, _)) =
+        tokio::join!(first, second);
+
+    let mut statuses = [first_status, second_status];
+    statuses.sort_by_key(|status| status.as_u16());
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "exactly one approval claims the task: {first_body} / {second_body}"
+    );
+
+    // Exactly one execution: the update incremented the revision once.
+    let stored = ContentService::new(fixture.db(&fixture.store_a).await)
+        .get_page(&page.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.title, "Once");
+    assert_eq!(stored.revision, 2);
+
+    let (status, fetched) = fixture
+        .admin(
+            "GET",
+            &format!("/api/v1/admin/ai/tasks/{task_id}"),
+            None,
+            &fixture.store_a,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["status"], "succeeded");
+    assert_eq!(fetched["output"]["title"], "Once");
+}
+
+#[tokio::test]
 async fn unknown_tools_and_invalid_input_are_rejected() {
     let fixture = fixture().await;
 
     let (status, body) = fixture
-        .admin(
-            "POST",
-            "/api/v1/admin/ai/tasks",
-            Some(json!({"tool": "page.delete", "input": {"id": "page_1"}})),
-            &fixture.store_a,
-        )
+        .create_task("page.delete", json!({"id": "page_1"}))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
@@ -403,12 +739,24 @@ async fn unknown_tools_and_invalid_input_are_rejected() {
     );
 
     let (status, body) = fixture
-        .admin(
-            "POST",
-            "/api/v1/admin/ai/tasks",
-            Some(json!({"tool": "page.get", "input": ["not", "an", "object"]})),
-            &fixture.store_a,
-        )
+        .create_task("page.get", json!(["not", "an", "object"]))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Inputs are validated against the registry's JSON Schema.
+    let (status, body) = fixture.create_task("page.get", json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("input is invalid"),
+        "{body}"
+    );
+
+    let (status, body) = fixture
+        .create_task("page.get", json!({"id": "page_1", "extra": true}))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
@@ -538,12 +886,7 @@ async fn tasks_are_isolated_per_store() {
     let fixture = fixture().await;
 
     let (status, created) = fixture
-        .admin(
-            "POST",
-            "/api/v1/admin/ai/tasks",
-            Some(json!({"tool": "order.get", "input": {"id": "order_1"}})),
-            &fixture.store_a,
-        )
+        .create_task("order.get", json!({"id": "order_1"}))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let task_id = created["id"].as_str().unwrap().to_owned();
@@ -563,4 +906,46 @@ async fn tasks_are_isolated_per_store() {
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn a_task_abandoned_by_a_crashed_runner_is_reclaimed_after_the_lease() {
+    let fixture = fixture().await;
+    let page = fixture
+        .create_page(&fixture.store_a, "About", "about")
+        .await;
+    let db = fixture.db(&fixture.store_a).await;
+
+    // A runner claimed this task and then died: the row is `running` and its
+    // start is older than the execution lease. Only the claim is simulated;
+    // the tool input is a normal update.
+    let now = fastcart_kernel::now_timestamp();
+    let stale_started = now - 3_600;
+    sqlx::query(
+        "INSERT INTO ai_tasks (id, tool, input_json, status, error, created_by, created_at, \
+         updated_at, started_at) VALUES ('task_stale', 'page.update', ?, 'running', NULL, NULL, \
+         ?, ?, ?)",
+    )
+    .bind(json!({"id": page.id.as_str(), "title": "Recovered"}).to_string())
+    .bind(now)
+    .bind(now)
+    .bind(stale_started)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let (status, task) = fixture
+        .admin(
+            "POST",
+            "/api/v1/admin/ai/tasks/task_stale/approve",
+            None,
+            &fixture.store_a,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["status"], "succeeded");
+    assert_eq!(task["output"]["title"], "Recovered");
+
+    let stored = ContentService::new(db).get_page(&page.id).await.unwrap();
+    assert_eq!(stored.title, "Recovered");
 }

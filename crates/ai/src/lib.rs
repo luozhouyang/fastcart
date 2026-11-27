@@ -1,14 +1,23 @@
 //! AI extension foundation.
 //!
 //! AI tools invoke commerce application services only. They never access
-//! repositories or SQLite directly, and mutations remain auditable. Tool
-//! definitions are metadata: this crate never executes model or tool code.
+//! repositories or SQLite directly, and mutations remain auditable.
+//!
+//! Tool execution is deterministic: [`execution::ToolExecutor`] validates a
+//! JSON input against the registry schema and dispatches it to a
+//! [`execution::ToolRuntime`] implemented by the API layer over application
+//! services. This crate never calls a model. [`provider::ModelProvider`] fixes
+//! that boundary for a follow-up client, and [`provider::MockModelProvider`]
+//! is the deterministic test double.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 
 use fastcart_kernel::{StoreId, UserId, now_timestamp};
 use serde::{Deserialize, Serialize};
+
+pub mod execution;
+pub mod provider;
 
 /// A controlled operation exposed to agents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -226,9 +235,10 @@ pub mod tool_names {
 /// Builds the registry of built-in tools.
 ///
 /// Every tool maps to an existing application service operation. The registry
-/// is metadata only: it does not execute anything and is safe to expose to
-/// administrators. Mutating tools declare [`ToolDefinition::mutates`] and
-/// [`ToolDefinition::requires_approval`] so a future executor can gate them.
+/// itself executes nothing and is safe to expose to administrators; execution
+/// goes through [`execution::ToolExecutor`]. Mutating tools declare
+/// [`ToolDefinition::mutates`] and [`ToolDefinition::requires_approval`] so the
+/// task lifecycle gates them behind human approval.
 #[must_use]
 pub fn builtin_registry() -> AiRegistry {
     let registry = AiRegistry::new();
