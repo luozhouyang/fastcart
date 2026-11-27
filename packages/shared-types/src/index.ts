@@ -3251,6 +3251,7 @@ export interface AiTask {
   input: Record<string, unknown>;
   status: string;
   error: string | null;
+  output?: unknown;
   created_by: string | null;
   created_at: Timestamp;
   updated_at: Timestamp;

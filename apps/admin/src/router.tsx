@@ -110,6 +110,9 @@ const ReturnReasonsPage = lazyRouteComponent(() =>
 const ReturnsPage = lazyRouteComponent(() =>
   import("@/pages/returns").then((module) => ({ default: module.ReturnsPage })),
 );
+const AiTasksPage = lazyRouteComponent(() =>
+  import("@/pages/ai-tasks").then((module) => ({ default: module.AiTasksPage })),
+);
 
 function PageLoading() {
   return (
@@ -379,6 +382,12 @@ const returnsRoute = createRoute({
   component: guarded(ReturnsPage, PERMISSIONS.orders.read),
 });
 
+const aiTasksRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/ai-tasks",
+  component: guarded(AiTasksPage, PERMISSIONS.settings.read),
+});
+
 const routeTree = rootRoute.addChildren([
   overviewRoute,
   ordersRoute,
@@ -410,6 +419,7 @@ const routeTree = rootRoute.addChildren([
   giftCardsRoute,
   returnsRoute,
   returnReasonsRoute,
+  aiTasksRoute,
   regionsRoute,
   shippingRoute,
   taxRoute,

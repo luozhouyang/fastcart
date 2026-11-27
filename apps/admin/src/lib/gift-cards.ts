@@ -1,6 +1,7 @@
 import type {
   CreateGiftCardRequest,
   GiftCard,
+  GiftCardDetail,
   GiftCardStatus,
   PageResult,
 } from "@fastcart/shared-types";
@@ -45,6 +46,19 @@ export function listGiftCards(
   return giftCardRequest<GiftCardPage>(
     storeId,
     `/gift-cards?${params.toString()}`,
+    signal ? { signal } : {},
+  );
+}
+
+/** Reads one card together with the orders it paid for. */
+export function getGiftCard(
+  storeId: string,
+  giftCardId: string,
+  signal?: AbortSignal,
+): Promise<GiftCardDetail> {
+  return giftCardRequest<GiftCardDetail>(
+    storeId,
+    `/gift-cards/${encodeURIComponent(giftCardId)}`,
     signal ? { signal } : {},
   );
 }

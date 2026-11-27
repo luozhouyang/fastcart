@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Gift, Loader2, Plus, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import type { GiftCard } from "@fastcart/shared-types";
+import type { GiftCard, GiftCardDetail } from "@fastcart/shared-types";
 
 import { PageHeader } from "@/components/page-header";
 import { Pagination } from "@/components/pagination";
@@ -20,6 +20,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import {
   Table,
   TableBody,
   TableCell,
@@ -29,9 +37,10 @@ import {
 } from "@/components/ui/table";
 import { errorMessage } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { demoGiftCards } from "@/lib/demo-commerce";
+import { demoGiftCards, demoGiftCardRedemptions } from "@/lib/demo-commerce";
 import { fromUnixSeconds, shortDate } from "@/lib/format";
 import {
+  getGiftCard,
   giftCardInputError,
   giftCardStatusLabel,
   issueGiftCard,
@@ -52,12 +61,14 @@ export function GiftCardsPage() {
   const [page, setPage] = useState(1);
   const [issueOpen, setIssueOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<GiftCard | null>(null);
 
   const canWrite = can(PERMISSIONS.payments.write);
 
   useEffect(() => {
     setDemoCards(demoGiftCards());
     setPage(1);
+    setDetail(null);
   }, [store?.id, dataKey]);
 
   const loader = useCallback(
@@ -164,9 +175,14 @@ export function GiftCardsPage() {
             {rows.map((card) => (
               <TableRow key={card.id} className="h-[58px]">
                 <TableCell className="pl-6">
-                  <p className="font-mono text-[12px] font-medium tracking-[0.08em] text-foreground">
+                  <button
+                    type="button"
+                    onClick={() => setDetail(card)}
+                    className="cursor-pointer text-left font-mono text-[12px] font-medium tracking-[0.08em] text-foreground underline-offset-4 hover:underline"
+                    aria-label={`Open gift card ${card.code}`}
+                  >
                     {card.code}
-                  </p>
+                  </button>
                   <p className="mt-1 text-[10.5px] text-faint">{card.id}</p>
                 </TableCell>
                 <TableCell className="text-right">
@@ -258,6 +274,13 @@ export function GiftCardsPage() {
           }}
         />
       ) : null}
+
+      <GiftCardDetailSheet
+        card={detail}
+        onOpenChange={(open) => {
+          if (!open) setDetail(null);
+        }}
+      />
     </div>
   );
 }
@@ -412,5 +435,166 @@ function IssueGiftCardDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function GiftCardDetailSheet({
+  card,
+  onOpenChange,
+}: {
+  card: GiftCard | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { mode, store } = useAuth();
+  const [detail, setDetail] = useState<GiftCardDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setDetail(null);
+    setError(null);
+    if (card === null || mode === "demo") {
+      setLoading(false);
+      return;
+    }
+    if (!store) return;
+    const controller = new AbortController();
+    setLoading(true);
+    void getGiftCard(store.id, card.id, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setDetail(result);
+      })
+      .catch((cause: unknown) => {
+        if (!controller.signal.aborted) setError(errorMessage(cause));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [card, mode, store]);
+
+  const demoDetail =
+    mode === "demo" && card !== null
+      ? { ...card, redemptions: demoGiftCardRedemptions(card.id) }
+      : null;
+  const current = detail ?? demoDetail ?? card;
+  const redemptions = detail?.redemptions ?? demoDetail?.redemptions ?? [];
+
+  return (
+    <Sheet
+      open={card !== null}
+      onOpenChange={(open) => {
+        if (!open) onOpenChange(false);
+      }}
+    >
+      <SheetContent className="flex flex-col sm:max-w-2xl">
+        {current ? (
+          <>
+            <SheetHeader>
+              <div className="flex flex-wrap items-center gap-2 pr-8">
+                <Badge variant={current.status === "active" ? "brand" : "secondary"}>
+                  {giftCardStatusLabel(current.status)}
+                </Badge>
+                <span className="font-mono text-[10.5px] text-faint">{current.id}</span>
+              </div>
+              <SheetTitle className="font-mono text-[16px] tracking-[0.08em]">
+                {current.code}
+              </SheetTitle>
+              <SheetDescription>
+                {formatMinorAmount(current.balance_minor, current.currency_code)} remaining of{" "}
+                {formatMinorAmount(current.initial_amount_minor, current.currency_code)} issued.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="flex-1 space-y-6 overflow-y-auto p-6">
+              <section className="grid grid-cols-2 gap-4">
+                <div>
+                  <p className="text-[11px] font-medium text-muted-foreground">Balance</p>
+                  <p className="mt-1 text-[12.5px] text-ink-soft tnum">
+                    {formatMinorAmount(current.balance_minor, current.currency_code)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-medium text-muted-foreground">Initial amount</p>
+                  <p className="mt-1 text-[12.5px] text-ink-soft tnum">
+                    {formatMinorAmount(current.initial_amount_minor, current.currency_code)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-medium text-muted-foreground">Issued</p>
+                  <p className="mt-1 text-[12.5px] text-ink-soft">
+                    {shortDate(fromUnixSeconds(current.created_at))}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-medium text-muted-foreground">Last updated</p>
+                  <p className="mt-1 text-[12.5px] text-ink-soft">
+                    {shortDate(fromUnixSeconds(current.updated_at))}
+                  </p>
+                </div>
+              </section>
+
+              <section>
+                <p className="text-[11px] font-medium tracking-[0.08em] text-faint uppercase">
+                  Redemptions
+                </p>
+                {error ? (
+                  <p className="mt-2 text-[12px] text-destructive">{error}</p>
+                ) : loading ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="size-4 animate-spin text-faint" aria-hidden="true" />
+                  </div>
+                ) : redemptions.length === 0 ? (
+                  <p className="mt-2 rounded-lg border border-dashed border-border px-3 py-6 text-center text-[12px] text-muted-foreground">
+                    No redemptions recorded for this card.
+                  </p>
+                ) : (
+                  <div className="mt-2 overflow-hidden rounded-lg border border-border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="hover:bg-transparent">
+                          <TableHead>Amount</TableHead>
+                          <TableHead className="w-[110px]">Status</TableHead>
+                          <TableHead>Order</TableHead>
+                          <TableHead className="w-[120px]">Created</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {redemptions.map((redemption) => (
+                          <TableRow key={redemption.id}>
+                            <TableCell className="tnum">
+                              {formatMinorAmount(redemption.amount_minor, current.currency_code)}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant={redemption.status === "redeemed" ? "brand" : "warning"}
+                              >
+                                {redemption.status === "redeemed" ? "Redeemed" : "Reversed"}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="font-mono text-[11px] text-ink-soft">
+                              {redemption.order_id ?? "—"}
+                            </TableCell>
+                            <TableCell className="text-[12px] text-muted-foreground">
+                              {shortDate(fromUnixSeconds(redemption.created_at))}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </section>
+            </div>
+
+            <SheetFooter>
+              <Button variant="ghost" onClick={() => onOpenChange(false)}>
+                Close
+              </Button>
+            </SheetFooter>
+          </>
+        ) : null}
+      </SheetContent>
+    </Sheet>
   );
 }

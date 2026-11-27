@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GiftCard } from "@fastcart/shared-types";
+import type { GiftCard, GiftCardDetail } from "@fastcart/shared-types";
 
 import { API_BASE_URL } from "@/lib/api";
 import {
+  getGiftCard,
   giftCardInputError,
   giftCardStatusLabel,
   issueGiftCard,
@@ -64,6 +65,36 @@ describe("gift card client", () => {
     const { url, init } = requestAt(mock);
     expect(url).toBe(`${API_BASE_URL}/api/v1/admin/gift-cards?limit=10&offset=20`);
     expect(init.credentials).toBe("include");
+    const headers = init.headers as Headers;
+    expect(headers.get("x-store-id")).toBe("store-1");
+    expect(headers.get("x-csrf-token")).toBe("csrf-token");
+  });
+
+  it("reads one card with its redemptions", async () => {
+    const detail: GiftCardDetail = {
+      ...card,
+      redemptions: [
+        {
+          id: "giftred_1",
+          gift_card_id: card.id,
+          checkout_id: "checkout_1",
+          order_id: "order_1",
+          amount_minor: 2_500,
+          status: "redeemed",
+          created_at: 3,
+          updated_at: 3,
+          reversed_at: null,
+        },
+      ],
+    };
+    const mock = vi.fn(async () => jsonResponse(detail));
+    vi.stubGlobal("fetch", mock);
+
+    await expect(getGiftCard("store-1", "gift 1")).resolves.toEqual(detail);
+
+    const { url, init } = requestAt(mock);
+    expect(url).toBe(`${API_BASE_URL}/api/v1/admin/gift-cards/gift%201`);
+    expect(init.method ?? "GET").toBe("GET");
     const headers = init.headers as Headers;
     expect(headers.get("x-store-id")).toBe("store-1");
     expect(headers.get("x-csrf-token")).toBe("csrf-token");

@@ -1,5 +1,6 @@
 import type {
   GiftCard,
+  GiftCardRedemption,
   PaymentRefund,
   Price,
   PriceList,
@@ -472,4 +473,50 @@ export function demoGiftCards(): GiftCard[] {
       updated_at: daysAgo(20),
     },
   ];
+}
+
+/** Sample redemptions for a demo gift card, newest first. */
+export function demoGiftCardRedemptions(cardId: string): GiftCardRedemption[] {
+  if (cardId === "gift_demo_7001") {
+    return [
+      {
+        id: "giftred_demo_7001_2",
+        gift_card_id: cardId,
+        checkout_id: "checkout_demo_1042",
+        order_id: "order_demo_1042",
+        amount_minor: 2_500,
+        status: "redeemed",
+        created_at: daysAgo(6),
+        updated_at: daysAgo(6),
+        reversed_at: null,
+      },
+      {
+        id: "giftred_demo_7001_1",
+        gift_card_id: cardId,
+        checkout_id: "checkout_demo_1039",
+        order_id: null,
+        amount_minor: 1_000,
+        status: "reversed",
+        created_at: daysAgo(8),
+        updated_at: daysAgo(7),
+        reversed_at: daysAgo(7),
+      },
+    ];
+  }
+  if (cardId === "gift_demo_7002") {
+    return [
+      {
+        id: "giftred_demo_7002_1",
+        gift_card_id: cardId,
+        checkout_id: "checkout_demo_1031",
+        order_id: "order_demo_1031",
+        amount_minor: 5_000,
+        status: "redeemed",
+        created_at: daysAgo(25),
+        updated_at: daysAgo(25),
+        reversed_at: null,
+      },
+    ];
+  }
+  return [];
 }

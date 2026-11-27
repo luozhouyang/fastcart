@@ -32,6 +32,7 @@ import {
   Settings as SettingsIcon,
   Settings2,
   SlidersHorizontal,
+  Sparkles,
   SunMoon,
   Tags,
   TicketPercent,
@@ -82,6 +83,7 @@ interface NavItem {
     | "/gift-cards"
     | "/returns"
     | "/return-reasons"
+    | "/ai-tasks"
     | "/forms"
     | "/inbox"
     | "/pages"
@@ -186,6 +188,12 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
         to: "/notifications",
         label: "Notifications",
         icon: Bell,
+        permission: PERMISSIONS.settings.read,
+      },
+      {
+        to: "/ai-tasks",
+        label: "AI tasks",
+        icon: Sparkles,
         permission: PERMISSIONS.settings.read,
       },
       {

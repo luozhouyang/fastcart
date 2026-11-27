@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -42,6 +42,22 @@ describe("gift cards page in demo mode", () => {
 
     // The demo issues a card with a generated placeholder code.
     expect(await screen.findByText("DEMO0000DEMO0000")).toBeInTheDocument();
+  });
+
+  it("opens a card and lists its redemptions", async () => {
+    const user = userEvent.setup();
+    renderDemo(<GiftCardsPage />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Open gift card 7QK2M9XR4TZB1HVN" }),
+    );
+    const sheet = await screen.findByRole("dialog", { name: "7QK2M9XR4TZB1HVN" });
+
+    expect(within(sheet).getByText("Redemptions")).toBeInTheDocument();
+    expect(within(sheet).getByText("order_demo_1042")).toBeInTheDocument();
+    expect(within(sheet).getByText("$25.00")).toBeInTheDocument();
+    expect(within(sheet).getByText("Redeemed")).toBeInTheDocument();
+    expect(within(sheet).getByText("Reversed")).toBeInTheDocument();
   });
 
   it("disables an active card", async () => {
