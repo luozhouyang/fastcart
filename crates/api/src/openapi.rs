@@ -83,6 +83,7 @@ use crate::state::AppContext;
     fastcart_module_cart::Cart,
     fastcart_module_cart::CartAdjustment,
     fastcart_module_cart::CartDiscount,
+    fastcart_module_cart::CartGiftCard,
     fastcart_module_cart::CartItem,
     fastcart_module_cart::CartShippingMethod,
     fastcart_module_cart::CartStatus,
@@ -310,7 +311,9 @@ use crate::state::AppContext;
     crate::routes::admin_payments::CreateGiftCardRequest,
     crate::routes::admin_payments::CreateRefundRequest,
     crate::routes::admin_payments::FailSessionRequest,
+    crate::routes::admin_payments::GiftCardDetailDto,
     crate::routes::admin_payments::GiftCardDto,
+    crate::routes::admin_payments::GiftCardRedemptionDto,
     crate::routes::admin_payments::RefundDto,
     crate::routes::admin_pricing::BulkPricesRequest,
     crate::routes::admin_pricing::CalculatePricesRequest,
@@ -382,6 +385,7 @@ use crate::state::AppContext;
     fastcart_module_inquiry::InquiryFormStatus,
     fastcart_module_inquiry::InquiryStatus,
     crate::routes::store_cart::AddItemRequest,
+    crate::routes::store_cart::ApplyGiftCardRequest,
     crate::routes::store_cart::CartAddressType,
     crate::routes::store_cart::CompleteCheckoutRequest,
     crate::routes::store_cart::CreateCartRequest,
@@ -975,10 +979,10 @@ mod tests {
 
         assert_eq!(count("/api/v1/platform"), 23);
         assert_eq!(count("/api/v1/admin"), 224);
-        assert_eq!(count("/api/v1/store"), 50);
+        assert_eq!(count("/api/v1/store"), 52);
         assert_eq!(count("/api/v1/webhooks"), 1);
         assert_eq!(count("/health") + count("/metrics"), 4);
-        assert_eq!(paths.len(), 302);
+        assert_eq!(paths.len(), 304);
 
         for key in [
             "/api/v1/platform/stores",
@@ -1004,6 +1008,8 @@ mod tests {
             "/api/v1/admin/ai/tasks",
             "/api/v1/admin/ai/tasks/{id}/approve",
             "/api/v1/admin/themes",
+            "/api/v1/store/carts/{cart_id}/gift-cards",
+            "/api/v1/store/carts/{cart_id}/gift-cards/{gift_card_id}",
             "/api/v1/store/checkouts/{checkout_id}/complete",
             "/api/v1/store/customers/me/orders/{order_id}/returns",
             "/api/v1/store/customers/me/orders/{order_id}/returns/{return_id}",
@@ -1031,6 +1037,10 @@ mod tests {
         };
         assert!(properties("Cart").contains_key("items"));
         assert!(!properties("Cart").contains_key("line_items"));
+        assert!(properties("Cart").contains_key("gift_cards"));
+        assert!(properties("CartGiftCard").contains_key("masked_code"));
+        assert!(!properties("CartGiftCard").contains_key("code"));
+        assert!(properties("CartTotals").contains_key("gift_card_total"));
         assert!(properties("Order").contains_key("items"));
         assert!(!properties("Order").contains_key("line_items"));
         assert!(properties("CartTotals").contains_key("total"));
@@ -1106,7 +1116,7 @@ mod tests {
             }
         }
 
-        assert_eq!(operation_count, 426);
+        assert_eq!(operation_count, 428);
     }
 
     #[test]

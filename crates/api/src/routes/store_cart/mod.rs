@@ -53,6 +53,11 @@ pub fn router() -> Router<Arc<AppContext>> {
         )
         .route("/carts/{cart_id}/discounts", post(apply_discount))
         .route("/carts/{cart_id}/discounts/{code}", delete(remove_discount))
+        .route("/carts/{cart_id}/gift-cards", post(apply_gift_card))
+        .route(
+            "/carts/{cart_id}/gift-cards/{gift_card_id}",
+            delete(remove_gift_card),
+        )
         .route("/checkouts", post(create_checkout))
         .route("/checkouts/{checkout_id}", get(get_checkout))
         .route("/checkouts/{checkout_id}/complete", post(complete_checkout))
@@ -73,6 +78,8 @@ pub fn openapi_router() -> OpenApiRouter<Arc<AppContext>> {
         .routes(routes!(set_shipping_method))
         .routes(routes!(apply_discount))
         .routes(routes!(remove_discount))
+        .routes(routes!(apply_gift_card))
+        .routes(routes!(remove_gift_card))
         .routes(routes!(create_checkout))
         .routes(routes!(get_checkout))
         .routes(routes!(complete_checkout))
@@ -178,6 +185,13 @@ pub struct SetShippingMethodRequest {
 #[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct DiscountRequest {
     /// Coupon code.
+    pub code: String,
+}
+
+/// Body for applying a gift card to a cart.
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct ApplyGiftCardRequest {
+    /// Redemption code printed on the card.
     pub code: String,
 }
 

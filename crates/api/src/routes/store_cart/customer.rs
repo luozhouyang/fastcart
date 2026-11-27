@@ -218,3 +218,54 @@ pub(super) async fn remove_discount(
         cart: workflow.remove_coupon(&cart_id, &code, &context).await?,
     }))
 }
+
+#[utoipa::path(
+    post,
+    path = "/carts/{cart_id}/gift-cards",
+    tag = "Store",
+    summary = "Apply a gift card to a cart",
+    request_body = ApplyGiftCardRequest,
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
+pub(super) async fn apply_gift_card(
+    State(_context): State<Arc<AppContext>>,
+    Extension(actor): Extension<ActorContext>,
+    StoreDb(db): StoreDb,
+    Path(cart_id): Path<String>,
+    ApiJson(request): ApiJson<ApplyGiftCardRequest>,
+) -> ApiResult<Json<CartResponse>> {
+    let cart_id = parse_cart_id(&cart_id)?;
+    let workflow = CartWorkflow::new(db);
+    let cart = workflow.get_cart(&cart_id).await?;
+    ensure_cart_access(&cart, &actor)?;
+    // Applying a card only changes how the stored total is paid; prices,
+    // discounts and tax are untouched, so the aggregate the cart service
+    // returns is already the priced snapshot.
+    Ok(Json(CartResponse {
+        cart: workflow.apply_gift_card(&cart_id, &request.code).await?,
+    }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/carts/{cart_id}/gift-cards/{gift_card_id}",
+    tag = "Store",
+    summary = "Remove a gift card from a cart",
+    security(("customerSession" = []), ()),
+    responses((status = 200, body = CartResponse))
+)]
+pub(super) async fn remove_gift_card(
+    State(_context): State<Arc<AppContext>>,
+    Extension(actor): Extension<ActorContext>,
+    StoreDb(db): StoreDb,
+    Path((cart_id, gift_card_id)): Path<(String, String)>,
+) -> ApiResult<Json<CartResponse>> {
+    let cart_id = parse_cart_id(&cart_id)?;
+    let workflow = CartWorkflow::new(db);
+    let cart = workflow.get_cart(&cart_id).await?;
+    ensure_cart_access(&cart, &actor)?;
+    Ok(Json(CartResponse {
+        cart: workflow.remove_gift_card(&cart_id, &gift_card_id).await?,
+    }))
+}

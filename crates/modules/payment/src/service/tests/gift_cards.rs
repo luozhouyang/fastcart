@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use fastcart_kernel::CheckoutId;
 use tokio::sync::Barrier;
 
 use super::*;
-use crate::domain::{CreateGiftCardInput, GiftCardStatus};
+use crate::domain::{CreateGiftCardInput, GiftCardRedemptionStatus, GiftCardStatus};
 
 #[tokio::test]
 async fn issues_generates_and_lists_gift_cards() {
@@ -268,4 +269,191 @@ async fn concurrent_redemptions_at_the_boundary_never_oversell() {
         .await
         .unwrap();
     assert_eq!(source, 1);
+}
+
+#[tokio::test]
+async fn checkout_redemption_records_the_ledger_once_and_reverses_idempotently() {
+    let (service, _db) = setup().await;
+    let card = service
+        .issue_gift_card(CreateGiftCardInput::new("usd", 1_000))
+        .await
+        .unwrap();
+    let checkout_id = CheckoutId::new();
+
+    let redemption = service
+        .redeem_gift_card_for_checkout(&checkout_id, &card.id, 400)
+        .await
+        .unwrap();
+    assert_eq!(redemption.gift_card_id, card.id);
+    assert_eq!(redemption.checkout_id, checkout_id.as_str());
+    assert_eq!(redemption.order_id, None);
+    assert_eq!(redemption.amount_minor, 400);
+    assert_eq!(redemption.status, GiftCardRedemptionStatus::Redeemed);
+    assert_eq!(
+        service.get_gift_card(&card.id).await.unwrap().balance_minor,
+        600
+    );
+
+    // Replaying the same completion returns the recorded redemption without
+    // spending the card again.
+    let replayed = service
+        .redeem_gift_card_for_checkout(&checkout_id, &card.id, 400)
+        .await
+        .unwrap();
+    assert_eq!(replayed.id, redemption.id);
+    assert_eq!(
+        service.get_gift_card(&card.id).await.unwrap().balance_minor,
+        600
+    );
+
+    // A different amount under the same key is a conflict, not a silent edit.
+    let conflict = service
+        .redeem_gift_card_for_checkout(&checkout_id, &card.id, 300)
+        .await
+        .unwrap_err();
+    assert!(matches!(conflict, AppError::Conflict(_)), "{conflict}");
+
+    // The ledger names the order once it exists, and the admin can read it back.
+    let order_id = OrderId::new();
+    let assigned = service
+        .assign_gift_card_redemptions_to_order(&checkout_id, &order_id)
+        .await
+        .unwrap();
+    assert_eq!(assigned, 1);
+    let for_card = service
+        .gift_card_redemptions_for_card(&card.id)
+        .await
+        .unwrap();
+    assert_eq!(for_card.len(), 1);
+    assert_eq!(for_card[0].order_id.as_deref(), Some(order_id.as_str()));
+
+    // Compensation gives the money back exactly once.
+    assert_eq!(
+        service
+            .reverse_gift_card_redemptions(&checkout_id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        service.get_gift_card(&card.id).await.unwrap().balance_minor,
+        1_000
+    );
+    assert_eq!(
+        service
+            .reverse_gift_card_redemptions(&checkout_id)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        service.get_gift_card(&card.id).await.unwrap().balance_minor,
+        1_000
+    );
+
+    // A retried completion after the reversal spends the card again and
+    // re-arms the same ledger row.
+    let rearmed = service
+        .redeem_gift_card_for_checkout(&checkout_id, &card.id, 400)
+        .await
+        .unwrap();
+    assert_eq!(rearmed.status, GiftCardRedemptionStatus::Redeemed);
+    assert_eq!(
+        service.get_gift_card(&card.id).await.unwrap().balance_minor,
+        600
+    );
+}
+
+#[tokio::test]
+async fn checkout_redemption_rejects_disabled_cards_and_insufficient_balances() {
+    let (service, _db) = setup().await;
+    let card = service
+        .issue_gift_card(CreateGiftCardInput::new("usd", 500))
+        .await
+        .unwrap();
+    let checkout_id = CheckoutId::new();
+
+    let over = service
+        .redeem_gift_card_for_checkout(&checkout_id, &card.id, 501)
+        .await
+        .unwrap_err();
+    assert!(matches!(over, AppError::Conflict(_)), "{over}");
+    assert_eq!(
+        service.get_gift_card(&card.id).await.unwrap().balance_minor,
+        500
+    );
+
+    service.disable_gift_card(&card.id).await.unwrap();
+    let disabled = service
+        .redeem_gift_card_for_checkout(&checkout_id, &card.id, 100)
+        .await
+        .unwrap_err();
+    assert!(matches!(disabled, AppError::Conflict(_)), "{disabled}");
+    assert!(
+        service
+            .gift_card_redemptions_for_checkout(&checkout_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Two checkouts racing for a card that covers only one of them: the guarded
+/// decrement must let exactly one win, on a real multi-connection pool.
+#[tokio::test]
+async fn concurrent_checkout_redemptions_of_one_card_leave_exactly_one_winner() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = StoreDatabase::file_backed_multi_connection(
+        StoreId::new(),
+        directory.path().join("store.sqlite"),
+        4,
+    )
+    .await
+    .unwrap();
+    let service = Arc::new(PaymentService::new(db.clone()));
+    let card = service
+        .issue_gift_card(CreateGiftCardInput::new("usd", 1_000))
+        .await
+        .unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let service = service.clone();
+        let barrier = barrier.clone();
+        let checkout_id = CheckoutId::new();
+        let card_id = card.id.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let redeemed = service
+                .redeem_gift_card_for_checkout(&checkout_id, &card_id, 700)
+                .await;
+            (checkout_id, redeemed)
+        }));
+    }
+    let mut winners = Vec::new();
+    let mut losers = 0;
+    for task in tasks {
+        let (checkout_id, result) = task.await.unwrap();
+        match result {
+            Ok(redemption) => winners.push((checkout_id, redemption)),
+            Err(error) => {
+                assert!(matches!(error, AppError::Conflict(_)), "{error}");
+                losers += 1;
+            }
+        }
+    }
+    assert_eq!(winners.len(), 1, "only one checkout may spend the card");
+    assert_eq!(losers, 1);
+
+    let stored = service.get_gift_card(&card.id).await.unwrap();
+    assert_eq!(stored.balance_minor, 300);
+    // The winner's ledger row exists; the loser left none behind.
+    let (winner_id, redemption) = &winners[0];
+    let recorded = service
+        .gift_card_redemptions_for_checkout(winner_id)
+        .await
+        .unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(&recorded[0], redemption);
 }

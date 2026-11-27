@@ -43,6 +43,9 @@ pub struct TotalsDto {
     /// Total tax.
     #[schema(required = false)]
     pub tax_total: i64,
+    /// Amount paid by applied gift cards.
+    #[schema(required = false)]
+    pub gift_card_total: i64,
     /// Payable total.
     pub grand_total: i64,
 }

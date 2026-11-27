@@ -14,9 +14,9 @@ mod service;
 
 pub use domain::{
     AddItemInput, Address, AddressInput, AdjustmentInput, Cart, CartAdjustment, CartDiscount,
-    CartItem, CartShippingMethod, CartStatus, CartTaxLine, CartTotals, CreateCartInput,
-    DEFAULT_CART_TTL_SECONDS, DiscountInput, ItemPriceInput, MAX_ITEM_QUANTITY, RecalculationInput,
-    SetShippingMethodInput, TaxLineInput, UpdateItemInput, allocate_cart_discounts,
-    allocate_cart_level_discount, calculate_totals, recalculate_totals,
+    CartGiftCard, CartItem, CartShippingMethod, CartStatus, CartTaxLine, CartTotals,
+    CreateCartInput, DEFAULT_CART_TTL_SECONDS, DiscountInput, GiftCardApplication, ItemPriceInput,
+    MAX_ITEM_QUANTITY, RecalculationInput, SetShippingMethodInput, TaxLineInput, UpdateItemInput,
+    allocate_cart_discounts, allocate_cart_level_discount, calculate_totals, recalculate_totals,
 };
 pub use service::CartService;

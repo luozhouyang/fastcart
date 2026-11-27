@@ -137,6 +137,35 @@ impl CartService {
 }
 
 impl CartService {
+    /// Loads the applied gift cards in application order.
+    ///
+    /// `applied_amount` is left at zero here: it is derived from the card
+    /// amounts, balances and the cart's payable total by
+    /// [`recalculate_totals`](crate::recalculate_totals), which runs at the end
+    /// of every aggregate load.
+    pub(super) async fn load_gift_cards(
+        tx: &mut Transaction<'_, Sqlite>,
+        cart_id: &CartId,
+    ) -> Result<Vec<CartGiftCard>, AppError> {
+        let rows = sqlx::query_as::<_, GiftCardRow>(GIFT_CARD_COLUMNS)
+            .bind(cart_id.as_str())
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(database_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| CartGiftCard {
+                gift_card_id: row.gift_card_id,
+                masked_code: row.masked_code,
+                amount: row.amount_minor,
+                balance: row.balance_minor,
+                applied_amount: 0,
+            })
+            .collect())
+    }
+}
+
+impl CartService {
     pub(super) async fn load_shipping_methods(
         tx: &mut Transaction<'_, Sqlite>,
         cart_id: &CartId,

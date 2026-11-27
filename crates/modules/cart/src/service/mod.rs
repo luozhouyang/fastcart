@@ -20,9 +20,9 @@ use sqlx::{FromRow, Sqlite, Transaction};
 
 use crate::domain::{
     AddItemInput, Address, AddressInput, AdjustmentInput, Cart, CartAdjustment, CartDiscount,
-    CartItem, CartShippingMethod, CartStatus, CartTaxLine, CartTotals, CreateCartInput,
-    DEFAULT_CART_TTL_SECONDS, DiscountInput, RecalculationInput, SetShippingMethodInput,
-    TaxLineInput, UpdateItemInput, recalculate_totals,
+    CartGiftCard, CartItem, CartShippingMethod, CartStatus, CartTaxLine, CartTotals,
+    CreateCartInput, DEFAULT_CART_TTL_SECONDS, DiscountInput, GiftCardApplication,
+    RecalculationInput, SetShippingMethodInput, TaxLineInput, UpdateItemInput, recalculate_totals,
 };
 
 const CART_COLUMNS: &str = "SELECT id, currency_code, customer_id, email, sales_channel_id, \
@@ -39,6 +39,9 @@ const ITEM_ADJUSTMENT_COLUMNS: &str = "SELECT a.cart_item_id, a.promotion_id, a.
 
 const DISCOUNT_COLUMNS: &str = "SELECT promotion_id, code, amount, is_automatic, metadata \
      FROM cart_discounts WHERE cart_id = ? ORDER BY created_at ASC, id ASC";
+
+const GIFT_CARD_COLUMNS: &str = "SELECT gift_card_id, masked_code, amount_minor, balance_minor \
+     FROM cart_gift_cards WHERE cart_id = ? ORDER BY created_at ASC, id ASC";
 
 const SHIPPING_METHOD_COLUMNS: &str = "SELECT shipping_option_id, name, amount, \
      currency_code, is_tax_inclusive, data FROM cart_shipping_methods WHERE cart_id = ? \
@@ -63,6 +66,7 @@ pub struct CartService {
 }
 
 mod discounts;
+mod gift_cards;
 mod items;
 mod lifecycle;
 mod parties;
@@ -136,6 +140,14 @@ struct DiscountRow {
     amount: i64,
     is_automatic: bool,
     metadata: String,
+}
+
+#[derive(Debug, FromRow)]
+struct GiftCardRow {
+    gift_card_id: String,
+    masked_code: String,
+    amount_minor: i64,
+    balance_minor: i64,
 }
 
 #[derive(Debug, FromRow)]

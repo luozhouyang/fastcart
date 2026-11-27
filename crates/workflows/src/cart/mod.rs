@@ -15,9 +15,10 @@ use fastcart_kernel::{
 };
 use fastcart_module_cart::{
     AddItemInput, AdjustmentInput, Cart, CartService, CreateCartInput, DiscountInput,
-    ItemPriceInput, RecalculationInput, SetShippingMethodInput, TaxLineInput,
+    GiftCardApplication, ItemPriceInput, RecalculationInput, SetShippingMethodInput, TaxLineInput,
 };
 use fastcart_module_catalog::CatalogService;
+use fastcart_module_payment::{GiftCardStatus, PaymentService};
 use fastcart_module_pricing::{PriceContext, PricingService};
 use fastcart_module_promotion::{
     PromotionCart, PromotionContext, PromotionLine, PromotionService, PromotionStatus,
@@ -114,12 +115,16 @@ pub struct CartWorkflow {
     tax: TaxService,
     store: StoreService,
     shipping: ShippingService,
+    payment: PaymentService,
 }
 
+mod gift_cards;
 mod items;
 mod lifecycle;
 mod recalculation;
 mod tax;
+
+pub use gift_cards::mask_gift_card_code;
 
 pub(crate) use tax::resolve_tax_provider;
 
@@ -134,7 +139,8 @@ impl CartWorkflow {
             promotion: PromotionService::new(db.clone()),
             tax: TaxService::new(db.clone()),
             store: StoreService::new(db.clone()),
-            shipping: ShippingService::new(db),
+            shipping: ShippingService::new(db.clone()),
+            payment: PaymentService::new(db),
         }
     }
 }

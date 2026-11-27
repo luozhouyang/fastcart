@@ -81,6 +81,7 @@ fn tax_line(amount: i64, inclusive: bool) -> TaxLineInput {
 }
 
 mod discounts;
+mod gift_cards;
 mod items;
 mod lifecycle;
 mod parties;

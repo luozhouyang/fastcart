@@ -20,9 +20,24 @@ mod sessions;
 mod store;
 mod webhooks;
 
+/// SQLite-backed payment service bound to one store.
+///
+/// Cloning shares the database handle and the provider registry, so a caller
+/// can keep one service on a workflow while handing another to a sub-service.
+#[derive(Clone)]
 pub struct PaymentService {
     db: StoreDatabase,
     providers: ProviderRegistry,
+}
+
+impl std::fmt::Debug for PaymentService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PaymentService")
+            .field("store_id", &self.db.store_id())
+            .field("providers", &self.providers.list().len())
+            .finish()
+    }
 }
 
 impl PaymentService {

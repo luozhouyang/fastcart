@@ -177,6 +177,51 @@ pub struct CartItem {
     pub adjustments: Vec<CartAdjustment>,
 }
 
+/// A gift card applied to the cart.
+///
+/// Only the masked code is stored here: the full code is a bearer credential
+/// that stays in the payment module, which owns the card and its live balance.
+/// The balance is a snapshot refreshed when the cart is priced, so a card spent
+/// somewhere else cannot be sold twice.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CartGiftCard {
+    /// Gift card identifier.
+    pub gift_card_id: String,
+    /// Redemption code with every character but the last four masked.
+    pub masked_code: String,
+    /// Amount the customer asked the card to cover, in minor units.
+    pub amount: i64,
+    /// Card balance when the cart was last priced, in minor units.
+    pub balance: i64,
+    /// Amount this card actually contributes to the payable total, in minor
+    /// units: the smaller of [`Self::amount`] and [`Self::balance`], capped by
+    /// what the cards applied before it leave to pay.
+    pub applied_amount: i64,
+}
+
+/// Input for [`crate::CartService::apply_gift_card`].
+///
+/// The workflow validates the card itself through the payment module, which
+/// owns it; the cart only checks what its own rows can prove (currency and that
+/// the card is not already applied) and stores the snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GiftCardApplication {
+    /// Gift card identifier.
+    pub gift_card_id: String,
+    /// Redemption code masked except for its last four characters.
+    pub masked_code: String,
+    /// Currency the card was issued in.
+    pub currency_code: String,
+    /// Amount to apply; `None` applies the whole remaining balance.
+    ///
+    /// A requested amount larger than the balance records the balance instead
+    /// of failing: the card covers what it has and the cart total follows.
+    pub amount_minor: Option<i64>,
+    /// Card balance the caller read immediately before applying, in minor
+    /// units. A negative balance is treated as zero.
+    pub balance_minor: i64,
+}
+
 /// A cart-level promotion or coupon snapshot.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CartDiscount {
@@ -258,7 +303,10 @@ pub struct CartTotals {
     pub shipping_total: i64,
     /// Sum of every stored tax line amount (inclusive and exclusive).
     pub tax_total: i64,
-    /// Payable amount: subtotal - discounts + shipping + exclusive tax.
+    /// Amount covered by applied gift cards, capped at the total they pay for.
+    pub gift_card_total: i64,
+    /// Payable amount: subtotal - discounts + shipping + exclusive tax -
+    /// gift cards, never negative.
     pub total: i64,
     /// Currency of every amount in the summary.
     pub currency_code: CurrencyCode,
@@ -277,6 +325,7 @@ impl CartTotals {
             discount_total: 0,
             shipping_total: 0,
             tax_total: 0,
+            gift_card_total: 0,
             total: 0,
             currency_code,
         }
@@ -308,6 +357,8 @@ pub struct Cart {
     pub items: Vec<CartItem>,
     /// Cart-level discounts.
     pub discounts: Vec<CartDiscount>,
+    /// Gift cards applied as a payment method.
+    pub gift_cards: Vec<CartGiftCard>,
     /// Selected shipping methods (at most one).
     pub shipping_methods: Vec<CartShippingMethod>,
     /// Flattened line adjustment snapshots, mirroring each item's adjustments.
@@ -477,6 +528,12 @@ pub struct TaxLineInput {
 /// - `tax_total` includes every tax line and is informational.
 /// - `total` only adds exclusive tax lines: inclusive tax is already contained
 ///   in the item and shipping prices and must not be counted twice.
+/// - Gift cards pay the total down: each applied card contributes the smaller
+///   of the amount the customer stored and the card's current balance, and
+///   never more than what the cards applied before it leave to pay. The excess
+///   is not spent, so the customer keeps it on the card.
+/// - `total` is `subtotal - discounts + shipping + exclusive tax - gift cards`,
+///   never negative: a card that would overpay is only charged the remainder.
 ///
 /// All arithmetic saturates instead of overflowing, so a pathological snapshot
 /// cannot panic a request.
@@ -531,10 +588,17 @@ pub fn calculate_totals(cart: &Cart, tax_lines: &[CartTaxLine]) -> CartTotals {
         .map(|line| line.amount.max(0))
         .fold(0_i64, i64::saturating_add);
 
-    let total = item_subtotal
+    let payable = item_subtotal
         .saturating_sub(discount_total)
         .saturating_add(shipping_total)
         .saturating_add(exclusive_tax);
+
+    // Cards pay in the order they were applied and never more than the money
+    // still owed, so over-applying one card does not silently overspend it: the
+    // unused part stays on the card.
+    let applied = applied_gift_card_amounts(&cart.gift_cards, payable);
+    let gift_card_total = applied.iter().copied().fold(0_i64, i64::saturating_add);
+    let total = payable.saturating_sub(gift_card_total).max(0);
 
     CartTotals {
         item_subtotal,
@@ -545,14 +609,49 @@ pub fn calculate_totals(cart: &Cart, tax_lines: &[CartTaxLine]) -> CartTotals {
         discount_total,
         shipping_total,
         tax_total,
+        gift_card_total,
         total,
         currency_code: cart.currency_code.clone(),
     }
 }
 
+/// Splits the payable amount across the applied gift cards, in application
+/// order.
+///
+/// Each card is charged the smaller of its stored amount and its current
+/// balance, and never more than the money the earlier cards leave to pay. The
+/// last element of the result is what the card actually spends; the remainder
+/// stays on the card for the next purchase.
+fn applied_gift_card_amounts(gift_cards: &[CartGiftCard], payable: i64) -> Vec<i64> {
+    let mut remaining = payable.max(0);
+    gift_cards
+        .iter()
+        .map(|card| {
+            let applied = card.amount.max(0).min(card.balance.max(0)).min(remaining);
+            remaining = remaining.saturating_sub(applied);
+            applied
+        })
+        .collect()
+}
+
 /// Recomputes the cart's stored totals in place.
+///
+/// The per-card [`CartGiftCard::applied_amount`] is refreshed from the same
+/// split the totals use, so a consumer that reads the cards instead of the
+/// summary sees the same figures.
 pub fn recalculate_totals(cart: &mut Cart) {
     cart.totals = calculate_totals(cart, &cart.tax_lines);
+    // `total` is the payable amount after cards, so adding the charged amount
+    // back returns the money the cards paid against. Both are non-negative and
+    // their sum cannot overflow: `total` is capped by the payable amount.
+    let payable = cart
+        .totals
+        .total
+        .saturating_add(cart.totals.gift_card_total);
+    let applied = applied_gift_card_amounts(&cart.gift_cards, payable);
+    for (card, amount) in cart.gift_cards.iter_mut().zip(applied) {
+        card.applied_amount = amount;
+    }
 }
 
 /// Spreads the cart's cart-level discounts across its line items.

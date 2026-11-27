@@ -553,6 +553,66 @@ impl CreateGiftCardInput {
     }
 }
 
+/// One gift card's contribution to a checkout, recorded when it is redeemed.
+///
+/// The ledger row is written in the same transaction as the guarded balance
+/// decrement, keyed uniquely by `(checkout_id, gift_card_id)`, so a retried
+/// completion returns the recorded redemption instead of spending the card
+/// twice. `order_id` is filled in once the order is placed, which is what makes
+/// the redemption queryable from the order and the admin.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GiftCardRedemption {
+    /// Redemption identifier.
+    pub id: String,
+    /// Gift card that paid.
+    pub gift_card_id: String,
+    /// Checkout the redemption belongs to.
+    pub checkout_id: String,
+    /// Order the checkout was placed as, once it exists.
+    pub order_id: Option<String>,
+    /// Amount taken from the card, in minor units.
+    pub amount_minor: i64,
+    /// `redeemed` while the money is spent; `reversed` after a compensation.
+    pub status: GiftCardRedemptionStatus,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    pub updated_at: i64,
+    /// Timestamp the redemption was reversed, when it was.
+    pub reversed_at: Option<i64>,
+}
+
+/// Lifecycle of one gift card redemption.
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GiftCardRedemptionStatus {
+    /// The card paid and the money is spent.
+    Redeemed,
+    /// The card was credited back after a failed completion.
+    Reversed,
+}
+
+impl GiftCardRedemptionStatus {
+    /// Stable storage representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Redeemed => "redeemed",
+            Self::Reversed => "reversed",
+        }
+    }
+
+    /// Parses a stored status, returning `None` for unknown values.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "redeemed" => Some(Self::Redeemed),
+            "reversed" => Some(Self::Reversed),
+            _ => None,
+        }
+    }
+}
+
 /// Input for [`crate::PaymentService::create_session`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreatePaymentSessionInput {

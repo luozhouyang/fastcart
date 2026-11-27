@@ -114,7 +114,7 @@ impl CheckoutWorkflow {
     ///
     /// Fenced by the placement claim, like compensation: a runner whose lease
     /// was taken over must not release the claims the new owner is working with.
-    async fn rollback_promotion_usage(
+    pub(super) async fn rollback_promotion_usage(
         &self,
         key: &str,
         checkout_id: &CheckoutId,

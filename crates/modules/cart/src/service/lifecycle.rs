@@ -77,6 +77,7 @@ impl CartService {
         let row = Self::cart_row_tx(tx, cart_id).await?;
         let items = Self::load_items(tx, cart_id).await?;
         let discounts = Self::load_discounts(tx, cart_id).await?;
+        let gift_cards = Self::load_gift_cards(tx, cart_id).await?;
         let shipping_methods = Self::load_shipping_methods(tx, cart_id).await?;
         let shipping_adjustments = Self::load_shipping_adjustments(tx, cart_id).await?;
         let tax_lines = Self::load_tax_lines(tx, cart_id).await?;
@@ -108,6 +109,7 @@ impl CartService {
             billing_address,
             items,
             discounts,
+            gift_cards,
             shipping_methods,
             item_adjustments,
             shipping_adjustments,

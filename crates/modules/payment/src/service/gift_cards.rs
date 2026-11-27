@@ -8,12 +8,15 @@
 
 use fastcart_infrastructure::database_error;
 use fastcart_kernel::{
-    AppError, CurrencyCode, PageResult, Pagination, now_timestamp, validate_metadata,
+    AppError, CheckoutId, CurrencyCode, OrderId, PageResult, Pagination, now_timestamp,
+    validate_metadata,
 };
 use rand::RngCore;
-use sqlx::{Sqlite, Transaction};
+use sqlx::{FromRow, Sqlite, Transaction};
 
-use crate::domain::{CreateGiftCardInput, GiftCard, GiftCardStatus};
+use crate::domain::{
+    CreateGiftCardInput, GiftCard, GiftCardRedemption, GiftCardRedemptionStatus, GiftCardStatus,
+};
 
 use super::store::*;
 use super::*;
@@ -21,6 +24,51 @@ use super::*;
 /// Columns selected for every gift card read.
 const GIFT_CARD_COLUMNS: &str = "id, code, currency_code, initial_amount_minor, balance_minor, \
                                  status, metadata, created_at, updated_at";
+
+/// Columns selected for every gift card redemption read.
+const GIFT_CARD_REDEMPTION_COLUMNS: &str = "id, gift_card_id, checkout_id, order_id, \
+     amount_minor, status, created_at, updated_at, reversed_at";
+
+/// One `payment_gift_card_redemptions` row.
+#[derive(Debug, FromRow)]
+struct GiftCardRedemptionRow {
+    id: String,
+    gift_card_id: String,
+    checkout_id: String,
+    order_id: Option<String>,
+    amount_minor: i64,
+    status: String,
+    created_at: i64,
+    updated_at: i64,
+    reversed_at: Option<i64>,
+}
+
+/// Converts a stored redemption row.
+///
+/// An unknown status fails loudly instead of guessing: the ledger decides
+/// whether a completion may spend a card again, so a value written by a newer
+/// build must not be read as either.
+fn gift_card_redemption_from_row(
+    row: GiftCardRedemptionRow,
+) -> Result<GiftCardRedemption, AppError> {
+    let status = GiftCardRedemptionStatus::parse(&row.status).ok_or_else(|| {
+        AppError::database(format!(
+            "unknown gift card redemption status {} on {}",
+            row.status, row.id
+        ))
+    })?;
+    Ok(GiftCardRedemption {
+        id: row.id,
+        gift_card_id: row.gift_card_id,
+        checkout_id: row.checkout_id,
+        order_id: row.order_id,
+        amount_minor: row.amount_minor,
+        status,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        reversed_at: row.reversed_at,
+    })
+}
 
 /// Alphabet for generated redemption codes.
 ///
@@ -248,28 +296,262 @@ impl PaymentService {
                 card.id
             )));
         }
-        let updated = sqlx::query(
-            "UPDATE gift_cards SET balance_minor = balance_minor - ?, updated_at = ? \
-             WHERE id = ? AND balance_minor >= ?",
-        )
-        .bind(amount_minor)
-        .bind(now_timestamp())
-        .bind(&card.id)
-        .bind(amount_minor)
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
-        if updated.rows_affected() == 0 {
+        if let Err(error) = decrement_gift_card_balance(&mut tx, &card, amount_minor).await {
             tx.rollback().await.map_err(database_error)?;
-            return Err(AppError::conflict(format!(
-                "gift card {} has insufficient balance: {} remaining, {amount_minor} requested",
-                card.id, card.balance_minor
-            )));
+            return Err(error);
         }
         let redeemed = load_gift_card(&mut tx, &card.id).await?;
         tx.commit().await.map_err(database_error)?;
         Ok(redeemed.balance_minor)
     }
+
+    /// Redeems one gift card for a checkout and records the redemption.
+    ///
+    /// The guarded balance decrement and the ledger row are written in the same
+    /// `BEGIN IMMEDIATE` transaction, so a completion that crashes after
+    /// spending a card always leaves the record behind. The ledger is unique per
+    /// `(checkout_id, gift_card_id)`: a retried completion finds the recorded
+    /// redemption, verifies the amount still matches the quote and returns it
+    /// instead of spending the card twice. An earlier redemption that a
+    /// compensation reversed is re-applied with the same guarded decrement.
+    ///
+    /// This is the checkout entry point into the same guarded update that
+    /// [`Self::redeem_gift_card`] uses. The card's currency is the caller's
+    /// responsibility, checked when the card was applied to the cart.
+    pub async fn redeem_gift_card_for_checkout(
+        &self,
+        checkout_id: &CheckoutId,
+        gift_card_id: &str,
+        amount_minor: i64,
+    ) -> Result<GiftCardRedemption, AppError> {
+        if amount_minor <= 0 {
+            return Err(AppError::validation(
+                "gift card redemption amount must be positive",
+            ));
+        }
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        if let Some(existing) =
+            load_redemption_locked(&mut tx, checkout_id.as_str(), gift_card_id).await?
+        {
+            match existing.status {
+                GiftCardRedemptionStatus::Redeemed => {
+                    if existing.amount_minor != amount_minor {
+                        tx.rollback().await.map_err(database_error)?;
+                        return Err(AppError::conflict(format!(
+                            "gift card redemption for checkout {checkout_id} is already recorded \
+                             for {}, not {amount_minor}",
+                            existing.amount_minor
+                        )));
+                    }
+                    tx.rollback().await.map_err(database_error)?;
+                    return Ok(existing);
+                }
+                GiftCardRedemptionStatus::Reversed => {}
+            }
+        }
+        let card = load_gift_card(&mut tx, gift_card_id).await?;
+        if card.status != GiftCardStatus::Active {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(AppError::conflict(format!(
+                "gift card {} is not active",
+                card.id
+            )));
+        }
+        if let Err(error) = decrement_gift_card_balance(&mut tx, &card, amount_minor).await {
+            tx.rollback().await.map_err(database_error)?;
+            return Err(error);
+        }
+        let now = now_timestamp();
+        sqlx::query(
+            "INSERT INTO payment_gift_card_redemptions \
+             (id, gift_card_id, checkout_id, order_id, amount_minor, status, created_at, \
+              updated_at, reversed_at) \
+             VALUES (?, ?, ?, NULL, ?, 'redeemed', ?, ?, NULL) \
+             ON CONFLICT (checkout_id, gift_card_id) DO UPDATE SET \
+              amount_minor = excluded.amount_minor, status = 'redeemed', \
+              updated_at = excluded.updated_at, reversed_at = NULL",
+        )
+        .bind(format!("gcred_{}", uuid::Uuid::now_v7().simple()))
+        .bind(&card.id)
+        .bind(checkout_id.as_str())
+        .bind(amount_minor)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let redemption = load_redemption_locked(&mut tx, checkout_id.as_str(), &card.id)
+            .await?
+            .ok_or_else(|| AppError::internal("gift card redemption vanished after insert"))?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(redemption)
+    }
+
+    /// Lists the redemptions a checkout recorded, newest first.
+    pub async fn gift_card_redemptions_for_checkout(
+        &self,
+        checkout_id: &CheckoutId,
+    ) -> Result<Vec<GiftCardRedemption>, AppError> {
+        let rows = sqlx::query_as::<_, GiftCardRedemptionRow>(&format!(
+            "SELECT {GIFT_CARD_REDEMPTION_COLUMNS} FROM payment_gift_card_redemptions \
+             WHERE checkout_id = ? ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(checkout_id.as_str())
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        rows.into_iter()
+            .map(gift_card_redemption_from_row)
+            .collect()
+    }
+
+    /// Lists the checkout and order a gift card paid for, newest first.
+    ///
+    /// This is the admin view of a card's history: the order identifier is
+    /// filled in once the order is placed, so an operator can reconcile a card
+    /// against the orders it paid for.
+    pub async fn gift_card_redemptions_for_card(
+        &self,
+        gift_card_id: &str,
+    ) -> Result<Vec<GiftCardRedemption>, AppError> {
+        let rows = sqlx::query_as::<_, GiftCardRedemptionRow>(&format!(
+            "SELECT {GIFT_CARD_REDEMPTION_COLUMNS} FROM payment_gift_card_redemptions \
+             WHERE gift_card_id = ? ORDER BY created_at DESC, id DESC"
+        ))
+        .bind(gift_card_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        rows.into_iter()
+            .map(gift_card_redemption_from_row)
+            .collect()
+    }
+
+    /// Names the order the checkout's redemptions paid for.
+    ///
+    /// Idempotent: replaying it after a crash rewrites the same identifier.
+    pub async fn assign_gift_card_redemptions_to_order(
+        &self,
+        checkout_id: &CheckoutId,
+        order_id: &OrderId,
+    ) -> Result<u64, AppError> {
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let updated = sqlx::query(
+            "UPDATE payment_gift_card_redemptions SET order_id = ?, updated_at = ? \
+             WHERE checkout_id = ? AND (order_id IS NULL OR order_id != ?)",
+        )
+        .bind(order_id.as_str())
+        .bind(now)
+        .bind(checkout_id.as_str())
+        .bind(order_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(updated.rows_affected())
+    }
+
+    /// Credits the checkout's still-redeemed cards back and marks them reversed.
+    ///
+    /// Called when a completion is compensated: the order the cards paid for
+    /// will never exist, so the money must return to them. Idempotent through
+    /// the `status = 'redeemed'` guard, and the balance credit and the status
+    /// flip share one `BEGIN IMMEDIATE` transaction. Returns the number of
+    /// redemptions reversed.
+    pub async fn reverse_gift_card_redemptions(
+        &self,
+        checkout_id: &CheckoutId,
+    ) -> Result<u64, AppError> {
+        let now = now_timestamp();
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let rows = sqlx::query_as::<_, GiftCardRedemptionRow>(&format!(
+            "SELECT {GIFT_CARD_REDEMPTION_COLUMNS} FROM payment_gift_card_redemptions \
+             WHERE checkout_id = ? AND status = 'redeemed' ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(checkout_id.as_str())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let mut reversed = 0_u64;
+        for row in rows {
+            let flipped = sqlx::query(
+                "UPDATE payment_gift_card_redemptions SET status = 'reversed', reversed_at = ?, \
+                 updated_at = ? WHERE id = ? AND status = 'redeemed'",
+            )
+            .bind(now)
+            .bind(now)
+            .bind(&row.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            if flipped.rows_affected() == 0 {
+                continue;
+            }
+            sqlx::query(
+                "UPDATE gift_cards SET balance_minor = balance_minor + ?, updated_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(row.amount_minor)
+            .bind(now)
+            .bind(&row.gift_card_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            reversed += 1;
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(reversed)
+    }
+}
+
+/// Applies the guarded balance decrement inside an open transaction.
+///
+/// The `balance_minor >= ?` predicate and the `rows_affected` check are the
+/// single place gift card money leaves a card: two concurrent callers that
+/// together ask for more than the balance cannot both commit, because the
+/// second update matches no row and fails with a conflict.
+async fn decrement_gift_card_balance(
+    tx: &mut Transaction<'_, Sqlite>,
+    card: &GiftCard,
+    amount_minor: i64,
+) -> Result<(), AppError> {
+    let updated = sqlx::query(
+        "UPDATE gift_cards SET balance_minor = balance_minor - ?, updated_at = ? \
+         WHERE id = ? AND balance_minor >= ?",
+    )
+    .bind(amount_minor)
+    .bind(now_timestamp())
+    .bind(&card.id)
+    .bind(amount_minor)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::conflict(format!(
+            "gift card {} has insufficient balance: {} remaining, {amount_minor} requested",
+            card.id, card.balance_minor
+        )));
+    }
+    Ok(())
+}
+
+/// Loads the redemption of one card by one checkout, if it exists.
+async fn load_redemption_locked(
+    tx: &mut Transaction<'_, Sqlite>,
+    checkout_id: &str,
+    gift_card_id: &str,
+) -> Result<Option<GiftCardRedemption>, AppError> {
+    let row = sqlx::query_as::<_, GiftCardRedemptionRow>(&format!(
+        "SELECT {GIFT_CARD_REDEMPTION_COLUMNS} FROM payment_gift_card_redemptions \
+         WHERE checkout_id = ? AND gift_card_id = ?"
+    ))
+    .bind(checkout_id)
+    .bind(gift_card_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    row.map(gift_card_redemption_from_row).transpose()
 }
 
 /// Maps a SQLite unique violation to a conflict, leaving other errors alone.

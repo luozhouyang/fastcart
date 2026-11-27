@@ -15,7 +15,7 @@ pub use after_sales::{
     ExchangeFulfillmentResult, OrderEditConfirmation, OrderPaymentSummary, ReceiveReturnResult,
     ReturnRefundResult,
 };
-pub use cart::{CartContext, CartWorkflow};
+pub use cart::{CartContext, CartWorkflow, mask_gift_card_code};
 pub use checkout::{CheckoutWorkflow, CompleteCheckoutResult, CreateCheckoutRequest};
 pub use drafts::{CreateDraftOrderRequest, DraftOrderLine, DraftOrderWorkflow};
 pub use engine::{

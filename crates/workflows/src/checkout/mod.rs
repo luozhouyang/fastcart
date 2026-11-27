@@ -22,6 +22,7 @@ const PLACEMENT_LEASE_SECONDS: i64 = 120;
 mod compensation;
 mod complete;
 mod create;
+mod gift_cards;
 mod promotions;
 mod settlement;
 

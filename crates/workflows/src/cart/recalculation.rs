@@ -23,7 +23,28 @@ impl CartWorkflow {
         cart_id: &CartId,
         context: &CartContext,
     ) -> Result<Cart, AppError> {
+        self.recalculate_with_gift_card_credits(cart_id, context, &BTreeMap::new())
+            .await
+    }
+
+    /// Recomputes the cart, crediting gift card money a checkout already spent.
+    ///
+    /// A checkout redeems its gift cards before the order is placed. A retry
+    /// after a crash then reads a card balance the same checkout has already
+    /// drawn down, and pricing the cart against it would change the totals the
+    /// checkout was created with. `credits` adds those already-redeemed amounts
+    /// back for this quote only; the next ordinary recalculation refreshes the
+    /// cards from their real balances again.
+    pub async fn recalculate_with_gift_card_credits(
+        &self,
+        cart_id: &CartId,
+        context: &CartContext,
+        credits: &BTreeMap<String, i64>,
+    ) -> Result<Cart, AppError> {
+        // A card that no longer exists fails here, before any price, discount or
+        // tax is written, so a broken payment method cannot half-update the cart.
         let cart = self.cart.get_cart(cart_id).await?;
+        let cart = self.refresh_gift_card_balances(&cart, credits).await?;
 
         // 1. Refresh unit prices from the pricing module, in memory. Quantity
         // is the only per-line input to price selection, so every line that

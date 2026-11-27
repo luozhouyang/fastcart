@@ -69,14 +69,21 @@ impl CheckoutWorkflow {
                 self.checkout.get(checkout_id).await,
                 Ok(latest) if latest.status == CheckoutStatus::OrderPlaced
             );
-            if !placed
-                && let Err(error) = self.checkout.release_placement(checkout_id, &token).await
-            {
-                tracing::warn!(
-                    checkout_id = %checkout_id,
-                    error = %error,
-                    "failed to release checkout placement claim"
-                );
+            if !placed {
+                // Gift cards are spent before the order exists. A completion
+                // that failed without placing one must give them back, or a
+                // crash or rejection would hold the customer's money forever.
+                // Fenced by the claim, so a runner whose lease was taken over
+                // cannot reverse cards the new owner is placing with. A retry
+                // re-applies a reversed redemption, so this is safe to repeat.
+                self.reverse_claimed_gift_cards(checkout_id, &token).await;
+                if let Err(error) = self.checkout.release_placement(checkout_id, &token).await {
+                    tracing::warn!(
+                        checkout_id = %checkout_id,
+                        error = %error,
+                        "failed to release checkout placement claim"
+                    );
+                }
             }
         }
         result
@@ -92,9 +99,28 @@ impl CheckoutWorkflow {
     ) -> Result<CompleteCheckoutResult, AppError> {
         let checkout_id = checkout.id.clone();
 
+        // A retry after a crash may find cards this same checkout already spent.
+        // Add those amounts back for this quote: the checkout must be re-priced
+        // against the balance it was created with, or its totals would no longer
+        // match, and the ledger would refuse the redemption on replay.
+        let credits = self
+            .gift_card_credits_for_checkout(&checkout_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    checkout_id = %checkout_id,
+                    error = %error,
+                    "could not read the checkout gift card redemptions"
+                );
+                error
+            })?;
+
         // Validate the cart snapshot before charging the customer. A price or
         // stock change must not result in a captured payment without an order.
-        let cart = self.carts.recalculate(&checkout.cart_id, context).await?;
+        let cart = self
+            .carts
+            .recalculate_with_gift_card_credits(&checkout.cart_id, context, &credits)
+            .await?;
         let totals = serde_json::to_value(&cart.totals)
             .map_err(|error| AppError::validation(error.to_string()))?;
         if totals != checkout.totals {
@@ -128,6 +154,26 @@ impl CheckoutWorkflow {
         // moves.
         self.claim_promotion_usage(&cart, &checkout_id, placement_token)
             .await?;
+
+        // Spend the gift cards before the provider capture. The guarded
+        // balance decrement is what makes a card single-use, so it must run
+        // before anything irreversible happens: a card that no longer covers
+        // its quote rejects the completion with a conflict, and the promotion
+        // claims above are given back by the caller's compensation path.
+        // Redemptions stay with the checkout until the order is placed and a
+        // replay of this same completion reuses them instead of spending twice.
+        let gift_card_charges = match self.redeem_checkout_gift_cards(&checkout_id, &cart).await {
+            Ok(charges) => charges,
+            Err(error) => {
+                self.rollback_promotion_usage(
+                    &fastcart_module_promotion::checkout_usage_key(checkout_id.as_str()),
+                    &checkout_id,
+                    placement_token,
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         // Capture before marking the checkout as confirmed. A session that
         // looks paid but was never captured must never reach order placement.
@@ -267,7 +313,7 @@ impl CheckoutWorkflow {
             .filter(|line| line.shipping_method_id.is_some() && !line.is_tax_inclusive)
             .map(|line| line.amount)
             .sum();
-        let adjustments = if shipping_tax == 0 {
+        let mut adjustments = if shipping_tax == 0 {
             Vec::new()
         } else {
             vec![CreateAdjustmentInput {
@@ -277,8 +323,24 @@ impl CheckoutWorkflow {
                 description: Some("Shipping tax".to_owned()),
             }]
         };
+        // Gift cards are a payment method, not a discount, but the order
+        // records one signed adjustment per card so the money that was not
+        // charged to the provider is visible in the order it paid for. The
+        // redemption ledger still holds the authoritative record.
+        for charge in &gift_card_charges {
+            adjustments.push(CreateAdjustmentInput {
+                promotion_id: None,
+                code: Some("gift_card".to_owned()),
+                amount: -charge.amount_minor,
+                description: Some(format!("Gift card {}", charge.gift_card_id)),
+            });
+        }
         let shipping_total = cart.totals.shipping_total;
-        let total = items_total + shipping_total + shipping_tax;
+        let total = items_total + shipping_total + shipping_tax
+            - gift_card_charges
+                .iter()
+                .map(|charge| charge.amount_minor)
+                .sum::<i64>();
         // The aggregate figures are the cart's own, and the per-item figures
         // above are built to add up to them. Refuse to place an order whose
         // stored total disagrees with the captured amount: an operator cannot
@@ -390,6 +452,11 @@ impl CheckoutWorkflow {
 
         self.reassign_promotion_usage(&checkout_id, order.id.as_str())
             .await;
+        // The redeemed cards paid for this order, so the ledger names it here.
+        // A failed write is logged and repaired by a replay rather than failing
+        // a placement that already moved money.
+        self.assign_gift_card_redemptions(&checkout_id, &order.id)
+            .await;
         let checkout = self.checkout.get(&checkout.id).await?;
         Ok(CompleteCheckoutResult {
             order,
@@ -418,6 +485,10 @@ impl CheckoutWorkflow {
         // A crash between placement and the claim being moved onto the order
         // leaves the usage keyed to the checkout; replaying converges here.
         self.reassign_promotion_usage(&checkout.id, order.id.as_str())
+            .await;
+        // Likewise a crash between placement and the redemptions being moved
+        // onto the order leaves them keyed to the checkout; converge here.
+        self.assign_gift_card_redemptions(&checkout.id, &order.id)
             .await;
         // A crash between placement and the collection being linked leaves the
         // collection of a placed checkout unnamed. The order is already placed

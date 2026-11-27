@@ -23,8 +23,8 @@ use fastcart_module_order::{
     OrderService, PaymentStatus as OrderPaymentStatus, RefundStatus as OrderRefundStatus,
 };
 use fastcart_module_payment::{
-    CreateGiftCardInput, GiftCard, ListPaymentsFilter, Payment, PaymentAttempt, PaymentService,
-    PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund,
+    CreateGiftCardInput, GiftCard, GiftCardRedemption, ListPaymentsFilter, Payment, PaymentAttempt,
+    PaymentService, PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -205,6 +205,43 @@ pub struct GiftCardDto {
     metadata: Metadata,
     created_at: i64,
     updated_at: i64,
+}
+
+/// One order a gift card paid for.
+///
+/// The `order_id` is filled in when the checkout is placed, so an operator can
+/// reconcile a card against the orders that spent it.
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct GiftCardRedemptionDto {
+    /// Redemption identifier.
+    id: String,
+    /// Checkout the card paid for.
+    checkout_id: String,
+    /// Order the checkout was placed as, once it exists.
+    order_id: Option<String>,
+    /// Amount taken from the card, in minor units.
+    amount_minor: i64,
+    /// `redeemed` while the money is spent, `reversed` after a failed completion.
+    status: String,
+    /// Creation timestamp in Unix seconds.
+    created_at: i64,
+    /// Last update timestamp in Unix seconds.
+    updated_at: i64,
+    /// Reversal timestamp in Unix seconds, when the redemption was reversed.
+    reversed_at: Option<i64>,
+}
+
+/// A gift card with the orders it paid for.
+///
+/// The detail is only returned by the single-card read: listing every card
+/// together with its ledger would turn one page into an unbounded join.
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+#[schema(as = GiftCardDetail)]
+pub struct GiftCardDetailDto {
+    #[serde(flatten)]
+    card: GiftCardDto,
+    /// Redemptions recorded against the card, newest first.
+    redemptions: Vec<GiftCardRedemptionDto>,
 }
 
 /// HTTP representation of a persisted webhook event.
@@ -570,20 +607,24 @@ async fn create_gift_card(
     get,
     path = "/gift-cards/{id}",
     tag = "Admin",
-    summary = "Get a gift card",
+    summary = "Get a gift card with the orders it paid for",
     security(("adminSession" = []), ("apiToken" = [])),
-    responses((status = 200, body = GiftCardDto))
+    responses((status = 200, body = GiftCardDetailDto))
 )]
 async fn get_gift_card(
     State(context): State<Arc<AppContext>>,
     AdminActor(actor): AdminActor,
     StoreDb(db): StoreDb,
     Path(id): Path<String>,
-) -> ApiResult<Json<GiftCardDto>> {
+) -> ApiResult<Json<GiftCardDetailDto>> {
     require_permission(&actor, "payments.read")?;
     let service = payment_service(&context, &actor, &db)?;
     let card = service.get_gift_card(&id).await?;
-    Ok(Json(gift_card_dto(&card)))
+    let redemptions = service.gift_card_redemptions_for_card(&card.id).await?;
+    Ok(Json(GiftCardDetailDto {
+        card: gift_card_dto(&card),
+        redemptions: redemptions.iter().map(gift_card_redemption_dto).collect(),
+    }))
 }
 
 #[utoipa::path(
@@ -637,6 +678,19 @@ fn gift_card_dto(card: &GiftCard) -> GiftCardDto {
         metadata: card.metadata.clone(),
         created_at: card.created_at,
         updated_at: card.updated_at,
+    }
+}
+
+fn gift_card_redemption_dto(redemption: &GiftCardRedemption) -> GiftCardRedemptionDto {
+    GiftCardRedemptionDto {
+        id: redemption.id.clone(),
+        checkout_id: redemption.checkout_id.clone(),
+        order_id: redemption.order_id.clone(),
+        amount_minor: redemption.amount_minor,
+        status: redemption.status.as_str().to_owned(),
+        created_at: redemption.created_at,
+        updated_at: redemption.updated_at,
+        reversed_at: redemption.reversed_at,
     }
 }
 
