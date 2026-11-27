@@ -24,7 +24,7 @@ use fastcart_module_order::{
 };
 use fastcart_module_payment::{
     CreateGiftCardInput, GiftCard, GiftCardRedemption, ListPaymentsFilter, Payment, PaymentAttempt,
-    PaymentService, PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund,
+    PaymentService, PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund, RefundStatus,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -168,6 +168,10 @@ pub struct RefundDto {
     status: String,
     provider_refund_id: Option<String>,
     reason: Option<String>,
+    /// Part of `amount` restored to gift cards, in minor units.
+    gift_card_refunded: i64,
+    /// Part of `amount` returned through the payment provider, in minor units.
+    provider_refunded: i64,
     created_at: i64,
     updated_at: i64,
 }
@@ -356,7 +360,19 @@ async fn list_refunds(
     require_permission(&actor, "payments.read")?;
     let service = payment_service(&context, &actor, &db)?;
     let refunds = service.list_refunds(&id).await?;
-    Ok(Json(refunds.iter().map(refund_dto).collect()))
+    let gift_card_totals = service.gift_card_refund_totals_for_payment(&id).await?;
+    Ok(Json(
+        refunds
+            .iter()
+            .map(|refund| {
+                let gift_card_refunded = gift_card_totals
+                    .get(refund.id.as_str())
+                    .copied()
+                    .unwrap_or(0);
+                refund_dto(refund, gift_card_refunded)
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(
@@ -385,6 +401,9 @@ async fn create_refund(
         }
         None => service.refund(&id, request.amount, request.reason).await?,
     };
+    let gift_card_refunded = service
+        .gift_card_refunded_for_refund(refund.id.as_str())
+        .await?;
     if let Some(order_id) = refund.order_id.clone() {
         let payment = service.get_payment(&id).await?;
         let (payment_status, refund_status) = match payment.status {
@@ -399,7 +418,10 @@ async fn create_refund(
         orders.set_payment_status(&order_id, payment_status).await?;
         orders.set_refund_status(&order_id, refund_status).await?;
     }
-    Ok((StatusCode::CREATED, Json(refund_dto(&refund))))
+    Ok((
+        StatusCode::CREATED,
+        Json(refund_dto(&refund, gift_card_refunded)),
+    ))
 }
 
 #[utoipa::path(
@@ -740,7 +762,14 @@ fn payment_attempt_dto(attempt: &PaymentAttempt) -> PaymentAttemptDto {
     }
 }
 
-fn refund_dto(refund: &Refund) -> RefundDto {
+fn refund_dto(refund: &Refund, gift_card_refunded: i64) -> RefundDto {
+    // A failed refund moved no money; a pending or succeeded one returned the
+    // part the cards did not cover through the provider.
+    let provider_refunded = if refund.status == RefundStatus::Failed {
+        0
+    } else {
+        refund.amount - gift_card_refunded
+    };
     RefundDto {
         id: refund.id.to_string(),
         payment_id: refund.payment_id.as_ref().map(ToString::to_string),
@@ -750,6 +779,8 @@ fn refund_dto(refund: &Refund) -> RefundDto {
         status: refund.status.as_str().to_owned(),
         provider_refund_id: refund.provider_refund_id.clone(),
         reason: refund.reason.clone(),
+        gift_card_refunded,
+        provider_refunded,
         created_at: refund.created_at,
         updated_at: refund.updated_at,
     }
@@ -856,10 +887,12 @@ mod tests {
             created_at: 20,
             updated_at: 20,
         };
-        let dto = refund_dto(&refund);
+        let dto = refund_dto(&refund, 150);
         assert_eq!(dto.id, refund.id.to_string());
         assert_eq!(dto.status, "succeeded");
         assert_eq!(dto.reason.as_deref(), Some("damaged"));
+        assert_eq!(dto.gift_card_refunded, 150);
+        assert_eq!(dto.provider_refunded, 250);
 
         let webhook = PaymentWebhookRecord {
             id: WebhookId::new(),

@@ -6,6 +6,8 @@
 //! changes (session + attempt, payment + refund) use one short transaction so a
 //! failed write cannot leave a payment half-applied.
 
+use std::collections::BTreeMap;
+
 use fastcart_infrastructure::database_error;
 use fastcart_kernel::{
     AppError, CheckoutId, CurrencyCode, OrderId, PageResult, Pagination, now_timestamp,
@@ -15,7 +17,8 @@ use rand::RngCore;
 use sqlx::{FromRow, Sqlite, Transaction};
 
 use crate::domain::{
-    CreateGiftCardInput, GiftCard, GiftCardRedemption, GiftCardRedemptionStatus, GiftCardStatus,
+    CreateGiftCardInput, GiftCard, GiftCardRedemption, GiftCardRedemptionStatus,
+    GiftCardRefundCredit, GiftCardStatus,
 };
 
 use super::store::*;
@@ -28,6 +31,10 @@ const GIFT_CARD_COLUMNS: &str = "id, code, currency_code, initial_amount_minor, 
 /// Columns selected for every gift card redemption read.
 const GIFT_CARD_REDEMPTION_COLUMNS: &str = "id, gift_card_id, checkout_id, order_id, \
      amount_minor, status, created_at, updated_at, reversed_at";
+
+/// Columns selected for every gift card refund credit read.
+const GIFT_CARD_REFUND_CREDIT_COLUMNS: &str =
+    "id, refund_id, redemption_id, gift_card_id, amount_minor, created_at";
 
 /// One `payment_gift_card_redemptions` row.
 #[derive(Debug, FromRow)]
@@ -68,6 +75,38 @@ fn gift_card_redemption_from_row(
         updated_at: row.updated_at,
         reversed_at: row.reversed_at,
     })
+}
+
+/// One `gift_card_refund_credits` row.
+#[derive(Debug, FromRow)]
+struct GiftCardRefundCreditRow {
+    id: String,
+    refund_id: String,
+    redemption_id: String,
+    gift_card_id: String,
+    amount_minor: i64,
+    created_at: i64,
+}
+
+/// Converts a stored refund credit row.
+fn gift_card_refund_credit_from_row(row: GiftCardRefundCreditRow) -> GiftCardRefundCredit {
+    GiftCardRefundCredit {
+        id: row.id,
+        refund_id: row.refund_id,
+        redemption_id: row.redemption_id,
+        gift_card_id: row.gift_card_id,
+        amount_minor: row.amount_minor,
+        created_at: row.created_at,
+    }
+}
+
+/// One still-redeemed order line and how much earlier refunds already credited.
+#[derive(Debug, FromRow)]
+struct RefundableRedemptionRow {
+    redemption_id: String,
+    gift_card_id: String,
+    amount_minor: i64,
+    credited_minor: i64,
 }
 
 /// Alphabet for generated redemption codes.
@@ -427,6 +466,79 @@ impl PaymentService {
             .collect()
     }
 
+    /// Lists the redemptions a placed order paid with, oldest first.
+    ///
+    /// Refund allocation walks this order: the oldest redemption is credited
+    /// back before a newer one.
+    pub async fn gift_card_redemptions_for_order(
+        &self,
+        order_id: &OrderId,
+    ) -> Result<Vec<GiftCardRedemption>, AppError> {
+        let rows = sqlx::query_as::<_, GiftCardRedemptionRow>(&format!(
+            "SELECT {GIFT_CARD_REDEMPTION_COLUMNS} FROM payment_gift_card_redemptions \
+             WHERE order_id = ? ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(order_id.as_str())
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        rows.into_iter()
+            .map(gift_card_redemption_from_row)
+            .collect()
+    }
+
+    /// Lists the gift card credits one refund recorded, oldest first.
+    pub async fn gift_card_refund_credits_for_refund(
+        &self,
+        refund_id: &str,
+    ) -> Result<Vec<GiftCardRefundCredit>, AppError> {
+        let rows = sqlx::query_as::<_, GiftCardRefundCreditRow>(&format!(
+            "SELECT {GIFT_CARD_REFUND_CREDIT_COLUMNS} FROM gift_card_refund_credits \
+             WHERE refund_id = ? ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(refund_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(rows
+            .into_iter()
+            .map(gift_card_refund_credit_from_row)
+            .collect())
+    }
+
+    /// Amount one refund credited back to gift cards, in minor units.
+    pub async fn gift_card_refunded_for_refund(&self, refund_id: &str) -> Result<i64, AppError> {
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_minor), 0) FROM gift_card_refund_credits \
+             WHERE refund_id = ?",
+        )
+        .bind(refund_id)
+        .fetch_one(self.db.pool())
+        .await
+        .map_err(database_error)
+    }
+
+    /// Amount each refund of a payment credited back to gift cards.
+    ///
+    /// Refunds that credited nothing are absent from the map; callers read a
+    /// missing identifier as zero. One grouped query serves a whole refund
+    /// list without a query per row.
+    pub async fn gift_card_refund_totals_for_payment(
+        &self,
+        payment_id: &str,
+    ) -> Result<BTreeMap<String, i64>, AppError> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT c.refund_id, SUM(c.amount_minor) FROM gift_card_refund_credits c \
+             JOIN refunds r ON r.id = c.refund_id \
+             WHERE r.payment_id = ? GROUP BY c.refund_id",
+        )
+        .bind(payment_id)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(database_error)?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// Names the order the checkout's redemptions paid for.
     ///
     /// Idempotent: replaying it after a crash rewrites the same identifier.
@@ -501,6 +613,153 @@ impl PaymentService {
             reversed += 1;
         }
         tx.commit().await.map_err(database_error)?;
+        Ok(reversed)
+    }
+
+    /// Credits up to `amount_minor` of `refund_id` back to the order's cards.
+    ///
+    /// The caller runs this inside the refund claim's `BEGIN IMMEDIATE`
+    /// transaction, before the provider is asked for any remainder. Running the
+    /// allocation there is what keeps concurrent refunds honest: the write lock
+    /// serializes the claims, and each claim sums every credit an earlier
+    /// refund already wrote, so two refunds can never both credit the same
+    /// part of one redemption.
+    ///
+    /// Allocation walks the order's still-redeemed lines oldest first and
+    /// credits at most the part of each line that no refund has credited yet.
+    /// The credit ledger row, the balance increase and the refund row all
+    /// commit together; a crash before the provider call leaves the cards
+    /// credited and the refund pending, which a retry with the same key
+    /// reconciles instead of crediting twice. Returns the amount credited.
+    pub(super) async fn allocate_refund_to_gift_cards(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        refund_id: &str,
+        order_id: Option<&OrderId>,
+        amount_minor: i64,
+    ) -> Result<i64, AppError> {
+        let Some(order_id) = order_id else {
+            return Ok(0);
+        };
+        if amount_minor <= 0 {
+            return Ok(0);
+        }
+        let rows = sqlx::query_as::<_, RefundableRedemptionRow>(
+            "SELECT r.id AS redemption_id, r.gift_card_id, r.amount_minor, \
+                    COALESCE(SUM(c.amount_minor), 0) AS credited_minor \
+             FROM payment_gift_card_redemptions r \
+             LEFT JOIN gift_card_refund_credits c ON c.redemption_id = r.id \
+             WHERE r.order_id = ? AND r.status = 'redeemed' \
+             GROUP BY r.id, r.gift_card_id, r.amount_minor, r.created_at \
+             ORDER BY r.created_at ASC, r.id ASC",
+        )
+        .bind(order_id.as_str())
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        let now = now_timestamp();
+        let mut remaining = amount_minor;
+        for row in rows {
+            if remaining == 0 {
+                break;
+            }
+            let available = row.amount_minor.saturating_sub(row.credited_minor);
+            if available <= 0 {
+                continue;
+            }
+            let credited = available.min(remaining);
+            sqlx::query(
+                "INSERT INTO gift_card_refund_credits \
+                 (id, refund_id, redemption_id, gift_card_id, amount_minor, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(format!("gcredit_{}", uuid::Uuid::now_v7().simple()))
+            .bind(refund_id)
+            .bind(&row.redemption_id)
+            .bind(&row.gift_card_id)
+            .bind(credited)
+            .bind(now)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+            // Same guarded shape as the redemption decrement: the update is
+            // conditional on the card still existing and the affected-row
+            // count decides whether the ledger row may stand.
+            let updated = sqlx::query(
+                "UPDATE gift_cards SET balance_minor = balance_minor + ?, updated_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(credited)
+            .bind(now)
+            .bind(&row.gift_card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::internal(format!(
+                    "gift card {} vanished while refund {refund_id} credited it",
+                    row.gift_card_id
+                )));
+            }
+            remaining -= credited;
+        }
+        Ok(amount_minor - remaining)
+    }
+
+    /// Removes every gift card credit a refund recorded, debiting the money.
+    ///
+    /// A retried refund recomputes its allocation from scratch, so the credits
+    /// of its earlier attempt are taken back first; a definitively rejected
+    /// refund is rolled back the same way, keeping cards and ledger in step.
+    ///
+    /// The debit is unconditional on purpose: the money was added by this
+    /// refund, and leaving it on a card after its ledger row disappears would
+    /// create money. Only a card whose balance was spent again after the
+    /// credit can go negative; it then rejects further redemptions until the
+    /// merchant reconciles it. The caller runs this in the same transaction
+    /// that changes the refund row.
+    pub(super) async fn reverse_refund_gift_card_credits(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        refund_id: &str,
+    ) -> Result<i64, AppError> {
+        let rows = sqlx::query_as::<_, GiftCardRefundCreditRow>(&format!(
+            "SELECT {GIFT_CARD_REFUND_CREDIT_COLUMNS} FROM gift_card_refund_credits \
+             WHERE refund_id = ? ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(refund_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let now = now_timestamp();
+        let mut reversed = 0_i64;
+        for row in &rows {
+            let updated = sqlx::query(
+                "UPDATE gift_cards SET balance_minor = balance_minor - ?, updated_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(row.amount_minor)
+            .bind(now)
+            .bind(&row.gift_card_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::internal(format!(
+                    "gift card {} vanished while refund {refund_id} reversed its credit",
+                    row.gift_card_id
+                )));
+            }
+            reversed += row.amount_minor;
+        }
+        sqlx::query("DELETE FROM gift_card_refund_credits WHERE refund_id = ?")
+            .bind(refund_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
         Ok(reversed)
     }
 }

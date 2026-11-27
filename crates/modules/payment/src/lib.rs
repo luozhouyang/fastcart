@@ -11,9 +11,9 @@ pub mod stripe;
 
 pub use domain::{
     CreateGiftCardInput, CreatePaymentSessionInput, GiftCard, GiftCardRedemption,
-    GiftCardRedemptionStatus, GiftCardStatus, ListPaymentsFilter, Payment, PaymentAttempt,
-    PaymentCollection, PaymentCollectionId, PaymentCollectionStatus, PaymentSession, PaymentStatus,
-    PaymentWebhookRecord, Refund, RefundStatus, WebhookStatus,
+    GiftCardRedemptionStatus, GiftCardRefundCredit, GiftCardStatus, ListPaymentsFilter, Payment,
+    PaymentAttempt, PaymentCollection, PaymentCollectionId, PaymentCollectionStatus,
+    PaymentSession, PaymentStatus, PaymentWebhookRecord, Refund, RefundStatus, WebhookStatus,
 };
 pub use provider::{
     CaptureRequest, CaptureResult, CreateProviderSession, MANUAL_SIGNATURE_HEADER, ManualProvider,

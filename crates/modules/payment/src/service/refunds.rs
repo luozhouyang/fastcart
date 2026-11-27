@@ -7,7 +7,7 @@
 //! failed write cannot leave a payment half-applied.
 
 use fastcart_infrastructure::{append_outbox_event, database_error};
-use fastcart_kernel::{AppError, DomainEventEnvelope, OrderId, RefundId, now_timestamp};
+use fastcart_kernel::{AppError, DomainEventEnvelope, OrderId, PaymentId, RefundId, now_timestamp};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, Transaction};
@@ -107,6 +107,16 @@ impl PaymentService {
     /// When no key is supplied, one is derived deterministically from the
     /// payment, amount and trimmed reason. Callers that need two identical
     /// refunds must pass distinct explicit keys.
+    ///
+    /// A refund on a payment linked to an order first credits the order's gift
+    /// card redemptions, oldest first, up to the refund amount; only the
+    /// remainder is sent to the payment provider. The credits are written in
+    /// the claim transaction, before the provider call, so the ledger and the
+    /// refund row can never disagree about which part of a redemption is still
+    /// refundable: `BEGIN IMMEDIATE` serializes concurrent claims and each one
+    /// sums the credits earlier refunds already wrote. A retry of a pending or
+    /// failed refund takes its own earlier credits back and re-applies them, so
+    /// replaying a key never credits anything twice.
     pub async fn refund_with_idempotency(
         &self,
         payment_id: &str,
@@ -125,11 +135,12 @@ impl PaymentService {
                 keyless_refund_idempotency_key(payment_id, amount, reason.as_deref())
             });
 
-        // The existing-key lookup, the claim and the amount cap share one
-        // BEGIN IMMEDIATE transaction. Concurrent callers with the same key
-        // therefore observe the winning row instead of a unique violation.
-        // The lookup happens before state validation so a duplicate request
-        // still returns the winning refund after a full refund.
+        // The existing-key lookup, the claim, the amount cap and the gift card
+        // allocation share one BEGIN IMMEDIATE transaction. Concurrent callers
+        // with the same key therefore observe the winning row instead of a
+        // unique violation. The lookup happens before state validation so a
+        // duplicate request still returns the winning refund after a full
+        // refund.
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let existing = sqlx::query_as::<_, RefundRow>(
             "SELECT id, payment_id, order_id, amount, currency_code, status,
@@ -162,14 +173,6 @@ impl PaymentService {
                 payment.status
             )));
         }
-        let provider = self
-            .providers
-            .get(&payment.provider)
-            .ok_or_else(|| AppError::not_found("payment provider", &payment.provider))?;
-        let provider_payment_id = payment
-            .provider_payment_id
-            .clone()
-            .ok_or_else(|| AppError::conflict("payment is missing a provider payment id"))?;
 
         let refund_id = existing
             .as_ref()
@@ -248,15 +251,74 @@ impl PaymentService {
             now,
         )
         .await?;
+
+        // Gift card money is restored inside the claim transaction, before the
+        // provider is asked for the uncredited remainder. This ordering means
+        // a definitive provider rejection has to take the credits back (see
+        // `fail_refund`), while an ambiguous outcome keeps them: the refund
+        // stays pending and its retry finds the coverage already recorded.
+        // A retry removes its own earlier credits first so the allocation is
+        // recomputed against every other refund's ledger, netting to the same
+        // cards for an unchanged amount.
+        if existing.is_some() {
+            self.reverse_refund_gift_card_credits(&mut tx, refund_id.as_str())
+                .await?;
+        }
+        let gift_card_refunded = self
+            .allocate_refund_to_gift_cards(
+                &mut tx,
+                refund_id.as_str(),
+                payment.order_id.as_ref(),
+                amount,
+            )
+            .await?;
+        let provider_refunded = amount - gift_card_refunded;
+        // The provider is needed only for the remainder. Resolving it before
+        // the commit keeps a missing provider or payment reference from
+        // leaving credits behind for a refund that cannot be attempted.
+        let provider_call = if provider_refunded > 0 {
+            let provider = self
+                .providers
+                .get(&payment.provider)
+                .ok_or_else(|| AppError::not_found("payment provider", &payment.provider))?;
+            let provider_payment_id = payment
+                .provider_payment_id
+                .clone()
+                .ok_or_else(|| AppError::conflict("payment is missing a provider payment id"))?;
+            Some((provider, provider_payment_id))
+        } else {
+            None
+        };
         tx.commit().await.map_err(database_error)?;
 
-        // Provider calls always happen outside the transaction. The provider
-        // key is deterministic, so re-invoking after a crash reconciles the
-        // same provider-side refund.
+        let Some((provider, provider_payment_id)) = provider_call else {
+            // The card credits covered the whole refund: no provider call is
+            // made and the refund succeeds with no provider reference. Its
+            // amount stays the full refunded amount.
+            let refund = Refund {
+                id: refund_id,
+                payment_id: Some(payment.id.clone()),
+                order_id: payment.order_id.clone(),
+                amount,
+                currency_code: payment.currency_code.clone(),
+                status: RefundStatus::Succeeded,
+                provider_refund_id: None,
+                idempotency_key: pending.idempotency_key,
+                reason,
+                created_at: pending.created_at,
+                updated_at: now_timestamp(),
+            };
+            return self.settle_refund(refund, gift_card_refunded).await;
+        };
+
+        // Provider calls always happen outside the transaction. Only the
+        // remainder reached the provider, and the provider key is
+        // deterministic, so re-invoking after a crash reconciles the same
+        // provider-side refund.
         let result = provider
             .refund(RefundRequest {
                 provider_payment_id,
-                amount,
+                amount: provider_refunded,
                 currency_code: payment.currency_code.clone(),
                 reason: reason.clone(),
                 idempotency_key: Some(provider_key),
@@ -269,25 +331,17 @@ impl PaymentService {
                 // `PaymentError::Provider` covers both a provider rejection
                 // and a transport failure where the provider may already have
                 // accepted the refund. Only `InvalidRequest` is known to have
-                // been rejected without side effects. An unknown outcome stays
+                // been rejected without side effects, so only then are the
+                // gift card credits taken back. An unknown outcome stays
                 // `pending`, which keeps it counted by the over-refund cap
                 // above until a webhook or retry reconciles it.
                 if matches!(error, PaymentError::InvalidRequest(_)) {
-                    sqlx::query(
-                        "UPDATE refunds SET status = 'failed', updated_at = ?
-                         WHERE id = ? AND status IN ('pending', 'failed')",
-                    )
-                    .bind(now_timestamp())
-                    .bind(refund_id.as_str())
-                    .execute(self.db.pool())
-                    .await
-                    .map_err(database_error)?;
+                    self.fail_refund(refund_id.as_str()).await?;
                 }
                 return Err(error.into());
             }
         };
 
-        let now = now_timestamp();
         let refund = Refund {
             id: refund_id.clone(),
             payment_id: Some(payment.id.clone()),
@@ -299,8 +353,48 @@ impl PaymentService {
             idempotency_key: pending.idempotency_key,
             reason,
             created_at: pending.created_at,
-            updated_at: now,
+            updated_at: now_timestamp(),
         };
+        self.settle_refund(refund, gift_card_refunded).await
+    }
+
+    /// Marks a definitively rejected refund failed and takes its card credits back.
+    ///
+    /// The row update and the reversal share one transaction, and the update
+    /// runs first: a caller whose refund was already reconciled to a success
+    /// by a concurrent request must not reverse credits that now belong to it.
+    async fn fail_refund(&self, refund_id: &str) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await.map_err(AppError::from)?;
+        let updated = sqlx::query(
+            "UPDATE refunds SET status = 'failed', updated_at = ?
+             WHERE id = ? AND status IN ('pending', 'failed')",
+        )
+        .bind(now_timestamp())
+        .bind(refund_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if updated.rows_affected() > 0 {
+            self.reverse_refund_gift_card_credits(&mut tx, refund_id)
+                .await?;
+        }
+        tx.commit().await.map_err(database_error)
+    }
+
+    /// Persists the final state of a refund, its payment and its event.
+    ///
+    /// `gift_card_refunded` is the part already credited to cards by the claim
+    /// transaction; the event records it so consumers can tell where the money
+    /// went. A failed outcome reverses those credits in the same transaction,
+    /// before the payment status is recomputed, so a refund the provider
+    /// rejected leaves no money on a card. When a concurrent caller or a
+    /// verified webhook already reconciled the row, the persisted refund is
+    /// returned without a second event or reversal.
+    async fn settle_refund(
+        &self,
+        refund: Refund,
+        gift_card_refunded: i64,
+    ) -> Result<Refund, AppError> {
         let mut tx = self.db.begin().await.map_err(AppError::from)?;
         let updated = sqlx::query(
             "UPDATE refunds SET status = ?, provider_refund_id = ?, updated_at = ?
@@ -308,7 +402,7 @@ impl PaymentService {
         )
         .bind(refund.status.as_str())
         .bind(refund.provider_refund_id.as_deref())
-        .bind(now)
+        .bind(refund.updated_at)
         .bind(refund.id.as_str())
         .execute(&mut *tx)
         .await
@@ -330,33 +424,49 @@ impl PaymentService {
                 .map(refund_from_row)
                 .ok_or_else(|| AppError::not_found("refund", refund.id.as_str()));
         }
+        if refund.status == RefundStatus::Failed {
+            // The provider rejected the refund: the cards must not keep money
+            // the refund never returned.
+            self.reverse_refund_gift_card_credits(&mut tx, refund.id.as_str())
+                .await?;
+        }
         // Recompute the payment status from the persisted refunds so a
         // provider-reported failure cannot leave the payment over-refunded.
-        let refunded: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(amount), 0) FROM refunds
-             WHERE payment_id = ? AND status != 'failed'",
-        )
-        .bind(payment.id.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(database_error)?;
-        let reconciled_payment_status = if refunded >= payment.amount {
-            PaymentStatus::Refunded
-        } else if refunded > 0 {
-            PaymentStatus::PartiallyRefunded
+        let refunded: i64 = if let Some(payment_id) = refund.payment_id.as_ref() {
+            sqlx::query_scalar(
+                "SELECT COALESCE(SUM(amount), 0) FROM refunds
+                 WHERE payment_id = ? AND status != 'failed'",
+            )
+            .bind(payment_id.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database_error)?
         } else {
-            PaymentStatus::Captured
+            0
         };
-        sqlx::query(
-            "UPDATE payments SET status = ?, updated_at = ? WHERE id = ?
-             AND status IN ('partially_captured', 'captured', 'partially_refunded', 'refunded')",
-        )
-        .bind(reconciled_payment_status.as_str())
-        .bind(now)
-        .bind(payment.id.as_str())
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        if let Some(payment_id) = refund.payment_id.as_ref() {
+            let payment_amount: Option<i64> =
+                sqlx::query_scalar("SELECT amount FROM payments WHERE id = ?")
+                    .bind(payment_id.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            let reconciled_payment_status = match payment_amount {
+                Some(amount) if refunded >= amount => PaymentStatus::Refunded,
+                Some(_) if refunded > 0 => PaymentStatus::PartiallyRefunded,
+                _ => PaymentStatus::Captured,
+            };
+            sqlx::query(
+                "UPDATE payments SET status = ?, updated_at = ? WHERE id = ?
+                 AND status IN ('partially_captured', 'captured', 'partially_refunded', 'refunded')",
+            )
+            .bind(reconciled_payment_status.as_str())
+            .bind(refund.updated_at)
+            .bind(payment_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
         let event = DomainEventEnvelope::new(
             if refund.status == RefundStatus::Failed {
                 "payment.refund_failed"
@@ -365,12 +475,18 @@ impl PaymentService {
             },
             Some(self.db.store_id().clone()),
             serde_json::json!({
-                "payment_id": payment.id.as_str(),
-                "order_id": payment.order_id.as_ref().map(OrderId::as_str),
+                "payment_id": refund.payment_id.as_ref().map(PaymentId::as_str),
+                "order_id": refund.order_id.as_ref().map(OrderId::as_str),
                 "refund_id": refund.id.as_str(),
                 "amount": refund.amount,
                 "currency_code": refund.currency_code,
                 "status": refund.status.as_str(),
+                "gift_card_refunded": gift_card_refunded,
+                "provider_refunded": if refund.status == RefundStatus::Failed {
+                    0
+                } else {
+                    refund.amount - gift_card_refunded
+                },
             }),
         );
         append_outbox_event(&mut *tx, &event)

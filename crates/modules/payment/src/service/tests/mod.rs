@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
@@ -66,6 +67,7 @@ struct TestProvider {
     create_calls: AtomicUsize,
     capture_calls: AtomicUsize,
     refund_calls: AtomicUsize,
+    refunded_amounts: Mutex<Vec<i64>>,
 }
 
 impl TestProvider {
@@ -81,6 +83,7 @@ impl TestProvider {
             create_calls: AtomicUsize::new(0),
             capture_calls: AtomicUsize::new(0),
             refund_calls: AtomicUsize::new(0),
+            refunded_amounts: Mutex::new(Vec::new()),
         }
     }
 
@@ -125,6 +128,14 @@ impl TestProvider {
 
     fn refund_count(&self) -> usize {
         self.refund_calls.load(Ordering::SeqCst)
+    }
+
+    /// Amounts the provider was asked to refund, in call order.
+    fn refunded_amounts(&self) -> Vec<i64> {
+        self.refunded_amounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -175,6 +186,10 @@ impl PaymentProvider for TestProvider {
 
     async fn refund(&self, request: RefundRequest) -> Result<RefundResult, PaymentError> {
         self.refund_calls.fetch_add(1, Ordering::SeqCst);
+        self.refunded_amounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.amount);
         if self.invalid_refund {
             return Err(PaymentError::InvalidRequest(
                 "refund request is invalid".to_owned(),
@@ -203,6 +218,7 @@ impl PaymentProvider for TestProvider {
 mod capture;
 mod gift_cards;
 mod queries;
+mod refund_gift_cards;
 mod refunds;
 mod sessions;
 mod webhooks;

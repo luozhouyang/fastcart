@@ -613,6 +613,29 @@ impl GiftCardRedemptionStatus {
     }
 }
 
+/// One credit a refund wrote back to a gift card.
+///
+/// A credit is the reverse of a [`GiftCardRedemption`]: it names the
+/// redemption whose money the refund restored and the card the money landed
+/// on. Rows are unique per `(refund_id, redemption_id)`, so replaying a refund
+/// can never credit the same redemption twice, and a partial refund leaves one
+/// row per redemption it touched.
+#[derive(utoipa::ToSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GiftCardRefundCredit {
+    /// Credit identifier.
+    pub id: String,
+    /// Refund that restored the money.
+    pub refund_id: String,
+    /// Redemption whose money the refund gave back.
+    pub redemption_id: String,
+    /// Gift card the money was credited to.
+    pub gift_card_id: String,
+    /// Amount credited to the card, in minor units.
+    pub amount_minor: i64,
+    /// Creation timestamp in Unix seconds.
+    pub created_at: i64,
+}
+
 /// Input for [`crate::PaymentService::create_session`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreatePaymentSessionInput {
